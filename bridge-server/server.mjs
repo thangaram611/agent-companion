@@ -556,6 +556,19 @@ export function emitNotification({
     if (!stuckReason) stuckReason = 'cancelled_before_summary';
   }
 
+  // Copilot CLI surfaces backend-model failures as stopReason="end_turn" with
+  // the error text as the assistant message, so without this remap they'd be
+  // classified as "completed" with the error masquerading as content. Cancel
+  // takes precedence above (a cancellation during a retry storm is "stuck").
+  if (
+    status === 'completed' &&
+    typeof summary?.message === 'string' &&
+    /Error:\s*Execution failed:\s*Error:\s*Failed to get response from the AI model/i.test(summary.message)
+  ) {
+    status = 'failed';
+    if (!detail) detail = 'copilot_capi_failure';
+  }
+
   const meta = {
     job_id: jobId, status,
     duration_ms: String(duration),

@@ -459,6 +459,79 @@ test('emitNotification: writes meta.detail to queue file when detail set', async
   }
 });
 
+test('emitNotification: remaps Copilot CAPI failure (completed → failed + detail)', async () => {
+  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tmp = mkdtempSync(join(tmpdir(), 'copilot-queue-test-'));
+  const queueFile = join(tmp, 'completions.jsonl');
+  const oldQ = process.env.COPILOT_QUEUE_PATH;
+  process.env.COPILOT_QUEUE_PATH = queueFile;
+  try {
+    const { emitNotification } = await import('./server.mjs');
+    emitNotification({
+      jobId: 'j-capi',
+      status: 'completed',
+      summary: {
+        stopReason: 'end_turn',
+        message: 'Info: Request failed due to a transient API error. Retrying...\nError: Execution failed: Error: Failed to get response from the AI model; retried 5 times (total retry wait time: 5.47 seconds) Last error: CAPIError: Request timed out.',
+      },
+      error: null,
+      stuckReason: null,
+      detail: null,
+      duration: 142383,
+      task: 'X',
+      mode: 'EXECUTE',
+      cwd: '/tmp',
+    });
+    const content = readFileSync(queueFile, 'utf8');
+    const event = JSON.parse(content.trim().split('\n').pop());
+    assert.equal(event.kind, 'terminal');
+    assert.equal(event.meta.status, 'failed');
+    assert.equal(event.meta.detail, 'copilot_capi_failure');
+    assert.equal(event.meta.stop_reason, 'end_turn');
+  } finally {
+    if (oldQ === undefined) delete process.env.COPILOT_QUEUE_PATH; else process.env.COPILOT_QUEUE_PATH = oldQ;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('emitNotification: normal completed message is not remapped', async () => {
+  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tmp = mkdtempSync(join(tmpdir(), 'copilot-queue-test-'));
+  const queueFile = join(tmp, 'completions.jsonl');
+  const oldQ = process.env.COPILOT_QUEUE_PATH;
+  process.env.COPILOT_QUEUE_PATH = queueFile;
+  try {
+    const { emitNotification } = await import('./server.mjs');
+    emitNotification({
+      jobId: 'j-ok',
+      status: 'completed',
+      summary: {
+        stopReason: 'end_turn',
+        message: 'All checks pass.\nRUBBER-DUCK: clean.',
+      },
+      error: null,
+      stuckReason: null,
+      detail: null,
+      duration: 2000,
+      task: 'X',
+      mode: 'EXECUTE',
+      cwd: '/tmp',
+    });
+    const content = readFileSync(queueFile, 'utf8');
+    const event = JSON.parse(content.trim().split('\n').pop());
+    assert.equal(event.meta.status, 'completed');
+    assert.equal(event.meta.detail, undefined);
+    assert.equal(event.meta.rubber_duck, 'clean');
+  } finally {
+    if (oldQ === undefined) delete process.env.COPILOT_QUEUE_PATH; else process.env.COPILOT_QUEUE_PATH = oldQ;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('persistJob writes file; gcExpiredJobs evicts in-memory entry and deletes file', async () => {
   const { existsSync } = await import('node:fs');
   const { jobs, gcExpiredJobs, persistJob } = await import('./server.mjs');
