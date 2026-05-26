@@ -205,9 +205,29 @@ Drop the same JSON into `.claude/settings.local.json` per repo if you'd rather o
 
 ## Public surface
 
-You don't call the MCP tool directly. Main Claude reads the subagent's
-`description` and spawns it via `Agent()` when the user asks for Copilot
-delegation, status checks, replies, or cancellation.
+Two ways to delegate to Copilot from a Claude Code session:
+
+**1. `/copilot <task>` — explicit slash command (recommended)**
+
+```
+/copilot scan the repo for unused exports
+/copilot refactor the auth module to use async iterators
+/copilot review my plan in docs/migration.md
+```
+
+The slash command is the fast path for explicit invocation. It spawns the
+`copilot-companion` subagent in the background; results surface in your
+next turn via the plugin's drain hook — no polling needed.
+
+**2. Prose — main Claude routes via the subagent's description**
+
+You can also just ask in natural language ("use copilot to scan the
+repo…", "delegate this audit to copilot…") and main Claude will read the
+subagent's `description` and spawn it via `Agent()`. Status checks,
+replies, and cancellations on running jobs follow the same path.
+
+You don't call the MCP tool directly in either path — the subagent owns
+the entire copilot-bridge surface.
 
 ### Internal MCP surface (subagent-only)
 
