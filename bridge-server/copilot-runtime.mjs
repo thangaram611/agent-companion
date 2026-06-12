@@ -6,11 +6,14 @@
 
 import { ensureDaemon, sendToSocket } from './daemon-client.mjs';
 
-export const RUNTIME_ADAPTERS = new Set(['acp']);
+export const RUNTIME_ADAPTERS = new Set(['acp', 'sdk']);
 export const DEFAULT_RUNTIME_ADAPTER = 'acp';
 
+let sdkRuntimePromise = null;
+let sdkRuntimeOverride = null;
+
 export function selectedRuntimeAdapter() {
-  return (process.env.COPILOT_RUNTIME_ADAPTER || DEFAULT_RUNTIME_ADAPTER).trim() || DEFAULT_RUNTIME_ADAPTER;
+  return ((process.env.COPILOT_RUNTIME_ADAPTER || DEFAULT_RUNTIME_ADAPTER).trim() || DEFAULT_RUNTIME_ADAPTER).toLowerCase();
 }
 
 function assertSupportedAdapter() {
@@ -18,20 +21,49 @@ function assertSupportedAdapter() {
   if (RUNTIME_ADAPTERS.has(adapter)) return adapter;
   const err = new Error(
     `unsupported Copilot runtime adapter "${adapter}". ` +
-    'Supported today: acp. The SDK adapter is intentionally not wired until it passes live parity checks.',
+    'Supported adapters: acp, sdk. ACP remains the default until SDK parity checks pass.',
   );
   err.code = 'RUNTIME_ADAPTER_UNSUPPORTED';
   err.adapter = adapter;
   throw err;
 }
 
+async function sdkRuntime() {
+  if (sdkRuntimeOverride) return sdkRuntimeOverride;
+  if (!sdkRuntimePromise) sdkRuntimePromise = import('./copilot-sdk-runtime.mjs');
+  return sdkRuntimePromise;
+}
+
 async function roundTrip(message, timeoutMs) {
-  assertSupportedAdapter();
+  const adapter = assertSupportedAdapter();
+  if (adapter === 'sdk') {
+    const sdk = await sdkRuntime();
+    switch (message.command) {
+      case 'status':
+        return sdk.runtimeStatus(timeoutMs);
+      case 'prompt-bg':
+        return sdk.promptBg(message);
+      case 'watch':
+        return sdk.watchPrompt(message, timeoutMs);
+      case 'inspect':
+        return sdk.inspectPrompt(message, timeoutMs);
+      case 'cancel':
+        return sdk.cancelPrompt(message);
+      case 'reply':
+        return sdk.replyPrompt(message, timeoutMs);
+      default:
+        return { ok: false, error: `unknown sdk runtime command: ${message.command}` };
+    }
+  }
   return sendToSocket(message, timeoutMs);
 }
 
 export async function ensureRuntime(opts = {}) {
-  assertSupportedAdapter();
+  const adapter = assertSupportedAdapter();
+  if (adapter === 'sdk') {
+    const sdk = await sdkRuntime();
+    return sdk.ensureRuntime(opts);
+  }
   return ensureDaemon(opts);
 }
 
@@ -76,4 +108,13 @@ export function cancelPrompt({ promptId }) {
 
 export function replyPrompt({ promptId, message }, timeoutMs = 15_000) {
   return roundTrip({ command: 'reply', promptId, message }, timeoutMs);
+}
+
+export function _setSdkRuntimeForTest(runtime) {
+  sdkRuntimeOverride = runtime;
+}
+
+export function _resetSdkRuntimeForTest() {
+  sdkRuntimeOverride = null;
+  sdkRuntimePromise = null;
 }

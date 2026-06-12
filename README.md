@@ -44,8 +44,9 @@ copilot-companion/                            ← plugin root
 │   ├── server.mjs                            `copilot` MCP tool, 5 actions:
 │   │                                         send | wait | status | reply | cancel
 │   ├── copilot-runtime.mjs                   runtime adapter boundary (ACP default)
+│   ├── copilot-sdk-runtime.mjs               experimental Copilot SDK adapter
 │   ├── validation.mjs                        per-action field allow-lists, schemas
-│   └── package.json                          runtime deps (MCP SDK)
+│   └── package.json                          runtime deps (MCP + Copilot SDKs)
 ├── lib/                                      state + logging + prompt utilities
 │   ├── host.mjs                              host detection + per-host paths (claude | codex)
 │   ├── runtime-paths.mjs                     private runtime dirs for IPC, logs, digests
@@ -277,9 +278,17 @@ Set `COPILOT_RUNTIME_DIR` to override the root for tests or advanced
 debugging. The bridge creates the directory with `0700` permissions and
 writes runtime files with private modes where applicable.
 
-The bridge currently uses `COPILOT_RUNTIME_ADAPTER=acp` by default. Other
-values fail fast with a structured adapter error until the Copilot SDK backend
-passes parity checks.
+The bridge uses `COPILOT_RUNTIME_ADAPTER=acp` by default. Set
+`COPILOT_RUNTIME_ADAPTER=sdk` to opt into the experimental
+`@github/copilot-sdk` backend. The SDK backend uses SDK session events,
+`abort()`, `resumeSession()`, and the bundled Copilot runtime unless `COPILOT_BIN`
+is set, while preserving the bridge's existing `send`, `wait`, `status`,
+`reply`, and `cancel` response shapes. SDK reasoning effort is unset by default
+because support is model-specific; set `COPILOT_SDK_REASONING_EFFORT` only for
+models verified to accept it. The configured `default-model` must also be
+available to the SDK runtime for the signed-in Copilot account. ACP remains the
+default until live side-by-side parity checks cover completion drain, digest
+generation, cancel, reply, timeout, and host restart behavior.
 
 The digest is refreshed:
 

@@ -25,10 +25,13 @@ claude plugin validate .
 ## Next Phase Queue
 
 1. Copilot runtime adapter
-   - Done in post-`59ab301` worktree: add a small runtime interface for `send`, `wait`, `status`, `reply`, and `cancel`.
-   - Done in post-`59ab301` worktree: keep the current ACP daemon as the default adapter.
-   - Next: add a Copilot SDK adapter behind an explicit config flag.
-   - Run side-by-side smoke tests before making SDK the default.
+   - Done in `5172d2f`: add a small runtime interface for `send`, `wait`, `status`, `reply`, and `cancel`.
+   - Done in `5172d2f`: keep the current ACP daemon as the default adapter.
+   - Done in current SDK phase: add `COPILOT_RUNTIME_ADAPTER=sdk` behind an explicit opt-in flag.
+   - Current SDK behavior: preserve the existing reply contract with cancel-and-restart; native SDK `mode:"immediate"` steering is a later API/UI decision.
+   - Direct bridge smoke passed for both `acp` and `sdk` with `gpt-5-mini`: `send` -> `wait` completed, digest path generated, verbose `status` inspected.
+   - SDK smoke findings: `gpt-4.1` was not available in this local SDK account/runtime, and model-specific reasoning effort must stay opt-in.
+   - Next: keep ACP as default until full Claude-host and Codex-host end-to-end smokes pass.
 
 2. MCP resource polish
    - Expose digest files through MCP resources or `resource_link` results.

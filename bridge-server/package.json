@@ -6,6 +6,7 @@
   "private": true,
   "main": "server.mjs",
   "dependencies": {
+    "@github/copilot-sdk": "^1.0.1",
     "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "engines": {
