@@ -297,7 +297,9 @@ is set, while preserving the bridge's existing `send`, `wait`, `status`,
 `reply`, and `cancel` response shapes. SDK reasoning effort is unset by default
 because support is model-specific; set `COPILOT_SDK_REASONING_EFFORT` only for
 models verified to accept it. The configured `default-model` must also be
-available to the SDK runtime for the signed-in Copilot account. ACP remains the
+available to the SDK runtime for the signed-in Copilot account. SDK in-flight
+prompts are intentionally marked non-resumable after a bridge restart until the
+adapter persists enough SDK prompt state to reattach safely. ACP remains the
 default until live side-by-side parity checks cover completion drain, digest
 generation, cancel, reply, timeout, and host restart behavior.
 

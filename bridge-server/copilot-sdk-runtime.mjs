@@ -132,11 +132,84 @@ function outputPreview(data = {}) {
 
 function errorFromEvent(event) {
   const data = event?.data || {};
-  return data.message || data.error?.message || data.error || data.reason || data.summary || `${event?.type || 'sdk'} error`;
+  return data.errorMessage || data.message || data.error?.message || data.error || data.reason || data.summary || `${event?.type || 'sdk'} error`;
 }
 
 function isTerminal(status) {
   return TERMINAL_STATUSES.has(status);
+}
+
+const PATH_ARGUMENT_KEYS = new Set([
+  'path',
+  'file',
+  'file_path',
+  'filepath',
+  'filename',
+  'relative_path',
+  'relativepath',
+  'target_file',
+  'target_path',
+  'targetpath',
+  'source_file',
+  'source_path',
+  'sourcepath',
+]);
+const PATH_ARRAY_ARGUMENT_KEYS = new Set(['paths', 'files', 'file_paths', 'filenames']);
+
+function normalizeToolInput(input) {
+  if (typeof input !== 'string') return input || {};
+  const trimmed = input.trim();
+  if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) return input;
+  try { return JSON.parse(trimmed); }
+  catch { return input; }
+}
+
+function looksPathLike(value) {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!trimmed || /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return false;
+  if (trimmed.includes('\n')) return false;
+  return true;
+}
+
+function locationsFromToolInput(input) {
+  const locations = [];
+  const seen = new Set();
+  const add = (value) => {
+    if (!looksPathLike(value)) return;
+    const path = value.trim();
+    if (seen.has(path)) return;
+    seen.add(path);
+    locations.push({ path });
+  };
+  const visit = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    for (const [key, raw] of Object.entries(value)) {
+      const normalizedKey = key.toLowerCase().replace(/[-\s]/g, '_');
+      const compactKey = normalizedKey.replace(/_/g, '');
+      if (PATH_ARGUMENT_KEYS.has(normalizedKey) || PATH_ARGUMENT_KEYS.has(compactKey)) {
+        if (Array.isArray(raw)) for (const item of raw) add(item);
+        else add(raw);
+        continue;
+      }
+      if (PATH_ARRAY_ARGUMENT_KEYS.has(normalizedKey) && Array.isArray(raw)) {
+        for (const item of raw) add(item);
+        continue;
+      }
+      visit(raw);
+    }
+  };
+  visit(input);
+  return locations;
+}
+
+function toolCallEventFields(input) {
+  const locations = locationsFromToolInput(input);
+  return locations.length > 0 ? { input, locations } : { input };
 }
 
 function sessionConfig({ cwd, model, approveAll }) {
@@ -562,13 +635,14 @@ class SdkRuntimeManager {
         if (Array.isArray(data.toolRequests)) {
           for (const tool of data.toolRequests) {
             const id = tool.toolCallId || randomUUID();
+            const input = normalizeToolInput(tool.arguments || {});
             state.toolNames.set(id, tool.name || tool.toolTitle || 'tool');
             this._writeEvent(state, {
               type: 'tool_call',
               toolCallId: id,
               name: tool.name || tool.toolTitle || 'tool',
               kind: tool.mcpServerName ? 'mcp' : toolKind(tool.name),
-              input: tool.arguments || {},
+              ...toolCallEventFields(input),
               ts,
             });
           }
@@ -583,13 +657,14 @@ class SdkRuntimeManager {
         break;
       case 'tool.execution_start': {
         const id = data.toolCallId || randomUUID();
+        const input = normalizeToolInput(data.arguments || {});
         state.toolNames.set(id, data.toolName || 'tool');
         this._writeEvent(state, {
           type: 'tool_call',
           toolCallId: id,
           name: data.toolName || 'tool',
           kind: toolKind(data.toolName, data),
-          input: data.arguments || {},
+          ...toolCallEventFields(input),
           ts,
         });
         break;
@@ -620,6 +695,7 @@ class SdkRuntimeManager {
       case 'session.error':
       case 'assistant.model_call_failure':
       case 'model_call_failure':
+      case 'model.call_failure':
         this._finishPrompt(state, { status: 'failed', error: errorFromEvent(event) });
         break;
       case 'assistant.abort':

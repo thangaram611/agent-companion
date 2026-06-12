@@ -16,6 +16,10 @@ export function selectedRuntimeAdapter() {
   return ((process.env.COPILOT_RUNTIME_ADAPTER || DEFAULT_RUNTIME_ADAPTER).trim() || DEFAULT_RUNTIME_ADAPTER).toLowerCase();
 }
 
+export function runtimeSupportsDetachedPromptResume() {
+  return assertSupportedAdapter() === 'acp';
+}
+
 function assertSupportedAdapter() {
   const adapter = selectedRuntimeAdapter();
   if (RUNTIME_ADAPTERS.has(adapter)) return adapter;

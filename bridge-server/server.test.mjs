@@ -531,6 +531,54 @@ test('resolveSendThread and hydrateJobsFromLedger preserve host/thread continuit
   }
 });
 
+test('hydrateJobsFromLedger marks SDK in-flight prompts as non-resumable after restart', async () => {
+  const mod = await bridge();
+  const { jobs, hydrateJobsFromLedger, dispatch, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldAdapter = process.env.COPILOT_RUNTIME_ADAPTER;
+
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-sdk-hydrate';
+  process.env.COPILOT_RUNTIME_ADAPTER = 'sdk';
+  try {
+    _resetForTest();
+    jobs.clear();
+    state.writeThreadSid('thread-sdk-hydrate', 'sdk-session-1');
+    state.writeJob('j-sdk-hydrate', {
+      jobId: 'j-sdk-hydrate', claudeSessionId: 'sid-sdk-hydrate',
+      copilotSessionId: 'sdk-session-1', thread: 'thread-sdk-hydrate',
+      task: 'sdk in-flight before restart', mode: 'EXECUTE',
+      status: 'running', promptId: 'prompt-sdk-hydrate',
+      startedAt: Date.now() - 5000,
+    });
+
+    hydrateJobsFromLedger();
+    const job = jobs.get('j-sdk-hydrate');
+    assert.equal(job.status, 'unreachable');
+    assert.equal(job.detail, 'sdk_adapter_non_resumable_after_restart');
+    assert.equal(job.sessionRetired, true);
+    assert.equal(state.readThreadSid('thread-sdk-hydrate'), null);
+
+    const body = parse(await dispatch({
+      action: 'wait',
+      job_id: 'j-sdk-hydrate',
+      max_wait_sec: 1,
+      host_session_id: 'sid-sdk-hydrate',
+    }));
+    assert.equal(body.status, 'unreachable');
+    assert.match(body.content, /SDK adapter cannot reattach/);
+  } finally {
+    state.deleteJob('j-sdk-hydrate');
+    state.clearThread('thread-sdk-hydrate');
+    jobs.clear();
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldAdapter === undefined) delete process.env.COPILOT_RUNTIME_ADAPTER;
+    else process.env.COPILOT_RUNTIME_ADAPTER = oldAdapter;
+    _resetForTest();
+  }
+});
+
 test('sweepOwnSessionStaleQueueRows drops only stale rows for the current host session', async () => {
   const { sweepOwnSessionStaleQueueRows } = await bridge();
   await withQueue(async (queueFile) => {

@@ -47,6 +47,7 @@ import {
   cancelPrompt,
   replyPrompt,
   selectedRuntimeAdapter,
+  runtimeSupportsDetachedPromptResume,
 } from './copilot-runtime.mjs';
 import {
   log,
@@ -785,6 +786,11 @@ export function formatTerminalContent({
       failedLine + digestLine + retiredLine;
   }
   if (status === 'unreachable') {
+    if (detail === 'sdk_adapter_non_resumable_after_restart') {
+      return taskHeader +
+        'The experimental Copilot SDK adapter cannot reattach an in-flight prompt after the bridge process restarts.\n\n' +
+        'Start a fresh send and restate the needed context. ACP remains the default adapter for restart-resumable jobs.';
+    }
     const detailLine = detail ? ` (detail: ${detail})` : '';
     return taskHeader +
       `Bridge could not reach the Copilot daemon (or socket reconciliation failed)${detailLine}.\n\n` +
@@ -1820,6 +1826,7 @@ export function hydrateJobsFromLedger() {
 
   let claimed = 0;
   let resumed = 0;
+  const canResumeDetachedPrompts = runtimeSupportsDetachedPromptResume();
   for (const persisted of entries) {
     const { copilotSessionId, ...rest } = persisted;
     const job = { ...rest };
@@ -1833,7 +1840,7 @@ export function hydrateJobsFromLedger() {
     // exist (original bridge died before writeThreadSid ran), restore it.
     // Do not restore timeout/empty-completed retirements: those sessions are
     // intentionally poisoned and the next send must mint a clean ACP session.
-    if (job.thread && job.sessionId && !(isTerminal && job.sessionRetired)) {
+    if (job.thread && job.sessionId && !(isTerminal && job.sessionRetired) && (isTerminal || canResumeDetachedPrompts)) {
       try { writeThreadSid(job.thread, job.sessionId); }
       catch (err) { log('WARN', 'hydrate writeThreadSid failed:', err.message); }
     }
@@ -1847,6 +1854,17 @@ export function hydrateJobsFromLedger() {
         status: 'unreachable',
         error: 'bridge restart before prompt-bg completed',
         detail: 'rehydrate_no_promptid',
+        terminalAt: Date.now(),
+      });
+      continue;
+    }
+    if (!canResumeDetachedPrompts) {
+      retireThreadSid(job.thread, job.sessionId, 'sdk_adapter_non_resumable_after_restart');
+      retainTerminalJob(job.jobId, {
+        status: 'unreachable',
+        error: 'experimental SDK adapter cannot reattach in-flight prompts after bridge restart',
+        detail: 'sdk_adapter_non_resumable_after_restart',
+        sessionRetired: true,
         terminalAt: Date.now(),
       });
       continue;

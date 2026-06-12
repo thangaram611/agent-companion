@@ -29,6 +29,7 @@ claude plugin validate .
    - Done in `5172d2f`: keep the current ACP daemon as the default adapter.
    - Done in current SDK phase: add `COPILOT_RUNTIME_ADAPTER=sdk` behind an explicit opt-in flag.
    - Current SDK behavior: preserve the existing reply contract with cancel-and-restart; native SDK `mode:"immediate"` steering is a later API/UI decision.
+   - Current SDK behavior: in-flight SDK prompts are explicitly non-resumable after bridge restart; ACP remains the restart-resumable default.
    - Direct bridge smoke passed for both `acp` and `sdk` with `gpt-5-mini`: `send` -> `wait` completed, digest path generated, verbose `status` inspected.
    - SDK smoke findings: `gpt-4.1` was not available in this local SDK account/runtime, and model-specific reasoning effort must stay opt-in.
    - Next: keep ACP as default until full Claude-host and Codex-host end-to-end smokes pass.

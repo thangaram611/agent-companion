@@ -8,6 +8,7 @@ import {
   inspectPrompt,
   promptBg,
   replyPrompt,
+  runtimeSupportsDetachedPromptResume,
   runtimeStatus,
   selectedRuntimeAdapter,
   _resetSdkRuntimeForTest,
@@ -38,6 +39,7 @@ test('ACP runtime adapter maps bridge methods to daemon socket commands', async 
     });
     try {
       assert.equal(selectedRuntimeAdapter(), 'acp');
+      assert.equal(runtimeSupportsDetachedPromptResume(), true);
       await ensureRuntime({ reqId: 'req-1' });
       await runtimeStatus(123);
       await promptBg({ sessionId: 'sid', text: 'hello', cwd: '/repo', model: 'gpt-5.5', reqId: 'req-2' });
@@ -74,6 +76,10 @@ test('unknown runtime adapters fail before daemon calls', async () => {
       );
       await assert.rejects(
         () => runtimeStatus(),
+        (err) => err.code === 'RUNTIME_ADAPTER_UNSUPPORTED',
+      );
+      assert.throws(
+        () => runtimeSupportsDetachedPromptResume(),
         (err) => err.code === 'RUNTIME_ADAPTER_UNSUPPORTED',
       );
     } finally {
@@ -118,6 +124,7 @@ test('SDK runtime adapter dispatches through the SDK backend boundary', async ()
     });
     try {
       assert.equal(selectedRuntimeAdapter(), 'sdk');
+      assert.equal(runtimeSupportsDetachedPromptResume(), false);
       await ensureRuntime({ reqId: 'req-sdk' });
       await runtimeStatus(111);
       await promptBg({ sessionId: 'sid', text: 'hello', cwd: '/repo', model: 'gpt-5', reqId: 'req-3' });

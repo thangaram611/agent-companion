@@ -163,10 +163,40 @@ test('SDK runtime sends a background prompt and maps session events to bridge wa
     assert.equal(inspected.data.lastAssistantOutput, 'hello world');
     assert.match(inspected.data.activity.join('\n'), /read file README\.md/);
 
+    const { buildDigest } = await import('../lib/prompt-digest.mjs');
+    const digest = buildDigest(start.data.promptId, { jobId: 'job-sdk-digest', status: 'completed' });
+    assert.match(digest, /Source files touched/);
+    assert.match(digest, /README\.md/);
+
     const status = await runtimeStatus();
     assert.equal(status.ok, true);
     assert.equal(status.data.connected, true);
     assert.equal(status.data.sdkStatus.version, 'fake-sdk-runtime');
+  } finally {
+    cleanup();
+  }
+});
+
+test('SDK runtime maps model call failures to a failed prompt with provider error text', async () => {
+  const cleanup = withRuntimeDir();
+  installFakeSdk();
+  try {
+    const start = await promptBg({ text: 'use unavailable model', cwd: process.cwd(), model: 'gpt-4.1' });
+    const session = FakeClient.instances[0].sessions[0];
+
+    session.emit('model.call_failure', {
+      errorMessage: 'model gpt-4.1 is unavailable for this account',
+      model: 'gpt-4.1',
+      tokenType: 'oauth',
+    });
+
+    const watched = await watchPrompt({ promptId: start.data.promptId, summaryOnly: true });
+    assert.equal(watched.ok, true);
+    assert.equal(watched.data.status, 'failed');
+    assert.match(watched.data.error, /gpt-4\.1 is unavailable/);
+
+    const inspected = await inspectPrompt({ promptId: start.data.promptId, includeTimeline: true });
+    assert.equal(inspected.data.status, 'failed');
   } finally {
     cleanup();
   }
