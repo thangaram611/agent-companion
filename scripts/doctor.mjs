@@ -62,6 +62,7 @@ const report = {
   codex: codexInfo(),
   copilot: commandVersion('copilot'),
   runtime: {
+    adapter: process.env.COPILOT_RUNTIME_ADAPTER || 'acp',
     dir: runtimeDir(),
     socket: daemonSocketPath(),
     queue: queuePath(),
@@ -90,7 +91,7 @@ if (asJson) {
   console.log(`claude:  ${report.claude.version || 'missing'}`);
   console.log(`codex:   ${report.codex.version || 'missing'}${report.codex.found ? ` (plugin add: ${report.codex.pluginAdd ? 'ok' : 'missing'})` : ''}`);
   console.log(`copilot: ${report.copilot.version || 'missing'}`);
-  console.log(`runtime: ${report.runtime.dir}`);
+  console.log(`runtime: ${report.runtime.dir} (adapter: ${report.runtime.adapter})`);
 }
 
 process.exit(report.ok ? 0 : 1);

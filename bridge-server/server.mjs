@@ -35,7 +35,15 @@ import {
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { sendToSocket, ensureDaemon } from './daemon-client.mjs';
+import {
+  ensureRuntime,
+  promptBg,
+  watchPrompt,
+  inspectPrompt,
+  cancelPrompt,
+  replyPrompt,
+  selectedRuntimeAdapter,
+} from './copilot-runtime.mjs';
 import {
   log,
   formatPrompt,
@@ -349,10 +357,11 @@ function normalizeInspectLimit(value) {
 
 async function fetchPromptInspect(job, { includeTimeline = false, limit = 40 } = {}) {
   if (!job?.promptId) return null;
-  const resp = await sendToSocket(
-    { command: 'inspect', promptId: job.promptId, includeTimeline, limit: normalizeInspectLimit(limit) },
-    15_000,
-  );
+  const resp = await inspectPrompt({
+    promptId: job.promptId,
+    includeTimeline,
+    limit: normalizeInspectLimit(limit),
+  });
   if (!resp.ok) throw new Error(`inspect failed: ${resp.error}`);
   return resp.data;
 }
@@ -819,7 +828,7 @@ async function runWorker({ jobId, reqId, task, mode, template, template_args, cw
   rlog.info('worker.start', { mode, template, thread: thread || null, model, cwd: cwd || null, parallel_strategy: parallel, fleet });
   log('INFO', 'worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} model=${model} cwd=${cwd} parallel=${parallel} fleet=${fleet}`);
   try {
-    await ensureDaemon({ reqId });
+    await ensureRuntime({ reqId });
 
     let formatted = formatPrompt({ template, task, mode, template_args, parallel });
     // plan_review prompts already embed their own senior-architect critique
@@ -830,8 +839,7 @@ async function runWorker({ jobId, reqId, task, mode, template, template_args, cw
       formatted = appendRubberDuckReview(formatted);
     }
 
-    const startResp = await sendToSocket({
-      command: 'prompt-bg',
+    const startResp = await promptBg({
       sessionId: previousSid || null,
       text: formatted,
       cwd,
@@ -1070,8 +1078,8 @@ async function awaitTerminal(promptId, maxWaitSec) {
   // padding gives the daemon room to return a terminal payload before we
   // give up on the socket roundtrip.
   const timeoutMs = Math.min((maxWaitSec + 120) * 1000, 25 * 60 * 1000);
-  const resp = await sendToSocket(
-    { command: 'watch', promptId, since: 0, raw: false, wait: maxWaitSec, summaryOnly: true },
+  const resp = await watchPrompt(
+    { promptId, since: 0, raw: false, wait: maxWaitSec, summaryOnly: true },
     timeoutMs,
   );
   if (!resp.ok) throw new Error(`await failed: ${resp.error}`);
@@ -1080,8 +1088,8 @@ async function awaitTerminal(promptId, maxWaitSec) {
 
 async function reconcileAfterTimeout(promptId) {
   try {
-    const resp = await sendToSocket(
-      { command: 'watch', promptId, since: 0, raw: false, wait: 0, summaryOnly: true },
+    const resp = await watchPrompt(
+      { promptId, since: 0, raw: false, wait: 0, summaryOnly: true },
       5_000,
     );
     const data = resp?.ok ? resp.data : null;
@@ -1288,7 +1296,7 @@ async function handleCancel({ job_id }) {
   if (!job)                                       return asJson({ ok: false, error: 'unknown job_id' });
   if (!job.promptId || job.status === 'starting') return asJson({ ok: false, error: 'job is not yet cancellable' });
   if (job.status !== 'running')                   return asJson({ ok: false, error: `job is ${job.status}` });
-  const resp = await sendToSocket({ command: 'cancel', promptId: job.promptId });
+  const resp = await cancelPrompt({ promptId: job.promptId });
   // v6.1 gap fix: cancel also surfaces the job via the cancel MCP response,
   // so mark the queue entry consumed to avoid a duplicate drain injection.
   if (resp.data?.cancelled) markQueueConsumed(job_id);
@@ -1315,7 +1323,7 @@ async function handleReply({ job_id, message }) {
   job.supersededPromptStatus = null;
   persistJob(job_id);
   try {
-    const resp = await sendToSocket({ command: 'reply', promptId: originalPromptId, message }, 15_000);
+    const resp = await replyPrompt({ promptId: originalPromptId, message });
     if (!resp.ok || !resp.data?.ok) {
       const reason = resp.data?.reason || resp.error || 'reply failed';
       delete job.supersedingPromptId;
@@ -1396,6 +1404,7 @@ async function handleStatus({ job_id, verbose }) {
   const modelInfo = readDefaultModel();
   return asJson({
     ok: true, action: 'status',
+    runtime_adapter: selectedRuntimeAdapter(),
     default_model: modelInfo,
     threads: listThreads(),
     jobs_in_memory: jobs.size,
@@ -1428,7 +1437,8 @@ const mcp = new Server(
       'per invocation by the companion agent. Actions: send (returns ' +
       'still_running synchronously), wait (blocks until terminal), status, ' +
       'reply, cancel. The companion uses send for kickoff then loops on wait ' +
-      'until terminal. Parallel orchestration is strategy-based: auto, always, ' +
+      `until terminal. Runtime adapter is ${selectedRuntimeAdapter()}. ` +
+      'Parallel orchestration is strategy-based: auto, always, ' +
       'or never. Runtime IPC, logs, prompt streams, digests, and completion ' +
       `queue live under the private directory ${runtimeDir()}.`,
   },

@@ -25,9 +25,9 @@ claude plugin validate .
 ## Next Phase Queue
 
 1. Copilot runtime adapter
-   - Add a small runtime interface for `send`, `wait`, `status`, `reply`, and `cancel`.
-   - Keep the current ACP daemon as the default adapter.
-   - Add a Copilot SDK adapter behind an explicit config flag.
+   - Done in post-`59ab301` worktree: add a small runtime interface for `send`, `wait`, `status`, `reply`, and `cancel`.
+   - Done in post-`59ab301` worktree: keep the current ACP daemon as the default adapter.
+   - Next: add a Copilot SDK adapter behind an explicit config flag.
    - Run side-by-side smoke tests before making SDK the default.
 
 2. MCP resource polish

@@ -43,6 +43,7 @@ copilot-companion/                            ← plugin root
 ├── bridge-server/
 │   ├── server.mjs                            `copilot` MCP tool, 5 actions:
 │   │                                         send | wait | status | reply | cancel
+│   ├── copilot-runtime.mjs                   runtime adapter boundary (ACP default)
 │   ├── validation.mjs                        per-action field allow-lists, schemas
 │   └── package.json                          runtime deps (MCP SDK)
 ├── lib/                                      state + logging + prompt utilities
@@ -275,6 +276,10 @@ bridge maintains private runtime files under
 Set `COPILOT_RUNTIME_DIR` to override the root for tests or advanced
 debugging. The bridge creates the directory with `0700` permissions and
 writes runtime files with private modes where applicable.
+
+The bridge currently uses `COPILOT_RUNTIME_ADAPTER=acp` by default. Other
+values fail fast with a structured adapter error until the Copilot SDK backend
+passes parity checks.
 
 The digest is refreshed:
 
