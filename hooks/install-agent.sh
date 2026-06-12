@@ -14,7 +14,7 @@
 #
 # After this runs, the standalone agent at ~/.claude/agents/copilot-companion.md
 # spawns the bridge MCP server inline ONLY when the subagent is invoked. Main
-# Claude has no `mcp__copilot-bridge__copilot` in its tool surface — there is
+# Claude has no `mcp__copilot-bridge__copilot_*` in its tool surface — there is
 # no plugin-level .mcp.json registration anywhere.
 #
 # Idempotent: rewrites the destination only when its checksum changes.

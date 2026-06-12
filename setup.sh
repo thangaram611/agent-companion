@@ -228,7 +228,7 @@ if [ "$DO_CLAUDE" = 1 ]; then
   fi
 
   # 5b. Permission allow-list — without an explicit allow rule, the first
-  # invocation of mcp__copilot-bridge__copilot can surface a permission
+  # invocation of a copilot-bridge MCP tool can surface a permission
   # prompt. Plugin-shipped settings.json cannot declare permissions, so
   # we merge into the user's ~/.claude/settings.json.
   printf "Granting MCP permission in ~/.claude/settings.json...\n"

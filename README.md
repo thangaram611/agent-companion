@@ -168,7 +168,14 @@ node scripts/install-codex-hooks.mjs --plugin-root "$(pwd)" --uninstall --yes
 
 ## Permissions (user setup)
 
-The subagent invokes one MCP tool, `mcp__copilot-bridge__copilot`. Without an explicit allow rule, the first invocation in a session can surface a permission prompt — even with `defaultMode: "auto"`. Plugin-level `settings.json` cannot declare permissions (Claude Code honors only `agent` and `subagentStatusLine` there), so the entry must live in your user or project settings.
+The subagent invokes five split MCP tools: `mcp__copilot-bridge__copilot_send`,
+`mcp__copilot-bridge__copilot_wait`, `mcp__copilot-bridge__copilot_status`,
+`mcp__copilot-bridge__copilot_reply`, and
+`mcp__copilot-bridge__copilot_cancel`. Without explicit allow rules, the first
+invocation in a session can surface a permission prompt — even with
+`defaultMode: "auto"`. Plugin-level `settings.json` cannot declare permissions
+(Claude Code honors only `agent` and `subagentStatusLine` there), so the entries
+must live in your user or project settings.
 
 **Pick whichever fits your install path:**
 
@@ -192,7 +199,11 @@ The plugin source lives under `~/.claude/plugins/cache/<hash>/...`, which isn't 
    {
      "permissions": {
        "allow": [
-         "mcp__copilot-bridge__copilot"
+         "mcp__copilot-bridge__copilot_send",
+         "mcp__copilot-bridge__copilot_wait",
+         "mcp__copilot-bridge__copilot_status",
+         "mcp__copilot-bridge__copilot_reply",
+         "mcp__copilot-bridge__copilot_cancel"
        ]
      }
    }
@@ -230,11 +241,11 @@ delegation, status checks, replies, or cancellation.
 ### Internal MCP surface (subagent-only)
 
 ```
-copilot({ action: "send",   task, cwd, mode?, template?, template_args?, thread?, max_wait_sec?, parallel? })
-copilot({ action: "wait",   job_id, max_wait_sec? })
-copilot({ action: "status", job_id?, verbose? })
-copilot({ action: "reply",  job_id, message })
-copilot({ action: "cancel", job_id })
+copilot_send({ task, cwd, mode?, template?, template_args?, thread?, max_wait_sec?, parallel? })
+copilot_wait({ job_id, max_wait_sec? })
+copilot_status({ job_id?, verbose? })
+copilot_reply({ job_id, message })
+copilot_cancel({ job_id })
 ```
 
 `cwd` is required on every `send` and must be the absolute target repo or
@@ -371,13 +382,13 @@ Use `parallel: "never"` when the task is strictly linear or single-source
 
 ```jsonc
 // default — bridge decides whether /fleet is worth it
-copilot({ action: "send", task: "refactor authentication across api/, ui/, and tests/" })
+copilot_send({ task: "refactor authentication across api/, ui/, and tests/" })
 
 // force /fleet for a broad audit
-copilot({ action: "send", task: "audit auth, billing, and API routes", parallel: "always" })
+copilot_send({ task: "audit auth, billing, and API routes", parallel: "always" })
 
 // skip /fleet for trivial linear work
-copilot({ action: "send", task: "fix the typo in foo.ts:42", parallel: "never" })
+copilot_send({ task: "fix the typo in foo.ts:42", parallel: "never" })
 ```
 
 When a task hits `status: "timeout"`, the bridge's `content` includes a
@@ -399,10 +410,16 @@ main decides which to try.
 The subagent declares these tools (full list in this plugin's `agents/copilot-companion.md` frontmatter):
 
 ```
-mcp__copilot-bridge__copilot, Bash, Read, Write, Edit, Grep, Glob, WebFetch, TodoWrite
+mcp__copilot-bridge__copilot_send, mcp__copilot-bridge__copilot_wait,
+mcp__copilot-bridge__copilot_status, mcp__copilot-bridge__copilot_reply,
+mcp__copilot-bridge__copilot_cancel, Bash, Read, Write, Edit, Grep, Glob,
+WebFetch, TodoWrite
 ```
 
-`mcp__copilot-bridge__copilot` is the canonical dispatch tool. All others exist for diagnostics, artifact handling, and self-sufficiency. See the frontmatter "Tool surface" and "Forbidden" sections for when each is appropriate.
+The `mcp__copilot-bridge__copilot_*` tools are the canonical dispatch surface.
+All non-MCP tools exist for diagnostics, artifact handling, and
+self-sufficiency. See the frontmatter "Tool surface" and "Forbidden" sections
+for when each is appropriate.
 
 ## Diagnostics
 

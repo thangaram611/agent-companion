@@ -76,6 +76,29 @@ test('server imports safely and dispatch handles the public boundary errors/stat
   assert.equal(typeof mod.dispatch, 'function');
   assert.ok(mod.jobs && typeof mod.jobs.get === 'function');
   assert.ok(mod.mcp);
+  const tools = await mod.mcp._requestHandlers.get('tools/list')({ method: 'tools/list', params: {} });
+  assert.deepEqual(
+    tools.tools.map((tool) => tool.name),
+    ['copilot_send', 'copilot_wait', 'copilot_status', 'copilot_reply', 'copilot_cancel'],
+  );
+  assert.equal(tools.tools.some((tool) => tool.name === 'copilot'), false);
+  assert.equal(tools.tools.find((tool) => tool.name === 'copilot_send').inputSchema.properties.action, undefined);
+  await assert.rejects(() => mod.mcp._requestHandlers.get('tools/call')({
+    method: 'tools/call',
+    params: { name: 'copilot', arguments: { action: 'status' } },
+  }), /unknown tool: copilot/);
+  const splitWithAction = parse(await mod.mcp._requestHandlers.get('tools/call')({
+    method: 'tools/call',
+    params: { name: 'copilot_status', arguments: { action: 'status' } },
+  }));
+  assert.equal(splitWithAction.ok, false);
+  assert.equal(splitWithAction.code, 'INVALID_ARGUMENTS');
+  const statusViaTool = parse(await mod.mcp._requestHandlers.get('tools/call')({
+    method: 'tools/call',
+    params: { name: 'copilot_status', arguments: {} },
+  }));
+  assert.equal(statusViaTool.ok, true);
+  assert.equal(statusViaTool.action, 'status');
   await assert.rejects(() => mod.dispatch({ action: 'frobnicate' }), /unhandled action/);
 
   const oldS = process.env.CLAUDE_CODE_SESSION_ID;
@@ -555,7 +578,7 @@ test('handleSend returns immediately and reattaches to existing jobs without dae
     assert.ok(instant.elapsed < 200, `handleSend must return synchronously (got ${instant.elapsed}ms)`);
     assert.equal(instant.body.status, 'still_running');
     assert.equal(instant.body.current_status, 'starting');
-    assert.match(instant.body.hint, /action:"wait"/);
+    assert.match(instant.body.hint, /copilot_wait/);
 
     jobs.set('copilot-existing-1', {
       jobId: 'copilot-existing-1',

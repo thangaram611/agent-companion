@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// install-permissions.mjs — idempotently grant the copilot-bridge MCP tool
+// install-permissions.mjs — idempotently grant the copilot-bridge MCP tools
 // permission in ~/.claude/settings.json. Pure Node ≥20 (no jq dependency);
 // relies only on the Node version setup.sh already verifies.
 //
@@ -30,7 +30,13 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
-const TOOL = 'mcp__copilot-bridge__copilot';
+const TOOLS = [
+  'mcp__copilot-bridge__copilot_send',
+  'mcp__copilot-bridge__copilot_wait',
+  'mcp__copilot-bridge__copilot_status',
+  'mcp__copilot-bridge__copilot_reply',
+  'mcp__copilot-bridge__copilot_cancel',
+];
 const SETTINGS = path.join(homedir(), '.claude', 'settings.json');
 const args = process.argv.slice(2);
 const yes = args.includes('--yes') || args.includes('-y');
@@ -87,8 +93,9 @@ const allow = Array.isArray(cfg.permissions.allow)
   ? cfg.permissions.allow.slice()
   : [];
 
-if (allow.includes(TOOL)) {
-  ok(`${TOOL} already in ${SETTINGS}`);
+const missing = TOOLS.filter((tool) => !allow.includes(tool));
+if (missing.length === 0) {
+  ok(`copilot-bridge MCP tools already in ${SETTINGS}`);
   process.exit(0);
 }
 
@@ -101,7 +108,7 @@ if (!yes) {
     input: process.stdin,
     output: process.stdout,
   });
-  const ans = (await rl.question(`Add ${TOOL} to ${SETTINGS}? [y/N] `))
+  const ans = (await rl.question(`Add ${missing.length} copilot-bridge MCP tool permission(s) to ${SETTINGS}? [y/N] `))
     .trim()
     .toLowerCase();
   rl.close();
@@ -111,7 +118,7 @@ if (!yes) {
   }
 }
 
-allow.push(TOOL);
+allow.push(...missing);
 cfg.permissions.allow = allow;
 
 const ts = new Date()
@@ -124,4 +131,4 @@ if (hadExisting) copyFileSync(SETTINGS, backup);
 const tmp = `${SETTINGS}.tmp.${process.pid}`;
 writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
 renameSync(tmp, SETTINGS);
-ok(`added ${TOOL}${hadExisting ? ` (backup: ${backup})` : ''}`);
+ok(`added ${missing.join(', ')}${hadExisting ? ` (backup: ${backup})` : ''}`);

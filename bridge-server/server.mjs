@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // copilot-bridge MCP server (v6.1 — clean-break subagent-isolated architecture)
 //
-// Single MCP tool: `copilot` with actions send | wait | status | reply | cancel.
+// MCP tools: copilot_send | copilot_wait | copilot_status | copilot_reply | copilot_cancel.
 // No start/stop/pause/session-gate — this server is spawned inline per invocation
 // from the copilot-companion subagent's frontmatter, so there is no separate
 // activation lifecycle. Model selection and rubber-duck critique are internal
@@ -620,7 +620,7 @@ function buildWaitResponse(outcome) {
       // Path to the smart-transcript digest the parent can read for an
       // up-to-date progress summary without making another status round-trip.
       digest_path: job.promptId ? digestPath(job.jobId) : null,
-      hint: 'call copilot({action:"wait", job_id, max_wait_sec}) again to continue blocking.',
+      hint: 'call copilot_wait({ job_id, max_wait_sec }) again to continue blocking.',
     };
     if (job.reattached) stillRunning.reattached = true;
     return asJson(stillRunning);
@@ -750,7 +750,7 @@ export function formatTerminalContent({
     return taskHeader +
       `Copilot got stuck on: \`${stuckReason || 'unknown'}\`.\n\n` +
       (promptId
-        ? `Inspect with \`copilot({action:"status", job_id:"${jobId}", verbose:true})\` before deciding whether to recover directly.`
+        ? `Inspect with \`copilot_status({ job_id:"${jobId}", verbose:true })\` before deciding whether to recover directly.`
         : 'Prompt inspection is unavailable for this job; decide whether to re-fire or recover directly.');
   }
   if (status === 'failed') {
@@ -1374,7 +1374,7 @@ async function handleSend(args) {
     started_at: iso(job?.startedAt || Date.now()),
     age_s: 0,
     session_reborn: false,
-    hint: 'call copilot({action:"wait", job_id, max_wait_sec}) to block until terminal.',
+    hint: 'call copilot_wait({ job_id, max_wait_sec }) to block until terminal.',
   });
 }
 
@@ -1533,10 +1533,11 @@ const mcp = new Server(
     capabilities: { tools: {}, resources: {} },
     instructions:
       'Internal MCP server for the copilot-companion subagent. Spawned inline ' +
-      'per invocation by the companion agent. Actions: send (returns ' +
-      'still_running synchronously), wait (blocks until terminal), status, ' +
-      'reply, cancel. The companion uses send for kickoff then loops on wait ' +
-      `until terminal. Runtime adapter is ${selectedRuntimeAdapter()}. ` +
+      'per invocation by the companion agent. Tools: copilot_send (returns ' +
+      'still_running synchronously), copilot_wait (blocks until terminal), ' +
+      'copilot_status, copilot_reply, and copilot_cancel. The companion uses ' +
+      'copilot_send for kickoff then loops on copilot_wait until terminal. ' +
+      `Runtime adapter is ${selectedRuntimeAdapter()}. ` +
       'Parallel orchestration is strategy-based: auto, always, ' +
       'or never. Runtime IPC, logs, prompt streams, digests, and completion ' +
       `queue live under the private directory ${runtimeDir()}.`,
@@ -1555,143 +1556,183 @@ mcp.setRequestHandler(ReadResourceRequestSchema, async (req) => (
   readDigestResource(req.params.uri)
 ));
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: 'copilot',
-      description:
-        'Internal Copilot companion tool. Actions: send | wait | status | reply | cancel. ' +
-        'Not exposed to main Claude — only the copilot-companion subagent invokes this. ' +
-        'Rubber-duck critique and model selection are handled server-side.',
-      inputSchema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          action: {
-            type: 'string',
-            enum: ['send', 'wait', 'status', 'reply', 'cancel'],
-            description:
-              'send: enqueue a task; returns still_running with job_id immediately. Caller then loops on action:wait to block until terminal. ' +
-              'wait: block on an existing job_id up to max_wait_sec seconds. ' +
-              'status: without job_id returns global state; with job_id returns job diagnostics. ' +
-              'reply: re-steer an in-flight job (requires job_id + message). ' +
-              'cancel: cancel a specific running job (requires job_id).',
-          },
-          task: {
-            type: 'string',
-            description: '[send] Plain-language description of the task.',
-          },
-          message: {
-            type: 'string',
-            description:
-              '[reply] Follow-up text to inject into a running job. The current ' +
-              'in-flight turn is cancelled and a new turn is started on the same ' +
-              'Copilot session with this message wrapped as a continuation.',
-          },
-          mode: {
-            type: 'string',
-            enum: ['PLAN', 'ANALYZE', 'EXECUTE'],
-            description:
-              '[send] PLAN: produce a plan, read-only. ANALYZE: investigate, read-only. ' +
-              'EXECUTE (default): Copilot may edit/write/shell.',
-          },
-          template: {
-            type: 'string',
-            enum: ['general', 'research', 'plan_review'],
-            description:
-              '[send] Prompt template. Defaults to "general". "research" for evidence-backed web research. ' +
-              '"plan_review" for senior-architect plan reviews (requires template_args.plan_path).',
-          },
-          template_args: {
-            type: 'object',
-            description: '[send] Template-specific arguments. Keys validated per-template.',
-            additionalProperties: false,
-            properties: {
-              plan_path:       { type: 'string', description: '[plan_review only] Absolute path to the plan .md (or "latest").' },
-              focus_directive: { type: 'string', description: '[plan_review only] Optional focus directive for plan_review.' },
-              scope_hint:      { type: 'string', description: '[general only] Binds the analysis to a specific scope (e.g. "imports/types only", "lines 1-120"). Useful for large-file ANALYZE.' },
-            },
-          },
-          cwd: {
-            type: 'string',
-            description:
-              '[send required] Absolute target repo/worktree for Copilot. The bridge rejects missing cwd instead of defaulting to the bridge process cwd.',
-          },
-          thread: {
-            type: 'string',
-            description:
-              '[send] Optional thread name. If omitted the bridge auto-generates `companion-<jobId>`. ' +
-              'Supplying a remembered thread name resumes a prior Copilot session for multi-turn continuity.',
-            pattern: '^[a-zA-Z0-9._-]+$',
-          },
-          max_wait_sec: {
-            type: 'number',
-            description:
-              '[send|wait] Upper bound on how long the bridge blocks before returning ' +
-              'still_running. Default 480, max 1200 (20 min) for all modes. The companion emits ' +
-              'a "still running" line between wait iterations to reset Claude Code\'s 600s ' +
-              "stream-idle watchdog, so the clamp is no longer mode-scoped. On a fresh `send` " +
-              'this bound is moot — the call returns still_running synchronously — but on a ' +
-              'reattach to an in-flight job, send blocks on the existing job up to this bound. ' +
-              'Wait always blocks up to this bound.',
-          },
-          parallel: {
-            type: 'string',
-            enum: ['auto', 'always', 'never'],
-            description:
-              '[send] Parallel orchestration strategy. "auto" (default) prepends "/fleet " only ' +
-              'when the bridge judges the task broad enough to benefit. "always" forces /fleet. ' +
-              '"never" skips /fleet for strictly linear or single-source work.',
-          },
-          job_id:  { type: 'string',  description: '[wait|status|reply|cancel] Target a specific job.' },
-          verbose: { type: 'boolean', description: '[status] Include full activity timeline when a job_id is given.' },
-          claude_session_id: {
-            type: 'string',
-            description:
-              "[all] Caller's Claude Code session id, used to scope the bridge's queue writes and " +
-              "ledger so events from one session never leak into another. The Claude companion subagent " +
-              'extracts this from $CLAUDE_CODE_SESSION_ID via Bash at activation and forwards it on ' +
-              'every action. Required on `send` for Claude callers; recommended on every other action ' +
-              "(lets the bridge rehydrate its own-session jobs after a restart). Codex callers don't " +
-              'need this — the bridge reads the session id from MCP `_meta["x-codex-turn-metadata"]` ' +
-              'directly. host_session_id is accepted as a host-neutral alias.',
-          },
-          host_session_id: {
-            type: 'string',
-            description:
-              '[all] Host-neutral alias of `claude_session_id`. Same semantics — pass either, not both. ' +
-              'Provided so non-Claude hosts can forward a session id without using a Claude-named field.',
+const HOST_SESSION_FIELDS = {
+  claude_session_id: {
+    type: 'string',
+    description:
+      "Caller's Claude Code session id, used to scope queue writes and persisted jobs. " +
+      'Claude companion agents forward this on every call; Codex normally uses MCP _meta instead.',
+  },
+  host_session_id: {
+    type: 'string',
+    description: 'Host-neutral alias of claude_session_id. Pass either alias, not both.',
+  },
+};
+
+const JOB_ID_FIELD = {
+  type: 'string',
+  description: 'Target Copilot companion job id.',
+};
+
+const MAX_WAIT_FIELD = {
+  type: 'number',
+  description:
+    'Upper bound on how long the bridge blocks before returning. Default 480, max 1200 seconds.',
+};
+
+const COPILOT_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['ok'],
+  properties: {
+    ok: { type: 'boolean' },
+    action: { type: 'string' },
+    status: { type: 'string' },
+    code: { type: 'string' },
+    error: { type: 'string' },
+    job_id: { type: 'string' },
+    thread: { type: 'string' },
+    prompt_id: { type: ['string', 'null'] },
+    session_id: { type: ['string', 'null'] },
+    digest_path: { type: ['string', 'null'] },
+    meta: { type: 'object', additionalProperties: true },
+    content: { type: 'string' },
+    fleet: { type: 'boolean' },
+    parallel: { type: 'string' },
+  },
+};
+
+const COPILOT_TOOL_ACTIONS = {
+  copilot_send: 'send',
+  copilot_wait: 'wait',
+  copilot_status: 'status',
+  copilot_reply: 'reply',
+  copilot_cancel: 'cancel',
+};
+
+const COPILOT_TOOLS = [
+  {
+    name: 'copilot_send',
+    description:
+      'Enqueue a Copilot task and return still_running immediately with job_id. ' +
+      'The companion should then loop on copilot_wait until terminal.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        task: { type: 'string', description: 'Plain-language task for Copilot.' },
+        mode: {
+          type: 'string',
+          enum: ['PLAN', 'ANALYZE', 'EXECUTE'],
+          description: 'PLAN produces a plan, ANALYZE is read-only, EXECUTE may edit/write/shell.',
+        },
+        template: {
+          type: 'string',
+          enum: ['general', 'research', 'plan_review'],
+          description:
+            'Prompt template. Defaults to general. plan_review requires template_args.plan_path.',
+        },
+        template_args: {
+          type: 'object',
+          description: 'Template-specific arguments. Keys are validated per template.',
+          additionalProperties: false,
+          properties: {
+            plan_path:       { type: 'string', description: '[plan_review] Absolute path to the plan .md, or "latest".' },
+            focus_directive: { type: 'string', description: '[plan_review] Optional review focus.' },
+            scope_hint:      { type: 'string', description: '[general] Scope hint for large-file analysis.' },
           },
         },
-        required: ['action'],
+        cwd: {
+          type: 'string',
+          description: 'Required absolute target repo/worktree path. The bridge refuses to default cwd.',
+        },
+        thread: {
+          type: 'string',
+          description: 'Optional thread name for Copilot conversation continuity.',
+          pattern: '^[a-zA-Z0-9._-]+$',
+        },
+        max_wait_sec: MAX_WAIT_FIELD,
+        parallel: {
+          type: 'string',
+          enum: ['auto', 'always', 'never'],
+          description: 'Parallel orchestration strategy. Defaults to auto.',
+        },
+        ...HOST_SESSION_FIELDS,
       },
-      outputSchema: {
-        type: 'object',
-        additionalProperties: true,
-        required: ['ok'],
-        properties: {
-          ok: { type: 'boolean' },
-          action: { type: 'string' },
-          status: { type: 'string' },
-          code: { type: 'string' },
-          error: { type: 'string' },
-          job_id: { type: 'string' },
-          thread: { type: 'string' },
-          prompt_id: { type: ['string', 'null'] },
-          session_id: { type: ['string', 'null'] },
-          digest_path: { type: ['string', 'null'] },
-          meta: { type: 'object', additionalProperties: true },
-          content: { type: 'string' },
-          fleet: { type: 'boolean' },
-          parallel: { type: 'string' },
-        },
+      required: ['cwd'],
+    },
+    outputSchema: COPILOT_OUTPUT_SCHEMA,
+  },
+  {
+    name: 'copilot_wait',
+    description: 'Block on an existing Copilot job until terminal or until max_wait_sec elapses.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        job_id: JOB_ID_FIELD,
+        max_wait_sec: MAX_WAIT_FIELD,
+        ...HOST_SESSION_FIELDS,
+      },
+      required: ['job_id'],
+    },
+    outputSchema: COPILOT_OUTPUT_SCHEMA,
+  },
+  {
+    name: 'copilot_status',
+    description: 'Return bridge state, or diagnostics for a specific Copilot job when job_id is provided.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        job_id: JOB_ID_FIELD,
+        verbose: { type: 'boolean', description: 'Include full activity timeline for a specific job.' },
+        ...HOST_SESSION_FIELDS,
       },
     },
-  ],
+    outputSchema: COPILOT_OUTPUT_SCHEMA,
+  },
+  {
+    name: 'copilot_reply',
+    description: 'Re-steer an in-flight Copilot job with a follow-up message.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        job_id: JOB_ID_FIELD,
+        message: {
+          type: 'string',
+          description: 'Follow-up text. The bridge cancels and restarts the current turn with this continuation.',
+        },
+        ...HOST_SESSION_FIELDS,
+      },
+      required: ['job_id', 'message'],
+    },
+    outputSchema: COPILOT_OUTPUT_SCHEMA,
+  },
+  {
+    name: 'copilot_cancel',
+    description: 'Cancel a specific running Copilot job.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        job_id: JOB_ID_FIELD,
+        ...HOST_SESSION_FIELDS,
+      },
+      required: ['job_id'],
+    },
+    outputSchema: COPILOT_OUTPUT_SCHEMA,
+  },
+];
+
+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: COPILOT_TOOLS,
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-  if (req.params.name !== 'copilot') throw new Error(`unknown tool: ${req.params.name}`);
+  const action = COPILOT_TOOL_ACTIONS[req.params.name];
+  if (!action) throw new Error(`unknown tool: ${req.params.name}`);
   try {
     // Codex (PR openai/codex#15190) injects per-turn metadata on every MCP
     // tool call as `_meta["x-codex-turn-metadata"]`, including a stable
@@ -1702,7 +1743,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     // (Claude does not).
     const metaSid = req?.params?._meta?.['x-codex-turn-metadata']?.session_id;
     if (metaSid && typeof metaSid === 'string') adoptHostSessionId(metaSid);
-    const normalized = validateCopilotArgs(req.params.arguments || {});
+    const toolArgs = req.params.arguments || {};
+    if (Object.prototype.hasOwnProperty.call(toolArgs, 'action')) {
+      throw new Error('copilot: split MCP tools do not accept an action field; choose the copilot_* tool that matches the operation');
+    }
+    const normalized = validateCopilotArgs({ action, ...toolArgs });
     return await dispatch(normalized);
   } catch (err) {
     if (err && err.code === 'BRIDGE_SID_CONFLICT') {

@@ -1,7 +1,8 @@
 // Pure-function helpers for the copilot-bridge MCP server (v6.1).
 //
-// One public tool (`copilot`) with five actions: send | wait | status | reply | cancel.
-// Validation is split per-action; the dispatch happens in the server. Error
+// Internal action validator for the split MCP tools:
+// copilot_send | copilot_wait | copilot_status | copilot_reply | copilot_cancel.
+// The server injects the action before validation. Error
 // messages are prefixed with `copilot:` so MCP clients can surface them as
 // synchronous tool-call rejections.
 //

@@ -39,9 +39,10 @@ claude plugin validate .
    - Next: run full Claude-host and Codex-host resource reads from real companion turns, then decide whether digest paths can become debug-only.
 
 3. MCP tool-surface split
-   - Evaluate replacing the multiplexed `copilot` tool with separate tools:
+   - Done in current tool-split phase: replaced the public multiplexed `copilot` tool with separate tools:
      `copilot_send`, `copilot_wait`, `copilot_status`, `copilot_reply`, `copilot_cancel`.
-   - Only split if host UX, schema precision, or permissions improve enough to justify it.
+   - The server still uses the action-based dispatcher internally; the public MCP layer injects the action from the tool name.
+   - Next: verify Claude and Codex host tool registration, permission prompts, and subagent instructions against the split surface.
 
 4. Published packaging
    - Finalize Codex marketplace packaging and decide whether lifecycle hooks should be
