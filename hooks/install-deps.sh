@@ -27,7 +27,7 @@ if [ -n "$NODE_BIN" ]; then
 fi
 NPM_BIN="$(resolve_npm 2>/dev/null || true)"
 if [ -z "$NPM_BIN" ]; then
-  echo "copilot-companion: npm not found; cannot install bridge dependencies" >&2
+  echo "agent-companion: npm not found; cannot install bridge dependencies" >&2
   exit 1
 fi
 
@@ -115,10 +115,10 @@ else
   INSTALL_ARGS=(install --silent --no-audit --no-fund)
 fi
 
-cd "$PERSIST_DIR" || { echo "copilot-companion: cd $PERSIST_DIR failed" >&2; exit 1; }
+cd "$PERSIST_DIR" || { echo "agent-companion: cd $PERSIST_DIR failed" >&2; exit 1; }
 if ! "$NPM_BIN" "${INSTALL_ARGS[@]}" >"$LOG" 2>&1; then
   rm -f "$MANIFEST_HASH"
-  echo "copilot-companion: npm install failed (see $LOG)" >&2
+  echo "agent-companion: npm install failed (see $LOG)" >&2
   exit 1
 fi
 
@@ -129,5 +129,5 @@ rm -rf "$SYMLINK" 2>/dev/null
 ln -s "$PERSIST_DIR/node_modules" "$SYMLINK"
 
 echo "$EXPECT_HASH" > "$MANIFEST_HASH"
-echo "copilot-companion: deps ready"
+echo "agent-companion: deps ready"
 exit 0

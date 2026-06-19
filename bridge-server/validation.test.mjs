@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  validateCopilotArgs,
+  validateAgentArgs,
   VALID_ACTIONS,
   VALID_MODES,
   VALID_TEMPLATES,
@@ -27,12 +27,12 @@ const TEST_CWD = tmpdir();
 
 function withPlansDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'copilot-plans-'));
-  const prev = process.env.COPILOT_PLANS_DIR;
-  process.env.COPILOT_PLANS_DIR = dir;
+  const prev = process.env.AGENT_PLANS_DIR;
+  process.env.AGENT_PLANS_DIR = dir;
   try { return fn(dir); }
   finally {
-    if (prev === undefined) delete process.env.COPILOT_PLANS_DIR;
-    else process.env.COPILOT_PLANS_DIR = prev;
+    if (prev === undefined) delete process.env.AGENT_PLANS_DIR;
+    else process.env.AGENT_PLANS_DIR = prev;
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -52,69 +52,69 @@ function sendArgs(extra = {}) {
 
 test('action schemas reject malformed inputs and normalize valid cancel/wait/status/reply calls', () => {
   assert.deepEqual([...VALID_ACTIONS].sort(), ['cancel', 'reply', 'send', 'status', 'wait']);
-  assert.throws(() => validateCopilotArgs({}), /action is required/);
-  assert.throws(() => validateCopilotArgs({ action: 'launch' }), /action must be one of/);
+  assert.throws(() => validateAgentArgs({}), /action is required/);
+  assert.throws(() => validateAgentArgs({ action: 'launch' }), /action must be one of/);
 
-  const cancel = validateCopilotArgs({ action: 'cancel', job_id: 'abc-123' });
+  const cancel = validateAgentArgs({ action: 'cancel', job_id: 'abc-123' });
   assert.deepEqual(cancel, { action: 'cancel', job_id: 'abc-123', host_session_id: null });
-  assert.throws(() => validateCopilotArgs({ action: 'cancel' }), /job_id/);
-  assert.throws(() => validateCopilotArgs({ action: 'cancel', job_id: 'x', model: 'm' }), /unknown field "model"/);
+  assert.throws(() => validateAgentArgs({ action: 'cancel' }), /job_id/);
+  assert.throws(() => validateAgentArgs({ action: 'cancel', job_id: 'x', model: 'm' }), /unknown field "model"/);
 
-  const wait = validateCopilotArgs({ action: 'wait', job_id: 'j', max_wait_sec: 120 });
+  const wait = validateAgentArgs({ action: 'wait', job_id: 'j', max_wait_sec: 120 });
   assert.equal(wait.max_wait_sec, 120);
-  assert.throws(() => validateCopilotArgs({ action: 'wait' }), /job_id/);
-  assert.throws(() => validateCopilotArgs({ action: 'wait', job_id: 'j', max_wait_sec: 'x' }), /max_wait_sec/);
+  assert.throws(() => validateAgentArgs({ action: 'wait' }), /job_id/);
+  assert.throws(() => validateAgentArgs({ action: 'wait', job_id: 'j', max_wait_sec: 'x' }), /max_wait_sec/);
 
-  const status = validateCopilotArgs({ action: 'status', job_id: 'j', verbose: true });
+  const status = validateAgentArgs({ action: 'status', job_id: 'j', verbose: true });
   assert.equal(status.verbose, true);
   assert.equal(status.diagnostics, false);
   assert.equal(status.job_id, 'j');
-  assert.equal(validateCopilotArgs({ action: 'status', diagnostics: true }).diagnostics, true);
-  assert.throws(() => validateCopilotArgs({ action: 'status', verbose: 'yes' }), /verbose must be a boolean/);
-  assert.throws(() => validateCopilotArgs({ action: 'status', diagnostics: 'yes' }), /diagnostics must be a boolean/);
+  assert.equal(validateAgentArgs({ action: 'status', diagnostics: true }).diagnostics, true);
+  assert.throws(() => validateAgentArgs({ action: 'status', verbose: 'yes' }), /verbose must be a boolean/);
+  assert.throws(() => validateAgentArgs({ action: 'status', diagnostics: 'yes' }), /diagnostics must be a boolean/);
 
-  const reply = validateCopilotArgs({ action: 'reply', job_id: 'job-1', message: 'add tests' });
+  const reply = validateAgentArgs({ action: 'reply', job_id: 'job-1', message: 'add tests' });
   assert.equal(reply.message, 'add tests');
-  assert.throws(() => validateCopilotArgs({ action: 'reply', message: 'hi' }), /job_id/);
-  assert.throws(() => validateCopilotArgs({ action: 'reply', job_id: 'job-1' }), /message/);
-  assert.throws(() => validateCopilotArgs({ action: 'reply', job_id: 'job-1', message: '' }), /message/);
-  assert.throws(() => validateCopilotArgs({ action: 'reply', job_id: 'job-1', message: 'x'.repeat(8001) }), /too long/);
-  assert.throws(() => validateCopilotArgs({ action: 'reply', job_id: 'j', message: 'm', thread: 'x' }), /unknown field/);
+  assert.throws(() => validateAgentArgs({ action: 'reply', message: 'hi' }), /job_id/);
+  assert.throws(() => validateAgentArgs({ action: 'reply', job_id: 'job-1' }), /message/);
+  assert.throws(() => validateAgentArgs({ action: 'reply', job_id: 'job-1', message: '' }), /message/);
+  assert.throws(() => validateAgentArgs({ action: 'reply', job_id: 'job-1', message: 'x'.repeat(8001) }), /too long/);
+  assert.throws(() => validateAgentArgs({ action: 'reply', job_id: 'j', message: 'm', thread: 'x' }), /unknown field/);
 });
 
 test('send validation covers defaults, modes, unknown fields, thread names, cwd, and base template_args shape', () => {
   assert.deepEqual([...VALID_TEMPLATES].sort(), ['general', 'plan_review', 'research']);
 
-  const basic = validateCopilotArgs(sendArgs());
+  const basic = validateAgentArgs(sendArgs());
   assert.equal(basic.mode, DEFAULT_MODE);
   assert.equal(basic.template, 'general');
   assert.equal(basic.parallel, 'auto');
 
   for (const mode of VALID_MODES) {
-    assert.equal(validateCopilotArgs(sendArgs({ mode })).mode, mode);
+    assert.equal(validateAgentArgs(sendArgs({ mode })).mode, mode);
   }
 
-  assert.throws(() => validateCopilotArgs({ action: 'send' }), /task is required/);
-  assert.throws(() => validateCopilotArgs(sendArgs({ model: 'gpt-5.4' })), /unknown field "model"/);
-  assert.throws(() => validateCopilotArgs(sendArgs({ rubber_duck: false })), /unknown field "rubber_duck"/);
-  assert.throws(() => validateCopilotArgs(sendArgs({ mode: 'write' })), /mode must be one of/);
-  assert.throws(() => validateCopilotArgs(sendArgs({ template: 'fleet' })), /template must be one of/);
+  assert.throws(() => validateAgentArgs({ action: 'send' }), /task is required/);
+  assert.throws(() => validateAgentArgs(sendArgs({ model: 'gpt-5.4' })), /unknown field "model"/);
+  assert.throws(() => validateAgentArgs(sendArgs({ rubber_duck: false })), /unknown field "rubber_duck"/);
+  assert.throws(() => validateAgentArgs(sendArgs({ mode: 'write' })), /mode must be one of/);
+  assert.throws(() => validateAgentArgs(sendArgs({ template: 'fleet' })), /template must be one of/);
 
-  assert.equal(validateCopilotArgs(sendArgs({ thread: 'my_branch.01-a' })).thread, 'my_branch.01-a');
-  assert.throws(() => validateCopilotArgs(sendArgs({ thread: '../etc' })), /thread must match/);
-  assert.throws(() => validateCopilotArgs(sendArgs({ thread: 'a/b' })), /thread must match/);
+  assert.equal(validateAgentArgs(sendArgs({ thread: 'my_branch.01-a' })).thread, 'my_branch.01-a');
+  assert.throws(() => validateAgentArgs(sendArgs({ thread: '../etc' })), /thread must match/);
+  assert.throws(() => validateAgentArgs(sendArgs({ thread: 'a/b' })), /thread must match/);
 
-  assert.throws(() => validateCopilotArgs({ action: 'send', task: 'x' }), /cwd is required/);
-  assert.throws(() => validateCopilotArgs(sendArgs({ cwd: 'relative/path' })), /cwd must be an absolute path/);
-  assert.throws(() => validateCopilotArgs(sendArgs({ cwd: '/__nope__/__nope__' })), /cwd does not exist/);
-  assert.throws(() => validateCopilotArgs(sendArgs({ template_args: [] })), /template_args must be a plain object/);
+  assert.throws(() => validateAgentArgs({ action: 'send', task: 'x' }), /cwd is required/);
+  assert.throws(() => validateAgentArgs(sendArgs({ cwd: 'relative/path' })), /cwd must be an absolute path/);
+  assert.throws(() => validateAgentArgs(sendArgs({ cwd: '/__nope__/__nope__' })), /cwd does not exist/);
+  assert.throws(() => validateAgentArgs(sendArgs({ template_args: [] })), /template_args must be a plain object/);
 });
 
 test('plan_review validates plan path existence, canonicalization, latest resolution, focus, and symlink escape', () => {
-  assert.throws(() => validateCopilotArgs({ action: 'send', template: 'plan_review' }),
+  assert.throws(() => validateAgentArgs({ action: 'send', template: 'plan_review' }),
     /requires template_args\.plan_path/);
-  assert.throws(() => validateCopilotArgs(planArgs('rel.md')), /plan_path must be absolute/);
-  assert.throws(() => validateCopilotArgs(planArgs('/tmp/<foo>.md')), /un-substituted placeholder/);
+  assert.throws(() => validateAgentArgs(planArgs('rel.md')), /plan_path must be absolute/);
+  assert.throws(() => validateAgentArgs(planArgs('/tmp/<foo>.md')), /un-substituted placeholder/);
 
   withPlansDir((dir) => {
     const oldPlan = join(dir, 'old.md');
@@ -124,34 +124,34 @@ test('plan_review validates plan path existence, canonicalization, latest resolu
     utimesSync(oldPlan, new Date(1000), new Date(1000));
     utimesSync(newPlan, new Date(2000), new Date(2000));
 
-    const accepted = validateCopilotArgs(planArgs(oldPlan, { focus_directive: 'security' }));
+    const accepted = validateAgentArgs(planArgs(oldPlan, { focus_directive: 'security' }));
     assert.equal(accepted.template, 'plan_review');
     assert.equal(accepted.task, null);
     assert.equal(accepted.template_args.focus_directive, 'security');
     assert.ok(accepted.template_args.plan_path.endsWith('old.md'));
 
-    const latest = validateCopilotArgs(planArgs('latest'));
+    const latest = validateAgentArgs(planArgs('latest'));
     assert.ok(latest.template_args.plan_path.endsWith('new.md'));
 
-    assert.throws(() => validateCopilotArgs(planArgs(oldPlan, { bogus_key: 'x' })),
+    assert.throws(() => validateAgentArgs(planArgs(oldPlan, { bogus_key: 'x' })),
       /unknown template_args key "bogus_key"/);
-    assert.throws(() => validateCopilotArgs(planArgs(oldPlan, { focus_directive: 42 })),
+    assert.throws(() => validateAgentArgs(planArgs(oldPlan, { focus_directive: 42 })),
       /focus_directive must be a string/);
   });
 
   const insideDir = mkdtempSync(join(tmpdir(), 'copilot-plans-'));
   const outsideDir = mkdtempSync(join(tmpdir(), 'copilot-out-'));
-  const prev = process.env.COPILOT_PLANS_DIR;
-  process.env.COPILOT_PLANS_DIR = insideDir;
+  const prev = process.env.AGENT_PLANS_DIR;
+  process.env.AGENT_PLANS_DIR = insideDir;
   try {
     const target = join(outsideDir, 'secret.md');
     writeFileSync(target, '# secret');
     const link = join(insideDir, 'innocent.md');
     symlinkSync(target, link);
-    assert.throws(() => validateCopilotArgs(planArgs(link)), /resolves outside/);
+    assert.throws(() => validateAgentArgs(planArgs(link)), /resolves outside/);
   } finally {
-    if (prev === undefined) delete process.env.COPILOT_PLANS_DIR;
-    else process.env.COPILOT_PLANS_DIR = prev;
+    if (prev === undefined) delete process.env.AGENT_PLANS_DIR;
+    else process.env.AGENT_PLANS_DIR = prev;
     rmSync(insideDir, { recursive: true, force: true });
     rmSync(outsideDir, { recursive: true, force: true });
   }
@@ -186,12 +186,12 @@ test('formatPrompt and appendRubberDuckReview render template-specific instructi
 });
 
 test('parallel strategy controls /fleet prefixes consistently across templates', () => {
-  assert.equal(validateCopilotArgs(sendArgs({ task: 'X', template: 'general' })).parallel, 'auto');
-  assert.equal(validateCopilotArgs(sendArgs({ task: 'X', template: 'general', parallel: 'never' })).parallel, 'never');
-  assert.equal(validateCopilotArgs(sendArgs({ task: 'X', template: 'research' })).parallel, 'auto');
-  assert.equal(validateCopilotArgs(sendArgs({ task: 'X', template: 'research', parallel: 'always' })).parallel, 'always');
-  assert.throws(() => validateCopilotArgs(sendArgs({ task: 'X', template: 'general', parallel: 'yes' })), /parallel must be one of auto\|always\|never/);
-  assert.throws(() => validateCopilotArgs(sendArgs({ task: 'X', template: 'general', parallel: false })), /parallel must be one of auto\|always\|never/);
+  assert.equal(validateAgentArgs(sendArgs({ task: 'X', template: 'general' })).parallel, 'auto');
+  assert.equal(validateAgentArgs(sendArgs({ task: 'X', template: 'general', parallel: 'never' })).parallel, 'never');
+  assert.equal(validateAgentArgs(sendArgs({ task: 'X', template: 'research' })).parallel, 'auto');
+  assert.equal(validateAgentArgs(sendArgs({ task: 'X', template: 'research', parallel: 'always' })).parallel, 'always');
+  assert.throws(() => validateAgentArgs(sendArgs({ task: 'X', template: 'general', parallel: 'yes' })), /parallel must be one of auto\|always\|never/);
+  assert.throws(() => validateAgentArgs(sendArgs({ task: 'X', template: 'general', parallel: false })), /parallel must be one of auto\|always\|never/);
 
   assert.match(formatPrompt({ template: 'general', task: 'do thing', mode: 'EXECUTE', parallel: 'always' }), /^\/fleet do thing\n/);
   assert.match(formatPrompt({ template: 'general', task: 'do thing', mode: 'EXECUTE', parallel: 'never' }), /^TASK: do thing\n/);
@@ -201,8 +201,8 @@ test('parallel strategy controls /fleet prefixes consistently across templates',
   withPlansDir((dir) => {
     const planFile = join(dir, 'p.md');
     writeFileSync(planFile, '# plan');
-    const on = validateCopilotArgs(planArgs(planFile, {}));
-    const off = validateCopilotArgs({ ...planArgs(planFile, {}), parallel: 'never' });
+    const on = validateAgentArgs(planArgs(planFile, {}));
+    const off = validateAgentArgs({ ...planArgs(planFile, {}), parallel: 'never' });
     assert.equal(on.parallel, 'auto');
     assert.equal(off.parallel, 'never');
     assert.match(formatPrompt({ template: 'plan_review', template_args: on.template_args, parallel: 'auto' }),
@@ -213,7 +213,7 @@ test('parallel strategy controls /fleet prefixes consistently across templates',
 });
 
 test('scope_hint is accepted only for general prompts and bounded by type and length', () => {
-  const accepted = validateCopilotArgs({
+  const accepted = validateAgentArgs({
     action: 'send', task: 'X', cwd: TEST_CWD, template: 'general',
     template_args: { scope_hint: 'imports only' },
   });
@@ -225,19 +225,19 @@ test('scope_hint is accepted only for general prompts and bounded by type and le
   }), /\nScope: imports only\n/);
   assert.doesNotMatch(formatPrompt({ template: 'general', task: 'X', mode: 'ANALYZE', parallel: 'never' }), /\nScope:/);
 
-  assert.throws(() => validateCopilotArgs({
+  assert.throws(() => validateAgentArgs({
     action: 'send', task: 'X', cwd: TEST_CWD, template: 'research',
     template_args: { scope_hint: 'X' },
   }), /unknown template_args key "scope_hint" for template="research"/);
-  assert.throws(() => validateCopilotArgs({
+  assert.throws(() => validateAgentArgs({
     action: 'send', task: 'X', cwd: TEST_CWD, template: 'general',
     template_args: { plan_path: '/tmp/x.md' },
   }), /unknown template_args key "plan_path" for template="general"/);
-  assert.throws(() => validateCopilotArgs({
+  assert.throws(() => validateAgentArgs({
     action: 'send', task: 'X', cwd: TEST_CWD, template: 'general',
     template_args: { scope_hint: 42 },
   }), /scope_hint must be a string/);
-  assert.throws(() => validateCopilotArgs({
+  assert.throws(() => validateAgentArgs({
     action: 'send', task: 'X', cwd: TEST_CWD, template: 'general',
     template_args: { scope_hint: 'x'.repeat(501) },
   }), /scope_hint too long/);
@@ -245,7 +245,7 @@ test('scope_hint is accepted only for general prompts and bounded by type and le
   withPlansDir((dir) => {
     const planFile = join(dir, 'p.md');
     writeFileSync(planFile, '# plan');
-    assert.throws(() => validateCopilotArgs(planArgs(planFile, { scope_hint: 'nope' })),
+    assert.throws(() => validateAgentArgs(planArgs(planFile, { scope_hint: 'nope' })),
       /unknown template_args key "scope_hint" for template="plan_review"/);
   });
 });
@@ -259,23 +259,23 @@ test('host_session_id and claude_session_id normalize across actions and reject 
     { action: 'cancel', job_id: 'j1', host_session_id: 'sid-abc' },
   ];
   for (const action of actions) {
-    assert.equal(validateCopilotArgs(action).host_session_id, 'sid-abc', `${action.action} normalized host_session_id`);
+    assert.equal(validateAgentArgs(action).host_session_id, 'sid-abc', `${action.action} normalized host_session_id`);
   }
 
-  assert.equal(validateCopilotArgs({ action: 'status', claude_session_id: 'legacy-sid' }).host_session_id, 'legacy-sid');
-  assert.equal(validateCopilotArgs({
+  assert.equal(validateAgentArgs({ action: 'status', claude_session_id: 'legacy-sid' }).host_session_id, 'legacy-sid');
+  assert.equal(validateAgentArgs({
     action: 'status',
     claude_session_id: 'matching-sid',
     host_session_id: 'matching-sid',
   }).host_session_id, 'matching-sid');
-  assert.throws(() => validateCopilotArgs({
+  assert.throws(() => validateAgentArgs({
     action: 'status',
     claude_session_id: 'sid-A',
     host_session_id: 'sid-B',
   }), /provided with different values/);
-  assert.throws(() => validateCopilotArgs({ action: 'status', claude_session_id: 42 }),
+  assert.throws(() => validateAgentArgs({ action: 'status', claude_session_id: 42 }),
     /claude_session_id must be a non-empty string/);
-  assert.throws(() => validateCopilotArgs({ action: 'status', host_session_id: '' }),
+  assert.throws(() => validateAgentArgs({ action: 'status', host_session_id: '' }),
     /host_session_id must be a non-empty string/);
-  assert.equal(validateCopilotArgs({ action: 'status' }).host_session_id, null);
+  assert.equal(validateAgentArgs({ action: 'status' }).host_session_id, null);
 });

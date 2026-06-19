@@ -1,5 +1,5 @@
 #!/bin/bash
-# drain-completions.sh — surface this Claude Code session's Copilot completions
+# drain-completions.sh — surface this Claude Code session's agent-job completions
 # into its own context.
 #
 # Fires on PostToolUse (any tool), UserPromptSubmit, SessionStart:startup. Each
@@ -14,23 +14,23 @@
 # Empty queue or missing session id → no injection, no context pollution.
 
 set -e
-HOST_NAME="${COPILOT_COMPANION_HOST:-claude}"
-RUNTIME_DIR="${COPILOT_RUNTIME_DIR:-$HOME/.$HOST_NAME/copilot-companion/runtime}"
+HOST_NAME="${AGENT_COMPANION_HOST:-claude}"
+RUNTIME_DIR="${AGENT_RUNTIME_DIR:-$HOME/.$HOST_NAME/agent-companion/runtime}"
 mkdir -p "$RUNTIME_DIR" 2>/dev/null || true
 chmod 700 "$RUNTIME_DIR" 2>/dev/null || true
 
-QUEUE="${COPILOT_QUEUE_PATH:-$RUNTIME_DIR/completions.jsonl}"
+QUEUE="${AGENT_QUEUE_PATH:-$RUNTIME_DIR/completions.jsonl}"
 LOCK="${QUEUE}.lock"
-HEARTBEAT_DIR="${COPILOT_HEARTBEAT_DIR:-$RUNTIME_DIR/heartbeats}"
+HEARTBEAT_DIR="${AGENT_HEARTBEAT_DIR:-$RUNTIME_DIR/heartbeats}"
 
 PAYLOAD=$(cat)
-if [ -n "${COPILOT_COMPANION_JQ:-}" ] && [ -x "$COPILOT_COMPANION_JQ" ]; then
-  JQ_BIN="$COPILOT_COMPANION_JQ"
+if [ -n "${AGENT_COMPANION_JQ:-}" ] && [ -x "$AGENT_COMPANION_JQ" ]; then
+  JQ_BIN="$AGENT_COMPANION_JQ"
 else
   JQ_BIN="$(command -v jq 2>/dev/null || true)"
 fi
 if [ -z "$JQ_BIN" ]; then
-  echo "copilot-companion: jq not found; cannot drain completion queue" >&2
+  echo "agent-companion: jq not found; cannot drain completion queue" >&2
   exit 0
 fi
 HOOK_EVENT=$(printf '%s' "$PAYLOAD" | "$JQ_BIN" -r '.hook_event_name // "PostToolUse"')
@@ -129,7 +129,7 @@ rm -f "$DRAIN"
 CONTENT=$(printf '%s' "$PARTITIONS" | "$JQ_BIN" -r '
   .deliver |
   map(
-    "## Copilot `\(.jobId // "?")` — **\(.meta.status // .kind // "unknown")**\n\n" +
+    "## \(.meta.target // "agent") `\(.jobId // "?")` — **\(.meta.status // .kind // "unknown")**\n\n" +
     (.content // "")
   ) | join("\n\n---\n\n")
 ')

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// install-permissions.mjs — idempotently grant the copilot-companion Claude
+// install-permissions.mjs — idempotently grant the agent-companion Claude
 // permissions in ~/.claude/settings.json. Pure Node ≥20 (no jq dependency);
 // relies only on the Node version setup.sh already verifies.
 //
@@ -31,26 +31,15 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 
 const PERMISSIONS = [
-  'mcp__copilot-bridge__agent_send',
-  'mcp__copilot-bridge__agent_wait',
-  'mcp__copilot-bridge__agent_status',
-  'mcp__copilot-bridge__agent_reply',
-  'mcp__copilot-bridge__agent_cancel',
-  // Compatibility aliases kept so older materialized subagents continue to
-  // work until SessionStart refreshes them.
-  'mcp__copilot-bridge__copilot_send',
-  'mcp__copilot-bridge__copilot_wait',
-  'mcp__copilot-bridge__copilot_status',
-  'mcp__copilot-bridge__copilot_reply',
-  'mcp__copilot-bridge__copilot_cancel',
+  'mcp__agent-bridge__agent_send',
+  'mcp__agent-bridge__agent_wait',
+  'mcp__agent-bridge__agent_status',
+  'mcp__agent-bridge__agent_reply',
+  'mcp__agent-bridge__agent_cancel',
   // Required by the Claude subagent to forward CLAUDE_CODE_SESSION_ID into
   // each MCP call. Without this, non-interactive/default-permission sessions
   // deny the probe and send calls fail validation.
   'Bash(echo "$CLAUDE_CODE_SESSION_ID")',
-];
-const LEGACY_TOOLS = [
-  'mcp__copilot-bridge__copilot',
-  'Bash(echo:*)',
 ];
 const SETTINGS = path.join(homedir(), '.claude', 'settings.json');
 const args = process.argv.slice(2);
@@ -109,9 +98,8 @@ const allow = Array.isArray(cfg.permissions.allow)
   : [];
 
 const missing = PERMISSIONS.filter((permission) => !allow.includes(permission));
-const legacyPresent = allow.filter((tool) => LEGACY_TOOLS.includes(tool));
-if (missing.length === 0 && legacyPresent.length === 0) {
-  ok(`copilot-companion permissions already in ${SETTINGS}`);
+if (missing.length === 0) {
+  ok(`agent-companion permissions already in ${SETTINGS}`);
   process.exit(0);
 }
 
@@ -124,11 +112,7 @@ if (!yes) {
     input: process.stdin,
     output: process.stdout,
   });
-  const changes = [
-    missing.length ? `add ${missing.length}` : null,
-    legacyPresent.length ? `remove ${legacyPresent.length} legacy` : null,
-  ].filter(Boolean).join(', ');
-  const ans = (await rl.question(`Update copilot-companion permissions in ${SETTINGS} (${changes})? [y/N] `))
+  const ans = (await rl.question(`Add ${missing.length} agent-companion permission(s) to ${SETTINGS}? [y/N] `))
     .trim()
     .toLowerCase();
   rl.close();
@@ -138,9 +122,7 @@ if (!yes) {
   }
 }
 
-cfg.permissions.allow = allow
-  .filter((tool) => !LEGACY_TOOLS.includes(tool))
-  .concat(missing);
+cfg.permissions.allow = allow.concat(missing);
 
 const ts = new Date()
   .toISOString()
@@ -152,8 +134,4 @@ if (hadExisting) copyFileSync(SETTINGS, backup);
 const tmp = `${SETTINGS}.tmp.${process.pid}`;
 writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
 renameSync(tmp, SETTINGS);
-const changeSummary = [
-  missing.length ? `added ${missing.join(', ')}` : null,
-  legacyPresent.length ? `removed ${legacyPresent.join(', ')}` : null,
-].filter(Boolean).join('; ');
-ok(`${changeSummary}${hadExisting ? ` (backup: ${backup})` : ''}`);
+ok(`added ${missing.join(', ')}${hadExisting ? ` (backup: ${backup})` : ''}`);

@@ -97,8 +97,8 @@ export const REPLY_DRAIN_TIMEOUT_MS = 10 * 1000;
 const COPILOT_DEFAULT_MODEL = 'gpt-5.5';
 
 // Read the host-routed effective model. lib/state.mjs chooses
-// ~/.claude/copilot-companion or ~/.codex/copilot-companion from
-// COPILOT_COMPANION_HOST, so Codex and Claude config stay separate.
+// ~/.claude/agent-companion or ~/.codex/agent-companion from
+// AGENT_COMPANION_HOST, so Codex and Claude config stay separate.
 function readConfiguredModel() {
   try {
     const { model } = readDefaultModel();
@@ -1127,7 +1127,7 @@ class SessionManager {
   // When opts.wait > 0, this method becomes async and may block until the
   // prompt reaches a terminal status, the wait budget expires, or both.
   // When opts.summaryOnly is true, the response strips the events array
-  // entirely — useful for the copilot-bridge worker which only cares about
+  // entirely — useful for the agent-bridge worker which only cares about
   // terminal state and summary.
   async watchPrompt(promptId, since = 0, opts = {}) {
     const state = this.inFlightPrompts.get(promptId);
@@ -1199,7 +1199,7 @@ class SessionManager {
 
     if (opts.summaryOnly) {
       // Summary-only mode: caller does NOT want the events array. This is
-      // the path the copilot-bridge MCP server uses — one tiny payload
+      // the path the agent-bridge MCP server uses — one tiny payload
       // per delegation regardless of how many raw events Copilot emitted.
       return baseResponse;
     }

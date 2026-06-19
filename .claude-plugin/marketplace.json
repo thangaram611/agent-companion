@@ -1,17 +1,17 @@
 {
-  "name": "copilot-companion",
+  "name": "agent-companion",
   "owner": {
     "name": "thangaram611",
     "email": "thangaram611@gmail.com"
   },
   "metadata": {
-    "description": "Marketplace for the copilot-companion plugin. The plugin's repo IS its own marketplace (source: \"./\"); this manifest is what `/plugin marketplace add thangaram611/copilot-companion` registers."
+    "description": "Marketplace for the agent-companion plugin. The plugin's repo IS its own marketplace (source: \"./\"); this manifest is what `/plugin marketplace add thangaram611/agent-companion` registers."
   },
   "plugins": [
     {
-      "name": "copilot-companion",
+      "name": "agent-companion",
       "source": "./",
-      "description": "GitHub Copilot delegation companion — subagent + MCP bridge + ACP daemon."
+      "description": "Agent delegation companion — subagent + MCP bridge that delegates to OpenCode or Copilot."
     }
   ]
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# copilot-companion v0.0.1 — post-install setup
+# agent-companion v0.0.1 — post-install setup
 # Idempotent: safe to run multiple times.
 set -euo pipefail
 
@@ -15,26 +15,38 @@ fail() { printf "${RED}[FAIL]${NC} %s\n" "$1"; }
 
 # --- Argument parsing -------------------------------------------------------
 #
-# --host claude            — install the Claude Code surface only
-# --host codex             — install the Codex CLI surface only
-# --host both   (default) — install both modern host surfaces
+# --host claude|codex|both    which host surface(s) to install (default both)
+# --target opencode|copilot|auto|none
+#                             which agent target to onboard. Delegated to
+#                             scripts/onboard.mjs. Default: none (host/plugin
+#                             surface only — "bring your target" later).
+# --no-target-check           write/select the target but don't fail if it
+#                             isn't ready yet.
+# --skip-tests                skip the unit-test step (lighter install path).
 
 HOST="both"
+TARGET="none"
+NO_TARGET_CHECK=0
+SKIP_TESTS=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --host)
-      HOST="${2:-}"; shift 2
-      ;;
-    --host=*)
-      HOST="${1#--host=}"; shift
-      ;;
+    --host)   HOST="${2:-}"; shift 2 ;;
+    --host=*) HOST="${1#--host=}"; shift ;;
+    --target)   TARGET="${2:-}"; shift 2 ;;
+    --target=*) TARGET="${1#--target=}"; shift ;;
+    --no-target-check) NO_TARGET_CHECK=1; shift ;;
+    --skip-tests)      SKIP_TESTS=1; shift ;;
     -h|--help)
       cat <<EOF
-Usage: $(basename "$0") [--host claude|codex|both]
+Usage: $(basename "$0") [--host claude|codex|both] [--target opencode|copilot|auto|none]
+                        [--no-target-check] [--skip-tests]
 
-  --host claude             install Claude Code surface only
-  --host codex    install Codex CLI surface only
-  --host both     (default) install both
+  --host claude|codex|both   install that host surface (default both)
+  --target opencode|copilot|auto|none
+                             onboard an agent target (default none; "bring
+                             your target"). auto picks the only ready target.
+  --no-target-check          select the target without failing on not-ready
+  --skip-tests               skip the unit-test step
 EOF
       exit 0
       ;;
@@ -50,6 +62,11 @@ case "$HOST" in
   *) fail "--host must be one of: claude, codex, both (got: $HOST)"; exit 2 ;;
 esac
 
+case "$TARGET" in
+  opencode|copilot|auto|none) ;;
+  *) fail "--target must be one of: opencode, copilot, auto, none (got: $TARGET)"; exit 2 ;;
+esac
+
 DO_CLAUDE=0
 DO_CODEX=0
 case "$HOST" in
@@ -58,7 +75,7 @@ case "$HOST" in
   both)   DO_CLAUDE=1; DO_CODEX=1 ;;
 esac
 
-echo "=== copilot-companion setup (host=$HOST) ==="
+echo "=== agent-companion setup (host=$HOST) ==="
 echo ""
 echo "This directory is a dual-host plugin (Claude Code + Codex CLI). The"
 echo "subagent-scoped MCP architecture stays the same on both sides — only"
@@ -66,12 +83,12 @@ echo "the agent file format and per-host install location differ."
 echo ""
 if [ "$DO_CLAUDE" = 1 ]; then
   echo "    .claude-plugin/plugin.json       Claude plugin manifest"
-  echo "    templates/copilot-companion.md   subagent template (Markdown + YAML frontmatter)"
+  echo "    templates/agent-companion.md   subagent template (Markdown + YAML frontmatter)"
   echo "    hooks/hooks.json                 SessionStart hooks: install-agent + prewarm + deps + drain"
 fi
 if [ "$DO_CODEX" = 1 ]; then
   echo "    .codex-plugin/plugin.json        Codex plugin manifest"
-  echo "    templates/copilot-companion.toml subagent template (TOML)"
+  echo "    templates/agent-companion.toml subagent template (TOML)"
   echo "    hooks/hooks-codex.json           plugin-scoped hooks for marketplace packages"
   echo "    scripts/install-codex-hooks.mjs  source-checkout dev hook materialization"
 fi
@@ -104,12 +121,9 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 ok "jq $(jq --version 2>/dev/null || echo found)"
 
-if command -v copilot >/dev/null 2>&1; then
-  ok "copilot $(copilot --version 2>/dev/null || echo 'found')"
-else
-  fail "copilot binary not found on PATH. Install GitHub Copilot CLI first."
-  exit 1
-fi
+# Target binaries (copilot / opencode) are NOT common prerequisites — this is
+# a "bring your target" bridge. Target readiness is validated later, only for
+# the target selected via --target, by scripts/onboard.mjs.
 
 if [ "$DO_CLAUDE" = 1 ]; then
   if command -v claude >/dev/null 2>&1; then
@@ -165,12 +179,12 @@ printf "Checking plugin surface...\n"
 SURFACE_PATHS=(
   "$SCRIPT_DIR/hooks/drain-completions.sh"
   "$SCRIPT_DIR/hooks/install-deps.sh"
-  "$SCRIPT_DIR/hooks/prewarm-daemon.sh"
+  "$SCRIPT_DIR/hooks/prewarm-target.sh"
 )
 if [ "$DO_CLAUDE" = 1 ]; then
   SURFACE_PATHS+=(
     "$SCRIPT_DIR/.claude-plugin/plugin.json"
-    "$SCRIPT_DIR/templates/copilot-companion.md"
+    "$SCRIPT_DIR/templates/agent-companion.md"
     "$SCRIPT_DIR/hooks/hooks.json"
     "$SCRIPT_DIR/hooks/install-agent.sh"
   )
@@ -178,7 +192,7 @@ fi
 if [ "$DO_CODEX" = 1 ]; then
   SURFACE_PATHS+=(
     "$SCRIPT_DIR/.codex-plugin/plugin.json"
-    "$SCRIPT_DIR/templates/copilot-companion.toml"
+    "$SCRIPT_DIR/templates/agent-companion.toml"
     "$SCRIPT_DIR/hooks/install-agent-codex.sh"
     "$SCRIPT_DIR/scripts/install-codex-hooks.mjs"
   )
@@ -195,24 +209,29 @@ done
 
 echo ""
 
-# --- Step 4: Copilot-side reviewer agent (host-agnostic) --------------------
+# --- Step 4: Copilot-side reviewer agent (Copilot target only) --------------
+#
+# This is Copilot-specific. Only set it up when Copilot is the selected target
+# or is already installed (so existing Copilot users keep it); an OpenCode-only
+# install skips it entirely.
 
-printf "Setting up Copilot reviewer agent...\n"
-COPILOT_AGENTS="$HOME/.copilot/agents"
-REVIEWER_AGENT="$COPILOT_AGENTS/reviewer.agent.md"
-mkdir -p "$COPILOT_AGENTS"
-if [ ! -f "$REVIEWER_AGENT" ]; then
-  if [ -f "$SCRIPT_DIR/.copilot/agents/reviewer.agent.md" ]; then
-    cp "$SCRIPT_DIR/.copilot/agents/reviewer.agent.md" "$REVIEWER_AGENT"
-    ok "reviewer.agent.md copied to $COPILOT_AGENTS/"
+if [ "$TARGET" = "copilot" ] || command -v copilot >/dev/null 2>&1; then
+  printf "Setting up Copilot reviewer agent...\n"
+  COPILOT_AGENTS="$HOME/.copilot/agents"
+  REVIEWER_AGENT="$COPILOT_AGENTS/reviewer.agent.md"
+  mkdir -p "$COPILOT_AGENTS"
+  if [ ! -f "$REVIEWER_AGENT" ]; then
+    if [ -f "$SCRIPT_DIR/.copilot/agents/reviewer.agent.md" ]; then
+      cp "$SCRIPT_DIR/.copilot/agents/reviewer.agent.md" "$REVIEWER_AGENT"
+      ok "reviewer.agent.md copied to $COPILOT_AGENTS/"
+    else
+      warn "reviewer.agent.md source not found, skipping"
+    fi
   else
-    warn "reviewer.agent.md source not found, skipping"
+    ok "reviewer.agent.md already exists"
   fi
-else
-  ok "reviewer.agent.md already exists"
+  echo ""
 fi
-
-echo ""
 
 # --- Step 5: Claude-host install (subagent + permissions + agent-teams) -----
 
@@ -220,16 +239,16 @@ if [ "$DO_CLAUDE" = 1 ]; then
   printf "=== Claude Code host install ===\n"
 
   # 5a. Eagerly materialize the Markdown subagent. Idempotent.
-  printf "Materializing subagent at ~/.claude/agents/copilot-companion.md...\n"
+  printf "Materializing subagent at ~/.claude/agents/agent-companion.md...\n"
   CLAUDE_PLUGIN_ROOT="$SCRIPT_DIR" bash "$SCRIPT_DIR/hooks/install-agent.sh"
-  if [ -f "$HOME/.claude/agents/copilot-companion.md" ]; then
-    ok "subagent installed at ~/.claude/agents/copilot-companion.md"
+  if [ -f "$HOME/.claude/agents/agent-companion.md" ]; then
+    ok "subagent installed at ~/.claude/agents/agent-companion.md"
   else
     warn "subagent install hook ran but file not found — check $SCRIPT_DIR/hooks/install-agent.sh"
   fi
 
   # 5b. Permission allow-list — without an explicit allow rule, the first
-  # invocation of a copilot-bridge MCP tool can surface a permission
+  # invocation of a agent-bridge MCP tool can surface a permission
   # prompt. Plugin-shipped settings.json cannot declare permissions, so
   # we merge into the user's ~/.claude/settings.json.
   printf "Granting Claude companion permissions in ~/.claude/settings.json...\n"
@@ -254,9 +273,9 @@ if [ "$DO_CLAUDE" = 1 ]; then
   fi
 
   # 5d. Diagnostic marker.
-  mkdir -p "$HOME/.claude/copilot-companion"
-  printf "claude\n" > "$HOME/.claude/copilot-companion/.host"
-  ok "diagnostic marker: ~/.claude/copilot-companion/.host"
+  mkdir -p "$HOME/.claude/agent-companion"
+  printf "claude\n" > "$HOME/.claude/agent-companion/.host"
+  ok "diagnostic marker: ~/.claude/agent-companion/.host"
 
   echo ""
 fi
@@ -272,10 +291,10 @@ if [ "$DO_CODEX" = 1 ]; then
   printf "=== Codex CLI host install ===\n"
 
   # 6a. Eagerly materialize the TOML subagent. Idempotent.
-  printf "Materializing subagent at ~/.codex/agents/copilot-companion.toml...\n"
+  printf "Materializing subagent at ~/.codex/agents/agent-companion.toml...\n"
   CLAUDE_PLUGIN_ROOT="$SCRIPT_DIR" bash "$SCRIPT_DIR/hooks/install-agent-codex.sh"
-  if [ -f "$HOME/.codex/agents/copilot-companion.toml" ]; then
-    ok "subagent installed at ~/.codex/agents/copilot-companion.toml"
+  if [ -f "$HOME/.codex/agents/agent-companion.toml" ]; then
+    ok "subagent installed at ~/.codex/agents/agent-companion.toml"
   else
     warn "subagent install hook ran but file not found — check $SCRIPT_DIR/hooks/install-agent-codex.sh"
   fi
@@ -301,14 +320,41 @@ if [ "$DO_CODEX" = 1 ]; then
   fi
 
   # 6d. Diagnostic marker.
-  mkdir -p "$HOME/.codex/copilot-companion"
-  printf "codex\n" > "$HOME/.codex/copilot-companion/.host"
-  ok "diagnostic marker: ~/.codex/copilot-companion/.host"
+  mkdir -p "$HOME/.codex/agent-companion"
+  printf "codex\n" > "$HOME/.codex/agent-companion/.host"
+  ok "diagnostic marker: ~/.codex/agent-companion/.host"
 
   echo ""
 fi
 
-# --- Step 7: Syntax-check all .mjs files ------------------------------------
+# --- Step 7: Target onboarding (bring your target) --------------------------
+#
+# Delegated entirely to scripts/onboard.mjs. Writes the per-host default-target
+# and prints target install/auth next steps. Skipped for --target none.
+
+if [ "$TARGET" = "none" ]; then
+  ok "no target selected (--target none); first send must pass an explicit target, or run \`node scripts/onboard.mjs --target <id> --set-default\` later"
+else
+  for h in claude codex; do
+    case "$h" in
+      claude) [ "$DO_CLAUDE" = 1 ] || continue ;;
+      codex)  [ "$DO_CODEX" = 1 ] || continue ;;
+    esac
+    printf "Onboarding target '%s' for host '%s'...\n" "$TARGET" "$h"
+    ONBOARD_ARGS=(--host "$h" --target "$TARGET" --set-default --yes)
+    [ "$NO_TARGET_CHECK" = 1 ] && ONBOARD_ARGS+=(--no-target-check)
+    if AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}"; then
+      ok "target '$TARGET' onboarded for $h"
+    else
+      fail "target '$TARGET' is not ready (or onboarding failed) — see next steps above. Fix it and re-run, or pass --no-target-check to proceed anyway."
+      exit 1
+    fi
+  done
+fi
+
+echo ""
+
+# --- Step 8: Syntax-check all .mjs files ------------------------------------
 
 printf "Syntax-checking scripts...\n"
 FAIL_COUNT=0
@@ -334,8 +380,12 @@ fi
 
 echo ""
 
-# --- Step 8: Run unit tests -------------------------------------------------
+# --- Step 9: Run unit tests -------------------------------------------------
 
+if [ "$SKIP_TESTS" = 1 ]; then
+  warn "skipping unit tests (--skip-tests)"
+  echo ""
+else
 printf "Running unit tests...\n"
 # Single source of truth: every `*.test.mjs` under the project tree. Avoids
 # the README / inline-list drift problem (new tests were getting added but
@@ -360,23 +410,24 @@ else
 fi
 
 echo ""
+fi
 
 # --- Done -------------------------------------------------------------------
 
-echo "=== Setup complete (host=$HOST) ==="
+echo "=== Setup complete (host=$HOST, target=$TARGET) ==="
 echo ""
 if [ "$DO_CLAUDE" = 1 ]; then
   echo "Claude Code:"
   echo "  claude --plugin-dir \"$SCRIPT_DIR\""
-  echo "  (or after publishing: /plugin install copilot-companion)"
+  echo "  (or after publishing: /plugin install agent-companion)"
   echo ""
 fi
 if [ "$DO_CODEX" = 1 ]; then
   echo "Codex CLI:"
   echo "  codex   # subagent + hooks are now wired into ~/.codex/"
-  echo "  Then ask main Codex to delegate (e.g. \"have copilot audit the auth module\")."
+  echo "  Then ask main Codex to delegate (e.g. \"have the agent companion audit the auth module\")."
   echo ""
 fi
 echo "Describe what you want in natural language and the host will spawn the"
-echo "copilot-companion subagent automatically. The bridge is spawned inline"
+echo "agent-companion subagent automatically. The bridge is spawned inline"
 echo "per invocation."

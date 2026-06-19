@@ -4,7 +4,7 @@
 // Codex marketplace roots must contain `.agents/plugins/marketplace.json`,
 // and plugin entries are resolved from normal relative paths under that root.
 // This source checkout is also a Claude plugin root, so the release package is
-// materialized into dist/codex-marketplace/plugins/copilot-companion.
+// materialized into dist/codex-marketplace/plugins/agent-companion.
 
 import {
   cpSync,
@@ -20,9 +20,9 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(HERE);
-const PLUGIN_NAME = 'copilot-companion';
+const PLUGIN_NAME = 'agent-companion';
 const DEFAULT_OUT = path.join(REPO_ROOT, 'dist', 'codex-marketplace');
-const BUILD_MARKER = '.copilot-companion-codex-marketplace';
+const BUILD_MARKER = '.agent-companion-codex-marketplace';
 
 const args = process.argv.slice(2);
 const outArg = readOption('--out') || DEFAULT_OUT;
@@ -111,9 +111,9 @@ if (manifest.hooks !== './hooks/hooks-codex.json') {
 
 mkdirSync(path.dirname(marketplacePath), { recursive: true });
 writeFileSync(marketplacePath, JSON.stringify({
-  name: 'copilot-companion',
+  name: 'agent-companion',
   interface: {
-    displayName: 'Copilot Companion',
+    displayName: 'Agent Companion',
   },
   plugins: [
     {

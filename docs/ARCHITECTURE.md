@@ -15,8 +15,8 @@ The bridge is no longer Copilot-only. The stable product shape is:
 ```mermaid
 flowchart LR
   User["User request"] --> Main["Main Claude/Codex"]
-  Main --> Subagent["copilot-companion subagent"]
-  Subagent --> MCP["copilot-bridge MCP server"]
+  Main --> Subagent["agent-companion subagent"]
+  Subagent --> MCP["agent-bridge MCP server"]
   MCP --> Registry["target-registry.mjs"]
   Registry --> OpenCode["opencode-runtime.mjs"]
   Registry --> Copilot["copilot-runtime.mjs + ACP daemon"]
@@ -28,7 +28,7 @@ flowchart LR
 
 ## Public MCP Surface
 
-Primary tools:
+The only tools are the generic `agent_*` set:
 
 - `agent_send`
 - `agent_wait`
@@ -36,22 +36,14 @@ Primary tools:
 - `agent_reply`
 - `agent_cancel`
 
-Compatibility aliases:
-
-- `copilot_send`
-- `copilot_wait`
-- `copilot_status`
-- `copilot_reply`
-- `copilot_cancel`
-
-`copilot_send` is pinned to `target: "copilot"`. Generic `agent_send` accepts optional `target`; callers should treat target choice as explicit or configured. Omitted target resolves from `AGENT_COMPANION_DEFAULT_TARGET`, legacy `COPILOT_COMPANION_DEFAULT_TARGET`, the `default-target` state file, then the current bootstrap fallback `opencode`.
+`agent_send` accepts an optional `target` (`opencode` | `copilot`). When omitted, the target resolves from `AGENT_COMPANION_DEFAULT_TARGET`, then the `default-target` state file. **There is no silent fallback** — if nothing is configured and no `target` is passed, `agent_send` returns a `TARGET_UNCONFIGURED` error pointing at onboarding. There are no legacy `copilot_*` aliases and no legacy env overrides; the rename to the `agent-*` identity is complete.
 
 ## Target Matrix
 
-| Target | MVP Status | Send | Wait | Status | Cancel | Reply | Restart Resume |
+| Target | Status | Send | Wait | Status | Cancel | Reply | Restart Resume |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | OpenCode | Implemented CLI adapter | yes | yes | yes | yes | no | no |
-| Copilot CLI | Existing compatibility adapter | yes | yes | yes | yes | yes | yes with ACP |
+| Copilot CLI | Implemented ACP adapter | yes | yes | yes | yes | yes | yes with ACP |
 | Goose | Planned | no | no | no | no | no | no |
 | Aider | Planned | no | no | no | no | no | no |
 
@@ -66,17 +58,22 @@ Current MVP adapters are not yet formal classes. The stable contract is visible 
 
 ## State
 
-State remains under the host-routed companion home:
+State lives under the host-routed companion home `~/.{claude,codex}/agent-companion/`:
 
 - `default-model`: Copilot model config.
-- `default-target`: generic default target config.
+- `default-target`: configured default target (written by onboarding).
 - `threads/`: logical companion thread names.
 - `threads/by-host-session/`: Codex host-session to companion-thread mapping.
 - `jobs/`: persisted in-flight/recent jobs for restart recovery.
 - `runtime/`: logs, queue, prompt streams, and digests.
 
-## Known Compatibility Choices
+## Naming
 
-- The MCP server name remains `copilot-bridge` for install compatibility.
-- Digest URIs remain `copilot-digest://<jobId>` for compatibility. A generic `agent-digest://` scheme is future cleanup.
-- The repo/package/template names remain `copilot-companion` until a deliberate rename/migration is planned.
+The product identity is uniformly `agent-*`, with no backward-compatibility shims:
+
+- MCP server: `agent-bridge`.
+- Digest URIs: `agent-digest://<jobId>`.
+- Env prefix: `AGENT_COMPANION_*` (and `AGENT_RUNTIME_DIR` / `AGENT_BRIDGE_LOG_FILE` / `AGENT_DIGEST_DIR` / etc. for runtime paths).
+- Repo / package / plugin / subagent / template names: `agent-companion`.
+
+The Copilot *target adapter* keeps its own `copilot-*` identifiers (`copilot-runtime.mjs`, `copilot-acp-daemon`, `COPILOT_BIN`, `COPILOT_RUNTIME_ADAPTER`, the `~/.copilot/agents/reviewer.agent.md` reviewer) — those name the Copilot target, not the product.

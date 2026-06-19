@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// install-codex-hooks.mjs — idempotently install the copilot-companion
+// install-codex-hooks.mjs — idempotently install the agent-companion
 // hook entries into ~/.codex/hooks.json for source-checkout development.
 // A finalized marketplace package can move these hooks into plugin scope; this
 // script exists so a local checkout can exercise the same lifecycle without
@@ -19,7 +19,7 @@
 // Behavior:
 //   - Backs up ~/.codex/hooks.json to ~/.codex/hooks.json.bak.<ts> when
 //     it exists and would be modified.
-//   - Each managed entry carries `_managed_by: "copilot-companion"` so
+//   - Each managed entry carries `_managed_by: "agent-companion"` so
 //     uninstall and re-install can locate just our entries without
 //     touching unrelated work.
 //   - Aborts cleanly if the existing file is not valid JSON (rather than
@@ -44,10 +44,10 @@ import readline from 'node:readline/promises';
 
 const HOOKS_FILE = path.join(homedir(), '.codex', 'hooks.json');
 const SENTINEL_KEY = '_managed_by';
-const SENTINEL_VALUE = 'copilot-companion';
+const SENTINEL_VALUE = 'agent-companion';
 const MANAGED_HOOK_SCRIPTS = [
   'hooks/install-agent-codex.sh',
-  'hooks/prewarm-daemon.sh',
+  'hooks/prewarm-target.sh',
   'hooks/install-deps.sh',
   'hooks/drain-completions.sh',
 ];
@@ -131,11 +131,11 @@ function bashEntry(scriptRel, timeout) {
   const jqBin = findExecutable('jq', STABLE_HOOK_PATH_DIRS);
   const env = [
     `CLAUDE_PLUGIN_ROOT=${shellQuote(pluginRoot)}`,
-    'COPILOT_COMPANION_HOST=codex',
-    `COPILOT_COMPANION_NODE=${shellQuote(process.execPath)}`,
+    'AGENT_COMPANION_HOST=codex',
+    `AGENT_COMPANION_NODE=${shellQuote(process.execPath)}`,
   ];
-  if (npmBin) env.push(`COPILOT_COMPANION_NPM=${shellQuote(npmBin)}`);
-  if (jqBin) env.push(`COPILOT_COMPANION_JQ=${shellQuote(jqBin)}`);
+  if (npmBin) env.push(`AGENT_COMPANION_NPM=${shellQuote(npmBin)}`);
+  if (jqBin) env.push(`AGENT_COMPANION_JQ=${shellQuote(jqBin)}`);
   env.push(`PATH=${shellQuote(hookPath)}`);
   return {
     type: 'command',
@@ -150,7 +150,7 @@ const MANAGED_ENTRIES = {
     {
       hooks: [
         bashEntry('hooks/install-agent-codex.sh', 5),
-        bashEntry('hooks/prewarm-daemon.sh', 5),
+        bashEntry('hooks/prewarm-target.sh', 5),
         bashEntry('hooks/install-deps.sh', 55),
         bashEntry('hooks/drain-completions.sh', 5),
       ],
@@ -216,7 +216,7 @@ function legacyManagedEntry(entry) {
 // Drop every entry whose top-level _managed_by === SENTINEL_VALUE. Also drop
 // legacy source-checkout entries from pre-sentinel installs: those commands
 // referenced this checkout's hook scripts directly, but lacked
-// COPILOT_COMPANION_HOST=codex and would otherwise survive as duplicate stale
+// AGENT_COMPANION_HOST=codex and would otherwise survive as duplicate stale
 // hooks after an upgrade.
 function dropManaged(eventName) {
   const list = cfg.hooks[eventName];
@@ -237,7 +237,7 @@ if (uninstall) {
   for (const ev of ALL_EVENTS) dropManaged(ev);
   if (Object.keys(cfg.hooks).length === 0) delete cfg.hooks;
   writeAtomic(cfg);
-  ok(`removed copilot-companion hooks from ${HOOKS_FILE}`);
+  ok(`removed agent-companion hooks from ${HOOKS_FILE}`);
   process.exit(0);
 }
 
@@ -250,7 +250,7 @@ if (existsSync(HOOKS_FILE) && !yes) {
     input: process.stdin,
     output: process.stdout,
   });
-  const ans = (await rl.question(`Merge copilot-companion hooks into ${HOOKS_FILE}? [y/N] `))
+  const ans = (await rl.question(`Merge agent-companion hooks into ${HOOKS_FILE}? [y/N] `))
     .trim()
     .toLowerCase();
   rl.close();
@@ -274,7 +274,7 @@ for (const [ev, entries] of Object.entries(MANAGED_ENTRIES)) {
 }
 
 writeAtomic(cfg);
-ok(`installed copilot-companion hooks into ${HOOKS_FILE}`);
+ok(`installed agent-companion hooks into ${HOOKS_FILE}`);
 
 function writeAtomic(data) {
   const ts = new Date()

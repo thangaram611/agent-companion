@@ -15,8 +15,8 @@ _cc_validate_node() {
 resolve_node() {
   local node_bin="" ref="" next="" highest="" candidate=""
 
-  if [ -n "${COPILOT_COMPANION_NODE:-}" ]; then
-    node_bin="$(_cc_validate_node "$COPILOT_COMPANION_NODE")"
+  if [ -n "${AGENT_COMPANION_NODE:-}" ]; then
+    node_bin="$(_cc_validate_node "$AGENT_COMPANION_NODE")"
     [ -n "$node_bin" ] && printf '%s\n' "$node_bin" && return 0
   fi
 
@@ -62,8 +62,8 @@ resolve_node() {
 resolve_npm() {
   local node_bin="" node_dir="" candidate=""
 
-  if [ -n "${COPILOT_COMPANION_NPM:-}" ] && [ -x "$COPILOT_COMPANION_NPM" ]; then
-    printf '%s\n' "$COPILOT_COMPANION_NPM"
+  if [ -n "${AGENT_COMPANION_NPM:-}" ] && [ -x "$AGENT_COMPANION_NPM" ]; then
+    printf '%s\n' "$AGENT_COMPANION_NPM"
     return 0
   fi
 

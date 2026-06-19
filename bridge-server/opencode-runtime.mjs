@@ -23,9 +23,6 @@ export function resolveOpenCodePermissionMode(env = process.env) {
   if (explicit === 'default' || explicit === 'prompt') {
     return { mode: 'default', skipPermissions: false, source: 'env' };
   }
-  if (String(env.AGENT_COMPANION_OPENCODE_SKIP_PERMISSIONS || '').trim() === '1') {
-    return { mode: 'skip', skipPermissions: true, source: 'legacy-env' };
-  }
   return { mode: 'default', skipPermissions: false, source: 'fallback' };
 }
 

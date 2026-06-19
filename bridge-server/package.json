@@ -1,5 +1,5 @@
 {
-  "name": "copilot-bridge",
+  "name": "agent-bridge",
   "version": "0.1.0",
   "description": "Subagent-only MCP bridge that delegates work to target AI runtimes and surfaces one completion event per job through the hook drain.",
   "type": "module",

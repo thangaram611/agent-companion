@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const STATE_SANDBOX = mkdtempSync(join(tmpdir(), 'copilot-state-server-'));
-process.env.COPILOT_COMPANION_HOME = STATE_SANDBOX;
+process.env.AGENT_COMPANION_HOME = STATE_SANDBOX;
 process.env.AGENT_COMPANION_DEFAULT_TARGET = 'copilot';
 const TEST_CWD = tmpdir();
 
@@ -36,12 +36,12 @@ async function withEnv(key, value, fn) {
 async function withQueue(fn) {
   const tmp = mkdtempSync(join(tmpdir(), 'copilot-queue-test-'));
   const queueFile = join(tmp, 'completions.jsonl');
-  const oldQ = process.env.COPILOT_QUEUE_PATH;
-  process.env.COPILOT_QUEUE_PATH = queueFile;
+  const oldQ = process.env.AGENT_QUEUE_PATH;
+  process.env.AGENT_QUEUE_PATH = queueFile;
   try { return await fn(queueFile); }
   finally {
-    if (oldQ === undefined) delete process.env.COPILOT_QUEUE_PATH;
-    else process.env.COPILOT_QUEUE_PATH = oldQ;
+    if (oldQ === undefined) delete process.env.AGENT_QUEUE_PATH;
+    else process.env.AGENT_QUEUE_PATH = oldQ;
     rmSync(tmp, { recursive: true, force: true });
   }
 }
@@ -82,37 +82,36 @@ test('server imports safely and dispatch handles the public boundary errors/stat
     tools.tools.map((tool) => tool.name),
     [
       'agent_send', 'agent_wait', 'agent_status', 'agent_reply', 'agent_cancel',
-      'copilot_send', 'copilot_wait', 'copilot_status', 'copilot_reply', 'copilot_cancel',
     ],
   );
-  assert.equal(tools.tools.some((tool) => tool.name === 'copilot'), false);
+  assert.equal(tools.tools.some((tool) => tool.name === 'copilot_send'), false);
   assert.ok(tools.tools.find((tool) => tool.name === 'agent_send').inputSchema.properties.target);
-  assert.equal(tools.tools.find((tool) => tool.name === 'copilot_send').inputSchema.properties.action, undefined);
+  assert.equal(tools.tools.find((tool) => tool.name === 'agent_send').inputSchema.properties.action, undefined);
   await assert.rejects(() => mod.mcp._requestHandlers.get('tools/call')({
     method: 'tools/call',
-    params: { name: 'copilot', arguments: { action: 'status' } },
-  }), /unknown tool: copilot/);
+    params: { name: 'copilot_status', arguments: { action: 'status' } },
+  }), /unknown tool: copilot_status/);
   const splitWithAction = parse(await mod.mcp._requestHandlers.get('tools/call')({
     method: 'tools/call',
-    params: { name: 'copilot_status', arguments: { action: 'status' } },
+    params: { name: 'agent_status', arguments: { action: 'status' } },
   }));
   assert.equal(splitWithAction.ok, false);
   assert.equal(splitWithAction.code, 'INVALID_ARGUMENTS');
   const statusViaTool = parse(await mod.mcp._requestHandlers.get('tools/call')({
     method: 'tools/call',
-    params: { name: 'copilot_status', arguments: {} },
+    params: { name: 'agent_status', arguments: {} },
   }));
   assert.equal(statusViaTool.ok, true);
   assert.equal(statusViaTool.action, 'status');
   assert.equal(statusViaTool.diagnostics, undefined);
   const statusWithDiagnostics = parse(await mod.mcp._requestHandlers.get('tools/call')({
     method: 'tools/call',
-    params: { name: 'copilot_status', arguments: { diagnostics: true } },
+    params: { name: 'agent_status', arguments: { diagnostics: true } },
   }));
   assert.equal(statusWithDiagnostics.ok, true);
   assert.equal(statusWithDiagnostics.action, 'status');
   assert.equal(statusWithDiagnostics.diagnostics.runtime.adapter, process.env.COPILOT_RUNTIME_ADAPTER || 'acp');
-  assert.match(statusWithDiagnostics.diagnostics.runtime.dir, /copilot-state-server-|copilot-companion/);
+  assert.match(statusWithDiagnostics.diagnostics.runtime.dir, /copilot-state-server-|agent-companion/);
   assert.equal(typeof statusWithDiagnostics.diagnostics.node.ok, 'boolean');
   await assert.rejects(() => mod.dispatch({ action: 'frobnicate' }), /unhandled action/);
 
@@ -200,9 +199,9 @@ test('wait response formatting covers timeout, digest metadata, unreachable deta
   assert.match(body.content, /parallel: "never"/);
   assert.match(body.content, /\*\*Failed tools:\*\* view, grep/);
   assert.match(body.content, /Partial transcript digest/);
-  assert.equal(body.meta.digest_uri, 'copilot-digest://job-timeout');
+  assert.equal(body.meta.digest_uri, 'agent-digest://job-timeout');
   assert.equal(body.meta.digest_path, undefined);
-  assert.match(body.meta.debug_digest_path, /copilot-digest-job-timeout\.md$/);
+  assert.match(body.meta.debug_digest_path, /agent-digest-job-timeout\.md$/);
   jobs.delete('job-timeout');
 
   jobs.set('job-timeout-nopid', terminalJob('job-timeout-nopid', 'timeout', { promptId: null }));
@@ -258,12 +257,12 @@ test('digest MCP resources list, read, template, and tool resource links', async
   const path = digestPath(jobId);
   writeFileSync(path, '# Digest\n\nResource body.\n');
 
-  assert.equal(digestResourceUri(jobId), `copilot-digest://${jobId}`);
-  assert.equal(digestJobIdFromResourceUri(`copilot-digest://${jobId}`), jobId);
+  assert.equal(digestResourceUri(jobId), `agent-digest://${jobId}`);
+  assert.equal(digestJobIdFromResourceUri(`agent-digest://${jobId}`), jobId);
   assert.equal(digestJobIdFromResourceUri('file:///tmp/nope'), null);
 
   const resource = digestResourceForJobId(jobId);
-  assert.equal(resource.uri, `copilot-digest://${jobId}`);
+  assert.equal(resource.uri, `agent-digest://${jobId}`);
   assert.equal(resource.mimeType, 'text/markdown');
   assert.equal(resource.description.includes(jobId), true);
   assert.equal(resource._meta, undefined);
@@ -271,13 +270,13 @@ test('digest MCP resources list, read, template, and tool resource links', async
   assert.equal(listDigestResources().some((r) => r.uri === resource.uri), true);
 
   const templates = listDigestResourceTemplates();
-  assert.equal(templates[0].uriTemplate, 'copilot-digest://{job_id}');
+  assert.equal(templates[0].uriTemplate, 'agent-digest://{job_id}');
 
   const read = readDigestResource(resource.uri);
   assert.equal(read.contents[0].uri, resource.uri);
   assert.match(read.contents[0].text, /Resource body/);
-  assert.throws(() => readDigestResource('copilot-digest://missing-resource'), /digest not found/);
-  assert.throws(() => readDigestResource('copilot-digest://bad/path'), /unknown digest resource uri/);
+  assert.throws(() => readDigestResource('agent-digest://missing-resource'), /digest not found/);
+  assert.throws(() => readDigestResource('agent-digest://bad/path'), /unknown digest resource uri/);
 
   const listedViaMcp = await mod.mcp._requestHandlers.get('resources/list')({
     method: 'resources/list',
@@ -288,7 +287,7 @@ test('digest MCP resources list, read, template, and tool resource links', async
     method: 'resources/templates/list',
     params: {},
   });
-  assert.equal(templatesViaMcp.resourceTemplates[0].uriTemplate, 'copilot-digest://{job_id}');
+  assert.equal(templatesViaMcp.resourceTemplates[0].uriTemplate, 'agent-digest://{job_id}');
   const readViaMcp = await mod.mcp._requestHandlers.get('resources/read')({
     method: 'resources/read',
     params: { uri: resource.uri },
@@ -353,9 +352,9 @@ test('still-running and terminal wait responses surface session_reborn and reatt
   let body = parse(await mod.dispatch({ action: 'wait', job_id: 'jr-still', max_wait_sec: 1 }));
   assert.equal(body.status, 'still_running');
   assert.equal(body.session_reborn, true);
-  assert.equal(body.digest_uri, 'copilot-digest://jr-still');
+  assert.equal(body.digest_uri, 'agent-digest://jr-still');
   assert.equal(body.digest_path, undefined);
-  assert.match(body.debug.digest_path, /copilot-digest-jr-still\.md$/);
+  assert.match(body.debug.digest_path, /agent-digest-jr-still\.md$/);
   jobs.delete('jr-still');
 
   jobs.set('jr-wait', terminalJob('jr-wait', 'completed', {
@@ -484,7 +483,7 @@ test('job ledger persistence, GC, and queue consumption protect resumed terminal
 test('host session adoption rejects placeholders/conflicts and accepts arg/meta/legacy aliases', async () => {
   const mod = await bridge();
   const { dispatch, getHostSessionId, adoptHostSessionId, _resetForTest } = mod;
-  const { validateCopilotArgs } = await import('./validation.mjs');
+  const { validateAgentArgs } = await import('./validation.mjs');
   const oldS = process.env.CLAUDE_CODE_SESSION_ID;
 
   _resetForTest();
@@ -496,7 +495,7 @@ test('host session adoption rejects placeholders/conflicts and accepts arg/meta/
   assert.equal(getHostSessionId(), 'arg-adopted-sid');
 
   _resetForTest();
-  const normalized = validateCopilotArgs({ action: 'status', job_id: null, claude_session_id: 'legacy-claude-sid' });
+  const normalized = validateAgentArgs({ action: 'status', job_id: null, claude_session_id: 'legacy-claude-sid' });
   await dispatch(normalized);
   assert.equal(getHostSessionId(), 'legacy-claude-sid');
 
@@ -670,7 +669,7 @@ test('handleSend returns immediately and reattaches to existing jobs without dae
     assert.ok(instant.elapsed < 200, `handleSend must return synchronously (got ${instant.elapsed}ms)`);
     assert.equal(instant.body.status, 'still_running');
     assert.equal(instant.body.current_status, 'starting');
-    assert.match(instant.body.hint, /copilot_wait/);
+    assert.match(instant.body.hint, /agent_wait/);
 
     jobs.set('copilot-existing-1', {
       jobId: 'copilot-existing-1',
@@ -833,7 +832,7 @@ test('OpenCode target adapter runs a fake CLI and surfaces terminal job state', 
     assert.equal(terminal.target, 'opencode');
     assert.equal(terminal.meta.target, 'opencode');
     assert.match(terminal.content, /OpenCode fake completed/);
-    assert.match(terminal.meta.digest_uri, new RegExp(`copilot-digest://${send.job_id}`));
+    assert.match(terminal.meta.digest_uri, new RegExp(`agent-digest://${send.job_id}`));
 
     const status = parse(await dispatch({
       action: 'status',

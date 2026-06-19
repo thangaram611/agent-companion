@@ -47,7 +47,7 @@ function withHome(fn) {
 }
 
 function managedEntries(cfg, event) {
-  return (cfg.hooks[event] || []).filter((e) => e._managed_by === 'copilot-companion');
+  return (cfg.hooks[event] || []).filter((e) => e._managed_by === 'agent-companion');
 }
 
 test('CLI validation rejects missing/relative plugin roots and malformed existing config without overwrite', () => {
@@ -100,7 +100,7 @@ test('fresh install writes the expected managed hook bundle with baked absolute 
     const sessionStart = managedEntries(cfg, 'SessionStart')[0];
     const cmds = sessionStart.hooks.map((h) => h.command);
     assert.match(cmds[0], /^CLAUDE_PLUGIN_ROOT='/);
-    assert.match(cmds[0], /COPILOT_COMPANION_NODE='/);
+    assert.match(cmds[0], /AGENT_COMPANION_NODE='/);
     assert.match(cmds[0], /\/bin\/bash '/);
     assert.ok(cmds[0].includes(PLUGIN_ROOT), 'plugin-root absolute path baked in');
     assert.ok(cmds[0].includes(process.execPath), 'node path baked in for hook scripts');
@@ -122,7 +122,7 @@ test('fresh install writes the expected managed hook bundle with baked absolute 
     assert.doesNotMatch(cmds.join('\n'), /\$\{CLAUDE_PLUGIN_ROOT\}/,
       'no ${VAR} placeholder because Codex does not expand user-scope hook env');
     assert.match(cmds[0], /install-agent-codex\.sh/);
-    assert.match(cmds[1], /prewarm-daemon\.sh/);
+    assert.match(cmds[1], /prewarm-target\.sh/);
     assert.match(cmds[2], /install-deps\.sh/);
     assert.match(cmds[3], /drain-completions\.sh/);
     assert.equal(sessionStart.hooks[2].timeout, 55);
@@ -157,7 +157,7 @@ test('reinstall is idempotent, preserves user hooks, and writes backups only for
     const userSS = cfg.hooks.SessionStart.find((e) =>
       e.hooks?.[0]?.command === '/usr/local/bin/user-script.sh');
     assert.ok(userSS, 'user SessionStart entry preserved');
-    assert.notEqual(userSS._managed_by, 'copilot-companion',
+    assert.notEqual(userSS._managed_by, 'agent-companion',
       'user entry was not tagged with our sentinel');
 
     for (const ev of ['SessionStart', 'UserPromptSubmit', 'PostToolUse']) {
@@ -170,7 +170,7 @@ test('reinstall is idempotent, preserves user hooks, and writes backups only for
   });
 });
 
-test('install migrates legacy untagged copilot-companion hook entries', () => {
+test('install migrates legacy untagged agent-companion hook entries', () => {
   withHome((home) => {
     const f = join(home, '.codex', 'hooks.json');
     mkdirSync(dirname(f), { recursive: true });
@@ -183,7 +183,7 @@ test('install migrates legacy untagged copilot-companion hook entries', () => {
         SessionStart: [{
           hooks: [
             legacy('hooks/install-agent-codex.sh'),
-            legacy('hooks/prewarm-daemon.sh'),
+            legacy('hooks/prewarm-target.sh'),
             legacy('hooks/install-deps.sh'),
             legacy('hooks/drain-completions.sh'),
           ],
@@ -208,9 +208,9 @@ test('install migrates legacy untagged copilot-companion hook entries', () => {
     }
 
     const commands = cfg.hooks.SessionStart[0].hooks.map((hook) => hook.command);
-    assert.ok(commands.every((command) => command.includes('COPILOT_COMPANION_HOST=codex')),
+    assert.ok(commands.every((command) => command.includes('AGENT_COMPANION_HOST=codex')),
       'replacement commands are codex-host routed');
-    assert.ok(commands.every((command) => command.includes('COPILOT_COMPANION_NODE=')),
+    assert.ok(commands.every((command) => command.includes('AGENT_COMPANION_NODE=')),
       'replacement commands bake the node executable');
   });
 });

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Environment diagnostics for copilot-companion.
+// Environment diagnostics for agent-companion.
 
 import { buildDoctorReport, renderDoctorReport } from '../lib/doctor.mjs';
 

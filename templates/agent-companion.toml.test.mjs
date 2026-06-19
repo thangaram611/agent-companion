@@ -1,15 +1,15 @@
-// Schema/structural sanity tests for templates/copilot-companion.toml.
+// Schema/structural sanity tests for templates/agent-companion.toml.
 //
 // We don't pull in a TOML parser dep just for this — but a TOML key=value
 // pair declared after a `[table.section]` header is parsed as part of
 // that table, not as a top-level key. That single foot-gun caused the
 // developer_instructions key to silently disappear into the
-// `[mcp_servers.copilot-bridge]` table during initial drafting. These
+// `[mcp_servers.agent-bridge]` table during initial drafting. These
 // regex checks lock the structural invariants that matter:
 //   - the three required fields are at the top level (declared before
 //     any `[...]` table header)
 //   - the bridge MCP table declares the right command/args/env
-//   - the COPILOT_COMPANION_HOST literal is "codex" (the route signal
+//   - the AGENT_COMPANION_HOST literal is "codex" (the route signal
 //     that lib/host.mjs reads on startup)
 //
 // If a future edit ever pulls @iarna/toml or a built-in TOML parser into
@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const TOML_PATH = join(HERE, 'copilot-companion.toml');
+const TOML_PATH = join(HERE, 'agent-companion.toml');
 const text = readFileSync(TOML_PATH, 'utf8');
 
 // Slice out everything that comes BEFORE the first [table] header — that
@@ -40,7 +40,7 @@ function tableBody(headerPattern) {
 }
 
 test('top-level TOML fields stay before the first table and use an allowlisted model', async () => {
-  assert.match(topLevel, /^name\s*=\s*"copilot-companion"\s*$/m);
+  assert.match(topLevel, /^name\s*=\s*"agent-companion"\s*$/m);
   assert.match(topLevel, /^description\s*=\s*"""/m);
   // This is the one most likely to drift below a [table] section by
   // accident. Keeping it strictly above the first table header guards
@@ -69,9 +69,9 @@ test('top-level TOML fields stay before the first table and use an allowlisted m
   assert.doesNotMatch(body, /canonical place to look up structured per-job progress/);
 });
 
-test('mcp_servers.copilot-bridge declares the Codex-specific command, args, env, and timeout', () => {
-  assert.match(text, /^\[mcp_servers\.copilot-bridge\]\s*$/m);
-  const bridgeTable = tableBody('mcp_servers\\.copilot-bridge');
+test('mcp_servers.agent-bridge declares the Codex-specific command, args, env, and timeout', () => {
+  assert.match(text, /^\[mcp_servers\.agent-bridge\]\s*$/m);
+  const bridgeTable = tableBody('mcp_servers\\.agent-bridge');
   assert.match(bridgeTable, /^command\s*=\s*"node"\s*$/m);
   assert.match(bridgeTable,
     /^args\s*=\s*\[\s*"\$\{CLAUDE_PLUGIN_ROOT\}\/bridge-server\/server\.mjs"\s*\]\s*$/m,
@@ -79,7 +79,7 @@ test('mcp_servers.copilot-bridge declares the Codex-specific command, args, env,
   // The literal env value is what lib/host.mjs reads on startup to route
   // paths under ~/.codex/. If this drifts to "claude" or gets dropped,
   // the Codex install will write into the Claude state directory.
-  assert.match(bridgeTable, /COPILOT_COMPANION_HOST\s*=\s*"codex"/);
+  assert.match(bridgeTable, /AGENT_COMPANION_HOST\s*=\s*"codex"/);
   assert.doesNotMatch(bridgeTable, /MCP_TOOL_TIMEOUT/);
   assert.match(bridgeTable, /^tool_timeout_sec\s*=\s*1320\s*$/m);
   // The Claude template tells the agent to forward CLAUDE_CODE_SESSION_ID

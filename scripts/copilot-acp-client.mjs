@@ -145,7 +145,7 @@ async function cmdInspect(args) {
 }
 
 // `await <promptId> [--max-wait <sec>]` is sugar for the long-poll +
-// summary-only path. The copilot-bridge MCP server uses this from its
+// summary-only path. The agent-bridge MCP server uses this from its
 // internal worker so it never has to manage polling, offsets, or coalescing.
 async function cmdAwait(args) {
   if (!(await isDaemonAlive())) throw new Error('daemon not running');

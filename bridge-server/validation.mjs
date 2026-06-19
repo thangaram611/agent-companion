@@ -1,10 +1,9 @@
-// Pure-function helpers for the copilot-bridge MCP server (v6.1).
+// Pure-function helpers for the agent-bridge MCP server (v6.1).
 //
 // Internal action validator for the split MCP tools:
-// agent_send | agent_wait | agent_status | agent_reply | agent_cancel, plus
-// legacy copilot_* aliases.
+// agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
 // The server injects the action before validation. Error
-// messages are prefixed with `copilot:` so MCP clients can surface them as
+// messages are prefixed with `agent:` so MCP clients can surface them as
 // synchronous tool-call rejections.
 //
 // Nothing in here opens sockets, spawns processes, or reads state files —
@@ -261,12 +260,12 @@ export function appendRubberDuckReview(formatted) {
 
 // --- Plan path resolution ---------------------------------------------------
 
-// PLANS_DIR can be overridden via COPILOT_PLANS_DIR for testing; otherwise
+// PLANS_DIR can be overridden via AGENT_PLANS_DIR for testing; otherwise
 // it routes through lib/host.mjs (so Codex resolves to ~/.codex/plans/
 // instead of Claude's directory). Resolved per call so tests can set the
 // env var without re-importing the module.
 export function getPlansDir() {
-  return process.env.COPILOT_PLANS_DIR || plansDir(detectHost());
+  return process.env.AGENT_PLANS_DIR || plansDir(detectHost());
 }
 export const PLANS_DIR = getPlansDir();
 
@@ -274,13 +273,13 @@ export function resolveLatestPlanPath() {
   const plansDir = getPlansDir();
   let entries;
   try { entries = readdirSync(plansDir); }
-  catch (err) { throw new Error(`copilot: plans directory not readable (${plansDir}): ${err.message}`); }
+  catch (err) { throw new Error(`agent: plans directory not readable (${plansDir}): ${err.message}`); }
   const candidates = entries
     .filter((f) => f.endsWith('.md'))
     .map((f) => { const full = join(plansDir, f); return { full, mtimeMs: statSync(full).mtimeMs }; })
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
   if (candidates.length === 0) {
-    throw new Error(`copilot: plan_path="latest" but no .md files found in ${plansDir}`);
+    throw new Error(`agent: plan_path="latest" but no .md files found in ${plansDir}`);
   }
   return candidates[0].full;
 }
@@ -291,7 +290,7 @@ function assertKnownFields(action, args) {
   const allowed = ALLOWED_FIELDS[action];
   for (const key of Object.keys(args)) {
     if (!allowed.has(key)) {
-      throw new Error(`copilot: unknown field "${key}" for action="${action}" (allowed: ${[...allowed].join(', ')})`);
+      throw new Error(`agent: unknown field "${key}" for action="${action}" (allowed: ${[...allowed].join(', ')})`);
     }
   }
 }
@@ -299,37 +298,37 @@ function assertKnownFields(action, args) {
 function assertString(name, value, { optional = false } = {}) {
   if (value === undefined || value === null || value === '') {
     if (optional) return;
-    throw new Error(`copilot: ${name} is required`);
+    throw new Error(`agent: ${name} is required`);
   }
-  if (typeof value !== 'string') throw new Error(`copilot: ${name} must be a string`);
+  if (typeof value !== 'string') throw new Error(`agent: ${name} must be a string`);
 }
 
 function assertBoolean(name, value) {
   if (value === undefined) return;
-  if (typeof value !== 'boolean') throw new Error(`copilot: ${name} must be a boolean`);
+  if (typeof value !== 'boolean') throw new Error(`agent: ${name} must be a boolean`);
 }
 
 function assertThreadName(value) {
   if (value === undefined || value === null || value === '') return;
-  if (typeof value !== 'string') throw new Error('copilot: thread must be a string');
+  if (typeof value !== 'string') throw new Error('agent: thread must be a string');
   if (!/^[a-zA-Z0-9._-]+$/.test(value)) {
-    throw new Error(`copilot: thread must match [a-zA-Z0-9._-]+ (got "${value}")`);
+    throw new Error(`agent: thread must match [a-zA-Z0-9._-]+ (got "${value}")`);
   }
 }
 
 function assertCwd(cwd) {
   if (cwd === undefined || cwd === null || cwd === '') {
     throw new Error(
-      'copilot: cwd is required for action="send" ' +
+      'agent: cwd is required for action="send" ' +
       '(pass the absolute target repo/worktree path; refusing to default to the bridge process cwd)',
     );
   }
-  if (typeof cwd !== 'string') throw new Error('copilot: cwd must be a string');
-  if (!isAbsolute(cwd)) throw new Error(`copilot: cwd must be an absolute path, got "${cwd}"`);
+  if (typeof cwd !== 'string') throw new Error('agent: cwd must be a string');
+  if (!isAbsolute(cwd)) throw new Error(`agent: cwd must be an absolute path, got "${cwd}"`);
   let st;
   try { st = statSync(cwd); }
-  catch { throw new Error(`copilot: cwd does not exist: ${cwd}`); }
-  if (!st.isDirectory()) throw new Error(`copilot: cwd is not a directory: ${cwd}`);
+  catch { throw new Error(`agent: cwd does not exist: ${cwd}`); }
+  if (!st.isDirectory()) throw new Error(`agent: cwd is not a directory: ${cwd}`);
 }
 
 // The per-action validators mutate their input where it's useful (e.g.
@@ -337,12 +336,12 @@ function assertCwd(cwd) {
 // argument object. The returned shape is what the server hands off to the
 // handlers; it always includes the resolved defaults.
 
-export function validateCopilotArgs(rawArgs) {
+export function validateAgentArgs(rawArgs) {
   const args = (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) ? rawArgs : {};
   const action = args.action;
-  if (!action) throw new Error('copilot: action is required (one of: send, wait, status, reply, cancel)');
+  if (!action) throw new Error('agent: action is required (one of: send, wait, status, reply, cancel)');
   if (!VALID_ACTIONS.has(action)) {
-    throw new Error(`copilot: action must be one of send|wait|status|reply|cancel, got "${action}"`);
+    throw new Error(`agent: action must be one of send|wait|status|reply|cancel, got "${action}"`);
   }
   assertKnownFields(action, args);
   switch (action) {
@@ -351,14 +350,14 @@ export function validateCopilotArgs(rawArgs) {
     case 'status': return validateStatus(args);
     case 'reply':  return validateReply(args);
     case 'cancel': return validateCancel(args);
-    default:       throw new Error(`copilot: unhandled action "${action}"`);
+    default:       throw new Error(`agent: unhandled action "${action}"`);
   }
 }
 
 // Accept either input alias and normalize to a single internal value.
 // host_session_id is the host-neutral name introduced for the dual-host
 // rollout; claude_session_id remains accepted unchanged so existing Claude
-// callers (the Markdown subagent in templates/copilot-companion.md) need
+// callers (the Markdown subagent in templates/agent-companion.md) need
 // no code changes. If both are present they must agree — disagreement is
 // almost certainly a caller bug worth surfacing rather than silently
 // preferring one.
@@ -369,11 +368,11 @@ function normalizeHostSid(args) {
   for (const [name, raw] of [['claude_session_id', claudeRaw], ['host_session_id', hostRaw]]) {
     if (raw == null) continue;
     if (typeof raw !== 'string' || !raw) {
-      throw new Error(`copilot: ${name} must be a non-empty string when provided`);
+      throw new Error(`agent: ${name} must be a non-empty string when provided`);
     }
   }
   if (claudeRaw != null && hostRaw != null && claudeRaw !== hostRaw) {
-    throw new Error('copilot: claude_session_id and host_session_id provided with different values; pass only one');
+    throw new Error('agent: claude_session_id and host_session_id provided with different values; pass only one');
   }
   return claudeRaw ?? hostRaw;
 }
@@ -384,7 +383,7 @@ function validateReply(args) {
   assertString('job_id', args.job_id);
   assertString('message', args.message);
   if (args.message.length > 8000) {
-    throw new Error(`copilot: reply.message too long (${args.message.length} > 8000 chars)`);
+    throw new Error(`agent: reply.message too long (${args.message.length} > 8000 chars)`);
   }
   return { action: 'reply', job_id: args.job_id, message: args.message, host_session_id: normalizeHostSid(args) };
 }
@@ -397,7 +396,7 @@ function validateCancel(args) {
 function validateWait(args) {
   assertString('job_id', args.job_id);
   if (args.max_wait_sec !== undefined && typeof args.max_wait_sec !== 'number') {
-    throw new Error('copilot: max_wait_sec must be a number');
+    throw new Error('agent: max_wait_sec must be a number');
   }
   return { action: 'wait', job_id: args.job_id, max_wait_sec: args.max_wait_sec, host_session_id: normalizeHostSid(args) };
 }
@@ -418,12 +417,12 @@ function validateStatus(args) {
 function validateSend(args) {
   const template = args.template || 'general';
   if (!VALID_TEMPLATES.has(template)) {
-    throw new Error(`copilot: template must be one of ${[...VALID_TEMPLATES].join('|')}, got "${template}"`);
+    throw new Error(`agent: template must be one of ${[...VALID_TEMPLATES].join('|')}, got "${template}"`);
   }
 
   const mode = args.mode || DEFAULT_MODE;
   if (!VALID_MODES.has(mode)) {
-    throw new Error(`copilot: mode must be one of ${[...VALID_MODES].join('|')}, got "${mode}"`);
+    throw new Error(`agent: mode must be one of ${[...VALID_MODES].join('|')}, got "${mode}"`);
   }
 
   // `task` is required for general/research; plan_review drives its prompt
@@ -431,64 +430,64 @@ function validateSend(args) {
   const needsTask = template === 'general' || template === 'research';
   if (needsTask) assertString('task', args.task);
   if (!needsTask && args.task) {
-    log('WARN', 'copilot: task ignored for template="plan_review"');
+    log('WARN', 'agent: task ignored for template="plan_review"');
   }
 
   const ta = args.template_args ?? {};
   if (typeof ta !== 'object' || Array.isArray(ta)) {
-    throw new Error('copilot: template_args must be a plain object');
+    throw new Error('agent: template_args must be a plain object');
   }
   const allowedTaKeys = VALID_TEMPLATE_ARGS_KEYS_BY_TEMPLATE[template] ?? new Set();
   for (const key of Object.keys(ta)) {
     if (!allowedTaKeys.has(key)) {
       const allowedDesc = allowedTaKeys.size > 0 ? [...allowedTaKeys].join(', ') : '(none)';
-      throw new Error(`copilot: unknown template_args key "${key}" for template="${template}" (allowed: ${allowedDesc})`);
+      throw new Error(`agent: unknown template_args key "${key}" for template="${template}" (allowed: ${allowedDesc})`);
     }
   }
   if (template === 'general' && ta.scope_hint !== undefined) {
     if (typeof ta.scope_hint !== 'string') {
-      throw new Error('copilot: template_args.scope_hint must be a string');
+      throw new Error('agent: template_args.scope_hint must be a string');
     }
     if (ta.scope_hint.length > SCOPE_HINT_MAX_CHARS) {
-      throw new Error(`copilot: template_args.scope_hint too long (${ta.scope_hint.length} > ${SCOPE_HINT_MAX_CHARS} chars)`);
+      throw new Error(`agent: template_args.scope_hint too long (${ta.scope_hint.length} > ${SCOPE_HINT_MAX_CHARS} chars)`);
     }
   }
 
   if (template === 'plan_review') {
     if (!ta.plan_path || typeof ta.plan_path !== 'string') {
       throw new Error(
-        'copilot: template="plan_review" requires template_args.plan_path ' +
+        'agent: template="plan_review" requires template_args.plan_path ' +
         '(absolute path to the plan .md file, or "latest")',
       );
     }
     if (ta.plan_path === 'latest') {
       ta.plan_path = resolveLatestPlanPath();
-      log('INFO', 'copilot:', `plan_path=latest resolved to ${ta.plan_path}`);
+      log('INFO', 'agent:', `plan_path=latest resolved to ${ta.plan_path}`);
     }
     if (ta.plan_path.includes('<') || ta.plan_path.includes('>')) {
-      throw new Error(`copilot: template_args.plan_path looks like an un-substituted placeholder: "${ta.plan_path}"`);
+      throw new Error(`agent: template_args.plan_path looks like an un-substituted placeholder: "${ta.plan_path}"`);
     }
     if (!isAbsolute(ta.plan_path)) {
-      throw new Error(`copilot: template_args.plan_path must be absolute, got "${ta.plan_path}"`);
+      throw new Error(`agent: template_args.plan_path must be absolute, got "${ta.plan_path}"`);
     }
     let st;
     try { st = statSync(ta.plan_path); }
-    catch { throw new Error(`copilot: template_args.plan_path does not exist: ${ta.plan_path}`); }
-    if (!st.isFile()) throw new Error(`copilot: template_args.plan_path is not a file: ${ta.plan_path}`);
+    catch { throw new Error(`agent: template_args.plan_path does not exist: ${ta.plan_path}`); }
+    if (!st.isFile()) throw new Error(`agent: template_args.plan_path is not a file: ${ta.plan_path}`);
     // v6.1 A8: resolve symlinks and verify the real path is inside PLANS_DIR.
     // Without this, a symlink at ~/.claude/plans/foo.md → /etc/passwd would
     // be passed verbatim to the prompt template and read by Copilot.
     let realPath;
     try { realPath = realpathSync(ta.plan_path); }
-    catch { throw new Error(`copilot: template_args.plan_path could not be resolved: ${ta.plan_path}`); }
+    catch { throw new Error(`agent: template_args.plan_path could not be resolved: ${ta.plan_path}`); }
     const realPlansDir = (() => { try { return realpathSync(getPlansDir()); } catch { return getPlansDir(); } })();
     const inside = realPath === realPlansDir || realPath.startsWith(realPlansDir + pathSep);
     if (!inside) {
-      throw new Error(`copilot: template_args.plan_path resolves outside ${getPlansDir()}: ${realPath}`);
+      throw new Error(`agent: template_args.plan_path resolves outside ${getPlansDir()}: ${realPath}`);
     }
     ta.plan_path = realPath;
     if (ta.focus_directive !== undefined && typeof ta.focus_directive !== 'string') {
-      throw new Error('copilot: template_args.focus_directive must be a string');
+      throw new Error('agent: template_args.focus_directive must be a string');
     }
   }
   // Note: pre-§D this branch had an `else if (template_args nonempty) → WARN
@@ -503,18 +502,18 @@ function validateSend(args) {
 
   const target = String(args.target || '').trim().toLowerCase();
   if (target && !VALID_TARGETS.has(target)) {
-    throw new Error(`copilot: target must be one of ${[...VALID_TARGETS].join('|')}, got "${args.target}"`);
+    throw new Error(`agent: target must be one of ${[...VALID_TARGETS].join('|')}, got "${args.target}"`);
   }
 
   if (args.max_wait_sec !== undefined && typeof args.max_wait_sec !== 'number') {
-    throw new Error('copilot: max_wait_sec must be a number');
+    throw new Error('agent: max_wait_sec must be a number');
   }
 
   // Fleet (parallel) handling. `auto` is the default: the bridge prepends
   // /fleet only when the task looks broad enough to benefit. `always` and
   // `never` are explicit overrides.
   if (args.parallel !== undefined && !VALID_PARALLEL_STRATEGIES.has(args.parallel)) {
-    throw new Error('copilot: parallel must be one of auto|always|never');
+    throw new Error('agent: parallel must be one of auto|always|never');
   }
   const parallel = args.parallel || DEFAULT_PARALLEL;
 

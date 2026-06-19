@@ -29,10 +29,12 @@ test('OpenCode runtime info exposes permission mode and timeout config', () => {
     skipPermissions: true,
     source: 'env',
   });
+  // The dangerous flag is only honored through the explicit permission-mode
+  // env; there is no legacy boolean shortcut.
   assert.deepEqual(resolveOpenCodePermissionMode({ AGENT_COMPANION_OPENCODE_SKIP_PERMISSIONS: '1' }), {
-    mode: 'skip',
-    skipPermissions: true,
-    source: 'legacy-env',
+    mode: 'default',
+    skipPermissions: false,
+    source: 'fallback',
   });
   assert.equal(openCodeRuntimeInfo({
     OPENCODE_BIN: '/tmp/opencode',

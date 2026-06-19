@@ -50,23 +50,23 @@ if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'add') {
   mkdirSync(codexHome, { recursive: true });
   writeFileSync(path.join(codexHome, 'fake-marketplace-source'), source);
   writeFileSync(path.join(codexHome, 'config.toml'), '# fake codex config\\n');
-  printJson({ marketplaceName: 'copilot-companion', installedRoot: source, alreadyAdded: false });
+  printJson({ marketplaceName: 'agent-companion', installedRoot: source, alreadyAdded: false });
   process.exit(0);
 }
 
 if (args[0] === 'plugin' && args[1] === 'add') {
-  if (args[2] !== 'copilot-companion@copilot-companion') fail('unexpected plugin selector');
+  if (args[2] !== 'agent-companion@agent-companion') fail('unexpected plugin selector');
   const source = readFileSync(path.join(codexHome, 'fake-marketplace-source'), 'utf8');
   const manifest = JSON.parse(readFileSync(path.join(source, '.agents', 'plugins', 'marketplace.json'), 'utf8'));
   const relPluginPath = manifest.plugins[0].source.path.replace(/^\\.\\//, '');
   const pluginRoot = path.join(source, relPluginPath);
-  const installedPath = path.join(codexHome, 'plugins', 'cache', 'copilot-companion', 'copilot-companion', '0.0.1');
+  const installedPath = path.join(codexHome, 'plugins', 'cache', 'agent-companion', 'agent-companion', '0.0.1');
   mkdirSync(path.dirname(installedPath), { recursive: true });
   cpSync(pluginRoot, installedPath, { recursive: true });
   printJson({
-    pluginId: 'copilot-companion@copilot-companion',
-    name: 'copilot-companion',
-    marketplaceName: 'copilot-companion',
+    pluginId: 'agent-companion@agent-companion',
+    name: 'agent-companion',
+    marketplaceName: 'agent-companion',
     version: '0.0.1',
     installedPath,
     authPolicy: 'ON_INSTALL'
@@ -105,7 +105,7 @@ test('validates Codex release package through an isolated marketplace install', 
       ['plugin', 'marketplace', 'add', '--help'],
       ['plugin', 'add', '--help'],
       ['plugin', 'marketplace', 'add', out, '--json'],
-      ['plugin', 'add', 'copilot-companion@copilot-companion', '--json'],
+      ['plugin', 'add', 'agent-companion@agent-companion', '--json'],
     ]);
 
     const codexHomes = new Set(calls.map((call) => call.codexHome));

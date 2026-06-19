@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(HERE);
-const PLUGIN_NAME = 'copilot-companion';
+const PLUGIN_NAME = 'agent-companion';
 const BUILD_SCRIPT = path.join(HERE, 'build-codex-marketplace.mjs');
 
 const args = process.argv.slice(2);
@@ -100,7 +100,7 @@ function validateMarketplaceTree(marketplaceRoot) {
   assert(manifest.name === PLUGIN_NAME, 'plugin manifest name mismatch');
   assert(manifest.hooks === './hooks/hooks-codex.json', 'plugin manifest hooks path mismatch');
   assertExists(path.join(pluginRoot, 'hooks', 'hooks-codex.json'), 'Codex hook manifest');
-  assertExists(path.join(pluginRoot, 'templates', 'copilot-companion.toml'), 'Codex agent template');
+  assertExists(path.join(pluginRoot, 'templates', 'agent-companion.toml'), 'Codex agent template');
   assertExists(path.join(pluginRoot, 'bridge-server', 'server.mjs'), 'bridge server');
   assertMissing(path.join(pluginRoot, 'scripts', 'build-codex-marketplace.test.mjs'), 'test file in release package');
   assertMissing(path.join(pluginRoot, 'scripts', 'validate-codex-release.test.mjs'), 'validator test file in release package');
@@ -118,7 +118,7 @@ function validateInstalledTree(codexHome, installedPath) {
   assert(manifest.name === PLUGIN_NAME, 'installed plugin manifest name mismatch');
   assert(manifest.hooks === './hooks/hooks-codex.json', 'installed plugin manifest hooks path mismatch');
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'hooks-codex.json'), 'installed Codex hook manifest');
-  assertExists(path.join(resolvedInstalledPath, 'templates', 'copilot-companion.toml'), 'installed Codex agent template');
+  assertExists(path.join(resolvedInstalledPath, 'templates', 'agent-companion.toml'), 'installed Codex agent template');
   assertExists(path.join(resolvedInstalledPath, 'bridge-server', 'server.mjs'), 'installed bridge server');
   assertMissing(path.join(resolvedInstalledPath, 'scripts', 'validate-codex-release.test.mjs'), 'test file in installed package');
 }
@@ -128,7 +128,7 @@ function main() {
   codexBin = readOption('--codex-bin') || process.env.CODEX_BIN || 'codex';
   outArg = readOption('--out');
 
-  tmpRoot = mkdtempSync(path.join(tmpdir(), 'copilot-companion-release-'));
+  tmpRoot = mkdtempSync(path.join(tmpdir(), 'agent-companion-release-'));
   const marketplaceRoot = outArg ? path.resolve(REPO_ROOT, outArg) : path.join(tmpRoot, 'codex-marketplace');
   const codexHome = path.join(tmpRoot, 'codex-home');
   const isolatedHome = path.join(tmpRoot, 'home');

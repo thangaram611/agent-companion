@@ -20,24 +20,25 @@ test('builds a Codex marketplace root with a nested plugin package', () => {
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
 
-    const pluginRoot = path.join(out, 'plugins', 'copilot-companion');
-    const markerPath = path.join(out, '.copilot-companion-codex-marketplace');
+    const pluginRoot = path.join(out, 'plugins', 'agent-companion');
+    const markerPath = path.join(out, '.agent-companion-codex-marketplace');
     const manifestPath = path.join(pluginRoot, '.codex-plugin', 'plugin.json');
     const hookPath = path.join(pluginRoot, 'hooks', 'hooks-codex.json');
     const marketplacePath = path.join(out, '.agents', 'plugins', 'marketplace.json');
 
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-    assert.equal(manifest.name, 'copilot-companion');
+    assert.equal(manifest.name, 'agent-companion');
     assert.ok(existsSync(markerPath));
     assert.equal(manifest.hooks, './hooks/hooks-codex.json');
-    assert.equal(manifest.interface.displayName, 'Copilot Companion');
+    assert.equal(manifest.interface.displayName, 'Agent Companion');
     assert.ok(existsSync(hookPath));
 
     const marketplace = JSON.parse(readFileSync(marketplacePath, 'utf8'));
-    assert.equal(marketplace.name, 'copilot-companion');
+    assert.equal(marketplace.name, 'agent-companion');
+    assert.equal(marketplace.interface.displayName, 'Agent Companion');
     assert.deepEqual(marketplace.plugins[0].source, {
       source: 'local',
-      path: './plugins/copilot-companion',
+      path: './plugins/agent-companion',
     });
     assert.deepEqual(marketplace.plugins[0].policy, {
       installation: 'AVAILABLE',

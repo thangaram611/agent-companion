@@ -22,7 +22,7 @@
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/prewarm-daemon.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/prewarm-target.sh",
             "timeout": 5
           },
           {

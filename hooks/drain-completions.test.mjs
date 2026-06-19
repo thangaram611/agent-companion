@@ -21,7 +21,7 @@ function makeQueueFile(rows) {
 function runDrain({ queuePath, payload }) {
   const stdout = execFileSync('bash', [SCRIPT], {
     input: JSON.stringify(payload),
-    env: { ...process.env, COPILOT_QUEUE_PATH: queuePath },
+    env: { ...process.env, AGENT_QUEUE_PATH: queuePath },
     encoding: 'utf8',
   });
   return stdout.trim();
@@ -95,7 +95,7 @@ test('concurrent drains for different sessions do not double-deliver or lose unr
     const { spawn } = await import('node:child_process');
     const runOne = (sid) => new Promise((res) => {
       const child = spawn('bash', [SCRIPT], {
-        env: { ...process.env, COPILOT_QUEUE_PATH: path },
+        env: { ...process.env, AGENT_QUEUE_PATH: path },
       });
       let stdout = '';
       child.stdout.on('data', (b) => (stdout += b.toString()));
@@ -145,7 +145,7 @@ test('move-aside drain preserves rows appended after the drain snapshot is renam
     const child = spawn('bash', [SCRIPT], {
       env: {
         ...process.env,
-        COPILOT_QUEUE_PATH: path,
+        AGENT_QUEUE_PATH: path,
         DEBUG_DRAIN_DELAY: '1.5',
       },
     });

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// copilot-bridge MCP server (v6.1 — subagent-isolated, target-generic architecture)
+// agent-bridge MCP server (v6.1 — subagent-isolated, target-generic architecture)
 //
-// Primary MCP tools: agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
-// Legacy aliases: copilot_send | copilot_wait | copilot_status | copilot_reply | copilot_cancel.
+// MCP tools: agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
+// agent_send takes an optional `target` (opencode | copilot); omitting it uses
+// the configured default target, and there is no silent fallback.
 // No start/stop/pause/session-gate — this server is spawned inline per invocation
-// from the copilot-companion subagent's frontmatter, so there is no separate
+// from the agent-companion subagent's frontmatter, so there is no separate
 // activation lifecycle. Model selection and rubber-duck critique are internal
 // server concerns and never exposed through the public schema.
 //
@@ -55,7 +56,7 @@ import {
   formatPrompt,
   appendRubberDuckReview,
   shouldUseFleet,
-  validateCopilotArgs,
+  validateAgentArgs,
 } from './validation.mjs';
 import {
   readDefaultModel,
@@ -80,11 +81,11 @@ import {
   defaultTargetId,
   getTarget,
   listTargets,
-} from './target-registry.mjs';
+} from '../lib/target-registry.mjs';
 
 // --- Queue (replaces dev-channel notifications) -----------------------------
 
-// Resolved per-call so tests can flip COPILOT_QUEUE_PATH before each
+// Resolved per-call so tests can flip AGENT_QUEUE_PATH before each
 // scenario. The const-at-module-load form locked the path for the lifetime
 // of the process and made queue-write tests unrunnable from node:test
 // without subprocesses.
@@ -423,10 +424,10 @@ export function refreshDigestForJob(job, statusOverride = null) {
   }
 }
 
-const DIGEST_RESOURCE_SCHEME = 'copilot-digest';
+const DIGEST_RESOURCE_SCHEME = 'agent-digest';
 const DIGEST_RESOURCE_MIME_TYPE = 'text/markdown';
-const DIGEST_RESOURCE_FILE_RE = /^copilot-digest-([a-zA-Z0-9._-]+)\.md$/;
-const DIGEST_RESOURCE_URI_RE = /^copilot-digest:\/\/([a-zA-Z0-9._-]+)$/;
+const DIGEST_RESOURCE_FILE_RE = /^agent-digest-([a-zA-Z0-9._-]+)\.md$/;
+const DIGEST_RESOURCE_URI_RE = /^agent-digest:\/\/([a-zA-Z0-9._-]+)$/;
 
 export function digestResourceUri(jobId) {
   if (!digestPath(jobId)) return null;
@@ -464,8 +465,8 @@ export function digestResourceForJobId(jobId) {
   // list_mcp_resources; richer MCP metadata is still not portable across hosts.
   return {
     uri,
-    name: `copilot-digest-${jobId}`,
-    description: `Smart transcript digest for Copilot job ${jobId}${status}.`,
+    name: `agent-digest-${jobId}`,
+    description: `Smart transcript digest for agent job ${jobId}${status}.`,
     mimeType: DIGEST_RESOURCE_MIME_TYPE,
   };
 }
@@ -479,9 +480,9 @@ export function listDigestResources() {
 export function listDigestResourceTemplates() {
   return [{
     uriTemplate: `${DIGEST_RESOURCE_SCHEME}://{job_id}`,
-    name: 'copilot-digest',
-    title: 'Copilot job digest',
-    description: 'Read a smart transcript digest for a Copilot companion job by job_id.',
+    name: 'agent-digest',
+    title: 'Agent job digest',
+    description: 'Read a smart transcript digest for an agent companion job by job_id.',
     mimeType: DIGEST_RESOURCE_MIME_TYPE,
   }];
 }
@@ -1441,6 +1442,18 @@ async function handleSend(args) {
   }
 
   const target = resolveTargetId(args.target);
+  if (!target) {
+    return asJson({
+      ok: false,
+      action: 'send',
+      code: 'TARGET_UNCONFIGURED',
+      target: null,
+      error:
+        'no agent target configured and none passed. Pass target on agent_send, ' +
+        'or set a default with `node scripts/onboard.mjs --target <id> --set-default`.',
+      targets: listTargets(),
+    });
+  }
   const targetInfo = getTarget(target);
   if (!targetInfo || !targetInfo.implemented || !targetInfo.capabilities?.send) {
     return asJson({
@@ -1448,7 +1461,7 @@ async function handleSend(args) {
       action: 'send',
       code: 'TARGET_UNSUPPORTED',
       target,
-      error: `target "${target}" is not implemented by this bridge`,
+      error: `target "${target}" is not a supported agent target (supported: ${listTargets().map((t) => t.id).join(', ')})`,
       targets: listTargets(),
     });
   }
@@ -1509,7 +1522,7 @@ async function handleSend(args) {
     existing.reattached = true;
     persistJob(existing.jobId);
     const maxWait = clampWaitSec(args.max_wait_sec, args.mode);
-    logEvent('info', 'copilot.send.reattached', {
+    logEvent('info', 'agent.send.reattached', {
       job_id: existing.jobId, target, thread, host_session: hostSid, status: existing.status || 'running',
     });
     log('INFO', 'agent:send reattached:', `job=${existing.jobId} target=${target} thread=${thread} status=${existing.status}`);
@@ -1603,9 +1616,7 @@ async function handleSend(args) {
     started_at: iso(job?.startedAt || Date.now()),
     age_s: 0,
     session_reborn: false,
-    hint: target === 'copilot'
-      ? 'call agent_wait or copilot_wait with { job_id, max_wait_sec } to block until terminal.'
-      : 'call agent_wait({ job_id, max_wait_sec }) to block until terminal.',
+    hint: 'call agent_wait({ job_id, max_wait_sec }) to block until terminal.',
   });
 }
 
@@ -1751,7 +1762,7 @@ async function handleReply({ job_id, message }) {
       sessionReborn: !!job.sessionReborn,
     }).catch((err) => log('ERROR', 'reply watch loop error:', job_id, err.message));
 
-    log('INFO', 'copilot:reply', `job=${job_id} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
+    log('INFO', 'agent:reply', `job=${job_id} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
     return asJson({
       ok: true, action: 'reply', job_id, target,
       original_prompt_id: resp.data.original_prompt_id,
@@ -1817,18 +1828,18 @@ async function handleStatus({ job_id, verbose, diagnostics }) {
 // --- MCP server setup -------------------------------------------------------
 
 const mcp = new Server(
-  { name: 'copilot-bridge', version: '0.0.1' },
+  { name: 'agent-bridge', version: '0.0.1' },
   {
     capabilities: { tools: {}, resources: {} },
     instructions:
       'Internal MCP server for the agent-companion subagent. Spawned inline ' +
       'per invocation by the companion agent. Tools: agent_send (returns ' +
       'still_running synchronously), agent_wait (blocks until terminal), ' +
-      'agent_status, agent_reply, and agent_cancel. Legacy copilot_* tools ' +
-      'remain as compatibility aliases pinned to target="copilot". The companion uses ' +
+      'agent_status, agent_reply, and agent_cancel. The companion uses ' +
       'agent_send for kickoff then loops on agent_wait until terminal. ' +
-      `Default target is ${defaultTargetId()}; Copilot runtime adapter is ${selectedRuntimeAdapter()}. ` +
-      'Parallel orchestration is strategy-based: auto, always, ' +
+      `Default target is ${defaultTargetId() || 'unset (pass target or run onboarding)'}; ` +
+      `supported targets: ${listTargets().map((t) => t.id).join(', ')}; Copilot runtime adapter is ${selectedRuntimeAdapter()}. ` +
+      'Parallel orchestration (Copilot) is strategy-based: auto, always, ' +
       'or never. Runtime IPC, logs, prompt streams, digests, and completion ' +
       `queue live under the private directory ${runtimeDir()}.`,
   },
@@ -1877,7 +1888,7 @@ const TARGET_FIELD = {
     'Target agent runtime. Supported now: opencode and copilot. Omit only when relying on the configured bridge target.',
 };
 
-const COPILOT_OUTPUT_SCHEMA = {
+const AGENT_OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: true,
   required: ['ok'],
@@ -1907,28 +1918,20 @@ const TOOL_ACTIONS = {
   agent_status: 'status',
   agent_reply: 'reply',
   agent_cancel: 'cancel',
-  copilot_send: 'send',
-  copilot_wait: 'wait',
-  copilot_status: 'status',
-  copilot_reply: 'reply',
-  copilot_cancel: 'cancel',
 };
 
-const TOOL_TARGET_OVERRIDES = {
-  copilot_send: 'copilot',
-};
-
-const COPILOT_TOOLS = [
+const AGENT_TOOLS = [
   {
-    name: 'copilot_send',
+    name: 'agent_send',
     description:
-      'Enqueue a Copilot task and return still_running immediately with job_id. ' +
-      'The companion should then loop on copilot_wait until terminal.',
+      'Enqueue a task on the selected/default agent target and return still_running ' +
+      'immediately with job_id. The companion should then loop on agent_wait until terminal.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        task: { type: 'string', description: 'Plain-language task for Copilot.' },
+        target: TARGET_FIELD,
+        task: { type: 'string', description: 'Plain-language task for the selected agent target.' },
         mode: {
           type: 'string',
           enum: ['PLAN', 'ANALYZE', 'EXECUTE'],
@@ -1956,7 +1959,7 @@ const COPILOT_TOOLS = [
         },
         thread: {
           type: 'string',
-          description: 'Optional thread name for Copilot conversation continuity.',
+          description: 'Optional thread name for conversation continuity where the target supports it.',
           pattern: '^[a-zA-Z0-9._-]+$',
         },
         max_wait_sec: MAX_WAIT_FIELD,
@@ -1969,11 +1972,11 @@ const COPILOT_TOOLS = [
       },
       required: ['cwd'],
     },
-    outputSchema: COPILOT_OUTPUT_SCHEMA,
+    outputSchema: AGENT_OUTPUT_SCHEMA,
   },
   {
-    name: 'copilot_wait',
-    description: 'Block on an existing Copilot job until terminal or until max_wait_sec elapses.',
+    name: 'agent_wait',
+    description: 'Block on an existing agent job until terminal or until max_wait_sec elapses.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1984,11 +1987,11 @@ const COPILOT_TOOLS = [
       },
       required: ['job_id'],
     },
-    outputSchema: COPILOT_OUTPUT_SCHEMA,
+    outputSchema: AGENT_OUTPUT_SCHEMA,
   },
   {
-    name: 'copilot_status',
-    description: 'Return bridge state, or diagnostics for a specific Copilot job when job_id is provided.',
+    name: 'agent_status',
+    description: 'Return bridge/target state, or diagnostics for a specific agent job when job_id is provided.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1999,11 +2002,11 @@ const COPILOT_TOOLS = [
         ...HOST_SESSION_FIELDS,
       },
     },
-    outputSchema: COPILOT_OUTPUT_SCHEMA,
+    outputSchema: AGENT_OUTPUT_SCHEMA,
   },
   {
-    name: 'copilot_reply',
-    description: 'Re-steer an in-flight Copilot job with a follow-up message.',
+    name: 'agent_reply',
+    description: 'Re-steer an in-flight agent job with a follow-up message when the target adapter supports replies.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -2017,11 +2020,11 @@ const COPILOT_TOOLS = [
       },
       required: ['job_id', 'message'],
     },
-    outputSchema: COPILOT_OUTPUT_SCHEMA,
+    outputSchema: AGENT_OUTPUT_SCHEMA,
   },
   {
-    name: 'copilot_cancel',
-    description: 'Cancel a specific running Copilot job.',
+    name: 'agent_cancel',
+    description: 'Cancel a specific running agent job.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -2031,59 +2034,11 @@ const COPILOT_TOOLS = [
       },
       required: ['job_id'],
     },
-    outputSchema: COPILOT_OUTPUT_SCHEMA,
+    outputSchema: AGENT_OUTPUT_SCHEMA,
   },
 ];
 
-function agentToolDescription(action) {
-  switch (action) {
-    case 'send':
-      return 'Enqueue a task on the selected/default agent target and return still_running immediately with job_id.';
-    case 'wait':
-      return 'Block on an existing agent job until terminal or until max_wait_sec elapses.';
-    case 'status':
-      return 'Return bridge/target state, or diagnostics for a specific agent job when job_id is provided.';
-    case 'reply':
-      return 'Re-steer an in-flight agent job when the target adapter supports replies.';
-    case 'cancel':
-      return 'Cancel a specific running agent job.';
-    default:
-      return 'Agent companion tool.';
-  }
-}
-
-const AGENT_TOOLS = COPILOT_TOOLS.map((tool) => {
-  const action = tool.name.replace(/^copilot_/, '');
-  const inputSchema = action === 'send'
-    ? {
-      ...tool.inputSchema,
-      properties: {
-        target: TARGET_FIELD,
-        ...tool.inputSchema.properties,
-        task: {
-          type: 'string',
-          description: 'Plain-language task for the selected agent target.',
-        },
-        thread: {
-          type: 'string',
-          description: 'Optional thread name for conversation continuity where the target supports it.',
-          pattern: '^[a-zA-Z0-9._-]+$',
-        },
-      },
-    }
-    : tool.inputSchema;
-  return {
-    ...tool,
-    name: tool.name.replace(/^copilot_/, 'agent_'),
-    description: agentToolDescription(action),
-    inputSchema,
-  };
-});
-
-const TOOLS = [
-  ...AGENT_TOOLS,
-  ...COPILOT_TOOLS,
-];
+const TOOLS = AGENT_TOOLS;
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: TOOLS,
@@ -2102,28 +2057,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     // (Claude does not).
     const metaSid = req?.params?._meta?.['x-codex-turn-metadata']?.session_id;
     if (metaSid && typeof metaSid === 'string') adoptHostSessionId(metaSid);
-    let toolArgs = req.params.arguments || {};
+    const toolArgs = req.params.arguments || {};
     if (Object.prototype.hasOwnProperty.call(toolArgs, 'action')) {
-      throw new Error('copilot: split MCP tools do not accept an action field; choose the agent_* or copilot_* tool that matches the operation');
+      throw new Error('agent: split MCP tools do not accept an action field; choose the agent_* tool that matches the operation');
     }
-    const forcedTarget = TOOL_TARGET_OVERRIDES[req.params.name];
-    if (forcedTarget && action === 'send') {
-      if (
-        toolArgs.target &&
-        String(toolArgs.target).trim().toLowerCase() !== forcedTarget
-      ) {
-        throw new Error(`copilot: ${req.params.name} is pinned to target="${forcedTarget}"`);
-      }
-      toolArgs = { ...toolArgs, target: forcedTarget };
-    }
-    const normalized = validateCopilotArgs({ action, ...toolArgs });
+    const normalized = validateAgentArgs({ action, ...toolArgs });
     return await dispatch(normalized);
   } catch (err) {
     if (err && err.code === 'BRIDGE_SID_CONFLICT') {
       log('ERROR', 'sid conflict on MCP call:', err.message);
       return asJson({ ok: false, error: err.message, code: 'BRIDGE_SID_CONFLICT' });
     }
-    if (/^copilot: /.test(err?.message || '')) {
+    if (/^agent: /.test(err?.message || '')) {
       log('WARN', 'invalid MCP arguments:', err.message);
       return invalidArgsResult(err);
     }
@@ -2159,7 +2104,7 @@ export async function dispatch(normalized) {
     case 'status': return handleStatus(normalized);
     case 'reply':  return handleReply(normalized);
     case 'cancel': return handleCancel(normalized);
-    default: throw new Error(`copilot: unhandled action "${normalized.action}"`);
+    default: throw new Error(`agent: unhandled action "${normalized.action}"`);
   }
 }
 

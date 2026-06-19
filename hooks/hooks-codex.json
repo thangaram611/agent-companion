@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "COPILOT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/drain-completions.sh",
+            "command": "AGENT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/drain-completions.sh",
             "timeout": 5
           }
         ]
@@ -17,22 +17,22 @@
         "hooks": [
           {
             "type": "command",
-            "command": "COPILOT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/install-agent-codex.sh",
+            "command": "AGENT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/install-agent-codex.sh",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "COPILOT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/prewarm-daemon.sh",
+            "command": "AGENT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/prewarm-target.sh",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "COPILOT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/install-deps.sh",
+            "command": "AGENT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/install-deps.sh",
             "timeout": 55
           },
           {
             "type": "command",
-            "command": "COPILOT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/drain-completions.sh",
+            "command": "AGENT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/drain-completions.sh",
             "timeout": 5
           }
         ]
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "COPILOT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/drain-completions.sh",
+            "command": "AGENT_COMPANION_HOST=codex bash ${PLUGIN_ROOT}/hooks/drain-completions.sh",
             "timeout": 5
           }
         ]

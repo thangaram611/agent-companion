@@ -2,6 +2,16 @@
 
 Last updated: 2026-06-19
 
+> **Status: IMPLEMENTED.** This handoff has been delivered. See `lib/target-registry.mjs`,
+> `lib/target-diagnostics.mjs`, `lib/doctor.mjs`, `scripts/onboard.mjs`, the
+> `setup.sh` `--target` flow, and `hooks/prewarm-target.sh`. Two deliberate
+> deviations from the plan below: (1) the silent `opencode` bootstrap fallback
+> was **removed** entirely — an unconfigured target now errors with onboarding
+> guidance rather than defaulting; (2) the full `agent-*` rename landed in the
+> same pass (no `copilot_*` aliases, no legacy env, server `agent-bridge`,
+> digest `agent-digest://`, state dir `~/.{claude,codex}/agent-companion/`).
+> The sections below are retained as the design record.
+
 ## Objective
 
 Make onboarding target-first and host-aware:
@@ -24,7 +34,7 @@ Already implemented:
 - Default target state in `lib/state.mjs`:
   - `AGENT_COMPANION_DEFAULT_TARGET`
   - legacy `COPILOT_COMPANION_DEFAULT_TARGET`
-  - `~/.{claude,codex}/copilot-companion/default-target`
+  - `~/.{claude,codex}/agent-companion/default-target`
   - current bootstrap fallback: `opencode`
 - OpenCode CLI adapter in `bridge-server/opencode-runtime.mjs`.
 - Copilot ACP adapter kept intact.

@@ -1,7 +1,7 @@
 #!/bin/bash
 # install-agent.sh — SessionStart hook
 #
-# Installs the copilot-companion subagent to ~/.claude/agents/copilot-companion.md
+# Installs the agent-companion subagent to ~/.claude/agents/agent-companion.md
 # with ${CLAUDE_PLUGIN_ROOT} substituted to its absolute value at install time.
 #
 # Why we need this: the canonical way to scope an MCP server to a specific
@@ -12,9 +12,9 @@
 # those fields are honored. This hook automates that copy on every session
 # start, idempotently.
 #
-# After this runs, the standalone agent at ~/.claude/agents/copilot-companion.md
+# After this runs, the standalone agent at ~/.claude/agents/agent-companion.md
 # spawns the bridge MCP server inline ONLY when the subagent is invoked. Main
-# Claude has no `mcp__copilot-bridge__copilot_*` in its tool surface — there is
+# Claude has no `mcp__agent-bridge__copilot_*` in its tool surface — there is
 # no plugin-level .mcp.json registration anywhere.
 #
 # Idempotent: rewrites the destination only when its checksum changes.
@@ -30,12 +30,12 @@
 ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
 [ -n "$ROOT" ] || exit 0
 
-TEMPLATE="$ROOT/templates/copilot-companion.md"
+TEMPLATE="$ROOT/templates/agent-companion.md"
 [ -f "$TEMPLATE" ] || exit 0
 
 DEST_DIR="$HOME/.claude/agents"
-DEST="$DEST_DIR/copilot-companion.md"
-SENTINEL="# AUTO-INSTALLED by copilot-companion plugin (hooks/install-agent.sh) — edits will be overwritten on next session"
+DEST="$DEST_DIR/agent-companion.md"
+SENTINEL="# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent.sh) — edits will be overwritten on next session"
 
 mkdir -p "$DEST_DIR"
 

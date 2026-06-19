@@ -112,11 +112,11 @@ function installFakeSdk() {
 
 function withRuntimeDir() {
   const dir = mkdtempSync(join(tmpdir(), 'copilot-sdk-runtime-test-'));
-  const prior = process.env.COPILOT_RUNTIME_DIR;
-  process.env.COPILOT_RUNTIME_DIR = dir;
+  const prior = process.env.AGENT_RUNTIME_DIR;
+  process.env.AGENT_RUNTIME_DIR = dir;
   return () => {
-    if (prior === undefined) delete process.env.COPILOT_RUNTIME_DIR;
-    else process.env.COPILOT_RUNTIME_DIR = prior;
+    if (prior === undefined) delete process.env.AGENT_RUNTIME_DIR;
+    else process.env.AGENT_RUNTIME_DIR = prior;
     rmSync(dir, { recursive: true, force: true });
   };
 }

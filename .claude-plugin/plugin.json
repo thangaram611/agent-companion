@@ -1,17 +1,18 @@
 {
-  "name": "copilot-companion",
+  "name": "agent-companion",
   "version": "0.0.1",
   "defaultEnabled": false,
-  "description": "GitHub Copilot delegation companion for Claude Code. Spawns a subagent that owns a dedicated MCP bridge + ACP daemon and delegates token-heavy tasks to Copilot CLI, freeing the parent's context.",
+  "description": "Agent delegation companion for Claude Code. Spawns a subagent that owns a dedicated MCP bridge and delegates token-heavy tasks to your chosen agent target (OpenCode or Copilot), freeing the parent's context.",
   "author": {
     "name": "thangaram611",
     "email": "thangaram611@gmail.com",
     "url": "https://github.com/thangaram611"
   },
-  "homepage": "https://github.com/thangaram611/copilot-companion",
-  "repository": "https://github.com/thangaram611/copilot-companion",
+  "homepage": "https://github.com/thangaram611/agent-companion",
+  "repository": "https://github.com/thangaram611/agent-companion",
   "license": "MIT",
   "keywords": [
+    "opencode",
     "copilot",
     "delegation",
     "mcp",

@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const text = readFileSync(join(HERE, 'copilot-companion.md'), 'utf8');
+const text = readFileSync(join(HERE, 'agent-companion.md'), 'utf8');
 
 test('Claude template documents status response rendering explicitly', () => {
   assert.match(text, /Status envelope/);

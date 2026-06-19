@@ -1,7 +1,7 @@
 #!/bin/bash
 # install-agent-codex.sh — Codex SessionStart hook
 #
-# Materializes templates/copilot-companion.toml to ~/.codex/agents/copilot-companion.toml
+# Materializes templates/agent-companion.toml to ~/.codex/agents/agent-companion.toml
 # with ${CLAUDE_PLUGIN_ROOT} substituted to its absolute value at install time.
 #
 # Why we need this: Codex's `RawPluginManifest` has NO `agents` field — Codex
@@ -29,12 +29,12 @@
 ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
 [ -n "$ROOT" ] || exit 0
 
-TEMPLATE="$ROOT/templates/copilot-companion.toml"
+TEMPLATE="$ROOT/templates/agent-companion.toml"
 [ -f "$TEMPLATE" ] || exit 0
 
 DEST_DIR="$HOME/.codex/agents"
-DEST="$DEST_DIR/copilot-companion.toml"
-SENTINEL="# AUTO-INSTALLED by copilot-companion plugin (hooks/install-agent-codex.sh) — edits will be overwritten on next session"
+DEST="$DEST_DIR/agent-companion.toml"
+SENTINEL="# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent-codex.sh) — edits will be overwritten on next session"
 
 mkdir -p "$DEST_DIR"
 
@@ -96,7 +96,7 @@ fi
 
 # Materialize: prepend the sentinel as line 1, then substitute
 # ${CLAUDE_PLUGIN_ROOT} in the body. The substitution targets the literal
-# token inside `mcp_servers.copilot-bridge.args` so the bridge launcher gets
+# token inside `mcp_servers.agent-bridge.args` so the bridge launcher gets
 # an absolute path at runtime. If we resolved a node binary, also rewrite
 # `command = "node"` to its absolute path so the MCP spawn doesn't depend
 # on PATH.

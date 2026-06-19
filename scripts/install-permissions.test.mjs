@@ -18,16 +18,11 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'install-permissions.mjs');
 const REQUIRED_PERMISSIONS = [
-  'mcp__copilot-bridge__agent_send',
-  'mcp__copilot-bridge__agent_wait',
-  'mcp__copilot-bridge__agent_status',
-  'mcp__copilot-bridge__agent_reply',
-  'mcp__copilot-bridge__agent_cancel',
-  'mcp__copilot-bridge__copilot_send',
-  'mcp__copilot-bridge__copilot_wait',
-  'mcp__copilot-bridge__copilot_status',
-  'mcp__copilot-bridge__copilot_reply',
-  'mcp__copilot-bridge__copilot_cancel',
+  'mcp__agent-bridge__agent_send',
+  'mcp__agent-bridge__agent_wait',
+  'mcp__agent-bridge__agent_status',
+  'mcp__agent-bridge__agent_reply',
+  'mcp__agent-bridge__agent_cancel',
   'Bash(echo "$CLAUDE_CODE_SESSION_ID")',
 ];
 
@@ -56,7 +51,7 @@ function readSettings(home) {
   return JSON.parse(readFileSync(settingsPath(home), 'utf8'));
 }
 
-test('fresh install writes required copilot-companion permissions', () => {
+test('fresh install writes required agent-companion permissions', () => {
   withHome((home) => {
     const r = runScript(home);
     assert.equal(r.code, 0, r.stderr);
@@ -64,7 +59,7 @@ test('fresh install writes required copilot-companion permissions', () => {
   });
 });
 
-test('install migrates legacy multiplexed permission and preserves unrelated entries', () => {
+test('install adds missing permissions, preserves unrelated entries, and backs up', () => {
   withHome((home) => {
     const f = settingsPath(home);
     mkdirSync(dirname(f), { recursive: true });
@@ -72,8 +67,6 @@ test('install migrates legacy multiplexed permission and preserves unrelated ent
       permissions: {
         allow: [
           'Bash(git status:*)',
-          'mcp__copilot-bridge__copilot',
-          'Bash(echo:*)',
           'Read(//tmp/**)',
         ],
       },
@@ -83,8 +76,6 @@ test('install migrates legacy multiplexed permission and preserves unrelated ent
     assert.equal(r.code, 0, r.stderr);
     const allow = readSettings(home).permissions.allow;
 
-    assert.equal(allow.includes('mcp__copilot-bridge__copilot'), false);
-    assert.equal(allow.includes('Bash(echo:*)'), false);
     assert.ok(allow.includes('Bash(git status:*)'));
     assert.ok(allow.includes('Read(//tmp/**)'));
     for (const permission of REQUIRED_PERMISSIONS) assert.ok(allow.includes(permission), `${permission} installed`);
