@@ -2,18 +2,13 @@
 
 Compaction-safe queue for work that is still pending. The runtime hardening,
 runtime-adapter boundary, MCP tool-surface split, MCP digest resources,
-resource-first digest UX, Codex marketplace packaging, and live host smokes are
-all merged and verified in code/commits; only the items below remain.
+resource-first digest UX, Codex marketplace packaging, repo-owned release
+validation, and live host smokes are all merged and verified in code/commits;
+only the items below remain.
 
 ## Remaining Work
 
-1. Repo-owned release validator.
-   - Add a script that builds the Codex marketplace package and installs it into
-     an isolated `CODEX_HOME` via `codex plugin marketplace add` + `codex plugin
-     add`. Today `setup.sh` only probes `codex plugin add --help`; no automated
-     end-to-end install validation exists.
-
-2. Optional: prompt-timeout envelope drill.
+1. Optional: prompt-timeout envelope drill.
    - Only run a full-window drill if we need proof of the 25-minute daemon
      timeout (`PROMPT_TIMEOUT_MS` in `scripts/copilot-acp-daemon.mjs` L70). The
      fast smoke already covered short-wait retry messaging, cancel, and reply.

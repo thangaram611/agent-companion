@@ -131,6 +131,21 @@ codex plugin marketplace add dist/codex-marketplace
 codex plugin add copilot-companion@copilot-companion --json
 ```
 
+For release validation, use the repo-owned end-to-end check:
+
+```bash
+node scripts/validate-codex-release.mjs
+```
+
+It builds the marketplace package, installs it into an isolated `CODEX_HOME`,
+and verifies the installed package shape. Pass `--keep` to retain the temporary
+workspace for inspection.
+
+The validator sets temporary `CODEX_HOME` and `HOME` values for every Codex CLI
+call, so it does not modify your existing `~/.codex` state. It does not install
+or update the Claude plugin; use `claude plugin validate .` for the Claude
+manifest check.
+
 The generated package installs plugin-scoped Codex hooks from
 `hooks/hooks-codex.json`; it does not mutate `~/.codex/hooks.json`.
 
@@ -409,9 +424,8 @@ node scripts/doctor.mjs          # or --json
 - `node --check` should pass on every `.mjs` after edits.
 - Tests:
   `node --test $(find bridge-server lib scripts hooks templates -name '*.test.mjs')`
-- Build/validate the Codex marketplace package:
-  `node scripts/build-codex-marketplace.mjs --out dist/codex-marketplace`, then
-  install it in an isolated `CODEX_HOME` during release checks.
+- Build and end-to-end validate the Codex marketplace package:
+  `node scripts/validate-codex-release.mjs`.
 - Validate the Claude plugin manifest: `claude plugin validate .` from the
   plugin root.
 

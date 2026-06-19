@@ -49,6 +49,11 @@ test('builds a Codex marketplace root with a nested plugin package', () => {
       false,
       'release package should not include test files',
     );
+    assert.equal(
+      existsSync(path.join(pluginRoot, 'scripts', 'validate-codex-release.test.mjs')),
+      false,
+      'release package should not include validator tests',
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
