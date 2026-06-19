@@ -1,7 +1,7 @@
 {
   "name": "copilot-bridge",
   "version": "0.1.0",
-  "description": "Claude Code MCP server that delegates work to GitHub Copilot CLI via the copilot-acp-daemon and surfaces a single completion event per job through the hook drain.",
+  "description": "Subagent-only MCP bridge that delegates work to target AI runtimes and surfaces one completion event per job through the hook drain.",
   "type": "module",
   "private": true,
   "main": "server.mjs",

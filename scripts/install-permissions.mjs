@@ -31,6 +31,13 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 
 const PERMISSIONS = [
+  'mcp__copilot-bridge__agent_send',
+  'mcp__copilot-bridge__agent_wait',
+  'mcp__copilot-bridge__agent_status',
+  'mcp__copilot-bridge__agent_reply',
+  'mcp__copilot-bridge__agent_cancel',
+  // Compatibility aliases kept so older materialized subagents continue to
+  // work until SessionStart refreshes them.
   'mcp__copilot-bridge__copilot_send',
   'mcp__copilot-bridge__copilot_wait',
   'mcp__copilot-bridge__copilot_status',

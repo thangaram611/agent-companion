@@ -1,7 +1,8 @@
 // Pure-function helpers for the copilot-bridge MCP server (v6.1).
 //
 // Internal action validator for the split MCP tools:
-// copilot_send | copilot_wait | copilot_status | copilot_reply | copilot_cancel.
+// agent_send | agent_wait | agent_status | agent_reply | agent_cancel, plus
+// legacy copilot_* aliases.
 // The server injects the action before validation. Error
 // messages are prefixed with `copilot:` so MCP clients can surface them as
 // synchronous tool-call rejections.
@@ -68,6 +69,7 @@ export const VALID_ACTIONS   = new Set(['send', 'wait', 'status', 'reply', 'canc
 export const VALID_MODES     = new Set(['PLAN', 'ANALYZE', 'EXECUTE']);
 export const VALID_TEMPLATES = new Set(['general', 'research', 'plan_review']);
 export const VALID_PARALLEL_STRATEGIES = new Set(['auto', 'always', 'never']);
+export const VALID_TARGETS = new Set(['opencode', 'copilot']);
 export const DEFAULT_MODE    = 'EXECUTE';
 export const DEFAULT_PARALLEL = 'auto';
 
@@ -84,7 +86,7 @@ export const DEFAULT_PARALLEL = 'auto';
 // .session_id directly in server.mjs's MCP handler — that path bypasses
 // the per-arg field entirely (host-injected, can't be spoofed by the agent).
 const ALLOWED_FIELDS = {
-  send:   new Set(['action', 'task', 'mode', 'template', 'template_args', 'cwd', 'thread', 'max_wait_sec', 'parallel', 'claude_session_id', 'host_session_id']),
+  send:   new Set(['action', 'task', 'mode', 'template', 'template_args', 'cwd', 'thread', 'target', 'max_wait_sec', 'parallel', 'claude_session_id', 'host_session_id']),
   wait:   new Set(['action', 'job_id', 'max_wait_sec', 'claude_session_id', 'host_session_id']),
   status: new Set(['action', 'job_id', 'verbose', 'diagnostics', 'claude_session_id', 'host_session_id']),
   reply:  new Set(['action', 'job_id', 'message', 'claude_session_id', 'host_session_id']),
@@ -499,6 +501,11 @@ function validateSend(args) {
   assertCwd(args.cwd);
   assertThreadName(args.thread);
 
+  const target = String(args.target || '').trim().toLowerCase();
+  if (target && !VALID_TARGETS.has(target)) {
+    throw new Error(`copilot: target must be one of ${[...VALID_TARGETS].join('|')}, got "${args.target}"`);
+  }
+
   if (args.max_wait_sec !== undefined && typeof args.max_wait_sec !== 'number') {
     throw new Error('copilot: max_wait_sec must be a number');
   }
@@ -519,6 +526,7 @@ function validateSend(args) {
     template_args: ta,
     cwd: args.cwd,
     thread: args.thread || null,
+    target: target || null,
     max_wait_sec: args.max_wait_sec,
     parallel,
     host_session_id: normalizeHostSid(args),

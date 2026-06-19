@@ -3,12 +3,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const STATE_SANDBOX = mkdtempSync(join(tmpdir(), 'copilot-state-server-'));
 process.env.COPILOT_COMPANION_HOME = STATE_SANDBOX;
+process.env.AGENT_COMPANION_DEFAULT_TARGET = 'copilot';
 const TEST_CWD = tmpdir();
 
 test.after(() => rmSync(STATE_SANDBOX, { recursive: true, force: true }));
@@ -79,9 +80,13 @@ test('server imports safely and dispatch handles the public boundary errors/stat
   const tools = await mod.mcp._requestHandlers.get('tools/list')({ method: 'tools/list', params: {} });
   assert.deepEqual(
     tools.tools.map((tool) => tool.name),
-    ['copilot_send', 'copilot_wait', 'copilot_status', 'copilot_reply', 'copilot_cancel'],
+    [
+      'agent_send', 'agent_wait', 'agent_status', 'agent_reply', 'agent_cancel',
+      'copilot_send', 'copilot_wait', 'copilot_status', 'copilot_reply', 'copilot_cancel',
+    ],
   );
   assert.equal(tools.tools.some((tool) => tool.name === 'copilot'), false);
+  assert.ok(tools.tools.find((tool) => tool.name === 'agent_send').inputSchema.properties.target);
   assert.equal(tools.tools.find((tool) => tool.name === 'copilot_send').inputSchema.properties.action, undefined);
   await assert.rejects(() => mod.mcp._requestHandlers.get('tools/call')({
     method: 'tools/call',
@@ -133,6 +138,10 @@ test('server imports safely and dispatch handles the public boundary errors/stat
     const status = parse(await mod.dispatch({ action: 'status', job_id: null, verbose: false }));
     assert.equal(status.ok, true);
     assert.equal(status.action, 'status');
+    assert.equal(status.default_target.target, 'copilot');
+    assert.equal(status.targets.some((target) => target.id === 'opencode' && target.implemented), true);
+    assert.equal(status.opencode_runtime.permission.mode, 'default');
+    assert.equal(typeof status.opencode_runtime.timeout_ms, 'number');
     assert.ok(Array.isArray(status.running_jobs));
     assert.ok(status.default_model);
     assert.equal(status.active, undefined);
@@ -185,7 +194,7 @@ test('wait response formatting covers timeout, digest metadata, unreachable deta
   }));
   let body = parse(await mod.dispatch({ action: 'wait', job_id: 'job-timeout', max_wait_sec: 1 }));
   assert.equal(body.status, 'timeout');
-  assert.match(body.content, /Copilot's model turn did not finish/);
+  assert.match(body.content, /GitHub Copilot CLI's model turn did not finish/);
   assert.match(body.content, /Decompose the task/);
   assert.match(body.content, /scope_hint/);
   assert.match(body.content, /parallel: "never"/);
@@ -209,7 +218,7 @@ test('wait response formatting covers timeout, digest metadata, unreachable deta
   }));
   body = parse(await mod.dispatch({ action: 'wait', job_id: 'job-unreachable', max_wait_sec: 1 }));
   assert.equal(body.status, 'unreachable');
-  assert.match(body.content, /Bridge could not reach the Copilot daemon/);
+  assert.match(body.content, /Bridge could not reach the GitHub Copilot CLI runtime/);
   assert.match(body.content, /detail: bridge_daemon_unreachable/);
   assert.equal(body.meta.detail, 'bridge_daemon_unreachable');
   jobs.delete('job-unreachable');
@@ -327,7 +336,7 @@ test('buildJobResponse and session-reborn content preserve bridge-owned status/d
     error: null, stuckReason: null, detail: null, failedTools: [],
     promptId: 'p1', sessionReborn: true,
   });
-  assert.match(content, /Copilot session was respawned mid-thread/);
+  assert.match(content, /GitHub Copilot CLI session was respawned mid-thread/);
   assert.ok(content.indexOf('respawned mid-thread') < content.indexOf('Task:'));
 });
 
@@ -772,6 +781,220 @@ test('handleSend returns immediately and reattaches to existing jobs without dae
   }
 });
 
+test('OpenCode target adapter runs a fake CLI and surfaces terminal job state', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+
+  const tmp = mkdtempSync(join(tmpdir(), 'opencode-fake-'));
+  const fakeBin = join(tmp, 'opencode-fake.mjs');
+  writeFileSync(fakeBin, [
+    '#!/usr/bin/env node',
+    'const args = process.argv.slice(2);',
+    'if (args[0] !== "run" || !args.includes("--format")) {',
+    '  console.error("unexpected args: " + args.join(" "));',
+    '  process.exit(2);',
+    '}',
+    'console.log(JSON.stringify({ type: "message", message: "OpenCode fake completed" }));',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  chmodSync(fakeBin, 0o700);
+
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldBin = process.env.OPENCODE_BIN;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-opencode';
+  process.env.OPENCODE_BIN = fakeBin;
+
+  try {
+    const send = parse(await dispatch({
+      action: 'send',
+      target: 'opencode',
+      task: 'exercise the OpenCode adapter',
+      mode: 'EXECUTE',
+      template: 'general',
+      cwd: TEST_CWD,
+      host_session_id: 'sid-opencode',
+      max_wait_sec: 5,
+      parallel: 'never',
+    }));
+    assert.equal(send.ok, true);
+    assert.equal(send.target, 'opencode');
+    assert.match(send.job_id, /^opencode-/);
+    assert.equal(send.status, 'still_running');
+    assert.match(send.hint, /agent_wait/);
+
+    const terminal = parse(await dispatch({
+      action: 'wait',
+      job_id: send.job_id,
+      host_session_id: 'sid-opencode',
+      max_wait_sec: 5,
+    }));
+    assert.equal(terminal.status, 'completed');
+    assert.equal(terminal.target, 'opencode');
+    assert.equal(terminal.meta.target, 'opencode');
+    assert.match(terminal.content, /OpenCode fake completed/);
+    assert.match(terminal.meta.digest_uri, new RegExp(`copilot-digest://${send.job_id}`));
+
+    const status = parse(await dispatch({
+      action: 'status',
+      job_id: send.job_id,
+      host_session_id: 'sid-opencode',
+      verbose: true,
+    }));
+    assert.equal(status.ok, true);
+    assert.equal(status.target, 'opencode');
+    assert.equal(status.inspect_available, false);
+
+    jobs.set('opencode-running-reply', {
+      jobId: 'opencode-running-reply',
+      target: 'opencode',
+      claudeSessionId: 'sid-opencode',
+      status: 'running',
+      promptId: 'opencode-reply',
+      task: 'running opencode job',
+      mode: 'EXECUTE',
+      cwd: TEST_CWD,
+      startedAt: Date.now(),
+    });
+    const reply = parse(await dispatch({
+      action: 'reply',
+      job_id: 'opencode-running-reply',
+      message: 'revise this',
+      host_session_id: 'sid-opencode',
+    }));
+    assert.equal(reply.ok, false);
+    assert.equal(reply.code, 'TARGET_UNSUPPORTED');
+    assert.equal(reply.target, 'opencode');
+  } finally {
+    jobs.delete('opencode-running-reply');
+    for (const id of [...jobs.keys()]) {
+      if (jobs.get(id)?.claudeSessionId === 'sid-opencode') jobs.delete(id);
+    }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldBin === undefined) delete process.env.OPENCODE_BIN;
+    else process.env.OPENCODE_BIN = oldBin;
+    rmSync(tmp, { recursive: true, force: true });
+    _resetForTest();
+  }
+});
+
+test('OpenCode cancel returns a standard terminal envelope', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+
+  const tmp = mkdtempSync(join(tmpdir(), 'opencode-cancel-fake-'));
+  const fakeBin = join(tmp, 'opencode-fake.mjs');
+  writeFileSync(fakeBin, [
+    '#!/usr/bin/env node',
+    'process.on("SIGTERM", () => {',
+    '  console.log(JSON.stringify({ type: "message", message: "cancelled partial output" }));',
+    '  process.exit(0);',
+    '});',
+    'setInterval(() => {}, 1000);',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  chmodSync(fakeBin, 0o700);
+
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldBin = process.env.OPENCODE_BIN;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-opencode-cancel';
+  process.env.OPENCODE_BIN = fakeBin;
+
+  try {
+    const send = parse(await dispatch({
+      action: 'send',
+      target: 'opencode',
+      task: 'cancel the OpenCode adapter',
+      mode: 'EXECUTE',
+      template: 'general',
+      cwd: TEST_CWD,
+      host_session_id: 'sid-opencode-cancel',
+      parallel: 'never',
+    }));
+    assert.equal(send.status, 'still_running');
+
+    const cancelled = parse(await dispatch({
+      action: 'cancel',
+      job_id: send.job_id,
+      host_session_id: 'sid-opencode-cancel',
+    }));
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(cancelled.target, 'opencode');
+    assert.equal(cancelled.meta.target, 'opencode');
+    assert.match(cancelled.content, /OpenCode job was cancelled/);
+  } finally {
+    for (const id of [...jobs.keys()]) {
+      if (jobs.get(id)?.claudeSessionId === 'sid-opencode-cancel') jobs.delete(id);
+    }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldBin === undefined) delete process.env.OPENCODE_BIN;
+    else process.env.OPENCODE_BIN = oldBin;
+    rmSync(tmp, { recursive: true, force: true });
+    _resetForTest();
+  }
+});
+
+test('OpenCode timeout is terminal and target-specific', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+
+  const tmp = mkdtempSync(join(tmpdir(), 'opencode-timeout-fake-'));
+  const fakeBin = join(tmp, 'opencode-fake.mjs');
+  writeFileSync(fakeBin, [
+    '#!/usr/bin/env node',
+    'setInterval(() => {}, 1000);',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  chmodSync(fakeBin, 0o700);
+
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldBin = process.env.OPENCODE_BIN;
+  const oldTimeout = process.env.AGENT_COMPANION_OPENCODE_TIMEOUT_MS;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-opencode-timeout';
+  process.env.OPENCODE_BIN = fakeBin;
+  process.env.AGENT_COMPANION_OPENCODE_TIMEOUT_MS = '50';
+
+  try {
+    const send = parse(await dispatch({
+      action: 'send',
+      target: 'opencode',
+      task: 'timeout the OpenCode adapter',
+      mode: 'EXECUTE',
+      template: 'general',
+      cwd: TEST_CWD,
+      host_session_id: 'sid-opencode-timeout',
+      parallel: 'never',
+    }));
+    const terminal = parse(await dispatch({
+      action: 'wait',
+      job_id: send.job_id,
+      host_session_id: 'sid-opencode-timeout',
+      max_wait_sec: 5,
+    }));
+    assert.equal(terminal.status, 'timeout');
+    assert.equal(terminal.target, 'opencode');
+    assert.equal(terminal.meta.detail, 'opencode_timeout');
+    assert.match(terminal.content, /OpenCode did not finish within the target timeout/);
+    assert.doesNotMatch(terminal.content, /\/fleet/);
+  } finally {
+    for (const id of [...jobs.keys()]) {
+      if (jobs.get(id)?.claudeSessionId === 'sid-opencode-timeout') jobs.delete(id);
+    }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldBin === undefined) delete process.env.OPENCODE_BIN;
+    else process.env.OPENCODE_BIN = oldBin;
+    if (oldTimeout === undefined) delete process.env.AGENT_COMPANION_OPENCODE_TIMEOUT_MS;
+    else process.env.AGENT_COMPANION_OPENCODE_TIMEOUT_MS = oldTimeout;
+    rmSync(tmp, { recursive: true, force: true });
+    _resetForTest();
+  }
+});
+
 test('runWorker retires persisted thread sid on prompt timeout and empty completion', async () => {
   const mod = await bridge();
   const state = await import('../lib/state.mjs');
@@ -833,7 +1056,7 @@ test('runWorker retires persisted thread sid on prompt timeout and empty complet
     assert.equal(body.status, 'timeout');
     assert.equal(body.meta.detail, 'prompt_timeout');
     assert.equal(body.meta.session_retired, 'true');
-    assert.match(body.content, /timed-out Copilot ACP session was retired/);
+    assert.match(body.content, /timed-out GitHub Copilot CLI session was retired/);
     assert.equal(state.readThreadSid('thread-timeout-retire'), null);
 
     state.clearThread('thread-empty-retire');

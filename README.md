@@ -1,6 +1,19 @@
-# Copilot Companion
+# Agent Companion
 
-GitHub Copilot delegation for Claude Code **and Codex CLI** — a dual-host plugin with a subagent-isolated architecture.
+Generic AI delegation for Claude Code **and Codex CLI** — a dual-host plugin with a subagent-isolated bridge. The project keeps the historical `copilot-companion` package/name for compatibility, but the runtime target is now generic.
+
+MVP target posture:
+
+- **Bring your target:** callers choose a target per send or configure one once
+  for the bridge.
+- **Supported now:** OpenCode via `opencode run --format json --dir <cwd>` and
+  GitHub Copilot CLI via the existing ACP daemon path.
+- **Public MCP tools:** `agent_send`, `agent_wait`, `agent_status`, `agent_reply`, `agent_cancel`.
+- **Legacy aliases:** `copilot_send`, `copilot_wait`, `copilot_status`, `copilot_reply`, `copilot_cancel` remain available and are pinned to `target: "copilot"`.
+
+The durable implementation tracker lives in [docs/MVP_TRACKER.md](docs/MVP_TRACKER.md).
+The first-class onboarding implementation handoff lives in
+[docs/ONBOARDING_HANDOFF.md](docs/ONBOARDING_HANDOFF.md).
 
 The entire public surface is a single subagent shipped inside this plugin (a
 Markdown variant for Claude Code, a TOML variant for Codex CLI). Main Claude /
@@ -10,9 +23,12 @@ is no slash command, no user-scope MCP registration, no skill, no session
 opt-in. Host hooks handle only materialization, dependency prewarm, heartbeat,
 and completion drain.
 
-Sends default to `parallel: "auto"`: the bridge invokes Copilot's built-in
-`/fleet` orchestrator only when the task looks broad enough to benefit (see
-[Parallel orchestration](#parallel-orchestration)).
+Sends should either include `target` or rely on the configured target
+(`AGENT_COMPANION_DEFAULT_TARGET` or `default-target`; unconfigured installs use
+the current bootstrap fallback `opencode`). `parallel: "auto"` is preserved for
+Copilot, where the bridge can invoke Copilot's built-in `/fleet` orchestrator
+when broad tasks look worth decomposing. OpenCode MVP runs are single-shot CLI
+runs; richer server/ACP integration is tracked as follow-up work.
 
 > **Host selection.** `setup.sh` defaults to `--host both`. Pass `--host claude`
 > or `--host codex` to install one surface only.
@@ -45,8 +61,10 @@ copilot-companion/                            ← plugin root
 │   ├── install-agent-codex.sh                Codex SessionStart: materialize TOML subagent
 │   └── prewarm-daemon.sh                     starts copilot-acp-daemon early
 ├── bridge-server/
-│   ├── server.mjs                            5 split MCP tools: copilot_send | copilot_wait
-│   │                                         | copilot_status | copilot_reply | copilot_cancel
+│   ├── server.mjs                            generic MCP tools: agent_send | agent_wait
+│   │                                         | agent_status | agent_reply | agent_cancel
+│   ├── target-registry.mjs                   target descriptors + default target resolution
+│   ├── opencode-runtime.mjs                  OpenCode CLI adapter
 │   ├── copilot-runtime.mjs                   runtime adapter boundary (ACP default)
 │   ├── copilot-sdk-runtime.mjs               experimental Copilot SDK adapter
 │   ├── validation.mjs                        per-action field allow-lists, schemas, templates
@@ -54,7 +72,7 @@ copilot-companion/                            ← plugin root
 ├── lib/                                      state + logging + prompt utilities
 │   ├── host.mjs                              host detection + per-host paths (claude | codex)
 │   ├── runtime-paths.mjs                     private runtime dirs for IPC, logs, digests
-│   ├── state.mjs                             default-model + threads/ + job state layer
+│   ├── state.mjs                             default-model + default-target + threads/ + jobs
 │   ├── log.mjs                               structured JSONL logger
 │   ├── heartbeat.mjs                         daemon/bridge heartbeat
 │   ├── prompt-digest.mjs                     smart transcript digest builder
@@ -74,10 +92,17 @@ copilot-companion/                            ← plugin root
 ## Prerequisites
 
 - **Node.js ≥ 22.**
-- **GitHub Copilot CLI authenticated.** `npm i -g @github/copilot`, then run
-  `copilot` once interactively to complete GitHub OAuth. The daemon resolves the
-  binary in order: `$COPILOT_BIN` → `command -v copilot` → `/opt/homebrew/bin/copilot`.
-  On Linux, export the absolute path: `export COPILOT_BIN=$(command -v copilot)`.
+- **At least one supported target runtime.**
+  - **OpenCode target:** install/configure OpenCode and make `opencode`
+    available on `PATH`, or set `OPENCODE_BIN=/absolute/path/to/opencode`.
+    Non-interactive `opencode run` will reject permission prompts unless you
+    configure an OpenCode agent with the required permissions or set
+    `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip` to pass
+    `--dangerously-skip-permissions`.
+  - **Copilot compatibility target:** install/authenticate GitHub Copilot CLI
+    (`npm i -g @github/copilot`, then run `copilot` once interactively). The
+    daemon resolves the binary in order: `$COPILOT_BIN` → `command -v copilot`
+    → `/opt/homebrew/bin/copilot`.
 - **`jq`** — required for hook delivery.
 - **Claude only:** `export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` (needed for
   SendMessage-based thread continuity). On Codex this is unnecessary —
@@ -212,6 +237,11 @@ either click "Yes, don't ask again" on the first prompt, or pre-populate
 {
   "permissions": {
     "allow": [
+      "mcp__copilot-bridge__agent_send",
+      "mcp__copilot-bridge__agent_wait",
+      "mcp__copilot-bridge__agent_status",
+      "mcp__copilot-bridge__agent_reply",
+      "mcp__copilot-bridge__agent_cancel",
       "mcp__copilot-bridge__copilot_send",
       "mcp__copilot-bridge__copilot_wait",
       "mcp__copilot-bridge__copilot_status",
@@ -234,22 +264,32 @@ marks an absolute path in Claude Code's permission syntax.
 
 You don't call the MCP tools directly. Main Claude / main Codex reads the
 subagent's `description` and spawns it via `Agent()` (Claude) / `spawn_agent`
-(Codex) when the user asks for Copilot delegation, status, reply, or cancel.
+(Codex) when the user asks for target-agent delegation, status, reply, or cancel.
 
-### Internal MCP surface (subagent-only)
+### Internal MCP Surface (Subagent-Only)
 
 ```
-copilot_send({ task, cwd, mode?, template?, template_args?, thread?, max_wait_sec?, parallel? })
-copilot_wait({ job_id, max_wait_sec? })
-copilot_status({ job_id?, verbose?, diagnostics? })
-copilot_reply({ job_id, message })
-copilot_cancel({ job_id })
+agent_send({ task, cwd, target?, mode?, template?, template_args?, thread?, max_wait_sec?, parallel? })
+agent_wait({ job_id, max_wait_sec? })
+agent_status({ job_id?, verbose?, diagnostics? })
+agent_reply({ job_id, message })
+agent_cancel({ job_id })
 ```
+
+`target` is optional on `agent_send`, but callers should treat target choice as
+explicit or configured. Supported MVP values are `opencode` and `copilot`;
+omitted target resolves through `AGENT_COMPANION_DEFAULT_TARGET`, legacy
+`COPILOT_COMPANION_DEFAULT_TARGET`,
+`~/.{claude,codex}/copilot-companion/default-target`, then the current
+bootstrap fallback `opencode`.
+
+The old `copilot_*` tools are compatibility aliases. `copilot_send` forces
+`target: "copilot"`; wait/status/reply/cancel work by `job_id`.
 
 `cwd` is required on every `send` and must be the absolute target repo/worktree
-path. The bridge, CLI client, and daemon all reject a missing `cwd` rather than
-defaulting to their own process cwd, so a delegated review never silently runs
-in the plugin checkout.
+path. The bridge, CLI client, and target adapters all reject a missing `cwd`
+rather than defaulting to their own process cwd, so a delegated review never
+silently runs in the plugin checkout.
 
 `send` enqueues the task and returns `status: "still_running"` with a `job_id`
 immediately; the worker runs in the background. The subagent then loops on
@@ -262,12 +302,12 @@ callers must set `tool_timeout_sec = 1320` on `[mcp_servers.copilot-bridge]`
 tool-call budget.
 
 **Terminal statuses:** `completed`, `failed`, `cancelled`, `stuck` (supervisor
-trip — model misbehavior), `timeout` (model turn didn't finish within the wait
+trip — model misbehavior), `timeout` (target turn didn't finish within the wait
 budget — recoverable; read the `meta.digest_uri` MCP resource before
-re-dispatching), and `unreachable` (bridge socket / daemon dead — `meta.detail`
-distinguishes `bridge_timeout` from `bridge_daemon_unreachable`).
+re-dispatching), and `unreachable` (bridge socket / target runtime unavailable
+— `meta.detail` distinguishes bridge/runtime failure modes).
 
-`copilot_status({ diagnostics: true })` adds the same environment/runtime doctor
+`agent_status({ diagnostics: true })` adds the same environment/runtime doctor
 report as `node scripts/doctor.mjs --json` to the global status response. The
 companion should use this MCP-native path for routine diagnostics before falling
 back to raw shell/log inspection.
@@ -282,20 +322,21 @@ none.
 
 ### Runtime files and progress digest (`meta.digest_uri`)
 
-For every job that registers a Copilot prompt, the bridge maintains private
-files under `~/.{claude,codex}/copilot-companion/runtime/` (override the root
-with `COPILOT_RUNTIME_DIR`; created `0700`):
+For every job that registers target output, the bridge maintains private files
+under `~/.{claude,codex}/copilot-companion/runtime/` (override the root with
+`COPILOT_RUNTIME_DIR`; created `0700`):
 
-- `copilot-acp.sock` — user-private daemon socket.
-- `copilot-bridge.log`, `copilot-acp-daemon.log` — bridge/daemon logs.
-- `prompts/copilot-acp-<promptId>.jsonl` — prompt event streams.
+- `copilot-acp.sock` — user-private Copilot daemon socket.
+- `copilot-bridge.log`, `copilot-acp-daemon.log` — bridge and Copilot daemon logs.
+- `prompts/copilot-acp-<promptId>.jsonl` — Copilot prompt event streams.
 - `digests/copilot-digest-<jobId>.md` — smart transcript digests.
 - `completions.jsonl` — completion queue drained by hooks.
 
 The digest is refreshed on every `status` call, every supervisor interim alert
 (~60s during silence), and every terminal emit. It contains a header, the task,
-the final/partial assistant message, `/fleet` sub-agent reports, files touched,
-a tool-call summary, and the latest todos snapshot (empty sections are skipped).
+the final/partial assistant message, captured target output, `/fleet` sub-agent
+reports when present, files touched, a tool-call summary, and the latest todos
+snapshot (empty sections are skipped).
 
 The digest is surfaced as `meta.digest_uri` on terminal responses, `digest_uri`
 on `still_running` waits and per-job `status` replies, and as a `resource_link`
@@ -307,7 +348,23 @@ round-trip. Local filesystem paths are retained only as debug metadata
 (`debug.digest_path` on per-job status/still-running responses and
 `meta.debug_digest_path` on terminal envelopes).
 
-### Runtime adapter (ACP default)
+### Targets and Runtime Adapters
+
+**OpenCode MVP adapter**
+
+- Uses `OPENCODE_BIN` or `opencode`.
+- Spawns `opencode run --dir <cwd> --format json <prompt>`.
+- Permission mode is visible in `agent_status()` under `opencode_runtime`.
+  Set `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip` only when you accept
+  OpenCode's dangerous auto-approval behavior; legacy
+  `AGENT_COMPANION_OPENCODE_SKIP_PERMISSIONS=1` is also honored.
+- Runtime timeout defaults to 40 minutes. Override with
+  `AGENT_COMPANION_OPENCODE_TIMEOUT_MS=<milliseconds>`.
+- Supports send/wait/status/cancel.
+- Does not yet support in-flight reply or restart resume; those require a
+  server/ACP mode adapter and are tracked in [docs/MVP_TRACKER.md](docs/MVP_TRACKER.md).
+
+**Copilot compatibility adapter**
 
 The bridge uses `COPILOT_RUNTIME_ADAPTER=acp` by default. Set it to `sdk` to opt
 into the experimental `@github/copilot-sdk` backend, which preserves the same
@@ -348,7 +405,7 @@ SendMessage({
 
 The same rule applies to the Agent-spawn `prompt` field.
 
-## Parallel orchestration
+## Parallel Orchestration
 
 Every `send` accepts `parallel: "auto" | "always" | "never"`:
 
@@ -368,9 +425,9 @@ template-shaped: `general` for multi-file refactors / parallel ANALYZE,
 verification.
 
 ```jsonc
-copilot_send({ task: "refactor authentication across api/, ui/, and tests/" })          // auto decides
-copilot_send({ task: "audit auth, billing, and API routes", parallel: "always" })       // force /fleet
-copilot_send({ task: "fix the typo in foo.ts:42", parallel: "never" })                   // skip /fleet
+agent_send({ task: "refactor authentication across api/, ui/, and tests/", target: "copilot" })       // auto decides
+agent_send({ task: "audit auth, billing, and API routes", target: "copilot", parallel: "always" })    // force /fleet
+agent_send({ task: "fix the typo in foo.ts:42", target: "opencode", parallel: "never" })              // OpenCode single-shot
 ```
 
 On `status: "timeout"`, the response `content` includes a `parallel: "never"`
@@ -421,7 +478,7 @@ Each entry carries a `host_detected` field (`claude` or `codex`).
 MCP-native environment report from the companion:
 
 ```jsonc
-copilot_status({ diagnostics: true })
+agent_status({ diagnostics: true })
 ```
 
 Direct CLI equivalent:

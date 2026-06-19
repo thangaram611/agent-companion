@@ -18,6 +18,11 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'install-permissions.mjs');
 const REQUIRED_PERMISSIONS = [
+  'mcp__copilot-bridge__agent_send',
+  'mcp__copilot-bridge__agent_wait',
+  'mcp__copilot-bridge__agent_status',
+  'mcp__copilot-bridge__agent_reply',
+  'mcp__copilot-bridge__agent_cancel',
   'mcp__copilot-bridge__copilot_send',
   'mcp__copilot-bridge__copilot_wait',
   'mcp__copilot-bridge__copilot_status',
