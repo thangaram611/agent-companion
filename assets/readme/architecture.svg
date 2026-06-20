@@ -1,0 +1,123 @@
+<svg width="3200" height="1800" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Companion architecture</title>
+  <desc id="desc">A refined architecture diagram showing parent hosts spawning a private Agent Companion subagent, which owns the agent-bridge MCP server, resolves target adapters, and writes runtime state and digests.</desc>
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="1600" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F8FAFC"/>
+      <stop offset="1" stop-color="#EEF6F7"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="124" y1="116" x2="1476" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14B8A6"/>
+      <stop offset="0.52" stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </linearGradient>
+    <linearGradient id="darkPanel" x1="183" y1="301" x2="1424" y2="766" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#101C2F"/>
+      <stop offset="1" stop-color="#0B1323"/>
+    </linearGradient>
+    <filter id="shadow" x="-12%" y="-18%" width="124%" height="136%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="20" stdDeviation="22" flood-color="#0F172A" flood-opacity="0.16"/>
+    </filter>
+    <filter id="softShadow" x="-10%" y="-12%" width="120%" height="124%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#0F172A" flood-opacity="0.10"/>
+    </filter>
+    <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse">
+      <path d="M34 0H0V34" stroke="#CBD5E1" stroke-opacity="0.33" stroke-width="1"/>
+    </pattern>
+    <style>
+      .sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 56px; font-weight: 780; fill: #0F172A; }
+      .subtitle { font-size: 23px; font-weight: 470; fill: #475569; }
+      .eyebrow { font-size: 15px; font-weight: 780; letter-spacing: 0; fill: #0F766E; }
+      .label { font-size: 27px; font-weight: 760; fill: #0F172A; }
+      .labelDark { font-size: 27px; font-weight: 760; fill: #F8FAFC; }
+      .body { font-size: 18px; font-weight: 500; fill: #475569; }
+      .bodyDark { font-size: 18px; font-weight: 500; fill: #CBD5E1; }
+      .code { font-size: 17px; font-weight: 680; fill: #334155; }
+      .codeDark { font-size: 17px; font-weight: 680; fill: #DDE7F4; }
+      .tiny { font-size: 14px; font-weight: 720; fill: #64748B; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#page)"/>
+  <rect width="1600" height="900" fill="url(#grid)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="58" width="1440" height="784" rx="34" fill="#FFFFFF" stroke="#D5E0EA"/>
+  </g>
+  <path d="M124 116H1476" stroke="url(#brand)" stroke-width="7" stroke-linecap="round"/>
+  <text x="124" y="193" class="sans eyebrow">ARCHITECTURE</text>
+  <text x="124" y="254" class="sans title">Subagent-isolated delegation</text>
+  <text x="124" y="296" class="sans subtitle">The parent agent spawns one companion. Only that companion can see the private MCP bridge.</text>
+
+  <g filter="url(#softShadow)">
+    <rect x="124" y="372" width="272" height="170" rx="24" fill="#F8FAFC" stroke="#CCD8E5"/>
+    <text x="158" y="424" class="sans label">Parent host</text>
+    <rect x="158" y="456" width="104" height="34" rx="17" fill="#E0F2FE"/>
+    <text x="176" y="479" class="mono tiny">Claude</text>
+    <rect x="274" y="456" width="88" height="34" rx="17" fill="#E0E7FF"/>
+    <text x="294" y="479" class="mono tiny">Codex</text>
+    <text x="158" y="518" class="sans body">No direct MCP visibility</text>
+  </g>
+
+  <path d="M412 457H518" stroke="#64748B" stroke-width="4" stroke-linecap="round"/>
+  <path d="M504 442L524 457L504 472" stroke="#64748B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g filter="url(#shadow)">
+    <rect x="540" y="332" width="476" height="252" rx="32" fill="url(#darkPanel)" stroke="#14B8A6" stroke-width="2"/>
+    <rect x="566" y="358" width="424" height="200" rx="24" fill="#0E1A2B" stroke="#2DD4BF" stroke-opacity="0.45" stroke-dasharray="9 9"/>
+    <text x="596" y="412" class="sans labelDark">Agent Companion</text>
+    <text x="596" y="445" class="sans bodyDark">Private subagent boundary</text>
+
+    <rect x="596" y="480" width="180" height="44" rx="22" fill="#0F766E" fill-opacity="0.28" stroke="#2DD4BF" stroke-opacity="0.68"/>
+    <text x="620" y="508" class="mono codeDark">agent_send</text>
+    <rect x="790" y="480" width="166" height="44" rx="22" fill="#1D4ED8" fill-opacity="0.24" stroke="#60A5FA" stroke-opacity="0.64"/>
+    <text x="815" y="508" class="mono codeDark">agent_wait</text>
+
+    <rect x="596" y="536" width="360" height="76" rx="18" fill="#05111E" stroke="#60A5FA" stroke-opacity="0.68"/>
+    <text x="628" y="582" class="mono codeDark">agent-bridge MCP server</text>
+  </g>
+
+  <path d="M1032 457H1136" stroke="#64748B" stroke-width="4" stroke-linecap="round"/>
+  <path d="M1122 442L1142 457L1122 472" stroke="#64748B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g filter="url(#softShadow)">
+    <rect x="1162" y="328" width="314" height="260" rx="28" fill="#F8FAFC" stroke="#CCD8E5"/>
+    <text x="1198" y="380" class="sans label">Target adapters</text>
+    <text x="1198" y="414" class="sans body">Capability-driven runtimes</text>
+
+    <rect x="1198" y="454" width="242" height="56" rx="18" fill="#ECFEFF" stroke="#14B8A6"/>
+    <circle cx="1232" cy="482" r="8" fill="#14B8A6"/>
+    <text x="1254" y="488" class="mono code">opencode-runtime</text>
+
+    <rect x="1198" y="526" width="242" height="56" rx="18" fill="#FFF7ED" stroke="#F59E0B"/>
+    <circle cx="1232" cy="554" r="8" fill="#F59E0B"/>
+    <text x="1254" y="560" class="mono code">copilot-runtime</text>
+  </g>
+
+  <path d="M778 622V672" stroke="#64748B" stroke-width="4" stroke-linecap="round"/>
+  <path d="M758 654L778 674L798 654" stroke="#64748B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g filter="url(#softShadow)">
+    <rect x="124" y="668" width="1352" height="104" rx="28" fill="#F8FAFC" stroke="#CCD8E5"/>
+    <text x="158" y="713" class="sans label">Host-routed runtime state</text>
+    <text x="158" y="746" class="mono code">~/.claude/agent-companion/  |  ~/.codex/agent-companion/</text>
+
+    <rect x="670" y="696" width="158" height="48" rx="24" fill="#E0F2FE"/>
+    <text x="698" y="727" class="mono tiny">jobs/</text>
+    <rect x="846" y="696" width="188" height="48" rx="24" fill="#DCFCE7"/>
+    <text x="874" y="727" class="mono tiny">digests/</text>
+    <rect x="1052" y="696" width="212" height="48" rx="24" fill="#FEF3C7"/>
+    <text x="1080" y="727" class="mono tiny">default-target</text>
+    <rect x="1282" y="696" width="158" height="48" rx="24" fill="#EDE9FE"/>
+    <text x="1310" y="727" class="mono tiny">threads/</text>
+  </g>
+
+  <g>
+    <rect x="124" y="604" width="236" height="44" rx="22" fill="#0F172A"/>
+    <text x="151" y="632" class="mono codeDark">no silent fallback</text>
+    <rect x="374" y="604" width="258" height="44" rx="22" fill="#0F172A"/>
+    <text x="401" y="632" class="mono codeDark">subagent-only MCP</text>
+  </g>
+</svg>

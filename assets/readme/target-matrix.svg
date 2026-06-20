@@ -1,0 +1,99 @@
+<svg width="3200" height="1520" viewBox="0 0 1600 760" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Companion target capability matrix</title>
+  <desc id="desc">A refined capability matrix comparing the OpenCode and Copilot CLI targets supported by Agent Companion.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#07111F"/>
+      <stop offset="0.54" stop-color="#0B1728"/>
+      <stop offset="1" stop-color="#0A2221"/>
+    </linearGradient>
+    <radialGradient id="glowBlue" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1230 208) rotate(135) scale(520 340)">
+      <stop offset="0" stop-color="#38BDF8" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#38BDF8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowAmber" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1270 594) rotate(145) scale(500 260)">
+      <stop offset="0" stop-color="#F59E0B" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#F59E0B" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-12%" y="-14%" width="124%" height="128%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#000713" flood-opacity="0.36"/>
+    </filter>
+    <style>
+      .sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 56px; font-weight: 780; fill: #F8FAFC; }
+      .subtitle { font-size: 23px; font-weight: 480; fill: #C8D4E5; }
+      .eyebrow { font-size: 15px; font-weight: 780; letter-spacing: 0; fill: #5EEAD4; }
+      .target { font-size: 34px; font-weight: 780; fill: #F8FAFC; }
+      .body { font-size: 19px; font-weight: 520; fill: #CBD5E1; }
+      .code { font-size: 17px; font-weight: 700; fill: #E2E8F0; }
+      .pill { font-size: 15px; font-weight: 780; fill: #07111F; }
+      .small { font-size: 15px; font-weight: 650; fill: #AEBED1; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="760" fill="url(#bg)"/>
+  <rect width="1600" height="760" fill="url(#glowBlue)"/>
+  <rect width="1600" height="760" fill="url(#glowAmber)"/>
+
+  <text x="104" y="92" class="sans eyebrow">SUPPORTED TARGETS</text>
+  <text x="104" y="154" class="sans title">Bring your target</text>
+  <text x="104" y="195" class="sans subtitle">OpenCode is the open/generic path. Copilot keeps resumable ACP sessions and fleet orchestration.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="104" y="260" width="668" height="352" rx="30" fill="#0E292B" stroke="#2DD4BF" stroke-opacity="0.52"/>
+    <rect x="144" y="300" width="92" height="92" rx="24" fill="#2DD4BF"/>
+    <path d="M190 322L215 346L190 380L165 346L190 322Z" fill="#07111F"/>
+    <text x="268" y="332" class="sans target">OpenCode</text>
+    <text x="268" y="369" class="mono code">opencode run --format json --dir &lt;cwd&gt;</text>
+    <text x="144" y="444" class="sans body">Single-shot CLI adapter for user-configured providers.</text>
+
+    <g transform="translate(144 486)">
+      <rect x="0" y="0" width="110" height="42" rx="21" fill="#CCFBF1"/>
+      <text x="35" y="27" class="sans pill">SEND</text>
+      <rect x="124" y="0" width="110" height="42" rx="21" fill="#CCFBF1"/>
+      <text x="160" y="27" class="sans pill">WAIT</text>
+      <rect x="248" y="0" width="126" height="42" rx="21" fill="#CCFBF1"/>
+      <text x="286" y="27" class="sans pill">STATUS</text>
+      <rect x="388" y="0" width="126" height="42" rx="21" fill="#CCFBF1"/>
+      <text x="425" y="27" class="sans pill">CANCEL</text>
+    </g>
+
+    <rect x="144" y="558" width="202" height="34" rx="17" fill="#082F2E" stroke="#2DD4BF" stroke-opacity="0.35"/>
+    <text x="165" y="580" class="mono small">reply: not yet</text>
+    <rect x="362" y="558" width="242" height="34" rx="17" fill="#082F2E" stroke="#2DD4BF" stroke-opacity="0.35"/>
+    <text x="383" y="580" class="mono small">restart resume: not yet</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="828" y="260" width="668" height="352" rx="30" fill="#332309" stroke="#F59E0B" stroke-opacity="0.58"/>
+    <rect x="868" y="300" width="92" height="92" rx="24" fill="#F59E0B"/>
+    <path d="M928 332C920 326 911 323 901 325C884 328 874 342 877 360C880 378 895 388 913 385C922 383 930 378 936 370L923 358C920 362 916 365 911 366C903 368 896 363 895 355C893 347 898 340 906 339C911 338 916 340 920 343L928 332Z" fill="#07111F"/>
+    <text x="992" y="332" class="sans target">Copilot CLI</text>
+    <text x="992" y="369" class="mono code">ACP daemon adapter</text>
+    <text x="868" y="444" class="sans body">Resumable sessions, reply support, and Copilot fleet mode.</text>
+
+    <g transform="translate(868 486)">
+      <rect x="0" y="0" width="110" height="42" rx="21" fill="#FEF3C7"/>
+      <text x="35" y="27" class="sans pill">SEND</text>
+      <rect x="124" y="0" width="110" height="42" rx="21" fill="#FEF3C7"/>
+      <text x="160" y="27" class="sans pill">WAIT</text>
+      <rect x="248" y="0" width="126" height="42" rx="21" fill="#FEF3C7"/>
+      <text x="286" y="27" class="sans pill">STATUS</text>
+      <rect x="388" y="0" width="112" height="42" rx="21" fill="#FEF3C7"/>
+      <text x="426" y="27" class="sans pill">REPLY</text>
+      <rect x="514" y="0" width="100" height="42" rx="21" fill="#FEF3C7"/>
+      <text x="549" y="27" class="sans pill">FLEET</text>
+    </g>
+
+    <rect x="868" y="558" width="202" height="34" rx="17" fill="#452A04" stroke="#F59E0B" stroke-opacity="0.42"/>
+    <text x="889" y="580" class="mono small">restart resume: yes</text>
+    <rect x="1086" y="558" width="238" height="34" rx="17" fill="#452A04" stroke="#F59E0B" stroke-opacity="0.42"/>
+    <text x="1107" y="580" class="mono small">parallel: /fleet</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="104" y="650" width="1392" height="54" rx="27" fill="#F8FAFC" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.12"/>
+    <text x="136" y="685" class="mono code">agent_send({ task, cwd, target? })  ->  agent_wait({ job_id })  ->  agent-digest://&lt;jobId&gt;</text>
+  </g>
+</svg>

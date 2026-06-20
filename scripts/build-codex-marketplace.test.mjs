@@ -23,6 +23,9 @@ test('builds a Codex marketplace root with a nested plugin package', () => {
     const pluginRoot = path.join(out, 'plugins', 'agent-companion');
     const markerPath = path.join(out, '.agent-companion-codex-marketplace');
     const manifestPath = path.join(pluginRoot, '.codex-plugin', 'plugin.json');
+    const heroPath = path.join(pluginRoot, 'assets', 'readme', 'hero.png');
+    const architecturePath = path.join(pluginRoot, 'assets', 'readme', 'architecture.png');
+    const targetMatrixPath = path.join(pluginRoot, 'assets', 'readme', 'target-matrix.png');
     const hookPath = path.join(pluginRoot, 'hooks', 'hooks-codex.json');
     const marketplacePath = path.join(out, '.agents', 'plugins', 'marketplace.json');
 
@@ -31,6 +34,9 @@ test('builds a Codex marketplace root with a nested plugin package', () => {
     assert.ok(existsSync(markerPath));
     assert.equal(manifest.hooks, './hooks/hooks-codex.json');
     assert.equal(manifest.interface.displayName, 'Agent Companion');
+    assert.ok(existsSync(heroPath));
+    assert.ok(existsSync(architecturePath));
+    assert.ok(existsSync(targetMatrixPath));
     assert.ok(existsSync(hookPath));
 
     const marketplace = JSON.parse(readFileSync(marketplacePath, 'utf8'));
