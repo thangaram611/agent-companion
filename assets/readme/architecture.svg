@@ -65,8 +65,8 @@
   <path d="M504 442L524 457L504 472" stroke="#64748B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
 
   <g filter="url(#shadow)">
-    <rect x="540" y="332" width="476" height="252" rx="32" fill="url(#darkPanel)" stroke="#14B8A6" stroke-width="2"/>
-    <rect x="566" y="358" width="424" height="200" rx="24" fill="#0E1A2B" stroke="#2DD4BF" stroke-opacity="0.45" stroke-dasharray="9 9"/>
+    <rect x="540" y="326" width="476" height="266" rx="32" fill="url(#darkPanel)" stroke="#14B8A6" stroke-width="2"/>
+    <rect x="566" y="352" width="424" height="214" rx="24" fill="#0E1A2B" stroke="#2DD4BF" stroke-opacity="0.45" stroke-dasharray="9 9"/>
     <text x="596" y="412" class="sans labelDark">Agent Companion</text>
     <text x="596" y="445" class="sans bodyDark">Private subagent boundary</text>
 
@@ -75,8 +75,8 @@
     <rect x="790" y="480" width="166" height="44" rx="22" fill="#1D4ED8" fill-opacity="0.24" stroke="#60A5FA" stroke-opacity="0.64"/>
     <text x="815" y="508" class="mono codeDark">agent_wait</text>
 
-    <rect x="596" y="536" width="360" height="76" rx="18" fill="#05111E" stroke="#60A5FA" stroke-opacity="0.68"/>
-    <text x="628" y="582" class="mono codeDark">agent-bridge MCP server</text>
+    <rect x="596" y="532" width="360" height="44" rx="18" fill="#05111E" stroke="#60A5FA" stroke-opacity="0.68"/>
+    <text x="628" y="560" class="mono codeDark">agent-bridge MCP server</text>
   </g>
 
   <path d="M1032 457H1136" stroke="#64748B" stroke-width="4" stroke-linecap="round"/>
@@ -96,28 +96,29 @@
     <text x="1254" y="560" class="mono code">copilot-runtime</text>
   </g>
 
-  <path d="M778 622V672" stroke="#64748B" stroke-width="4" stroke-linecap="round"/>
-  <path d="M758 654L778 674L798 654" stroke="#64748B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M778 610V666" stroke="#64748B" stroke-width="4" stroke-linecap="round"/>
+  <path d="M758 648L778 668L798 648" stroke="#64748B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
 
   <g filter="url(#softShadow)">
-    <rect x="124" y="668" width="1352" height="104" rx="28" fill="#F8FAFC" stroke="#CCD8E5"/>
-    <text x="158" y="713" class="sans label">Host-routed runtime state</text>
-    <text x="158" y="746" class="mono code">~/.claude/agent-companion/  |  ~/.codex/agent-companion/</text>
+    <rect x="124" y="694" width="1352" height="104" rx="28" fill="#F8FAFC" stroke="#CCD8E5"/>
+    <text x="158" y="739" class="sans label">Host-routed runtime state</text>
+    <text x="158" y="772" class="mono code">~/.claude/agent-companion/  |  ~/.codex/agent-companion/</text>
 
-    <rect x="670" y="696" width="158" height="48" rx="24" fill="#E0F2FE"/>
-    <text x="698" y="727" class="mono tiny">jobs/</text>
-    <rect x="846" y="696" width="188" height="48" rx="24" fill="#DCFCE7"/>
-    <text x="874" y="727" class="mono tiny">digests/</text>
-    <rect x="1052" y="696" width="212" height="48" rx="24" fill="#FEF3C7"/>
-    <text x="1080" y="727" class="mono tiny">default-target</text>
-    <rect x="1282" y="696" width="158" height="48" rx="24" fill="#EDE9FE"/>
-    <text x="1310" y="727" class="mono tiny">threads/</text>
+    <rect x="670" y="722" width="158" height="48" rx="24" fill="#E0F2FE"/>
+    <text x="698" y="753" class="mono tiny">jobs/</text>
+    <rect x="846" y="722" width="188" height="48" rx="24" fill="#DCFCE7"/>
+    <text x="874" y="753" class="mono tiny">digests/</text>
+    <rect x="1052" y="722" width="212" height="48" rx="24" fill="#FEF3C7"/>
+    <text x="1080" y="753" class="mono tiny">default-target</text>
+    <rect x="1282" y="722" width="158" height="48" rx="24" fill="#EDE9FE"/>
+    <text x="1310" y="753" class="mono tiny">threads/</text>
   </g>
 
-  <g>
-    <rect x="124" y="604" width="236" height="44" rx="22" fill="#0F172A"/>
-    <text x="151" y="632" class="mono codeDark">no silent fallback</text>
-    <rect x="374" y="604" width="258" height="44" rx="22" fill="#0F172A"/>
-    <text x="401" y="632" class="mono codeDark">subagent-only MCP</text>
+  <g filter="url(#softShadow)">
+    <rect x="124" y="608" width="508" height="56" rx="28" fill="#0F172A"/>
+    <rect x="152" y="620" width="206" height="32" rx="16" fill="#17243A"/>
+    <text x="178" y="642" class="mono codeDark">no silent fallback</text>
+    <rect x="378" y="620" width="226" height="32" rx="16" fill="#17243A"/>
+    <text x="404" y="642" class="mono codeDark">subagent-only MCP</text>
   </g>
 </svg>
