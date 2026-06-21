@@ -32,14 +32,18 @@ import { readDefaultModel } from '../lib/state.mjs';
 
 // --- Constants ---------------------------------------------------------------
 
-// Resolve the copilot CLI binary at module init. Portability matters here —
-// hardcoding a Homebrew Apple Silicon path breaks the daemon on Intel Macs,
-// Linux, or any install that lives elsewhere. Precedence:
+// Resolve the copilot CLI binary only when spawning the real daemon. Module
+// imports must stay side-effect-light so unit tests can exercise SessionManager
+// with a fake AcpConnection on machines without Copilot CLI installed.
+//
+// Portability matters here — hardcoding a Homebrew Apple Silicon path breaks
+// the daemon on Intel Macs, Linux, or any install that lives elsewhere.
+// Precedence:
 //   1. $COPILOT_BIN override (for pinning a specific build)
 //   2. `command -v copilot` — honours the user's PATH
 //   3. /opt/homebrew/bin/copilot as a last-resort legacy fallback
 // Fails loudly with an actionable error if none resolve.
-const COPILOT_BIN = (() => {
+function resolveCopilotBin() {
   if (process.env.COPILOT_BIN) return process.env.COPILOT_BIN;
   try {
     const found = execSync('command -v copilot', { encoding: 'utf8', shell: '/bin/sh' }).trim();
@@ -52,7 +56,7 @@ const COPILOT_BIN = (() => {
   throw new Error(
     'copilot binary not found on PATH. Install GitHub Copilot CLI or set $COPILOT_BIN.'
   );
-})();
+}
 const LOG_MAX_BYTES = 1024 * 1024; // 1 MB
 const PRIVATE_FILE_MODE = 0o600;
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
@@ -273,7 +277,8 @@ class AcpConnection {
     this.cwdReal = canonicalCwd(this.cwd);
     this.model = normalizeModel(model);
     const flags = buildCopilotFlags(this.model);
-    logSpawn(COPILOT_BIN, flags);
+    const copilotBin = resolveCopilotBin();
+    logSpawn(copilotBin, flags);
     log('INFO', `copilot process cwd=${this.cwd} model=${this.model}`);
     const OTEL_TRACES_PATH = otelTracesPath();
     // Rotate OTel traces file if it exceeds 1 MB (same threshold as daemon log).
@@ -285,7 +290,7 @@ class AcpConnection {
       }
     } catch { /* best-effort rotation */ }
 
-    this.child = spawn(COPILOT_BIN, flags, {
+    this.child = spawn(copilotBin, flags, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {

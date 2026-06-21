@@ -7,6 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +19,28 @@ import {
   TERMINAL_STATUSES,
   REPLY_DRAIN_TIMEOUT_MS,
 } from './copilot-acp-daemon.mjs';
+
+test('module import does not require a copilot binary on PATH', () => {
+  const moduleUrl = new URL('./copilot-acp-daemon.mjs', import.meta.url).href;
+  const result = spawnSync(
+    process.execPath,
+    ['--input-type=module', '--eval', `import ${JSON.stringify(moduleUrl)};`],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: '',
+        COPILOT_BIN: '',
+      },
+    },
+  );
+
+  assert.equal(
+    result.status,
+    0,
+    `daemon module import should succeed without Copilot CLI\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+});
 
 const RUNTIME_SANDBOX = mkdtempSync(join(tmpdir(), 'copilot-daemon-runtime-'));
 process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
