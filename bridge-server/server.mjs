@@ -60,13 +60,23 @@ import {
 } from './validation.mjs';
 import {
   readDefaultModel,
-  isModelAllowed,
+  isModelAllowedFor,
+  readDefaultTarget,
   ALLOWED_MODELS,
   DEFAULT_MODEL,
   readThreadSid, writeThreadSid, clearThread, listThreads,
   readHostSessionThread, writeHostSessionThread,
   writeJob, readJob, listJobsForSession, deleteJob,
 } from '../lib/state.mjs';
+import {
+  loadProfiles,
+  getProfile,
+  resolveStrength,
+  resolveProfileCapabilities,
+  listProfilesPublic,
+  flatStrengths,
+  STRENGTH_CAPABILITY_REQUIREMENTS,
+} from '../lib/profile-registry.mjs';
 import { sanitizeHostSessionId } from '../lib/host.mjs';
 import { queuePath, promptEventsPath, runtimeDir, bridgeLogFile, daemonLogFile, digestDir } from '../lib/runtime-paths.mjs';
 import { createReqId, withReq, logEvent } from '../lib/log.mjs';
@@ -84,6 +94,7 @@ import {
   openCodeServerRuntimeInfo,
   openCodeServerPromptId,
   resolveOpenCodeServerModel,
+  parseOpenCodeModel,
   ensureOpenCodeServer,
   createOpenCodeSession,
   startOpenCodeServerPrompt,
@@ -368,12 +379,12 @@ function retainTerminalJob(jobId, patch) {
   return job;
 }
 
-function retireThreadSid(thread, sessionId, reason) {
+function retireThreadSid(thread, profileId, sessionId, reason) {
   if (!thread || !sessionId) return false;
   try {
-    if (readThreadSid(thread) !== sessionId) return false;
-    clearThread(thread);
-    log('WARN', 'thread sid retired:', `thread=${thread} session=${sessionId} reason=${reason}`);
+    if (readThreadSid(thread, profileId) !== sessionId) return false;
+    clearThread(thread, profileId);
+    log('WARN', 'thread sid retired:', `thread=${thread} profile=${profileId || '-'} session=${sessionId} reason=${reason}`);
     return true;
   } catch (err) {
     log('WARN', 'retireThreadSid failed:', err.message);
@@ -410,8 +421,172 @@ function normalizeInspectLimit(value) {
   return Math.max(1, Math.min(n, 200));
 }
 
-function resolveTargetId(requested = null) {
-  return requested ? String(requested).trim().toLowerCase() : defaultTargetId();
+// --- Strength/profile routing — the sole SEND routing brain -----------------
+//
+// resolveRouting({target, profile, strength}, env) generalizes the old
+// one-to-one resolveTargetId. It reads ONLY loadProfiles(env) output, applies
+// constraint-consistency precedence, runs the pre-spawn capability gate
+// (STEP C), and returns {ok:true, resolved} or {ok:false, code, ...}. No silent
+// fallback: identical inputs + identical profiles.json → identical outcome.
+
+// Unchanged wording from the pre-#2 TARGET_UNCONFIGURED path.
+const UNCONFIGURED_SEND_ERROR =
+  'no companion target configured and none passed. Pass target on agent_send, ' +
+  'or set a default with `node scripts/onboard.mjs --target <id> --set-default`.';
+
+// Synthesize a degenerate profile for an explicit bare companion — the legacy
+// target-only semantics: copilot model from default-model, opencode model from
+// env, capabilities inherited. profileId is null downstream (legacy sid path).
+function synthProfileForCompanion(companion, env) {
+  const model = companion === 'copilot'
+    ? readDefaultModel().model
+    : (String(env.AGENT_COMPANION_OPENCODE_MODEL || '').trim() || null);
+  const prof = { id: '__default__', companion, model, strengths: [], adapter: null, synthesized: true };
+  prof.capabilities = resolveProfileCapabilities(prof, env);
+  return prof;
+}
+
+// STEP C — pre-spawn, statically-knowable capability gate. Only model + adapter
+// actually gate under v1 (STRENGTH_CAPABILITY_REQUIREMENTS is an empty no-op map).
+function capabilityGate(prof, env) {
+  if (!prof.companion) return { ok: false, code: 'TARGET_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR };
+  const descriptor = getTarget(prof.companion, env);
+  const caps = prof.capabilities || descriptor?.capabilities || null;
+  if (!descriptor || !descriptor.implemented || !caps?.send) {
+    return {
+      ok: false, code: 'TARGET_UNSUPPORTED', companion: prof.companion,
+      error: `target "${prof.companion}" is not a supported companion target (supported: ${listTargets().map((t) => t.id).join(', ')})`,
+    };
+  }
+  const model = prof.model || null;
+  if (model) {
+    if (caps.modelSelection === false) {
+      return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `companion "${prof.companion}" cannot select a model but profile pins "${model}"` };
+    }
+    if (!isModelAllowedFor(prof.companion, model)) {
+      if (prof.companion === 'copilot') {
+        return {
+          ok: false, code: 'MODEL_NOT_ALLOWED', companion: 'copilot', model,
+          error: `model "${model}" is not a documented Copilot model`,
+          hint: `set the Copilot model to a documented model id (one of: ${[...ALLOWED_MODELS].join(', ')}), or remove it to use the ${DEFAULT_MODEL} default`,
+        };
+      }
+      return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `companion "${prof.companion}" model "${model}" is not a valid provider/model pin (expected provider/model)` };
+    }
+  }
+  if (prof.companion === 'opencode' && prof.adapter === 'server' && !caps.serverMode) {
+    return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: 'opencode adapter:"server" requested but server mode is unavailable in this environment' };
+  }
+  // STRENGTH_CAPABILITY_REQUIREMENTS — no-op under the v1 empty map; populating
+  // it later enforces a requirement pre-spawn here with zero other changes.
+  for (const declared of prof.strengths) {
+    for (const reqCap of STRENGTH_CAPABILITY_REQUIREMENTS[declared] || []) {
+      if (!caps[reqCap]) {
+        return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `strength "${declared}" requires capability "${reqCap}" which companion "${prof.companion}" lacks` };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+// Bare target-only path: lone profile whose companion===t; if multiple require a
+// defaultProfile tiebreak among them or PROFILE_AMBIGUOUS; if none, synthesize
+// for the explicit companion (legacy semantics — an explicit target always
+// resolves to that companion with the default model).
+function resolveBareTarget(load, t, env) {
+  const matches = load.profiles.filter((pr) => !pr.synthesized && pr.companion === t);
+  if (matches.length === 1) return { ok: true, prof: matches[0] };
+  if (matches.length > 1) {
+    const dp = load.defaultProfile?.value || null;
+    const winner = dp ? matches.find((m) => m.id === dp) : null;
+    if (winner) return { ok: true, prof: winner };
+    return { ok: false, code: 'PROFILE_AMBIGUOUS', error: `multiple profiles target companion "${t}" with no defaultProfile tiebreak`, candidates: matches.map((m) => m.id) };
+  }
+  return { ok: true, prof: synthProfileForCompanion(t, env) };
+}
+
+// Zero explicit inputs: defaultProfile wins if it resolves; else the empty/
+// no-default edge falls back to the legacy bare-target against default-target
+// (so a hand-authored profiles.json that omits defaultProfile but keeps a
+// default-target does not newly fail); else TARGET_UNCONFIGURED.
+function resolveZeroInput(load, env) {
+  const dp = load.defaultProfile?.value || null;
+  if (dp) {
+    const prof = getProfile(load, dp);
+    if (prof) return { ok: true, prof };
+    // A configured defaultProfile that names no profile is a loud error, not a
+    // silent fall-through to default-target — the cardinal no-silent-fallback
+    // rule (handoff §"never silently ignored"). The synthesized registry's
+    // defaultProfile always resolves, so this only fires on a real typo.
+    return {
+      ok: false, code: 'PROFILE_UNKNOWN',
+      error: `defaultProfile "${dp}" names no configured profile`,
+      candidates: load.profiles.filter((pr) => !pr.synthesized).map((pr) => pr.id),
+    };
+  }
+  const dt = readDefaultTarget(env).target;
+  if (dt) return resolveBareTarget(load, dt, env);
+  return { ok: false, code: 'TARGET_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR };
+}
+
+export function resolveRouting({ target = null, profile = null, strength = null } = {}, env = process.env) {
+  const t = target ? String(target).trim().toLowerCase() : null;
+  const p = profile ? String(profile).trim() : null;
+  const s = strength ? String(strength).trim().toLowerCase() : null;
+  const load = loadProfiles({ env });
+  const publicIds = () => load.profiles.filter((pr) => !pr.synthesized).map((pr) => pr.id);
+
+  const succeed = (prof, requestedStrength) => {
+    const gate = capabilityGate(prof, env);
+    if (!gate.ok) return { ...gate, load };
+    return {
+      ok: true,
+      load,
+      resolved: {
+        profileId: prof.synthesized ? null : prof.id,
+        companion: prof.companion,
+        model: prof.model || null,
+        strengths: prof.strengths.slice(),
+        capabilities: prof.capabilities,
+        adapter: prof.adapter || null,
+        synthesized: !!prof.synthesized,
+        strength: requestedStrength || null,
+      },
+    };
+  };
+
+  // STEP A — constraint-consistency precedence.
+  if (p && s) return { ok: false, code: 'ROUTING_CONFLICT', error: 'pass only one of profile or strength', load };
+
+  let prof = null;
+  let requestedStrength = null;
+
+  if (p) {
+    prof = getProfile(load, p);
+    if (!prof) return { ok: false, code: 'PROFILE_UNKNOWN', error: `no configured profile "${p}"`, candidates: publicIds(), load };
+  } else if (s) {
+    const r = resolveStrength(load, s);
+    if (r.status === 'unconfigured') return { ok: false, code: 'STRENGTH_UNCONFIGURED', error: `no configured profile declares strength "${s}"`, candidates: publicIds(), load };
+    if (r.status === 'ambiguous') return { ok: false, code: 'STRENGTH_AMBIGUOUS', error: `strength "${s}" is declared by multiple profiles with no defaultProfile tiebreak`, candidates: r.candidates, load };
+    prof = getProfile(load, r.profileId);
+    requestedStrength = s;
+  } else if (t) {
+    const bt = resolveBareTarget(load, t, env);
+    if (!bt.ok) return { ...bt, load };
+    prof = bt.prof;
+  } else {
+    const zi = resolveZeroInput(load, env);
+    if (!zi.ok) return { ...zi, load };
+    prof = zi.prof;
+  }
+
+  // target refinement: an explicit target co-existing with profile/strength must
+  // agree with the resolved profile's companion.
+  if (t && (p || s) && prof.companion !== t) {
+    return { ok: false, code: 'ROUTING_CONFLICT', error: `resolved profile targets companion "${prof.companion}" but explicit target is "${t}"`, load };
+  }
+
+  return succeed(prof, requestedStrength);
 }
 
 function targetLabel(id) {
@@ -1057,7 +1232,7 @@ export function classifyRubberDuck(message) {
 
 const MAX_JOB_MS = 40 * 60 * 1000;
 
-async function runWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, model, previousSid, parallel }) {
+async function runWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, profileId = null, model, previousSid, parallel }) {
   const startedAt = Date.now();
   const fleet = shouldUseFleet({ parallel, template, mode, task });
   const rlog = withReq(reqId, { job_id: jobId });
@@ -1130,7 +1305,7 @@ async function runWorker({ jobId, reqId, task, mode, template, template_args, cw
     updateJob(jobId, { promptId, sessionId, status: 'running', inspectAvailable: true, sessionReborn: !!sessionReborn });
 
     if (thread && sessionId) {
-      try { writeThreadSid(thread, sessionId); }
+      try { writeThreadSid(thread, profileId, sessionId); }
       catch (err) { log('WARN', 'writeThreadSid failed:', err.message); }
     }
 
@@ -1145,7 +1320,7 @@ async function runWorker({ jobId, reqId, task, mode, template, template_args, cw
       emitRebirthAlert({ jobId, task, promptId, thread, previousSid, newSessionId: sessionId, startedAt, reqId });
     }
 
-    await runWatchLoop({ jobId, promptId, sessionId, thread, task, mode, cwd, startedAt, reqId, sessionReborn: !!sessionReborn, fleet });
+    await runWatchLoop({ jobId, promptId, sessionId, thread, profileId, task, mode, cwd, startedAt, reqId, sessionReborn: !!sessionReborn, fleet });
   } catch (err) {
     // Failure before the prompt was registered (ensureDaemon, prompt-bg, etc).
     // No promptId yet → not reconcilable, just record terminal failure.
@@ -1166,11 +1341,11 @@ async function runOpenCodeWorker(args) {
 // Server-mode worker: ensure a pooled `opencode serve`, create a persisted
 // session, subscribe to /event BEFORE prompting (so session.idle can't be
 // missed), then drive the turn through the reusable watch helper.
-async function runOpenCodeServerWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, parallel, target }) {
+async function runOpenCodeServerWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, model = null, parallel, target }) {
   const startedAt = Date.now();
   const rlog = withReq(reqId, { job_id: jobId, target });
-  rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target, adapter: 'server' });
-  log('INFO', 'opencode-server worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd}`);
+  rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target, adapter: 'server', model: model || null });
+  log('INFO', 'opencode-server worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} model=${model || '-'}`);
   try {
     const { baseUrl } = await ensureOpenCodeServer();
     const sessionId = await createOpenCodeSession({ baseUrl, directory: cwd, title: thread || jobId });
@@ -1185,7 +1360,7 @@ async function runOpenCodeServerWorker({ jobId, reqId, task, mode, template, tem
     const formatted = formatPrompt({ template, task, mode, template_args, parallel: 'never' });
     await runOpenCodeServerWatch({
       jobId, reqId, baseUrl, sessionId, promptId, directory: cwd,
-      prompt: formatted, task, mode, cwd, thread, startedAt, fresh: true,
+      prompt: formatted, model, task, mode, cwd, thread, startedAt, fresh: true,
     });
   } catch (err) {
     const duration = Date.now() - startedAt;
@@ -1215,7 +1390,7 @@ async function runOpenCodeServerWorker({ jobId, reqId, task, mode, template, tem
 // A per-job watch generation guard (job.promptId === promptId) ensures a
 // superseded turn (after a reply aborts it) never writes a terminal/notification
 // over the live one — mirrors the Copilot superseding-prompt logic.
-async function runOpenCodeServerWatch({ jobId, reqId, baseUrl, sessionId, promptId, directory = null, prompt = null, task, mode, cwd, thread, startedAt, fresh = false, reply = false, abortFirst = false }) {
+async function runOpenCodeServerWatch({ jobId, reqId, baseUrl, sessionId, promptId, directory = null, prompt = null, model = null, task, mode, cwd, thread, startedAt, fresh = false, reply = false, abortFirst = false }) {
   const rlog = withReq(reqId, { job_id: jobId });
   const timeoutMs = resolveOpenCodeServerTimeoutMs();
   let watcher;
@@ -1244,7 +1419,11 @@ async function runOpenCodeServerWatch({ jobId, reqId, baseUrl, sessionId, prompt
       },
     });
     if (fresh || reply) {
-      await startOpenCodeServerPrompt({ baseUrl, sessionId, directory, prompt, model: resolveOpenCodeServerModel() });
+      // Per-job model (from the resolved profile) overrides the env default; an
+      // unset/synthesized job falls back to resolveOpenCodeServerModel()'s env
+      // default so the legacy/default path is byte-identical.
+      const promptModel = parseOpenCodeModel(model) || resolveOpenCodeServerModel();
+      await startOpenCodeServerPrompt({ baseUrl, sessionId, directory, prompt, model: promptModel });
     }
     const result = await watcher.done;
 
@@ -1413,17 +1592,18 @@ function finalizeResumedOpenCodeTranscript(job, transcript, reqId, startedAt) {
   log('INFO', 'opencode-server resume terminal:', jobId, `status=${status} (from transcript)`);
 }
 
-async function runOpenCodeCliWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, parallel, target }) {
+async function runOpenCodeCliWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, model = null, parallel, target }) {
   const startedAt = Date.now();
   const rlog = withReq(reqId, { job_id: jobId, target });
-  rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target });
-  log('INFO', 'opencode worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} parallel=${parallel}`);
+  rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target, model: model || null });
+  log('INFO', 'opencode worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} parallel=${parallel} model=${model || '-'}`);
   try {
     const formatted = formatPrompt({ template, task, mode, template_args, parallel: 'never' });
     const result = await startOpenCodeRun({
       jobId,
       cwd,
       prompt: formatted,
+      model: model || null,
       onStarted: ({ pid, promptId, command }) => {
         updateJob(jobId, {
           promptId,
@@ -1519,7 +1699,7 @@ async function runOpenCodeCliWorker({ jobId, reqId, task, mode, template, templa
 // Watch-loop and terminal handling, factored out so a rehydrated bridge can
 // re-attach to a daemon-owned promptId without re-running prompt-bg. Called
 // from runWorker (fresh prompt) and from rehydrate (recovery after restart).
-async function runWatchLoop({ jobId, promptId, sessionId, thread, task, mode, cwd, startedAt, reqId, sessionReborn = false, fleet = false }) {
+async function runWatchLoop({ jobId, promptId, sessionId, thread, profileId = null, task, mode, cwd, startedAt, reqId, sessionReborn = false, fleet = false }) {
   const rlog = withReq(reqId, { job_id: jobId });
   try {
     let result;
@@ -1546,7 +1726,7 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, task, mode, cw
       result.stuckReason = null;
       result.error = null;
       result.detail = 'prompt_timeout';
-      retireThreadSid(thread, sessionId, 'prompt_timeout');
+      retireThreadSid(thread, profileId, sessionId, 'prompt_timeout');
       result.sessionRetired = true;
       rlog.warn('worker.remap_prompt_timeout', { prompt_id: promptId });
       log('INFO', 'remap prompt_timeout:', jobId, `promptId=${promptId} → status=timeout retired=${!!result.sessionRetired}`);
@@ -1556,7 +1736,7 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, task, mode, cw
       result.status = 'failed';
       result.error = 'Copilot returned completed without any assistant message, tool calls, or plan updates.';
       result.detail = 'empty_completed';
-      retireThreadSid(thread, sessionId, 'empty_completed');
+      retireThreadSid(thread, profileId, sessionId, 'empty_completed');
       result.sessionRetired = true;
       rlog.warn('worker.empty_completed', { prompt_id: promptId, session_retired: !!result.sessionRetired });
       log('WARN', 'empty completed remapped:', jobId, `promptId=${promptId} retired=${!!result.sessionRetired}`);
@@ -1565,10 +1745,10 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, task, mode, cw
     if (result.status === 'failed' && result.error === 'empty completed response') {
       result.error = 'Copilot returned completed without any assistant message, tool calls, or plan updates.';
       result.detail = 'empty_completed';
-      retireThreadSid(thread, sessionId, 'empty_completed');
+      retireThreadSid(thread, profileId, sessionId, 'empty_completed');
       result.sessionRetired = true;
     } else if (result.sessionRetired) {
-      retireThreadSid(thread, sessionId, result.detail || result.error || 'session_retired');
+      retireThreadSid(thread, profileId, sessionId, result.detail || result.error || 'session_retired');
       result.sessionRetired = true;
     }
 
@@ -1617,6 +1797,7 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, task, mode, cw
 async function emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId }) {
   const duration = Date.now() - startedAt;
   const promptId = jobs.get(jobId)?.promptId;
+  const profileId = jobs.get(jobId)?.profileId ?? null;
   const currentSessionId = jobs.get(jobId)?.sessionId || sessionId;
   const fleet = !!jobs.get(jobId)?.fleet;
   const isReconcilableErr = !!promptId && (
@@ -1633,7 +1814,7 @@ async function emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd
     status = 'failed';
     error = 'Copilot returned completed without any assistant message, tool calls, or plan updates.';
     detail = 'empty_completed';
-    retireThreadSid(thread, currentSessionId, 'empty_completed');
+    retireThreadSid(thread, profileId, currentSessionId, 'empty_completed');
     sessionRetired = true;
   }
   rlog.warn('worker.catch', { error: err.message, reconciled: reconciled?.status || null });
@@ -1760,30 +1941,37 @@ async function handleSend(args) {
     });
   }
 
-  const target = resolveTargetId(args.target);
-  if (!target) {
-    return asJson({
+  // Route by target/profile/strength through the sole routing brain. Every
+  // resolution error returns the TARGET_UNCONFIGURED envelope shape (echoing
+  // candidates + the public profile list); MODEL_NOT_ALLOWED keeps its legacy
+  // reason/model/hint fields as a superset.
+  const routing = resolveRouting(
+    { target: args.target || null, profile: args.profile || null, strength: args.strength || null },
+    process.env,
+  );
+  if (!routing.ok) {
+    const envelope = {
       ok: false,
       action: 'send',
-      code: 'TARGET_UNCONFIGURED',
-      target: null,
-      error:
-        'no companion target configured and none passed. Pass target on agent_send, ' +
-        'or set a default with `node scripts/onboard.mjs --target <id> --set-default`.',
+      code: routing.code,
+      target: routing.companion || null,
+      error: routing.error,
       targets: listTargets(),
-    });
+      profiles: listProfilesPublic(routing.load),
+    };
+    if (routing.candidates) envelope.candidates = routing.candidates;
+    if (routing.code === 'MODEL_NOT_ALLOWED') {
+      envelope.reason = 'model-not-allowed';
+      envelope.model = routing.model;
+      envelope.hint = routing.hint;
+    }
+    return asJson(envelope);
   }
-  const targetInfo = getTarget(target);
-  if (!targetInfo || !targetInfo.implemented || !targetInfo.capabilities?.send) {
-    return asJson({
-      ok: false,
-      action: 'send',
-      code: 'TARGET_UNSUPPORTED',
-      target,
-      error: `target "${target}" is not a supported companion target (supported: ${listTargets().map((t) => t.id).join(', ')})`,
-      targets: listTargets(),
-    });
-  }
+
+  const target = routing.resolved.companion;
+  const model = routing.resolved.model;
+  const profileId = routing.resolved.profileId;
+  const routedStrength = routing.resolved.strength;
 
   // v6.1: bridge auto-generates a thread name if caller (the companion
   // subagent) did not pass one. This is how the companion gets a stable
@@ -1821,6 +2009,24 @@ async function handleSend(args) {
           `but this send requested ${target}. Wait/cancel the existing job or use a different thread.`,
       });
     }
+    const existingProfileId = existing.profileId ?? null;
+    if (existingProfileId !== profileId) {
+      return asJson({
+        ok: false,
+        action: 'send',
+        status: 'profile_mismatch',
+        job_id: existing.jobId,
+        current_status: existing.status || 'running',
+        thread,
+        target,
+        existing_profile: existingProfileId,
+        requested_profile: profileId,
+        error:
+          `existing in-flight job ${existing.jobId} on thread ${thread} runs profile ` +
+          `${existingProfileId || '(default)'}, but this send resolved to ${profileId || '(default)'}. ` +
+          'Wait/cancel the existing job or use a different thread.',
+      });
+    }
     if (!sameRequiredCwd(existing.cwd, args.cwd)) {
       return asJson({
         ok: false,
@@ -1852,21 +2058,13 @@ async function handleSend(args) {
   // Thread → previous Copilot sid. If the caller passed an explicit thread
   // name that doesn't exist yet, readThreadSid returns null (new thread).
   // An auto-generated companion-<jobId> is brand new too, so null.
+  // Thread → previous Copilot sid, namespaced by profile (synthesized/legacy →
+  // profileId=null → byte-identical <thread>.sid). The model was already
+  // validated by the capability gate in resolveRouting.
   let previousSid = null;
   if (target === 'copilot') {
-    try { previousSid = readThreadSid(thread); }
+    try { previousSid = readThreadSid(thread, profileId); }
     catch (err) { return asJson({ ok: false, error: err.message }); }
-  }
-
-  let model = null;
-  if (target === 'copilot') {
-    ({ model } = readDefaultModel());
-    if (!isModelAllowed(model)) {
-      return asJson({
-        ok: false, action: 'send', target, reason: 'model-not-allowed', model,
-        hint: `set the Copilot default-model to a documented model id (one of: ${[...ALLOWED_MODELS].join(', ')}), or remove it to use the ${DEFAULT_MODEL} default`,
-      });
-    }
   }
 
   const reqId = createReqId();
@@ -1879,6 +2077,9 @@ async function handleSend(args) {
   jobs.set(jobId, {
     jobId, reqId,
     target,
+    profileId,
+    model,
+    strength: routedStrength,
     claudeSessionId: getHostSessionId(),
     task: args.task, mode: args.mode,
     template: args.template, cwd: args.cwd,
@@ -1891,19 +2092,20 @@ async function handleSend(args) {
   persistJob(jobId);
   logEvent('info', `${target}.send`, {
     req_id: reqId, job_id: jobId, target,
+    profile: profileId, strength: routedStrength,
     template: args.template, mode: args.mode,
     thread, model,
     parallel_strategy: args.parallel,
     fleet,
   });
-  log('INFO', 'agent:send', `job=${jobId} req=${reqId} target=${target} template=${args.template} mode=${args.mode} thread=${thread} model=${model || '-'} parallel=${args.parallel} fleet=${fleet}`);
+  log('INFO', 'agent:send', `job=${jobId} req=${reqId} target=${target} profile=${profileId || '-'} strength=${routedStrength || '-'} template=${args.template} mode=${args.mode} thread=${thread} model=${model || '-'} parallel=${args.parallel} fleet=${fleet}`);
 
   if (target === 'copilot') {
     runWorker({
       jobId, reqId,
       task: args.task, mode: args.mode,
       template: args.template, template_args: args.template_args,
-      cwd: args.cwd, thread, model, previousSid,
+      cwd: args.cwd, thread, profileId, model, previousSid,
       parallel: args.parallel,
     }).catch((err) => log('ERROR', 'worker error:', err.message));
   } else if (target === 'opencode') {
@@ -1911,7 +2113,7 @@ async function handleSend(args) {
       jobId, reqId,
       task: args.task, mode: args.mode,
       template: args.template, template_args: args.template_args,
-      cwd: args.cwd, thread,
+      cwd: args.cwd, thread, profileId, model,
       parallel: args.parallel,
       target,
     }).catch((err) => log('ERROR', 'opencode worker error:', err.message));
@@ -1928,6 +2130,8 @@ async function handleSend(args) {
     ok: true, action: 'send', status: 'still_running',
     job_id: jobId,
     target,
+    profile: profileId,
+    strength: routedStrength,
     thread,
     current_status: job?.status || 'starting',
     parallel: args.parallel,
@@ -2063,7 +2267,7 @@ async function handleOpenCodeServerReply(job, message) {
   runOpenCodeServerWatch({
     jobId: job_id, reqId,
     baseUrl: job.baseUrl, sessionId: job.sessionId, promptId: replacementPromptId, directory: job.cwd || null,
-    prompt: message, task: job.task || message, mode: job.mode || 'EXECUTE',
+    prompt: message, model: job.model ?? null, task: job.task || message, mode: job.mode || 'EXECUTE',
     cwd: job.cwd || null, thread: job.thread || null,
     startedAt: job.startedAt || Date.now(), reply: true, abortFirst: true,
   })
@@ -2157,6 +2361,7 @@ async function handleReply({ job_id, message }) {
       promptId: replacementPromptId,
       sessionId: replacementSessionId,
       thread: job.thread || null,
+      profileId: job.profileId ?? null,
       task: job.task || message,
       mode: job.mode || 'EXECUTE',
       cwd: job.cwd || null,
@@ -2198,10 +2403,17 @@ async function handleStatus({ job_id, verbose, diagnostics }) {
     return asJson(response);
   }
   const modelInfo = readDefaultModel();
+  // Single producer read for the harness-facing strengths view + the
+  // operator-facing default_profile. The strengths array is deliberately
+  // id-free (the subagent enumerates it BEFORE sending and routes by label,
+  // never by companion/model/profile id).
+  const registry = loadProfiles({ env: process.env });
   const response = {
     ok: true, action: 'status',
     default_target: defaultTargetInfo(),
+    default_profile: registry.synthesized ? { value: null, source: 'synthesized' } : registry.defaultProfile,
     targets: listTargets(),
+    strengths: flatStrengths(registry),
     runtime_adapter: selectedRuntimeAdapter(),
     opencode_runtime: { ...openCodeRuntimeInfo(), ...openCodeServerRuntimeInfo(), server_pool: openCodeServerPoolSnapshot() },
     default_model: modelInfo,
@@ -2212,6 +2424,8 @@ async function handleStatus({ job_id, verbose, diagnostics }) {
       .map((j) => ({
         job_id: j.jobId,
         target: j.target || 'copilot',
+        profile: j.profileId ?? null,
+        strength: j.strength ?? null,
         status: j.status || 'starting',
         mode: j.mode || null,
         parallel: j.parallelStrategy || j.parallel || null,
@@ -2224,7 +2438,15 @@ async function handleStatus({ job_id, verbose, diagnostics }) {
         reply_in_flight: !!j.replyInFlight,
       })),
   };
-  if (diagnostics) response.diagnostics = buildDoctorReport();
+  if (diagnostics) {
+    const report = buildDoctorReport();
+    response.diagnostics = report;
+    // Operator-facing, diagnostics-gated profile detail (ids + blockers).
+    response.profiles = (report.profiles || []).map((p) => ({
+      id: p.id, companion: p.companion, model: p.model, strengths: p.strengths,
+      ready: p.ready, blockers: p.blockers,
+    }));
+  }
   return asJson(response);
 }
 
@@ -2242,6 +2464,9 @@ const mcp = new Server(
       'agent_send for kickoff then loops on agent_wait until terminal. ' +
       `Default target is ${defaultTargetId() || 'unset (pass target or run onboarding)'}; ` +
       `supported targets: ${listTargets().map((t) => t.id).join(', ')}; Copilot runtime adapter is ${selectedRuntimeAdapter()}. ` +
+      'Route a send by strength (preferred) or profile instead of a concrete ' +
+      'target; discover the configured strengths via {action:status} and never ' +
+      'pass companion or model ids. ' +
       'Parallel orchestration (Copilot) is strategy-based: auto, always, ' +
       'or never. Runtime IPC, logs, prompt streams, digests, and completion ' +
       `queue live under the private directory ${runtimeDir()}.`,
@@ -2334,6 +2559,20 @@ const AGENT_TOOLS = [
       additionalProperties: false,
       properties: {
         target: TARGET_FIELD,
+        strength: {
+          type: 'string',
+          description:
+            'Route to the configured profile that declares this capability label (e.g. reviewer, ' +
+            'web_researcher, planner, fast_executor). Validated server-side against the live profile ' +
+            'registry. Discover available strengths via {action:status}; do not hardcode. Mutually ' +
+            'exclusive with profile.',
+        },
+        profile: {
+          type: 'string',
+          description:
+            'Route to a specific configured profile id. Discover ids via {action:status, ' +
+            'diagnostics:true}. Mutually exclusive with strength.',
+        },
         task: { type: 'string', description: 'Plain-language task for the selected companion target.' },
         mode: {
           type: 'string',
@@ -2554,7 +2793,7 @@ export function hydrateJobsFromLedger() {
     // Do not restore timeout/empty-completed retirements: those sessions are
     // intentionally poisoned and the next send must mint a clean ACP session.
     if (target === 'copilot' && job.thread && job.sessionId && !(isTerminal && job.sessionRetired) && (isTerminal || canResumeDetachedPrompts)) {
-      try { writeThreadSid(job.thread, job.sessionId); }
+      try { writeThreadSid(job.thread, job.profileId ?? null, job.sessionId); }
       catch (err) { log('WARN', 'hydrate writeThreadSid failed:', err.message); }
     }
 
@@ -2594,7 +2833,7 @@ export function hydrateJobsFromLedger() {
       continue;
     }
     if (!canResumeDetachedPrompts) {
-      retireThreadSid(job.thread, job.sessionId, 'sdk_adapter_non_resumable_after_restart');
+      retireThreadSid(job.thread, job.profileId ?? null, job.sessionId, 'sdk_adapter_non_resumable_after_restart');
       retainTerminalJob(job.jobId, {
         status: 'unreachable',
         error: 'experimental SDK adapter cannot reattach in-flight prompts after bridge restart',
@@ -2609,6 +2848,7 @@ export function hydrateJobsFromLedger() {
       promptId: job.promptId,
       sessionId: job.sessionId || null,
       thread: job.thread || null,
+      profileId: job.profileId ?? null,
       task: job.task || '',
       mode: job.mode || 'EXECUTE',
       cwd: job.cwd || null,

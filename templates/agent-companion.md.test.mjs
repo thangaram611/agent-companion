@@ -18,3 +18,15 @@ test('Claude template documents status response rendering explicitly', () => {
   assert.match(text, /MCP-native doctor report/);
   assert.doesNotMatch(text, /canonical place to look up structured per-job progress/);
 });
+
+test('Claude template documents strength/profile routing without hardcoding ids', () => {
+  // The new optional routing siblings are documented beside target in both the
+  // wire-payload doc and the build-the-JSON block.
+  assert.match(text, /"strength":\s+"reviewer"/);
+  assert.match(text, /"profile":\s+"\.\.\."/);
+  assert.match(text, /"strength":\s+"<from input, else omit>"/);
+  assert.match(text, /discover the configured set via `\{action:status\}`/);
+  assert.match(text, /never pass companion or model ids/);
+  // The tool allow-list must NOT grow — still the 5 agent_* tools plus host tools.
+  assert.doesNotMatch(text, /agent_route|agent_strength|agent_profile/);
+});

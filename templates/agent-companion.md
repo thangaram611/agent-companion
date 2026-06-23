@@ -20,8 +20,14 @@ description: |
 
     { "action": "send",
       "task":          "...",
-      "target":        "opencode" | "copilot",              // optional but preferred; omit only when
-                                                               // relying on bridge target config
+      "target":        "opencode" | "copilot",              // optional; omit when routing by strength/profile
+                                                               // or relying on bridge target config
+      "strength":      "reviewer" | "web_researcher"        // optional, PREFERRED; route by capability label.
+                       | "planner" | "fast_executor",       //   Discover the configured set via {action:status};
+                                                               //   do not hardcode. Mutually exclusive with profile.
+      "profile":       "...",                               // optional; a specific configured profile id (discover
+                                                               //   via {action:status,diagnostics:true}). Never pass
+                                                               //   companion or model ids. Mutually exclusive w/ strength.
       "mode":          "EXECUTE" | "PLAN" | "ANALYZE",       // default EXECUTE
       "template":      "general" | "research" | "plan_review", // default general
       "template_args": {                                       // optional; per-template keys:
@@ -53,7 +59,10 @@ description: |
     { "action": "cancel", "job_id": "opencode-..." }
     { "action": "cancel" }                                    // cancels this companion's tracked job
 
-  The JSON has no `thread` field — the companion manages thread continuity
+  Route by `strength` (preferred) or `profile` instead of a concrete target; do
+  not hardcode strengths — discover the configured set via `{action:status}`, and
+  never pass companion or model ids. The JSON has no `thread` field — the
+  companion manages thread continuity
   internally. Every `send` must include `cwd` as the absolute target repo or
   worktree path; the bridge rejects missing `cwd` instead of defaulting to the
   companion's own working directory. For `send`, spawn with
@@ -162,6 +171,8 @@ Initial call to `mcp__agent-bridge__agent_send`:
 {
   "task":          "<from input>",
   "target":        "<from input, else omit for bridge default>",
+  "strength":      "<from input, else omit>",
+  "profile":       "<from input, else omit>",
   "mode":          "<from input, else \"EXECUTE\">",
   "template":      "<from input, else \"general\">",
   "template_args": <from input, else omit>,

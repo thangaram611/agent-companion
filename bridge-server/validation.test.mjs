@@ -110,6 +110,35 @@ test('send validation covers defaults, modes, unknown fields, thread names, cwd,
   assert.throws(() => validateAgentArgs(sendArgs({ template_args: [] })), /template_args must be a plain object/);
 });
 
+test('send validation handles strength/profile open-string siblings with mutual exclusion', () => {
+  // Defaults to null when absent.
+  const basic = validateAgentArgs(sendArgs());
+  assert.equal(basic.profile, null);
+  assert.equal(basic.strength, null);
+
+  // strength accepted (case/space normalized) against the closed vocabulary.
+  assert.equal(validateAgentArgs(sendArgs({ strength: 'Reviewer' })).strength, 'reviewer');
+  for (const s of ['reviewer', 'web_researcher', 'planner', 'fast_executor']) {
+    assert.equal(validateAgentArgs(sendArgs({ strength: s })).strength, s);
+  }
+  assert.throws(() => validateAgentArgs(sendArgs({ strength: 'archivist' })), /strength must be one of/);
+  assert.throws(() => validateAgentArgs(sendArgs({ strength: 42 })), /strength must be a string/);
+
+  // profile shape-checked only (existence deferred to the server registry).
+  assert.equal(validateAgentArgs(sendArgs({ profile: 'cop-review' })).profile, 'cop-review');
+  assert.throws(() => validateAgentArgs(sendArgs({ profile: 'Cop-Review' })), /profile must match/);
+  assert.throws(() => validateAgentArgs(sendArgs({ profile: 'a/b' })), /profile must match/);
+
+  // Mutual exclusion of {profile, strength}; an explicit target may co-exist.
+  assert.throws(() => validateAgentArgs(sendArgs({ profile: 'cop-review', strength: 'reviewer' })), /pass only one of profile or strength/);
+  const refine = validateAgentArgs(sendArgs({ strength: 'reviewer', target: 'copilot' }));
+  assert.equal(refine.strength, 'reviewer');
+  assert.equal(refine.target, 'copilot');
+
+  // MCP boundary still rejects unknown keys.
+  assert.throws(() => validateAgentArgs(sendArgs({ strengths: 'reviewer' })), /unknown field "strengths"/);
+});
+
 test('plan_review validates plan path existence, canonicalization, latest resolution, focus, and symlink escape', () => {
   assert.throws(() => validateAgentArgs({ action: 'send', template: 'plan_review' }),
     /requires template_args\.plan_path/);

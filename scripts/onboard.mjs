@@ -29,12 +29,16 @@ import {
   inspectTarget,
   inspectTargets,
   targetReadinessSummary,
+  inspectProfiles,
+  profileReadinessSummary,
 } from '../lib/target-diagnostics.mjs';
-import { writeDefaultTarget, readDefaultTarget } from '../lib/state.mjs';
+import { writeDefaultTarget, readDefaultTarget, writeProfiles, isModelAllowedFor } from '../lib/state.mjs';
 import { buildDoctorReport, renderDoctorReport } from '../lib/doctor.mjs';
+import { loadProfiles, VALID_STRENGTHS } from '../lib/profile-registry.mjs';
 
 const VALID_HOSTS = new Set(['claude', 'codex', 'both']);
 const VALID_TARGET_OPTS = new Set([...TARGET_IDS, 'auto', 'none']);
+const PROFILE_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 export function parseArgs(argv) {
   const opts = {
@@ -47,6 +51,15 @@ export function parseArgs(argv) {
     listTargets: false,
     doctor: false,
     noTargetCheck: false,
+    // Strength-routed profile authoring.
+    listProfiles: false,
+    defineProfile: undefined,
+    companion: undefined,
+    model: undefined,
+    adapter: undefined,
+    strength: undefined, // CSV → array
+    assignStrength: undefined,
+    setDefaultProfile: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -62,6 +75,14 @@ export function parseArgs(argv) {
       case '--list-targets': opts.listTargets = true; break;
       case '--doctor': opts.doctor = true; break;
       case '--no-target-check': opts.noTargetCheck = true; break;
+      case '--list-profiles': opts.listProfiles = true; break;
+      case '--define-profile': opts.defineProfile = String(valueOf(inline) || '').trim(); break;
+      case '--companion': opts.companion = String(valueOf(inline) || '').trim().toLowerCase(); break;
+      case '--model': opts.model = String(valueOf(inline) || '').trim(); break;
+      case '--adapter': opts.adapter = String(valueOf(inline) || '').trim().toLowerCase(); break;
+      case '--strength': opts.strength = String(valueOf(inline) || '').split(',').map((s) => s.trim()).filter(Boolean); break;
+      case '--assign-strength': opts.assignStrength = String(valueOf(inline) || '').trim(); break;
+      case '--set-default-profile': opts.setDefaultProfile = String(valueOf(inline) || '').trim(); break;
       case '-h': case '--help': opts.help = true; break;
       default: opts.unknown = a; break;
     }
@@ -108,6 +129,100 @@ export function planOnboard({ options, targets }) {
   return { kind: 'ask', candidates: readyIds };
 }
 
+// Pure profile planner: validate a profile definition against the existing set
+// without IO. Returns { kind:'ok', profile } or { kind:'error', code, message }.
+// Persistence (writeProfiles) is the caller's job. OpenCode per-profile models
+// are accepted — the worker model plumbing is committed-regression-verified for
+// both the cli and server adapters.
+export function planProfile({ id, companion, model = null, strengths = [], adapter = null, existing = [] }) {
+  const cleanId = String(id || '').trim();
+  if (!PROFILE_ID_RE.test(cleanId)) {
+    return { kind: 'error', code: 'bad_id', message: `profile id "${id}" must match ${PROFILE_ID_RE}` };
+  }
+  if (existing.some((p) => p.id === cleanId)) {
+    return { kind: 'error', code: 'duplicate_id', message: `profile "${cleanId}" already exists` };
+  }
+  const comp = String(companion || '').trim().toLowerCase();
+  if (!TARGET_IDS.has(comp)) {
+    return { kind: 'error', code: 'bad_companion', message: `--companion must be one of ${[...TARGET_IDS].join(', ')} (got "${companion}")` };
+  }
+  let adp = adapter ? String(adapter).trim().toLowerCase() : null;
+  if (adp) {
+    if (!['cli', 'server'].includes(adp)) return { kind: 'error', code: 'bad_adapter', message: '--adapter must be cli or server' };
+    if (comp !== 'opencode') return { kind: 'error', code: 'bad_adapter', message: '--adapter is opencode-only' };
+  }
+  const mdl = model ? String(model).trim() : null;
+  if (mdl && !isModelAllowedFor(comp, mdl)) {
+    return {
+      kind: 'error', code: 'bad_model',
+      message: comp === 'copilot'
+        ? `model "${mdl}" is not a documented Copilot model`
+        : `model "${mdl}" must be provider/model form (e.g. anthropic/claude-sonnet-4.6)`,
+    };
+  }
+  const strs = [];
+  for (const s of strengths) {
+    const label = String(s || '').trim().toLowerCase();
+    if (!label) continue;
+    if (!VALID_STRENGTHS.has(label)) {
+      return { kind: 'error', code: 'bad_strength', message: `strength "${s}" must be one of ${[...VALID_STRENGTHS].join(', ')}` };
+    }
+    if (!strs.includes(label)) strs.push(label);
+  }
+  const profile = { id: cleanId, companion: comp, ...(mdl ? { model: mdl } : {}), ...(adp ? { adapter: adp } : {}), strengths: strs };
+  return { kind: 'ok', profile };
+}
+
+// Pure strength-assignment planner — the deterministic mirror of the server's
+// resolveStrength ambiguity rule. A strength already claimed by another profile
+// is ambiguous UNLESS a defaultProfile tiebreak is one of the claimants (and so
+// actually claims the strength).
+export function planStrengthAssignment({ profileId, strength, existing = [], defaultProfile = null }) {
+  const label = String(strength || '').trim().toLowerCase();
+  if (!VALID_STRENGTHS.has(label)) {
+    return { kind: 'error', code: 'bad_strength', message: `strength "${strength}" must be one of ${[...VALID_STRENGTHS].join(', ')}` };
+  }
+  if (!existing.some((p) => p.id === profileId)) {
+    return { kind: 'error', code: 'unknown_profile', message: `profile "${profileId}" does not exist` };
+  }
+  const otherClaimants = existing.filter((p) => p.id !== profileId && (p.strengths || []).includes(label));
+  if (otherClaimants.length === 0) return { kind: 'ok', resolved: true };
+  const claimSet = new Set([profileId, ...otherClaimants.map((p) => p.id)]);
+  if (defaultProfile && claimSet.has(defaultProfile)) {
+    return { kind: 'ok', resolved: true, tiebreak: defaultProfile };
+  }
+  return {
+    kind: 'conflict', code: 'strength_ambiguous',
+    candidates: [...claimSet],
+    message: `strength "${label}" is already claimed by ${otherClaimants.map((p) => p.id).join(', ')}; set a defaultProfile tiebreak among the claimants (--set-default-profile <id>)`,
+  };
+}
+
+// Reconstruct the raw authoring doc (profiles[] + defaultProfile) from the
+// single-producer registry. The synthesized legacy profile is excluded; a
+// file-level defaultProfile that still points to a live profile is carried
+// forward.
+function loadAuthoringState(env) {
+  const reg = loadProfiles({ env });
+  const profiles = reg.synthesized
+    ? []
+    : reg.profiles.filter((p) => !p.synthesized).map((p) => ({
+        id: p.id, companion: p.companion,
+        ...(p.model ? { model: p.model } : {}),
+        ...(p.adapter ? { adapter: p.adapter } : {}),
+        strengths: p.strengths.slice(),
+      }));
+  const dp = (!reg.synthesized && reg.defaultProfile?.value && reg.byId.has(reg.defaultProfile.value))
+    ? reg.defaultProfile.value : null;
+  return { profiles, defaultProfile: dp };
+}
+
+function persistProfiles(profiles, defaultProfile) {
+  const doc = { profiles };
+  if (defaultProfile) doc.defaultProfile = defaultProfile;
+  writeProfiles(doc);
+}
+
 function printTargetReport(report, { json } = {}) {
   if (json) return; // JSON mode prints the whole object once at the end.
   console.log(`\n${report.displayName} — ${targetReadinessSummary(report)}`);
@@ -143,12 +258,89 @@ function runSmoke(id, env) {
   }
 }
 
+// Profile authoring CLI. Returns an exit code; never exits the process itself
+// (so it stays unit-testable). Pure planners do the validation; this wires them
+// to writeProfiles. Only ids / model names / strength labels are persisted —
+// never secrets.
+export function runProfileCommand(options, env = process.env, io = console) {
+  if (options.listProfiles) {
+    const profiles = inspectProfiles({ env });
+    if (options.json) { io.log(JSON.stringify({ profiles, defaultProfile: loadAuthoringState(env).defaultProfile }, null, 2)); return 0; }
+    if (profiles.length === 0) { io.log('no profiles configured (profiles.json absent or empty).'); return 0; }
+    const { defaultProfile } = loadAuthoringState(env);
+    io.log(`default profile: ${defaultProfile || 'unset'}`);
+    for (const p of profiles) io.log(`  - ${profileReadinessSummary(p)}${p.strengths.length ? ` [${p.strengths.join(', ')}]` : ''}`);
+    return 0;
+  }
+
+  if (options.defineProfile !== undefined) {
+    const { profiles, defaultProfile } = loadAuthoringState(env);
+    const plan = planProfile({
+      id: options.defineProfile, companion: options.companion, model: options.model,
+      adapter: options.adapter, strengths: options.strength || [], existing: profiles,
+    });
+    if (plan.kind === 'error') { io.error(`[FAIL] ${plan.message}`); return 2; }
+    // Mirror the server's ambiguity rule for each declared strength.
+    for (const s of plan.profile.strengths) {
+      const sa = planStrengthAssignment({ profileId: plan.profile.id, strength: s, existing: [...profiles, plan.profile], defaultProfile });
+      if (sa.kind === 'conflict') {
+        if (options.yes) { io.error(`[FAIL] ${sa.message}`); return 2; }
+        io.error(`[WARN] ${sa.message}`);
+      }
+    }
+    persistProfiles([...profiles, plan.profile], defaultProfile);
+    io.log(`[OK] defined profile "${plan.profile.id}" → ${plan.profile.companion}${plan.profile.model ? ` (${plan.profile.model})` : ''}${plan.profile.strengths.length ? ` [${plan.profile.strengths.join(', ')}]` : ''}`);
+    return 0;
+  }
+
+  if (options.assignStrength !== undefined) {
+    const { profiles, defaultProfile } = loadAuthoringState(env);
+    const target = profiles.find((p) => p.id === options.assignStrength);
+    if (!target) { io.error(`[FAIL] profile "${options.assignStrength}" does not exist`); return 2; }
+    const labels = options.strength || [];
+    if (labels.length === 0) { io.error('[FAIL] --assign-strength requires --strength <labels>'); return 2; }
+    for (const s of labels) {
+      const sa = planStrengthAssignment({ profileId: target.id, strength: s, existing: profiles, defaultProfile });
+      if (sa.kind === 'error') { io.error(`[FAIL] ${sa.message}`); return 2; }
+      if (sa.kind === 'conflict') {
+        if (options.yes) { io.error(`[FAIL] ${sa.message}`); return 2; }
+        io.error(`[WARN] ${sa.message}`);
+      }
+      const label = String(s).trim().toLowerCase();
+      if (!target.strengths.includes(label)) target.strengths.push(label);
+    }
+    persistProfiles(profiles, defaultProfile);
+    io.log(`[OK] assigned [${labels.join(', ')}] to "${target.id}"`);
+    return 0;
+  }
+
+  if (options.setDefaultProfile !== undefined) {
+    const { profiles } = loadAuthoringState(env);
+    if (!profiles.some((p) => p.id === options.setDefaultProfile)) {
+      io.error(`[FAIL] profile "${options.setDefaultProfile}" does not exist — define it first`);
+      return 2;
+    }
+    persistProfiles(profiles, options.setDefaultProfile);
+    io.log(`[OK] default profile set to "${options.setDefaultProfile}"`);
+    return 0;
+  }
+
+  return null; // not a profile command
+}
+
 const HELP = `agent-companion onboarding
 
   node scripts/onboard.mjs --target opencode|copilot|auto|none [--host claude|codex|both]
                            [--set-default] [--yes] [--json] [--smoke] [--no-target-check]
   node scripts/onboard.mjs --list-targets [--json]
   node scripts/onboard.mjs --doctor [--json]
+
+  # Strength-routed companion profiles (authoring; ids/models/labels only, no secrets):
+  node scripts/onboard.mjs --list-profiles [--json]
+  node scripts/onboard.mjs --define-profile <id> --companion opencode|copilot \\
+                           [--model <m>] [--adapter cli|server] [--strength reviewer,planner] [--yes]
+  node scripts/onboard.mjs --assign-strength <id> --strength <labels> [--yes]
+  node scripts/onboard.mjs --set-default-profile <id>
 
 Attach your companion. Supported now: opencode and copilot. Onboarding never
 asks for or stores provider secrets — authenticate with the vendor tools.`;
@@ -167,6 +359,11 @@ async function main() {
     console.log(options.json ? JSON.stringify(report, null, 2) : renderDoctorReport(report));
     process.exit(report.ok ? 0 : 1);
   }
+
+  // Strength-routed profile authoring subcommands. runProfileCommand returns an
+  // exit code, or null when no profile flag was passed.
+  const profileExit = runProfileCommand(options, env);
+  if (profileExit !== null) process.exit(profileExit);
 
   const targets = inspectTargets({ env });
 

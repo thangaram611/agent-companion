@@ -51,14 +51,18 @@ export function openCodeServerActive(env = process.env) {
 }
 
 // Split a `provider/model` string into the server prompt API's
-// { providerID, modelID } shape. Returns null when unset (server uses its own
-// configured default model).
+// { providerID, modelID } shape. Returns null when empty/malformed.
+export function parseOpenCodeModel(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const slash = s.indexOf('/');
+  if (slash <= 0 || slash === s.length - 1) return null;
+  return { providerID: s.slice(0, slash), modelID: s.slice(slash + 1) };
+}
+
+// The env-default model (server uses its own configured default when unset).
 export function resolveOpenCodeServerModel(env = process.env) {
-  const raw = String(env.AGENT_COMPANION_OPENCODE_MODEL || '').trim();
-  if (!raw) return null;
-  const slash = raw.indexOf('/');
-  if (slash <= 0 || slash === raw.length - 1) return null;
-  return { providerID: raw.slice(0, slash), modelID: raw.slice(slash + 1) };
+  return parseOpenCodeModel(env.AGENT_COMPANION_OPENCODE_MODEL);
 }
 
 export function openCodeServerRuntimeInfo(env = process.env) {

@@ -587,7 +587,7 @@ test('hydrateJobsFromLedger marks SDK in-flight prompts as non-resumable after r
   try {
     _resetForTest();
     jobs.clear();
-    state.writeThreadSid('thread-sdk-hydrate', 'sdk-session-1');
+    state.writeThreadSid('thread-sdk-hydrate', null, 'sdk-session-1');
     state.writeJob('j-sdk-hydrate', {
       jobId: 'j-sdk-hydrate', claudeSessionId: 'sid-sdk-hydrate',
       copilotSessionId: 'sdk-session-1', thread: 'thread-sdk-hydrate',
@@ -1072,6 +1072,49 @@ test('OpenCode server mode: send routes through the HTTP server and completes', 
     });
   } finally {
     for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-oc-srv') jobs.delete(id);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('REGRESSION OpenCode server model: a profile model reaches startOpenCodeServerPrompt body', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-oc-model';
+  let promptBody = null;
+  state.writeProfiles({ profiles: [
+    { id: 'oc-pin', companion: 'opencode', adapter: 'server', model: 'anthropic/claude-sonnet-4.6', strengths: ['web_researcher'] },
+  ] });
+  try {
+    await withOpenCodeServer({
+      fetchJson: async (url, opts = {}) => {
+        if (url.includes('/global/health')) return { ok: true, data: { healthy: true } };
+        if (url.endsWith('/session?directory=' + encodeURIComponent(TEST_CWD)) || (url.includes('/session?directory=') && opts.method === 'POST')) return { ok: true, data: { id: 'ses_model' } };
+        if (url.includes('/prompt_async')) { promptBody = opts.body; return { ok: true, data: {} }; }
+        return { ok: true, data: {} };
+      },
+      openEventStream: _ocSse([
+        _ocFrame({ type: 'message.part.updated', properties: { sessionID: 'ses_model', part: { id: 'p1', messageID: 'm1', type: 'text', text: 'done' } } }),
+        _ocFrame({ type: 'session.idle', properties: { sessionID: 'ses_model' } }),
+      ]),
+    }, async () => {
+      const send = parse(await dispatch({
+        action: 'send', profile: 'oc-pin', task: 'server-mode model', mode: 'EXECUTE',
+        template: 'general', cwd: TEST_CWD, host_session_id: 'sid-oc-model', parallel: 'never', max_wait_sec: 5,
+      }));
+      assert.equal(send.ok, true);
+      assert.equal(send.target, 'opencode');
+      parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-oc-model', max_wait_sec: 5 }));
+      // The per-profile model (not the env default) reaches the prompt body in
+      // the server prompt API's { providerID, modelID } shape.
+      assert.deepEqual(promptBody.model, { providerID: 'anthropic', modelID: 'claude-sonnet-4.6' });
+    });
+  } finally {
+    state.clearProfiles();
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-oc-model') jobs.delete(id);
     if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
     _resetForTest();
   }

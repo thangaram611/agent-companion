@@ -11,8 +11,9 @@ Agent Companion is organized around a harness + companion model:
 - **MCP middle:** one subagent-only MCP server with generic `agent_*` tools.
 - **Companion adapters inward:** OpenCode, Copilot, and future companions behind
   a small runtime boundary.
-- **Strength routing next:** future installs can expose strengths to the harness
-  while the bridge maps each strength to one configured companion profile.
+- **Strength routing:** installs can expose strengths to the harness while the
+  bridge maps each strength to one configured companion profile (see
+  `profiles.json` and `resolveRouting`).
 - **Harness isolation unchanged:** main Claude/main Codex never see the bridge
   tools directly.
 
@@ -22,8 +23,8 @@ Agent Companion is organized around a harness + companion model:
 | --- | --- | --- |
 | Harness | host | Parent coding-agent surface, currently Claude Code or Codex CLI. |
 | Companion | target | Downstream agent runtime, currently OpenCode or GitHub Copilot CLI. |
-| Companion profile | not implemented yet | A configured runtime/model instance, such as a Copilot model profile or OpenCode provider/model profile. |
-| Strength | not implemented yet | A public capability label such as `reviewer`, `web_researcher`, `planner`, or `fast_executor`. |
+| Companion profile | `profiles.json` entry | A configured runtime/model instance, such as a Copilot model profile or OpenCode provider/model profile. |
+| Strength | `agent_send({ strength })` | A public capability label such as `reviewer`, `web_researcher`, `planner`, or `fast_executor`. |
 
 The current public flags and schema keep `host` and `target` for compatibility:
 `setup.sh --host claude|codex|both` selects harness surfaces, and
@@ -83,57 +84,60 @@ job records the adapter it started with (`opencodeAdapter`), and per-job
 `reply_available` / `resume_available` flags on the status response report what
 that specific job can do — independent of the current env.
 
-## Current Routing Contract
+## Routing Contract
 
-Routing is deliberately one-to-one in the MVP:
+`agent_send` is routed by the sole routing brain `resolveRouting({target,
+profile, strength})` (`bridge-server/server.mjs`). A harness picks **at most one
+of** `profile` or `strength`; an explicit `target` may co-exist as a refinement.
 
-1. A harness asks the `agent-companion` subagent to send work.
-2. The bridge resolves exactly one companion target from the explicit `target`
-   field or the configured default target.
+1. A harness asks the `agent-companion` subagent to send work, naming a
+   **strength** (preferred), a **profile** id, or a bare `target`.
+2. `resolveRouting` resolves exactly one profile from `profiles.json`, applies a
+   pre-spawn capability gate (model/adapter validity), and returns the backing
+   `{companion, model, adapter}`.
 3. The resolved adapter owns that job until terminal status.
 
-This contract keeps the public surface small while the project proves the
-harness isolation, digest, wait, cancel, and onboarding mechanics.
+No silent fallback: an unresolvable or ambiguous request returns an explicit
+`ok:false` envelope that echoes the candidate ids (`STRENGTH_UNCONFIGURED`,
+`STRENGTH_AMBIGUOUS`, `PROFILE_UNKNOWN`, `PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`,
+`CAPABILITY_UNAVAILABLE`), mirroring the existing `TARGET_UNCONFIGURED` posture.
 
-## Future Strength Router
+When no `profiles.json` exists, the bridge synthesizes a single degenerate
+profile from `default-target` / `default-model`, so a legacy one-to-one install
+routes byte-identically (same job object, same `<thread>.sid` filename).
 
-The next routing shape is one-to-many. Users should be able to configure
-multiple companion profiles, including multiple model profiles from the same
-runtime, then assign strengths to those profiles. Harnesses should see only the
-strength names and should not need to know whether a strength is backed by
-Copilot, OpenCode, another companion, or a specific model behind one of them.
+## Strength Router
 
-Illustrative future profile shape:
+Users configure multiple companion profiles — including multiple model profiles
+from the same runtime — in `$BASE_DIR/profiles.json`, and assign strengths to
+those profiles. Harnesses see only the strength names (via `agent_status`); they
+never need to know whether a strength is backed by Copilot, OpenCode, another
+companion, or a specific model behind one of them.
 
 ```jsonc
 {
   "profiles": [
-    {
-      "id": "copilot_claude_sonnet_4_6",
-      "companion": "copilot",
-      "model": "claude-sonnet-4.6",
-      "strengths": ["web_researcher"]
-    },
-    {
-      "id": "copilot_gpt_5_4",
-      "companion": "copilot",
-      "model": "gpt-5.4",
-      "strengths": ["reviewer"]
-    },
-    {
-      "id": "opencode_provider_model",
-      "companion": "opencode",
-      "model": "provider/model",
-      "strengths": ["fast_executor"]
-    }
-  ]
+    { "id": "cop-review",  "companion": "copilot",  "model": "claude-sonnet-4.6",            "strengths": ["reviewer", "planner"] },
+    { "id": "cop-fast",    "companion": "copilot",  "model": "claude-haiku-4.5",             "strengths": ["fast_executor"] },
+    { "id": "oc-research", "companion": "opencode", "model": "anthropic/claude-sonnet-4.6", "adapter": "server", "strengths": ["web_researcher"] }
+  ],
+  "defaultProfile": "cop-review"
 }
 ```
 
-This is roadmap only. The current bridge accepts `target=opencode|copilot`,
-not profile ids or strengths. A future router should be capability-driven and
-should avoid assuming every companion supports reply, resume, parallelism,
-streaming, or model selection.
+A profile **inherits** its companion's capabilities (it never re-declares
+capability booleans); model is a per-prompt argument, so two profiles differing
+only by model reuse the same detached server. Multiple profiles may declare the
+same strength — the top-level `defaultProfile` breaks the tie **only if it itself
+declares that strength**, otherwise the send returns `STRENGTH_AMBIGUOUS`.
+Authoring is non-interactive: `node scripts/onboard.mjs --define-profile <id>
+--companion <c> [--model <m>] [--adapter cli|server] [--strength <labels>]`,
+`--assign-strength`, `--set-default-profile`, and `--list-profiles`. Only ids,
+model names, and strength labels are persisted — never secrets.
+
+The router is capability-driven: a strength label never implies a capability the
+backing profile lacks, and the design avoids assuming every companion supports
+reply, resume, parallelism, streaming, or model selection.
 
 ## Companion Adapter Contract
 

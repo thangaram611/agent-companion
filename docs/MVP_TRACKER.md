@@ -97,12 +97,13 @@ primary companion:
 
 ## MVP Limitations
 
-- Current routing is one-to-one: one `agent_send` resolves to one target
-  (`opencode` or `copilot`), not a strength or profile.
-- Multiple companion profiles are not implemented yet.
-- Multiple model profiles inside the same companion are not implemented yet.
-- Strength labels such as `reviewer`, `web_researcher`, `planner`, or
-  `fast_executor` are roadmap vocabulary, not current MCP fields.
+- Routing supports strength/profile/target: `agent_send` accepts `strength`
+  (preferred) or `profile` beside `target`, resolved by `resolveRouting` against
+  `profiles.json` with no silent fallback. Multiple companion profiles and
+  multiple model profiles per companion are supported.
+- Strength labels `reviewer`, `web_researcher`, `planner`, and `fast_executor`
+  are live `agent_send` fields (open strings validated against the registry);
+  `STRENGTH_CAPABILITY_REQUIREMENTS` is wired but an empty no-op in v1.
 - OpenCode has two adapters selected by `OPENCODE_RUNTIME_ADAPTER`: `cli`
   (default, single-shot `opencode run`) and `server` (`opencode serve` HTTP).
 - OpenCode reply/re-steer and restart resume work in `server` mode only; in `cli`
@@ -128,16 +129,20 @@ primary companion:
      sandboxed `$HOME`, real config verified untouched). See
      [docs/RELEASE_READINESS.md](RELEASE_READINESS.md) "Smoke evidence".
 
-2. Strength-routed companion profiles:
-   - add a profile registry that can represent multiple profiles per companion.
-   - allow profiles to declare strengths such as `reviewer` or
-     `web_researcher`.
-   - teach onboarding/doctor/status to show configured strengths and profile
-     readiness.
-   - expose strengths to harnesses without requiring them to know companion or
-     model ids.
-   - route each send by explicit target/profile/strength with deterministic
-     conflict handling and no silent fallback.
+2. Strength-routed companion profiles — DONE (2026-06-23). Built per
+   [docs/STRENGTH_ROUTING_HANDOFF.md](STRENGTH_ROUTING_HANDOFF.md) across phases
+   P1–P5 with the committed regressions green:
+   - `lib/profile-registry.mjs` is the single producer of `profiles.json`
+     (`loadProfiles`), with a source-scanning single-producer guard test.
+   - `resolveRouting` in `bridge-server/server.mjs` is the sole SEND routing
+     brain: constraint-consistency precedence, six no-silent-fallback codes, and
+     a pre-spawn capability gate. Per-profile model reaches both the Copilot
+     daemon and both OpenCode adapters; Copilot `.sid` files are namespaced by
+     profile.
+   - doctor/status surface profile readiness and an id-free `strengths[]` view;
+     onboarding authors profiles via `--define-profile`/`--assign-strength`/
+     `--set-default-profile`/`--list-profiles` (ids/models/labels only).
+   - legacy installs route byte-identically via a synthesized default profile.
 
 3. OpenCode server/ACP adapter — DONE (2026-06-23, server mode):
    - `bridge-server/opencode-server-runtime.mjs` drives `opencode serve` over HTTP
@@ -163,13 +168,16 @@ primary companion:
 
 ```bash
 node --check bridge-server/server.mjs
+node --check bridge-server/validation.mjs
 node --check bridge-server/opencode-runtime.mjs
 node --check bridge-server/opencode-server-runtime.mjs
+node --check lib/profile-registry.mjs
 node --check lib/target-registry.mjs
 node --check lib/target-diagnostics.mjs
+node --check lib/doctor.mjs
 node --check scripts/onboard.mjs
 node --check lib/state.mjs
-node --test $(find bridge-server lib scripts hooks templates -name '*.test.mjs')
+node --test $(find bridge-server lib scripts hooks templates test -name '*.test.mjs')
 node scripts/validate-codex-release.mjs
 claude plugin validate .
 ```

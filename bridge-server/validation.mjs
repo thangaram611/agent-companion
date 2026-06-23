@@ -24,6 +24,9 @@ import { isAbsolute, join, sep as pathSep } from 'node:path';
 
 import { plansDir, detectHost } from '../lib/host.mjs';
 import { bridgeLogFile } from '../lib/runtime-paths.mjs';
+// Single-sourced from the registry — the validator imports ONLY the closed
+// strength set (never loadProfiles), so it stays socket/process/file-free.
+import { VALID_STRENGTHS } from '../lib/profile-registry.mjs';
 
 // --- Logger -----------------------------------------------------------------
 
@@ -85,7 +88,7 @@ export const DEFAULT_PARALLEL = 'auto';
 // .session_id directly in server.mjs's MCP handler — that path bypasses
 // the per-arg field entirely (host-injected, can't be spoofed by the agent).
 const ALLOWED_FIELDS = {
-  send:   new Set(['action', 'task', 'mode', 'template', 'template_args', 'cwd', 'thread', 'target', 'max_wait_sec', 'parallel', 'claude_session_id', 'host_session_id']),
+  send:   new Set(['action', 'task', 'mode', 'template', 'template_args', 'cwd', 'thread', 'target', 'profile', 'strength', 'max_wait_sec', 'parallel', 'claude_session_id', 'host_session_id']),
   wait:   new Set(['action', 'job_id', 'max_wait_sec', 'claude_session_id', 'host_session_id']),
   status: new Set(['action', 'job_id', 'verbose', 'diagnostics', 'claude_session_id', 'host_session_id']),
   reply:  new Set(['action', 'job_id', 'message', 'claude_session_id', 'host_session_id']),
@@ -505,6 +508,34 @@ function validateSend(args) {
     throw new Error(`agent: target must be one of ${[...VALID_TARGETS].join('|')}, got "${args.target}"`);
   }
 
+  // Strength + profile are open-string siblings of target (not closed enums, so
+  // the per-install vocabulary never freezes into the public MCP contract).
+  // Structural checks only here: strength against the closed VALID_STRENGTHS
+  // vocabulary, profile against the id charset. Registry membership /
+  // existence / routing conflicts are resolved server-side (resolveRouting),
+  // which echoes candidates on failure. The cardinal rule enforced here is the
+  // strict mutual-exclusion of {profile, strength}; an explicit target MAY
+  // co-exist (resolved server-side → ROUTING_CONFLICT on disagreement).
+  let strength = null;
+  if (args.strength !== undefined && args.strength !== null && args.strength !== '') {
+    if (typeof args.strength !== 'string') throw new Error('agent: strength must be a string');
+    strength = args.strength.trim().toLowerCase();
+    if (!VALID_STRENGTHS.has(strength)) {
+      throw new Error(`agent: strength must be one of ${[...VALID_STRENGTHS].join('|')}, got "${args.strength}"`);
+    }
+  }
+  let profile = null;
+  if (args.profile !== undefined && args.profile !== null && args.profile !== '') {
+    if (typeof args.profile !== 'string') throw new Error('agent: profile must be a string');
+    profile = args.profile.trim();
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(profile)) {
+      throw new Error(`agent: profile must match [a-z0-9][a-z0-9._-]{0,63} (got "${args.profile}")`);
+    }
+  }
+  if (profile && strength) {
+    throw new Error('agent: pass only one of profile or strength');
+  }
+
   if (args.max_wait_sec !== undefined && typeof args.max_wait_sec !== 'number') {
     throw new Error('agent: max_wait_sec must be a number');
   }
@@ -526,6 +557,8 @@ function validateSend(args) {
     cwd: args.cwd,
     thread: args.thread || null,
     target: target || null,
+    profile: profile || null,
+    strength: strength || null,
     max_wait_sec: args.max_wait_sec,
     parallel,
     host_session_id: normalizeHostSid(args),

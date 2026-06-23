@@ -88,3 +88,14 @@ test('mcp_servers.agent-bridge declares the Codex-specific command, args, env, a
   assert.doesNotMatch(text, /CLAUDE_CODE_SESSION_ID/,
     'Codex template should not mention CLAUDE_CODE_SESSION_ID');
 });
+
+test('template documents strength/profile routing without hardcoding ids', () => {
+  // Wire payload doc lives in `description`; the build-the-JSON block lives in
+  // `developer_instructions`. Assert across the whole materialized template.
+  assert.match(text, /"strength":\s+"reviewer"/);
+  assert.match(text, /"profile":\s+"\.\.\."/);
+  assert.match(text, /"strength":\s+"<from input, else omit>"/);
+  assert.match(text, /discover the configured set via `\{action:status\}`/);
+  assert.match(text, /never pass companion or model ids/);
+  assert.doesNotMatch(text, /agent_route|agent_strength|agent_profile/);
+});
