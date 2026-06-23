@@ -50,8 +50,8 @@ test('top-level TOML fields stay before the first table and use an allowlisted m
   const match = topLevel.match(/^model\s*=\s*"([^"]+)"\s*$/m);
   assert.ok(match, 'model field present at top level');
   const state = await import('../lib/state.mjs');
-  assert.equal(state.isModelAllowed(match[1]), true,
-    `model ${match[1]} must be in ALLOWED_MODELS`);
+  assert.equal(state.isCodexAgentModelAllowed(match[1]), true,
+    `model ${match[1]} must be in CODEX_AGENT_MODELS`);
 
   const di = topLevel.match(/^developer_instructions\s*=\s*"""([\s\S]*?)"""/m);
   assert.ok(di, 'developer_instructions block extractable');

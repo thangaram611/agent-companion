@@ -355,7 +355,7 @@ export function validateAgentArgs(rawArgs) {
 }
 
 // Accept either input alias and normalize to a single internal value.
-// host_session_id is the host-neutral name introduced for the dual-host
+// host_session_id is the host-neutral name introduced for the dual-harness
 // rollout; claude_session_id remains accepted unchanged so existing Claude
 // callers (the Markdown subagent in templates/agent-companion.md) need
 // no code changes. If both are present they must agree — disagreement is

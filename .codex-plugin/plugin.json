@@ -1,7 +1,7 @@
 {
   "name": "agent-companion",
   "version": "0.0.1",
-  "description": "Agent delegation companion for Codex CLI. Spawns a subagent that owns a dedicated MCP bridge and delegates token-heavy coding tasks to your chosen agent target (OpenCode or Copilot) while keeping the parent context clean.",
+  "description": "Attach an OpenCode or Copilot companion to the Codex CLI harness. Agent Companion spawns a private subagent with a dedicated MCP bridge so token-heavy coding work leaves the parent context clean.",
   "author": {
     "name": "thangaram611",
     "email": "thangaram611@gmail.com",
@@ -22,8 +22,8 @@
   "hooks": "./hooks/hooks-codex.json",
   "interface": {
     "displayName": "Agent Companion",
-    "shortDescription": "Delegate large coding tasks to your chosen agent target.",
-    "longDescription": "Adds a Codex subagent that delegates implementation, review, and research work to your chosen agent target (OpenCode or Copilot) through a private MCP bridge, per-host runtime state, and completion drain hooks.",
+    "shortDescription": "Attach OpenCode or Copilot companions to Codex.",
+    "longDescription": "Adds a Codex subagent that delegates implementation, review, and research work to a chosen companion runtime, currently OpenCode or GitHub Copilot CLI, through a private MCP bridge, per-host runtime state, and completion drain hooks. The public direction is harness plus companion now, with future strength-routed companion profiles.",
     "developerName": "thangaram611",
     "category": "Engineering",
     "capabilities": [

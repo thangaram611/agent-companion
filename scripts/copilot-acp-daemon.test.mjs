@@ -60,7 +60,7 @@ function makeFakeConnection() {
     child: { exitCode: null, pid: 1, kill() {} },
     initialized: true,
     dead: false,
-    model: 'gpt-5.5',
+    model: 'claude-sonnet-4.6',
     isAlive() { return true; },
     sendPrompt(_sid, _text, _writeEvent) {
       return new Promise((resolve, reject) => {
@@ -82,7 +82,7 @@ function makeManager(sessionId = 'sid-A', cwd = '/tmp') {
   const manager = new SessionManager();
   const conn = makeFakeConnection();
   manager.connection = conn;
-  manager.sessions.set(sessionId, { cwd, model: 'gpt-5.5', promptCount: 0, createdAt: Date.now() });
+  manager.sessions.set(sessionId, { cwd, model: 'claude-sonnet-4.6', promptCount: 0, createdAt: Date.now() });
   const teardown = async () => {
     // Settle any dangling sendPrompt first so the daemon's `.then` handler
     // runs (it calls _resetInactivityTimer and writeEvent). We then drain
@@ -120,7 +120,7 @@ function patchAcpConnection(t) {
   AcpConnection.prototype.spawn = async function spawnForTest(cwd) {
     this.cwd = cwd;
     this.cwdReal = realpathSync(cwd);
-    this.model = 'gpt-5.5';
+    this.model = 'claude-sonnet-4.6';
     this.dead = false;
     this.child = {
       exitCode: null,
@@ -210,7 +210,7 @@ test('prompt-bg treats explicit cwd mismatch on a remembered session as a fresh 
 
   let startSessionCwd = null;
   let promptSessionId = null;
-  manager._startSessionUnlocked = async (cwd, model = 'gpt-5.5') => {
+  manager._startSessionUnlocked = async (cwd, model = 'claude-sonnet-4.6') => {
     startSessionCwd = cwd;
     manager.sessions.set('sid-new', { cwd, model, promptCount: 0, createdAt: Date.now() });
     return 'sid-new';

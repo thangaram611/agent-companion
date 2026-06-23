@@ -11,7 +11,7 @@
     {
       "name": "agent-companion",
       "source": "./",
-      "description": "Agent delegation companion — subagent + MCP bridge that delegates to OpenCode or Copilot."
+      "description": "Attach OpenCode or Copilot companions to Claude Code through a private subagent + MCP bridge."
     }
   ]
 }

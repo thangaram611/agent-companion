@@ -1,14 +1,17 @@
 # MVP Tracker
 
-Last updated: 2026-06-19
+Last updated: 2026-06-23
 
 ## MVP Definition
 
-Complete a generic delegation bridge that no longer requires Copilot as the primary target:
+Complete a generic delegation bridge that no longer requires Copilot as the
+primary companion:
 
 - Generic `agent_*` MCP tools are the only subagent surface.
-- Users bring their target; supported targets are OpenCode and Copilot.
-- Copilot keeps working as a first-class target adapter (no legacy MCP aliases).
+- Users bring their harness; supported harnesses are Claude Code and Codex CLI.
+- Users attach their companion; supported companions are OpenCode and Copilot.
+- Copilot keeps working as a first-class companion adapter (no legacy MCP
+  aliases).
 - Repo docs and tests make the current state and remaining work recoverable.
 
 ## Done
@@ -77,8 +80,29 @@ Complete a generic delegation bridge that no longer requires Copilot as the prim
   - [docs/ARCHITECTURE.md](ARCHITECTURE.md)
   - this tracker.
 
+- Public positioning and release-readiness alignment (this pass):
+  - README now leads with the harness + companion slogan and defines the product
+    vocabulary.
+  - Public docs distinguish today's one-to-one `target` routing from the future
+    one-to-many companion profile router.
+  - [docs/RELEASE_READINESS.md](RELEASE_READINESS.md) records source-backed
+    compatibility notes and public release gates.
+  - Claude and Codex plugin manifests now describe the supported harnesses and
+    companions consistently.
+  - `setup.sh` install copy maps `--host` to harness and `--target` to today's
+    companion selector without renaming stable flags.
+  - Copilot default-model fallback now uses a currently documented Copilot CLI
+    model (`claude-sonnet-4.6`), and Copilot model validation is separated from
+    the Codex subagent role model allow-list.
+
 ## MVP Limitations
 
+- Current routing is one-to-one: one `agent_send` resolves to one target
+  (`opencode` or `copilot`), not a strength or profile.
+- Multiple companion profiles are not implemented yet.
+- Multiple model profiles inside the same companion are not implemented yet.
+- Strength labels such as `reviewer`, `web_researcher`, `planner`, or
+  `fast_executor` are roadmap vocabulary, not current MCP fields.
 - OpenCode adapter is single-shot CLI mode, not OpenCode server/ACP mode.
 - OpenCode reply/re-steer is not supported yet.
 - OpenCode restart resume is not supported yet; persisted nonterminal OpenCode jobs are marked `unreachable` after bridge restart.
@@ -87,21 +111,32 @@ Complete a generic delegation bridge that no longer requires Copilot as the prim
 
 ## Next Backlog
 
-1. OpenCode server/ACP adapter:
-   - support in-flight reply/re-steer.
-   - support restart resume.
-   - stream events into richer digests.
-
-2. Additional target adapters:
-   - Goose first candidate for desktop/CLI/API plus MCP/ACP fit.
-   - Aider second candidate for git-native terminal workflows.
-   - Keep adapters capability-driven; do not assume reply/resume/parallel support.
-
-3. Release validation:
+1. Release validation:
    - run full Node test suite.
    - run Codex marketplace validation.
    - run Claude plugin validation.
    - manually smoke a real OpenCode install and a real Copilot install.
+
+2. Strength-routed companion profiles:
+   - add a profile registry that can represent multiple profiles per companion.
+   - allow profiles to declare strengths such as `reviewer` or
+     `web_researcher`.
+   - teach onboarding/doctor/status to show configured strengths and profile
+     readiness.
+   - expose strengths to harnesses without requiring them to know companion or
+     model ids.
+   - route each send by explicit target/profile/strength with deterministic
+     conflict handling and no silent fallback.
+
+3. OpenCode server/ACP adapter:
+   - support in-flight reply/re-steer.
+   - support restart resume.
+   - stream events into richer digests.
+
+4. Additional companion adapters:
+   - Goose first candidate for desktop/CLI/API plus MCP/ACP fit.
+   - Aider second candidate for git-native terminal workflows.
+   - Keep adapters capability-driven; do not assume reply/resume/parallel support.
 
 ## Validation Commands
 
@@ -113,4 +148,6 @@ node --check lib/target-diagnostics.mjs
 node --check scripts/onboard.mjs
 node --check lib/state.mjs
 node --test $(find bridge-server lib scripts hooks templates -name '*.test.mjs')
+node scripts/validate-codex-release.mjs
+claude plugin validate .
 ```
