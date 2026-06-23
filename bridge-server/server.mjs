@@ -72,7 +72,7 @@ import {
   loadProfiles,
   getProfile,
   resolveStrength,
-  resolveProfileCapabilities,
+  buildSynthesizedProfile,
   listProfilesPublic,
   flatStrengths,
   STRENGTH_CAPABILITY_REQUIREMENTS,
@@ -416,18 +416,6 @@ const UNCONFIGURED_SEND_ERROR =
   'no companion target configured and none passed. Pass target on agent_send, ' +
   'or set a default with `node scripts/onboard.mjs --target <id> --set-default`.';
 
-// Synthesize a degenerate profile for an explicit bare companion — the legacy
-// target-only semantics: copilot model from default-model, opencode model from
-// env, capabilities inherited. profileId is null downstream (legacy sid path).
-function synthProfileForCompanion(companion, env) {
-  const model = companion === 'copilot'
-    ? readDefaultModel().model
-    : (String(env.AGENT_COMPANION_OPENCODE_MODEL || '').trim() || null);
-  const prof = { id: '__default__', companion, model, strengths: [], adapter: null, synthesized: true };
-  prof.capabilities = resolveProfileCapabilities(prof, env);
-  return prof;
-}
-
 // STEP C — pre-spawn, statically-knowable capability gate. Only model + adapter
 // actually gate under v1 (STRENGTH_CAPABILITY_REQUIREMENTS is an empty no-op map).
 function capabilityGate(prof, env) {
@@ -484,7 +472,7 @@ function resolveBareTarget(load, t, env) {
     if (winner) return { ok: true, prof: winner };
     return { ok: false, code: 'PROFILE_AMBIGUOUS', error: `multiple profiles target companion "${t}" with no defaultProfile tiebreak`, candidates: matches.map((m) => m.id) };
   }
-  return { ok: true, prof: synthProfileForCompanion(t, env) };
+  return { ok: true, prof: buildSynthesizedProfile(t, env) };
 }
 
 // Zero explicit inputs: defaultProfile wins if it resolves; else the empty/
