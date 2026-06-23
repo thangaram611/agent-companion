@@ -27,8 +27,8 @@ import { readFileSync, existsSync } from 'node:fs';
 
 import { resolveOpenCodeBin, resolveOpenCodePermissionMode, resolveOpenCodeTimeoutMs } from './opencode-runtime.mjs';
 import { openCodeServerRegistryPath, writePrivateFile } from '../lib/runtime-paths.mjs';
+import { truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
 
-const MAX_SUMMARY_CHARS = 64 * 1024;
 const MAX_TRANSCRIPT_CHARS = 12_000;
 const SERVER_BOOT_TIMEOUT_MS = 15_000;
 const HEALTH_PROBE_TIMEOUT_MS = 2_000;
@@ -264,8 +264,8 @@ export function createTurnAccumulator(sessionId) {
     snapshot() {
       const snap = latestAssistantId ? snapshotMessage(latestAssistantId) : { text: '', thoughts: '', tools: [] };
       return {
-        message: truncate(snap.text, MAX_SUMMARY_CHARS),
-        thoughts: truncate(snap.thoughts, MAX_SUMMARY_CHARS),
+        message: truncateChars(snap.text, MAX_SUMMARY_CHARS),
+        thoughts: truncateChars(snap.thoughts, MAX_SUMMARY_CHARS),
         toolCalls: snap.tools.map((t) => ({ name: t.name, input: t.input })),
         error: messageError ? messageError.message : null,
       };
@@ -504,8 +504,8 @@ export async function loadOpenCodeTranscript({ baseUrl, sessionId, directory = n
     aborted: !!(err && /abort/i.test(err.name || err.type || '')),
     error: err ? (err.message || err.name || 'error') : null,
     summary: {
-      message: truncate(text, MAX_SUMMARY_CHARS),
-      thoughts: truncate(thoughts, MAX_SUMMARY_CHARS),
+      message: truncateChars(text, MAX_SUMMARY_CHARS),
+      thoughts: truncateChars(thoughts, MAX_SUMMARY_CHARS),
       toolCalls: tools,
       stopReason: 'idle',
       error: err ? (err.message || err.name || 'error') : null,
@@ -646,11 +646,6 @@ function finalize(acc, { status, error = null, stopReason }) {
 
 function emptySummary() {
   return { message: '', thoughts: '', toolCalls: [], stopReason: 'idle', error: null };
-}
-
-function truncate(s, n) {
-  const text = String(s || '');
-  return text.length > n ? `${text.slice(0, n)}\n\n[truncated ${text.length - n} chars]` : text;
 }
 
 export { MAX_TRANSCRIPT_CHARS };

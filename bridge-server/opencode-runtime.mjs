@@ -3,11 +3,11 @@ import { existsSync } from 'node:fs';
 
 import { digestPath } from '../lib/prompt-digest.mjs';
 import { writePrivateFile } from '../lib/runtime-paths.mjs';
+import { truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
 
 const running = new Map();
 const cancelRequested = new Set();
 const MAX_CAPTURE_BYTES = 256 * 1024;
-const MAX_SUMMARY_CHARS = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 40 * 60 * 1000;
 const DEFAULT_KILL_GRACE_MS = 5_000;
 
@@ -165,8 +165,8 @@ export function cancelOpenCodeRun(jobId, pid = null) {
 export function writeOpenCodeDigest(job, result = null) {
   const path = digestPath(job?.jobId);
   if (!path) return null;
-  const stdout = result?.stdout ? truncateBlock(result.stdout.trim(), 12_000) : '';
-  const stderr = result?.stderr ? truncateBlock(result.stderr.trim(), 4_000) : '';
+  const stdout = result?.stdout ? truncateChars(result.stdout.trim(), 12_000) : '';
+  const stderr = result?.stderr ? truncateChars(result.stderr.trim(), 4_000) : '';
   const summary = result?.summary?.message || '';
   const lines = [];
   lines.push(`# ${job?.target || 'opencode'} job ${job?.jobId || '(unknown)'} - digest`);
@@ -182,10 +182,10 @@ export function writeOpenCodeDigest(job, result = null) {
   if (job?.terminalAt) lines.push(`**Terminal:** ${new Date(job.terminalAt).toISOString()}`);
   lines.push('');
   if (job?.task) {
-    lines.push('## Task', '', truncateBlock(job.task, 1500), '');
+    lines.push('## Task', '', truncateChars(job.task, 1500), '');
   }
   if (summary) {
-    lines.push('## Final / partial assistant message', '', truncateBlock(summary, 12_000), '');
+    lines.push('## Final / partial assistant message', '', truncateChars(summary, 12_000), '');
   }
   if (stdout) {
     lines.push('## Raw stdout', '', '```text', stdout, '```', '');
@@ -210,7 +210,7 @@ function summarizeOpenCodeOutput(stdout, stderr, collected = null) {
       .filter((entry) => entry && typeof entry === 'object' && /tool/i.test(String(entry.type || entry.event || entry.kind || '')))
       .map((entry) => ({ input: entry.input || entry.args || {}, name: entry.name || entry.tool || entry.type || entry.event }));
   return {
-    message: truncateBlock(message, MAX_SUMMARY_CHARS),
+    message: truncateChars(message, MAX_SUMMARY_CHARS),
     thoughts: '',
     toolCalls,
     stopReason: parsed.length > 0 ? 'json' : 'text',
@@ -330,11 +330,6 @@ function collectMessageLike(value, out, { shallow = false } = {}) {
     }
     if (!shallow && child && typeof child === 'object') collectMessageLike(child, out);
   }
-}
-
-function truncateBlock(s, n) {
-  const text = String(s || '');
-  return text.length > n ? `${text.slice(0, n)}\n\n[truncated ${text.length - n} chars]` : text;
 }
 
 function appendCapped(current, chunk, maxBytes) {
