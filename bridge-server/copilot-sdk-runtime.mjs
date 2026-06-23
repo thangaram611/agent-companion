@@ -5,26 +5,22 @@
 // contract stable while we validate SDK parity behind COPILOT_RUNTIME_ADAPTER=sdk.
 
 import {
-  appendFileSync,
-  chmodSync,
   existsSync,
   readFileSync,
   realpathSync,
   statSync,
   unlinkSync,
-  writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
-import { promptEventsPath } from '../lib/runtime-paths.mjs';
+import { promptEventsPath, writePrivateFile, appendPrivateFile } from '../lib/runtime-paths.mjs';
 import {
   buildPromptInspection,
   coalesceTextChunks,
   parseJsonlEvents,
 } from '../lib/prompt-inspect.mjs';
 
-const PRIVATE_FILE_MODE = 0o600;
 const PROMPT_RETENTION_MS = 60 * 60 * 1000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 25 * 60 * 1000;
 const SDK_STOP_TIMEOUT_MS = 5 * 1000;
@@ -37,20 +33,6 @@ let manager = null;
 function promptTimeoutMs() {
   const configured = Number(process.env.COPILOT_SDK_PROMPT_TIMEOUT_MS);
   return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_PROMPT_TIMEOUT_MS;
-}
-
-function chmodPrivate(path) {
-  try { chmodSync(path, PRIVATE_FILE_MODE); } catch {}
-}
-
-function appendPrivateFile(path, content) {
-  appendFileSync(path, content, { encoding: 'utf8', mode: PRIVATE_FILE_MODE });
-  chmodPrivate(path);
-}
-
-function writePrivateFile(path, content) {
-  writeFileSync(path, content, { encoding: 'utf8', mode: PRIVATE_FILE_MODE });
-  chmodPrivate(path);
 }
 
 function requireAbsoluteDirectoryCwd(cwd, label = 'cwd') {

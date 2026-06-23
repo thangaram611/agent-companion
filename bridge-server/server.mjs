@@ -35,8 +35,8 @@ import {
   ListResourceTemplatesRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
-  appendFileSync, readFileSync, writeFileSync,
-  renameSync, existsSync, realpathSync, chmodSync, unlinkSync,
+  readFileSync,
+  renameSync, existsSync, realpathSync, unlinkSync,
   readdirSync, statSync,
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -78,7 +78,7 @@ import {
   STRENGTH_CAPABILITY_REQUIREMENTS,
 } from '../lib/profile-registry.mjs';
 import { sanitizeHostSessionId } from '../lib/host.mjs';
-import { queuePath, promptEventsPath, runtimeDir, bridgeLogFile, daemonLogFile, digestDir } from '../lib/runtime-paths.mjs';
+import { queuePath, promptEventsPath, runtimeDir, bridgeLogFile, daemonLogFile, digestDir, appendPrivateFile } from '../lib/runtime-paths.mjs';
 import { createReqId, withReq, logEvent } from '../lib/log.mjs';
 import { writeDigest, digestPath } from '../lib/prompt-digest.mjs';
 import { buildDoctorReport } from '../lib/doctor.mjs';
@@ -121,22 +121,6 @@ import {
 // without subprocesses.
 function getQueuePath() {
   return queuePath();
-}
-
-const PRIVATE_FILE_MODE = 0o600;
-
-function chmodPrivate(path) {
-  try { chmodSync(path, PRIVATE_FILE_MODE); } catch {}
-}
-
-function appendPrivateFile(path, content) {
-  appendFileSync(path, content, { encoding: 'utf8', mode: PRIVATE_FILE_MODE });
-  chmodPrivate(path);
-}
-
-function writePrivateFile(path, content) {
-  writeFileSync(path, content, { encoding: 'utf8', mode: PRIVATE_FILE_MODE });
-  chmodPrivate(path);
 }
 
 function appendQueueLines(path, lines) {

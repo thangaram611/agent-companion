@@ -1,11 +1,11 @@
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 
 import { digestPath } from '../lib/prompt-digest.mjs';
+import { writePrivateFile } from '../lib/runtime-paths.mjs';
 
 const running = new Map();
 const cancelRequested = new Set();
-const PRIVATE_FILE_MODE = 0o600;
 const MAX_CAPTURE_BYTES = 256 * 1024;
 const MAX_SUMMARY_CHARS = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 40 * 60 * 1000;
@@ -194,8 +194,7 @@ export function writeOpenCodeDigest(job, result = null) {
     lines.push('## Raw stderr', '', '```text', stderr, '```', '');
   }
   try {
-    writeFileSync(path, lines.join('\n'), { mode: PRIVATE_FILE_MODE });
-    try { chmodSync(path, PRIVATE_FILE_MODE); } catch {}
+    writePrivateFile(path, lines.join('\n'));
     return existsSync(path) ? path : null;
   } catch {
     return null;

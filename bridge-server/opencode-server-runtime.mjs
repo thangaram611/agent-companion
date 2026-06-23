@@ -23,12 +23,11 @@
 // that can be unit-tested with plain strings — no socket required.
 
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 
 import { resolveOpenCodeBin, resolveOpenCodePermissionMode, resolveOpenCodeTimeoutMs } from './opencode-runtime.mjs';
-import { openCodeServerRegistryPath } from '../lib/runtime-paths.mjs';
+import { openCodeServerRegistryPath, writePrivateFile } from '../lib/runtime-paths.mjs';
 
-const PRIVATE_FILE_MODE = 0o600;
 const MAX_SUMMARY_CHARS = 64 * 1024;
 const MAX_TRANSCRIPT_CHARS = 12_000;
 const SERVER_BOOT_TIMEOUT_MS = 15_000;
@@ -305,8 +304,7 @@ function readRegistry() {
 function writeRegistry(reg) {
   try {
     const path = openCodeServerRegistryPath();
-    writeFileSync(path, JSON.stringify(reg, null, 2), { mode: PRIVATE_FILE_MODE });
-    try { chmodSync(path, PRIVATE_FILE_MODE); } catch {}
+    writePrivateFile(path, JSON.stringify(reg, null, 2));
   } catch { /* registry is best-effort */ }
 }
 

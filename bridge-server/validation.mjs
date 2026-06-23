@@ -18,12 +18,11 @@ import {
   writeFileSync,
   existsSync,
   renameSync,
-  chmodSync,
 } from 'node:fs';
 import { isAbsolute, join, sep as pathSep } from 'node:path';
 
 import { plansDir, detectHost } from '../lib/host.mjs';
-import { bridgeLogFile } from '../lib/runtime-paths.mjs';
+import { bridgeLogFile, PRIVATE_FILE_MODE, chmodPrivate } from '../lib/runtime-paths.mjs';
 // Single-sourced from the registry — the validator imports ONLY the closed
 // strength set (never loadProfiles), so it stays socket/process/file-free.
 import { VALID_STRENGTHS } from '../lib/profile-registry.mjs';
@@ -31,14 +30,9 @@ import { VALID_STRENGTHS } from '../lib/profile-registry.mjs';
 // --- Logger -----------------------------------------------------------------
 
 export const BRIDGE_LOG_MAX_BYTES = 1024 * 1024;
-const PRIVATE_FILE_MODE = 0o600;
 
 export function getBridgeLogFile() {
   return bridgeLogFile();
-}
-
-function chmodPrivate(path) {
-  try { chmodSync(path, PRIVATE_FILE_MODE); } catch {}
 }
 
 export function log(level, ...args) {
