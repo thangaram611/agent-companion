@@ -590,4 +590,4 @@ Expected:
 - Should setup write `default-target` automatically when `--target` is passed, or require `--set-default`? Recommendation: write automatically for `setup.sh --target`, require `--set-default` for standalone diagnostic-only `onboard.mjs`.
 - Should OpenCode permissions be configured by generating a companion agent profile? Recommendation: not in the first onboarding pass; document permission config and keep dangerous auto-approval opt-in.
 - Should the bootstrap fallback remain `opencode` after target onboarding exists? Resolved: no. The implemented bridge removed the fallback and returns `TARGET_UNCONFIGURED` with onboarding guidance.
-- Should `setup.sh --target auto --yes` choose OpenCode if both are installed? Recommendation: no. Fail and ask for explicit target to preserve the "bring your target" posture.
+- Should `setup.sh --target auto --yes` choose OpenCode if both are installed? Recommendation: no. Fail and ask for explicit target to preserve the "attach your companion" posture.

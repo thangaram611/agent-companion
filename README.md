@@ -77,7 +77,7 @@ companion runtime boundary.
 
 ## Supported Companions
 
-![Agent Companion target matrix](assets/readme/target-matrix.png)
+![Agent Companion companion matrix](assets/readme/target-matrix.png)
 
 | Companion | Runtime | Send | Wait | Status | Cancel | Reply | Restart resume |
 | --- | --- | --- | --- | --- | --- | --- | --- |

@@ -67,8 +67,11 @@ GitHub Copilot CLI companion:
   prompts, and tool approval prompts:
   <https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/overview>.
 - Copilot CLI model selection is documented through `--model=MODEL` or
-  `COPILOT_MODEL`, with current examples including `claude-sonnet-4.6`,
-  `gpt-5.4`, and `gpt-5.3-codex`:
+  `COPILOT_MODEL`. The cited CLI reference enumerates the full supported-model
+  table — `claude-sonnet-4.6` (default), `claude-haiku-4.5`, `gpt-5.4`,
+  `gpt-5.3-codex`, `gemini-3.1-pro-preview`, `gemini-3.5-flash`,
+  `mai-code-1-flash`, and `auto` — which is the basis for the `ALLOWED_MODELS`
+  set in `lib/state.mjs`:
   <https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference>.
   Public docs and defaults should not advertise an undocumented Copilot model id.
 

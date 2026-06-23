@@ -1,6 +1,6 @@
 <svg width="3200" height="1520" viewBox="0 0 1600 760" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">Agent Companion target capability matrix</title>
-  <desc id="desc">A refined capability matrix comparing the OpenCode and Copilot CLI targets supported by Agent Companion.</desc>
+  <title id="title">Agent Companion companion capability matrix</title>
+  <desc id="desc">A refined capability matrix comparing the OpenCode and Copilot CLI companions supported by Agent Companion.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="760" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#07111F"/>
@@ -36,8 +36,8 @@
   <rect width="1600" height="760" fill="url(#glowBlue)"/>
   <rect width="1600" height="760" fill="url(#glowAmber)"/>
 
-  <text x="104" y="92" class="sans eyebrow">SUPPORTED TARGETS</text>
-  <text x="104" y="154" class="sans title">Bring your target</text>
+  <text x="104" y="92" class="sans eyebrow">SUPPORTED COMPANIONS</text>
+  <text x="104" y="154" class="sans title">Attach your companion</text>
   <text x="104" y="195" class="sans subtitle">OpenCode is the open/generic path. Copilot keeps resumable ACP sessions and fleet orchestration.</text>
 
   <g filter="url(#shadow)">

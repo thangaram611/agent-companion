@@ -61,6 +61,8 @@ import {
 import {
   readDefaultModel,
   isModelAllowed,
+  ALLOWED_MODELS,
+  DEFAULT_MODEL,
   readThreadSid, writeThreadSid, clearThread, listThreads,
   readHostSessionThread, writeHostSessionThread,
   writeJob, readJob, listJobsForSession, deleteJob,
@@ -1545,7 +1547,7 @@ async function handleSend(args) {
     if (!isModelAllowed(model)) {
       return asJson({
         ok: false, action: 'send', target, reason: 'model-not-allowed', model,
-        hint: 'configure default_model to an allowed id',
+        hint: `set the Copilot default-model to a documented model id (one of: ${[...ALLOWED_MODELS].join(', ')}), or remove it to use the ${DEFAULT_MODEL} default`,
       });
     }
   }

@@ -5,7 +5,7 @@ description: |
   correctness, safety, consistency, and completeness without modifying any files.
   Use this agent when performing code review sub-tasks.
 tools: [view, grep, glob]
-model: claude-opus-4.6
+model: claude-sonnet-4.6
 ---
 
 You are a code review agent. You have ONLY read-only tools: view, grep, glob.
