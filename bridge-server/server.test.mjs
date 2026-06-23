@@ -60,6 +60,7 @@ async function withDaemonStubs(stubs, body) {
 function terminalJob(jobId, status, extra = {}) {
   return {
     jobId,
+    target: 'copilot',
     status,
     task: 'X',
     mode: 'EXECUTE',
@@ -127,7 +128,7 @@ test('server imports safely and dispatch handles the public boundary errors/stat
     assert.match(parse(await mod.dispatch({ action: 'cancel', job_id: 'no-such' })).error, /unknown job_id/);
 
     assert.match(parse(await mod.dispatch({ action: 'reply', job_id: 'nonexistent-job', message: 'hi' })).error, /unknown job_id/);
-    mod.jobs.set('job-no-prompt', { jobId: 'job-no-prompt', status: 'starting', startedAt: Date.now() });
+    mod.jobs.set('job-no-prompt', { jobId: 'job-no-prompt', target: 'copilot', status: 'starting', startedAt: Date.now() });
     assert.match(parse(await mod.dispatch({ action: 'reply', job_id: 'job-no-prompt', message: 'hi' })).error, /no prompt yet/);
     mod.jobs.set('job-done', terminalJob('job-done', 'completed', { promptId: 'p1' }));
     assert.match(parse(await mod.dispatch({ action: 'reply', job_id: 'job-done', message: 'hi' })).error, /already completed/);
@@ -344,7 +345,7 @@ test('still-running and terminal wait responses surface session_reborn and reatt
   const { jobs } = mod;
 
   jobs.set('jr-still', {
-    jobId: 'jr-still', status: 'running', task: 't', mode: 'EXECUTE',
+    jobId: 'jr-still', target: 'copilot', status: 'running', task: 't', mode: 'EXECUTE',
     promptId: 'p', sessionId: 's-new', thread: 'companion-x',
     startedAt: Date.now() - 5000,
     sessionReborn: true,
@@ -422,6 +423,7 @@ test('job ledger persistence, GC, and queue consumption protect resumed terminal
 
   jobs.set('j-gc', {
     jobId: 'j-gc',
+    target: 'copilot',
     claudeSessionId: 'sid-X',
     sessionId: 'cop-sid-1',
     status: 'completed',
@@ -448,7 +450,7 @@ test('job ledger persistence, GC, and queue consumption protect resumed terminal
     try {
       state.writeJob('j-rehydrated', {
         jobId: 'j-rehydrated', claudeSessionId: 'sid-rehydrate-A',
-        copilotSessionId: 'cop-rh', thread: null,
+        target: 'copilot', companionSessionId: 'cop-rh', thread: null,
         task: 'old task', mode: 'EXECUTE',
         status: 'completed',
         summary: { message: 'all done' },
@@ -496,9 +498,9 @@ test('host session adoption rejects placeholders/conflicts and accepts arg/meta/
   assert.equal(getHostSessionId(), 'arg-adopted-sid');
 
   _resetForTest();
-  const normalized = validateAgentArgs({ action: 'status', job_id: null, claude_session_id: 'legacy-claude-sid' });
+  const normalized = validateAgentArgs({ action: 'status', job_id: null, host_session_id: 'forwarded-host-sid' });
   await dispatch(normalized);
-  assert.equal(getHostSessionId(), 'legacy-claude-sid');
+  assert.equal(getHostSessionId(), 'forwarded-host-sid');
 
   _resetForTest();
   adoptHostSessionId('meta-sid-codex');
@@ -542,7 +544,7 @@ test('resolveSendThread and hydrateJobsFromLedger preserve host/thread continuit
   try {
     state.writeJob('j-mine-terminal', {
       jobId: 'j-mine-terminal', claudeSessionId: 'sid-hydrate-A',
-      copilotSessionId: 'cop-1', thread: 'thread-restored',
+      target: 'copilot', companionSessionId: 'cop-1', thread: 'thread-restored',
       status: 'completed', startedAt: 1000, terminalAt: 2000,
       retentionExpiresAt: Date.now() + 60_000,
     });
@@ -552,7 +554,7 @@ test('resolveSendThread and hydrateJobsFromLedger preserve host/thread continuit
     });
     state.writeJob('j-orphan', {
       jobId: 'j-orphan', claudeSessionId: 'sid-hydrate-A',
-      status: 'starting', startedAt: 1000,
+      target: 'copilot', status: 'starting', startedAt: 1000,
     });
 
     jobs.clear();
@@ -590,7 +592,7 @@ test('hydrateJobsFromLedger marks SDK in-flight prompts as non-resumable after r
     state.writeThreadSid('thread-sdk-hydrate', null, 'sdk-session-1');
     state.writeJob('j-sdk-hydrate', {
       jobId: 'j-sdk-hydrate', claudeSessionId: 'sid-sdk-hydrate',
-      copilotSessionId: 'sdk-session-1', thread: 'thread-sdk-hydrate',
+      target: 'copilot', companionSessionId: 'sdk-session-1', thread: 'thread-sdk-hydrate',
       task: 'sdk in-flight before restart', mode: 'EXECUTE',
       status: 'running', promptId: 'prompt-sdk-hydrate',
       startedAt: Date.now() - 5000,
@@ -619,6 +621,30 @@ test('hydrateJobsFromLedger marks SDK in-flight prompts as non-resumable after r
     else process.env.CLAUDE_CODE_SESSION_ID = oldS;
     if (oldAdapter === undefined) delete process.env.COPILOT_RUNTIME_ADAPTER;
     else process.env.COPILOT_RUNTIME_ADAPTER = oldAdapter;
+    _resetForTest();
+  }
+});
+
+test('hydrateJobsFromLedger skips a ledger entry with no target (no silent fallback)', async () => {
+  const mod = await bridge();
+  const { jobs, hydrateJobsFromLedger, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-no-target';
+  try {
+    _resetForTest();
+    jobs.clear();
+    state.writeJob('j-no-target', {
+      jobId: 'j-no-target', claudeSessionId: 'sid-no-target',
+      status: 'running', startedAt: 1000,
+    });
+    hydrateJobsFromLedger();
+    assert.equal(jobs.has('j-no-target'), false);
+  } finally {
+    state.deleteJob('j-no-target');
+    jobs.clear();
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
     _resetForTest();
   }
 });
@@ -674,6 +700,7 @@ test('handleSend returns immediately and reattaches to existing jobs without dae
 
     jobs.set('copilot-existing-1', {
       jobId: 'copilot-existing-1',
+      target: 'copilot',
       claudeSessionId: 'sid-send',
       thread: 'thread-reattach',
       cwd: TEST_CWD,
@@ -705,6 +732,7 @@ test('handleSend returns immediately and reattaches to existing jobs without dae
 
     jobs.set('copilot-existing-mismatch', {
       jobId: 'copilot-existing-mismatch',
+      target: 'copilot',
       claudeSessionId: 'sid-send',
       thread: 'thread-cwd-mismatch',
       cwd: null,
@@ -735,6 +763,7 @@ test('handleSend returns immediately and reattaches to existing jobs without dae
 
     jobs.set('copilot-existing-2', {
       jobId: 'copilot-existing-2',
+      target: 'copilot',
       claudeSessionId: 'sid-send',
       thread: 'thread-terminal',
       cwd: TEST_CWD,
@@ -1455,6 +1484,7 @@ test('handleReply rebinds a running job to the replacement prompt and watcher re
   process.env.CLAUDE_CODE_SESSION_ID = 'sid-reply-rebind';
   jobs.set('copilot-reply-1', {
     jobId: 'copilot-reply-1',
+    target: 'copilot',
     reqId: 'req-reply-1',
     claudeSessionId: 'sid-reply-rebind',
     thread: 'thread-reply-1',
@@ -1522,4 +1552,61 @@ test('handleReply rebinds a running job to the replacement prompt and watcher re
     if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
     else process.env.CLAUDE_CODE_SESSION_ID = oldS;
   }
+});
+
+test('handleReply preserves fleet on the reply terminal notification (regression)', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-reply-fleet';
+  await withQueue(async (queueFile) => {
+    jobs.set('copilot-reply-fleet', {
+      jobId: 'copilot-reply-fleet',
+      target: 'copilot',
+      reqId: 'req-reply-fleet',
+      claudeSessionId: 'sid-reply-fleet',
+      thread: 'thread-reply-fleet',
+      task: 'original task',
+      mode: 'EXECUTE',
+      template: 'general',
+      parallel: 'always',
+      fleet: true,
+      status: 'running',
+      promptId: 'prompt-old',
+      sessionId: 'session-reply-fleet',
+      startedAt: Date.now() - 1000,
+      inspectAvailable: true,
+    });
+    try {
+      await withDaemonStubs(
+        {
+          sendToSocket: async (msg) => {
+            if (msg.command === 'reply') {
+              return { ok: true, data: { ok: true, original_prompt_id: 'prompt-old', new_prompt_id: 'prompt-new', session_id: 'session-reply-fleet' } };
+            }
+            if (msg.command === 'watch') {
+              return { ok: true, data: { promptId: 'prompt-new', sessionId: 'session-reply-fleet', status: 'completed', summary: { message: 'done\n\nRUBBER-DUCK: clean.' } } };
+            }
+            return { ok: true, data: {} };
+          },
+        },
+        async () => parse(await dispatch({ action: 'reply', job_id: 'copilot-reply-fleet', message: 'go', host_session_id: 'sid-reply-fleet' })),
+      );
+      // The watch loop emits the terminal event asynchronously; poll the queue.
+      let terminal = null;
+      for (let i = 0; i < 50 && !terminal; i++) {
+        await new Promise((r) => setImmediate(r));
+        const rows = existsSync(queueFile) ? readQueue(queueFile) : [];
+        terminal = rows.find((row) => row.jobId === 'copilot-reply-fleet' && row.kind === 'terminal');
+      }
+      assert.ok(terminal, 'terminal event was enqueued for the fleet reply job');
+      assert.equal(terminal.meta.fleet, 'true', 'fleet is preserved on the reply terminal notification');
+    } finally {
+      jobs.delete('copilot-reply-fleet');
+      _resetForTest();
+      if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+      else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    }
+  });
 });

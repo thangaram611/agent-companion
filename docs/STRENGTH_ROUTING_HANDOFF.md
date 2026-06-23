@@ -297,8 +297,8 @@ Host-routed under `BASE_DIR`; atomic `0600` / `ensureDir 0700`; reads return
   `AGENT_COMPANION_DEFAULT_PROFILE` (env) > `profiles.json` `defaultProfile` (file).
 - `isModelAllowedFor(companionId, model)`: copilot → `ALLOWED_MODELS.has`;
   opencode → provider/model shape `/^[^/]+\/.+$/`; `modelSelection:false` →
-  `model` must be null; unknown companion → false. **`isModelAllowed` is kept
-  intact** (copilot, daemon import + existing tests).
+  `model` must be null; unknown companion → false. (Post-cleanup: the old
+  copilot-only `isModelAllowed` was folded into `isModelAllowedFor('copilot', model)`.)
 - **Thread/sid namespacing (critic fix).** `threadPath(name, profileId?)` /
   `readThreadSid(name, profileId?)` / `writeThreadSid(name, profileId?, sid)` /
   `clearThread(name, profileId?)` gain an optional `profileId` qualifier → on-disk
@@ -415,8 +415,9 @@ bare-target against [`AGENT_COMPANION_DEFAULT_TARGET` (env) > `default-target`
 `TARGET_UNCONFIGURED`. When both default-profile and default-target resolve with no
 explicit arg, default-profile wins.
 
-**Preserved:** `default-target`/`default-model` not removed; `isModelAllowed` /
-`ALLOWED_MODELS` unchanged; status/doctor/onboard only **gain** keys/sections;
+**Preserved:** `default-target`/`default-model` not removed; `ALLOWED_MODELS`
+unchanged (the copilot-only `isModelAllowed` later folded into `isModelAllowedFor`);
+status/doctor/onboard only **gain** keys/sections;
 `report.targets.<id>.ready`, `default_target`, `targets`, the `'not persisted'`
 warnings, and existing `<thread>.sid` filenames are byte-identical; callers passing
 no new field see no schema change.

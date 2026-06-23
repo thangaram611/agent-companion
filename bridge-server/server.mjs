@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// agent-bridge MCP server (v6.1 — subagent-isolated, target-generic architecture)
+// agent-bridge MCP server (subagent-isolated, target-generic architecture)
 //
 // MCP tools: agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
 // agent_send takes an optional `target` (opencode | copilot); omitting it uses
@@ -167,7 +167,7 @@ function rewriteQueueByMoveAside(suffix, transform) {
 //   1. MCP _meta["x-codex-turn-metadata"].session_id — Codex injects this
 //      on every CallToolRequest (PR openai/codex#15190); adopted in
 //      server.mjs's CallToolRequestSchema handler before dispatch.
-//   2. The host_session_id (or legacy claude_session_id) MCP arg —
+//   2. The host_session_id MCP arg —
 //      forwarded by the agent. Used by the Claude subagent because Claude
 //      Code does NOT expand ${VAR} in MCP env: blocks at spawn time, so
 //      env-var injection is unavailable. Codex falls back here only if
@@ -301,8 +301,7 @@ function gcExpiredJobs(now = Date.now()) {
 // ACP session or an OpenCode `ses_` id). The persisted form renames it to the
 // target-neutral `companionSessionId` so it cannot be confused with the Claude
 // Code session id (`claudeSessionId`) that the drain hook keys on, and so an
-// OpenCode session id is not stored under a Copilot-specific key. Legacy ledgers
-// written before the rename used `copilotSessionId`; hydrate still reads it.
+// OpenCode session id is not stored under a Copilot-specific key.
 // Best-effort: failures don't abort the action — the in-memory map is still
 // authoritative for the current bridge process.
 function persistJob(jobId) {
@@ -327,9 +326,8 @@ function persistJob(jobId) {
 // (`codex-rs/codex-mcp/src/rmcp_client.rs:79`) but is user-configurable
 // via `[mcp_servers.X].tool_timeout_sec` in the agent TOML — see README's
 // Codex install section. Default 480s when input is missing, non-numeric,
-// or zero. Floor 1s to avoid no-wait races. The `mode` arg is retained
-// for call-site compatibility but no longer affects the cap.
-export function clampWaitSec(input, _mode) {
+// or zero. Floor 1s to avoid no-wait races.
+export function clampWaitSec(input) {
   const cap = 1200;
   return Math.max(1, Math.min(Number(input) || 480, cap));
 }
@@ -372,7 +370,7 @@ function retainTerminalJob(jobId, patch) {
   Object.assign(job, patch, {
     terminalAt,
     retentionExpiresAt: terminalAt + JOB_RETENTION_MS,
-    inspectAvailable: (patch.target || job.target || 'copilot') === 'copilot' && Boolean(job.promptId || patch.promptId),
+    inspectAvailable: (patch.target || job.target) === 'copilot' && Boolean(job.promptId || patch.promptId),
   });
   persistJob(jobId);
   resolveAllWaiters(jobId, { terminal: true, job });
@@ -622,7 +620,7 @@ export function refreshDigestForJob(job, statusOverride = null) {
       template:   job.template || null,
       thread:     job.thread || null,
       parallel:   !!job.fleet,
-      parallelStrategy: job.parallelStrategy || job.parallel || null,
+      parallelStrategy: job.parallelStrategy || null,
       task:       job.task || null,
       sessionId:  job.sessionId || null,
       startedAt:  job.startedAt || null,
@@ -748,7 +746,7 @@ function digestResourceLinkForResult(obj) {
 // prompt; OpenCode can reply only in server mode with a live session.
 function jobReplyAvailable(job) {
   if (!job || job.terminalAt) return false;
-  const target = job.target || 'copilot';
+  const target = job.target;
   if (target === 'copilot') return Boolean(job.promptId);
   if (target === 'opencode') return Boolean(job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId);
   return false;
@@ -759,7 +757,7 @@ function jobReplyAvailable(job) {
 // jobs resume via the surviving server + persisted session id.
 function jobResumeAvailable(job) {
   if (!job) return false;
-  const target = job.target || 'copilot';
+  const target = job.target;
   if (target === 'copilot') return Boolean(job.promptId && runtimeSupportsDetachedPromptResume());
   if (target === 'opencode') return Boolean(job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId);
   return false;
@@ -779,12 +777,12 @@ export function buildJobResponse(job, inspect = null, { includeTimeline = false 
   const response = {
     ok: true,
     job_id: job.jobId,
-    target: job.target || 'copilot',
+    target: job.target,
     status,
     prompt_id: data.promptId || job.promptId || null,
     session_id: data.sessionId || job.sessionId || null,
     mode: job.mode || null,
-    parallel: job.parallelStrategy || job.parallel || null,
+    parallel: job.parallelStrategy || null,
     fleet: Boolean(job.fleet),
     thread: job.thread || null,
     cwd: data.cwd || job.cwd || null,
@@ -825,7 +823,7 @@ export function buildJobResponse(job, inspect = null, { includeTimeline = false 
   return response;
 }
 
-// --- Waiters (v6.1) --------------------------------------------------------
+// --- Waiters ----------------------------------------------------------------
 //
 // `wait` parks a resolver on the target jobId (`send` returns synchronously,
 // so it never parks). The worker calls resolveAllWaiters through
@@ -885,12 +883,12 @@ function buildWaitResponse(outcome) {
     const stillRunning = {
       ok: true, action: 'wait', status: 'still_running',
       job_id: job.jobId,
-      target: job.target || 'copilot',
+      target: job.target,
       // Surface thread even on still_running so a crash+resume can still
-      // recover it. (v6.1 thread-continuity invariant.)
+      // recover it. (thread-continuity invariant.)
       thread: job.thread || null,
       current_status: job.status || 'running',
-      parallel: job.parallelStrategy || job.parallel || null,
+      parallel: job.parallelStrategy || null,
       fleet: Boolean(job.fleet),
       started_at: iso(job.startedAt),
       age_s: Math.round((Date.now() - (job.startedAt || Date.now())) / 1000),
@@ -914,9 +912,9 @@ function buildWaitResponse(outcome) {
   refreshDigestForJob(job, job.status);
   const meta = {
     job_id: job.jobId, status: job.status,
-    target: job.target || 'copilot',
+    target: job.target,
     mode: job.mode || 'EXECUTE',
-    parallel: job.parallelStrategy || job.parallel || '',
+    parallel: job.parallelStrategy || '',
     fleet: Boolean(job.fleet) ? 'true' : 'false',
     thread: job.thread || null,
     prompt_id: job.promptId || null,
@@ -933,9 +931,9 @@ function buildWaitResponse(outcome) {
   return asJson({
     ok: true, action: 'wait', status: job.status,
     job_id: job.jobId,
-    target: job.target || 'copilot',
+    target: job.target,
     duration_ms: job.durationMs || null,
-    content: formatTerminalContent({ ...job, digestUri, target: job.target || 'copilot' }),
+    content: formatTerminalContent({ ...job, digestUri, target: job.target }),
     meta,
   });
 }
@@ -1051,15 +1049,13 @@ export function formatTerminalContent({
   if (status === 'timeout') {
     const failedLine = (Array.isArray(failedTools) && failedTools.length)
       ? `\n\n**Failed tools:** ${failedTools.slice(0, 10).join(', ')}` : '';
-    const digestLine = digestUri
-      ? `\n\n**Partial transcript digest:** \`${digestUri}\` — read this MCP resource BEFORE re-dispatching. ` +
-        'It contains the partial assistant message, /fleet sub-agent reports (often near-complete), files touched, and todos. ' +
-        'You may be able to finalise from the digest alone, or use it to scope a much smaller follow-up send.'
+    const digestHint = (detail) => digestUri
+      ? `\n\n**Partial transcript digest:** \`${digestUri}\` — read this MCP resource BEFORE re-dispatching. ${detail}`
       : '';
-    const targetDigestLine = digestUri
-      ? `\n\n**Partial transcript digest:** \`${digestUri}\` — read this MCP resource BEFORE re-dispatching. ` +
-        'It contains any captured assistant output, raw stdout/stderr, and job metadata.'
-      : '';
+    const targetDigestLine = digestHint('It contains any captured assistant output, raw stdout/stderr, and job metadata.');
+    const digestLine = digestHint(
+      'It contains the partial assistant message, /fleet sub-agent reports (often near-complete), files touched, and todos. ' +
+      'You may be able to finalise from the digest alone, or use it to scope a much smaller follow-up send.');
     if (target !== 'copilot') {
       return taskHeader +
         `${label} did not finish within the target timeout (${Math.round(duration / 1000)}s).\n\n` +
@@ -1139,7 +1135,7 @@ export function emitNotification({
 
   const meta = {
     job_id: jobId, status,
-    target: target || 'copilot',
+    target,
     duration_ms: String(duration),
     mode: mode || 'EXECUTE',
   };
@@ -1796,10 +1792,11 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, profileId = nu
 
 async function emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId }) {
   const duration = Date.now() - startedAt;
-  const promptId = jobs.get(jobId)?.promptId;
-  const profileId = jobs.get(jobId)?.profileId ?? null;
-  const currentSessionId = jobs.get(jobId)?.sessionId || sessionId;
-  const fleet = !!jobs.get(jobId)?.fleet;
+  const job = jobs.get(jobId);
+  const promptId = job?.promptId;
+  const profileId = job?.profileId ?? null;
+  const currentSessionId = job?.sessionId || sessionId;
+  const fleet = !!job?.fleet;
   const isReconcilableErr = !!promptId && (
     (err && typeof err.code === 'string' && ['ECONNREFUSED', 'ENOENT', 'EPIPE', 'ETIMEDOUT'].includes(err.code)) ||
     /timeout/i.test(err?.message || '')
@@ -1973,12 +1970,11 @@ async function handleSend(args) {
   const profileId = routing.resolved.profileId;
   const routedStrength = routing.resolved.strength;
 
-  // v6.1: bridge auto-generates a thread name if caller (the companion
+  // The bridge auto-generates a thread name if the caller (the companion
   // subagent) did not pass one. This is how the companion gets a stable
   // handle it can remember across resumes — main never sees or carries it.
   // Pre-compute the jobId first so we can derive thread = companion-<jobId>.
-  const jobPrefix = target === 'copilot' ? 'copilot' : target;
-  const jobId = `${jobPrefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const jobId = `${target}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const thread = resolveSendThread(args.thread || null, getHostSessionId(), jobId);
 
   // Reattach guard. When the MCP bridge dies mid-send and Claude Code respawns
@@ -1993,7 +1989,7 @@ async function handleSend(args) {
     if (existing.thread !== thread) continue;
     if (existing.claudeSessionId !== hostSid) continue;
     if (existing.terminalAt) continue;
-    const existingTarget = existing.target || 'copilot';
+    const existingTarget = existing.target;
     if (existingTarget !== target) {
       return asJson({
         ok: false,
@@ -2046,7 +2042,7 @@ async function handleSend(args) {
     }
     existing.reattached = true;
     persistJob(existing.jobId);
-    const maxWait = clampWaitSec(args.max_wait_sec, args.mode);
+    const maxWait = clampWaitSec(args.max_wait_sec);
     logEvent('info', 'agent.send.reattached', {
       job_id: existing.jobId, target, thread, host_session: hostSid, status: existing.status || 'running',
     });
@@ -2145,11 +2141,7 @@ async function handleSend(args) {
 
 async function handleWait({ job_id, max_wait_sec }) {
   if (!job_id) return asJson({ ok: false, action: 'wait', error: 'job_id required' });
-  // The clamp is mode-agnostic now (single 1200s cap), but we still pass
-  // mode through to keep the call signature stable for legacy callers.
-  const job = getJob(job_id);
-  const mode = job?.mode || 'EXECUTE';
-  const max = clampWaitSec(max_wait_sec, mode);
+  const max = clampWaitSec(max_wait_sec);
   const outcome = await waitForJob(job_id, max);
   return buildWaitResponse(outcome);
 }
@@ -2173,7 +2165,7 @@ async function handleCancel({ job_id }) {
   if (!job_id) return asJson({ ok: false, action: 'cancel', error: 'job_id required' });
   const job = getJob(job_id);
   if (!job)                                       return asJson({ ok: false, error: 'unknown job_id' });
-  const target = job.target || 'copilot';
+  const target = job.target;
   if (!job.promptId || job.status === 'starting') return asJson({ ok: false, error: 'job is not yet cancellable' });
   if (job.status !== 'running')                   return asJson({ ok: false, error: `job is ${job.status}` });
   if (target !== 'copilot') {
@@ -2217,10 +2209,10 @@ async function handleCancel({ job_id }) {
     });
   }
   const resp = await cancelPrompt({ promptId: job.promptId });
-  // v6.1 gap fix: cancel also surfaces the job via the cancel MCP response,
-  // so mark the queue entry consumed to avoid a duplicate drain injection.
-  if (resp.data?.cancelled) markQueueConsumed(job_id);
+  // Cancel also surfaces the job via the cancel MCP response, so mark the
+  // queue entry consumed to avoid a duplicate drain injection.
   if (resp.data?.cancelled) {
+    markQueueConsumed(job_id);
     return buildCancelFollowup(job_id, target, { reason: resp.data?.reason || null });
   }
   return asJson({
@@ -2291,7 +2283,7 @@ async function handleReply({ job_id, message }) {
   // replies cannot race the cancel-and-restart sequence.
   const job = getJob(job_id);
   if (!job) return asJson({ ok: false, action: 'reply', error: 'unknown job_id' });
-  const target = job.target || 'copilot';
+  const target = job.target;
   if (target === 'opencode') {
     if (job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId) {
       return handleOpenCodeServerReply(job, message);
@@ -2308,7 +2300,7 @@ async function handleReply({ job_id, message }) {
       job_id,
       target,
       code: 'TARGET_UNSUPPORTED',
-      error: `${targetLabel(target)} MVP adapter does not support in-flight replies yet; cancel or start a new send with the revised prompt.`,
+      error: `${targetLabel(target)} does not support in-flight replies; cancel or start a new send with the revised prompt.`,
     });
   }
   if (!job.promptId) return asJson({ ok: false, action: 'reply', error: 'job has no prompt yet — wait for status: running' });
@@ -2368,6 +2360,7 @@ async function handleReply({ job_id, message }) {
       startedAt: job.startedAt || Date.now(),
       reqId,
       sessionReborn: !!job.sessionReborn,
+      fleet: !!job.fleet,
     }).catch((err) => log('ERROR', 'reply watch loop error:', job_id, err.message));
 
     log('INFO', 'agent:reply', `job=${job_id} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
@@ -2389,7 +2382,7 @@ async function handleStatus({ job_id, verbose, diagnostics }) {
     const job = getJob(job_id);
     if (!job) return asJson({ ok: false, error: 'unknown job_id' });
     let inspect = null;
-    if (job.promptId && (job.target || 'copilot') === 'copilot') {
+    if (job.promptId && job.target === 'copilot') {
       try { inspect = await fetchPromptInspect(job, { includeTimeline: verbose }); }
       catch (err) { log('WARN', 'status inspect failed:', job_id, err.message); }
     }
@@ -2423,12 +2416,12 @@ async function handleStatus({ job_id, verbose, diagnostics }) {
       .filter((j) => !j.terminalAt)
       .map((j) => ({
         job_id: j.jobId,
-        target: j.target || 'copilot',
+        target: j.target,
         profile: j.profileId ?? null,
         strength: j.strength ?? null,
         status: j.status || 'starting',
         mode: j.mode || null,
-        parallel: j.parallelStrategy || j.parallel || null,
+        parallel: j.parallelStrategy || null,
         fleet: Boolean(j.fleet),
         thread: j.thread || null,
         cwd: j.cwd || null,
@@ -2486,15 +2479,11 @@ mcp.setRequestHandler(ReadResourceRequestSchema, async (req) => (
 ));
 
 const HOST_SESSION_FIELDS = {
-  claude_session_id: {
-    type: 'string',
-    description:
-      "Caller's Claude Code session id, used to scope queue writes and persisted jobs. " +
-      'Claude companion agents forward this on every call; Codex normally uses MCP _meta instead.',
-  },
   host_session_id: {
     type: 'string',
-    description: 'Host-neutral alias of claude_session_id. Pass either alias, not both.',
+    description:
+      "Caller's host session id, used to scope queue writes and persisted jobs. " +
+      'Claude companion agents forward $CLAUDE_CODE_SESSION_ID under this key on every call; Codex normally uses MCP _meta instead.',
   },
 };
 
@@ -2680,10 +2669,8 @@ const AGENT_TOOLS = [
   },
 ];
 
-const TOOLS = AGENT_TOOLS;
-
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS,
+  tools: AGENT_TOOLS,
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -2724,8 +2711,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 // invoking dispatch — this matches the MCP handler's own ordering.
 export async function dispatch(normalized) {
   // Arg-based session-id adoption (host_session_id is the host-neutral
-  // alias; claude_session_id stays accepted as input alias and is
-  // normalized into host_session_id by validation.mjs::normalizeHostSid).
+  // session-id field, validated by validation.mjs::normalizeHostSid).
   // Skipped if _meta already adopted a sid for this process — adoptHostSessionId
   // is no-op-on-match / throws BRIDGE_SID_CONFLICT on conflict, so the
   // precedence holds. We catch the conflict here so direct callers (tests,
@@ -2778,15 +2764,21 @@ export function hydrateJobsFromLedger() {
   let resumed = 0;
   const canResumeDetachedPrompts = runtimeSupportsDetachedPromptResume();
   for (const persisted of entries) {
-    const { companionSessionId, copilotSessionId, ...rest } = persisted;
+    const { companionSessionId, ...rest } = persisted;
     const job = { ...rest };
-    const restoredSessionId = companionSessionId ?? copilotSessionId;
-    if (restoredSessionId !== undefined) job.sessionId = restoredSessionId;
+    if (companionSessionId !== undefined) job.sessionId = companionSessionId;
+    // Every persisted job carries the target it was created with; a ledger
+    // entry without one is corrupt or hand-edited. Skip it loudly rather than
+    // silently assuming a companion (no-silent-fallback).
+    if (!job.target) {
+      log('WARN', 'hydrate skipped: ledger entry has no target:', job.jobId);
+      continue;
+    }
     jobs.set(job.jobId, job);
     claimed++;
 
     const isTerminal = !!job.terminalAt;
-    const target = job.target || 'copilot';
+    const target = job.target;
 
     // If thread + sessionId are both known but the thread file may not
     // exist (original bridge died before writeThreadSid ran), restore it.
@@ -2810,7 +2802,7 @@ export function hydrateJobsFromLedger() {
       if (!isTerminal) {
         retainTerminalJob(job.jobId, {
           status: 'unreachable',
-          error: `${targetLabel(target)} job cannot be resumed after bridge restart in the MVP adapter`,
+          error: `${targetLabel(target)} job cannot be resumed after a bridge restart`,
           detail: 'target_adapter_non_resumable_after_restart',
           terminalAt: Date.now(),
         });
@@ -2928,7 +2920,7 @@ if (isMain) {
   // In production, Claude Code passes the literal string `${CLAUDE_CODE_SESSION_ID}`
   // through to the env block (no ${VAR} expansion at MCP-spawn time), so
   // sanitizeSid returns null and we wait for the subagent to forward the
-  // sid via the first MCP call's `claude_session_id` arg.
+  // sid via the first MCP call's `host_session_id` arg.
   if (getHostSessionId()) {
     hydrateJobsFromLedger();
     sweepOwnSessionStaleQueueRows();

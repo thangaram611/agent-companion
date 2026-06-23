@@ -182,7 +182,7 @@ Export:
 ```js
 inspectTarget(id, { run, env })
 inspectTargets({ run, env })
-selectConfiguredTarget({ env })
+readDefaultTarget(env)            // from lib/state.mjs
 targetReadinessSummary(report)
 ```
 

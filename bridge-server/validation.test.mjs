@@ -279,7 +279,7 @@ test('scope_hint is accepted only for general prompts and bounded by type and le
   });
 });
 
-test('host_session_id and claude_session_id normalize across actions and reject conflicts or invalid values', () => {
+test('host_session_id normalizes across actions and rejects invalid values', () => {
   const actions = [
     { action: 'send', task: 'X', cwd: TEST_CWD, host_session_id: 'sid-abc' },
     { action: 'wait', job_id: 'j1', host_session_id: 'sid-abc' },
@@ -291,20 +291,12 @@ test('host_session_id and claude_session_id normalize across actions and reject 
     assert.equal(validateAgentArgs(action).host_session_id, 'sid-abc', `${action.action} normalized host_session_id`);
   }
 
-  assert.equal(validateAgentArgs({ action: 'status', claude_session_id: 'legacy-sid' }).host_session_id, 'legacy-sid');
-  assert.equal(validateAgentArgs({
-    action: 'status',
-    claude_session_id: 'matching-sid',
-    host_session_id: 'matching-sid',
-  }).host_session_id, 'matching-sid');
-  assert.throws(() => validateAgentArgs({
-    action: 'status',
-    claude_session_id: 'sid-A',
-    host_session_id: 'sid-B',
-  }), /provided with different values/);
-  assert.throws(() => validateAgentArgs({ action: 'status', claude_session_id: 42 }),
-    /claude_session_id must be a non-empty string/);
+  assert.throws(() => validateAgentArgs({ action: 'status', host_session_id: 42 }),
+    /host_session_id must be a non-empty string/);
   assert.throws(() => validateAgentArgs({ action: 'status', host_session_id: '' }),
     /host_session_id must be a non-empty string/);
   assert.equal(validateAgentArgs({ action: 'status' }).host_session_id, null);
+  // claude_session_id was collapsed into host_session_id — it is now an unknown key.
+  assert.throws(() => validateAgentArgs({ action: 'status', claude_session_id: 'x' }),
+    /unknown field "claude_session_id"/);
 });

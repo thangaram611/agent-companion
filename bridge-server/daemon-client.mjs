@@ -21,13 +21,8 @@ import { daemonSocketPath } from '../lib/runtime-paths.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const DAEMON_PATH = process.env.COPILOT_DAEMON_PATH || (() => {
-  const pluginPath = pathResolve(__dirname, '..', 'scripts', 'copilot-acp-daemon.mjs');
-  if (existsSync(pluginPath)) return pluginPath;
-  const legacyPath = pathResolve(__dirname, '..', '..', 'scripts', 'copilot-acp-daemon.mjs');
-  if (existsSync(legacyPath)) return legacyPath;
-  return pluginPath;
-})();
+const DAEMON_PATH = process.env.COPILOT_DAEMON_PATH
+  || pathResolve(__dirname, '..', 'scripts', 'copilot-acp-daemon.mjs');
 const DAEMON_BOOT_TIMEOUT_MS = Number(process.env.COPILOT_DAEMON_BOOT_MS) || 8_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 6 * 60 * 1000;
 

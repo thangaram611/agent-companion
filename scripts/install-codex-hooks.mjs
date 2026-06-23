@@ -45,12 +45,6 @@ import readline from 'node:readline/promises';
 const HOOKS_FILE = path.join(homedir(), '.codex', 'hooks.json');
 const SENTINEL_KEY = '_managed_by';
 const SENTINEL_VALUE = 'agent-companion';
-const MANAGED_HOOK_SCRIPTS = [
-  'hooks/install-agent-codex.sh',
-  'hooks/prewarm-target.sh',
-  'hooks/install-deps.sh',
-  'hooks/drain-completions.sh',
-];
 const STABLE_HOOK_PATH_DIRS = [
   '/opt/homebrew/bin',
   '/usr/local/bin',
@@ -202,27 +196,12 @@ if (!cfg.hooks || typeof cfg.hooks !== 'object' || Array.isArray(cfg.hooks)) {
   cfg.hooks = {};
 }
 
-function commandReferencesManagedScript(command) {
-  if (typeof command !== 'string') return false;
-  return MANAGED_HOOK_SCRIPTS.some((scriptRel) => command.includes(scriptPath(scriptRel)));
-}
-
-function legacyManagedEntry(entry) {
-  if (!entry || typeof entry !== 'object' || !Array.isArray(entry.hooks)) return false;
-  const commands = entry.hooks.map((hook) => hook?.command);
-  return commands.length > 0 && commands.every(commandReferencesManagedScript);
-}
-
-// Drop every entry whose top-level _managed_by === SENTINEL_VALUE. Also drop
-// legacy source-checkout entries from pre-sentinel installs: those commands
-// referenced this checkout's hook scripts directly, but lacked
-// AGENT_COMPANION_HOST=codex and would otherwise survive as duplicate stale
-// hooks after an upgrade.
+// Drop every entry whose top-level _managed_by === SENTINEL_VALUE.
 function dropManaged(eventName) {
   const list = cfg.hooks[eventName];
   if (!Array.isArray(list)) return;
   const filtered = list.filter((entry) => {
-    return !entry || (entry[SENTINEL_KEY] !== SENTINEL_VALUE && !legacyManagedEntry(entry));
+    return !entry || entry[SENTINEL_KEY] !== SENTINEL_VALUE;
   });
   if (filtered.length === 0) {
     delete cfg.hooks[eventName];

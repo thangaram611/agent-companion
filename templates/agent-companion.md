@@ -123,7 +123,7 @@ The bridge tags every queue write with the calling Claude Code session id so eve
 echo "$CLAUDE_CODE_SESSION_ID"
 ```
 
-Store the UUID it prints. Add `"claude_session_id": "<that uuid>"` to **every** `mcp__agent-bridge__agent_*` call you make for the rest of this turn — `send`, `wait`, `status`, `reply`, `cancel`, all of them. The bridge adopts the value on the first call it sees and locks it; passing the same value on subsequent calls is a no-op but lets a respawned bridge rehydrate this session's prior jobs.
+Store the UUID it prints. Add `"host_session_id": "<that uuid>"` to **every** `mcp__agent-bridge__agent_*` call you make for the rest of this turn — `send`, `wait`, `status`, `reply`, `cancel`, all of them. The bridge adopts the value on the first call it sees and locks it; passing the same value on subsequent calls is a no-op but lets a respawned bridge rehydrate this session's prior jobs.
 
 If `$CLAUDE_CODE_SESSION_ID` is empty in your Bash output, the bridge will reject `send` with a clear error — surface that error to the parent rather than dispatching without the field.
 

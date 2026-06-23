@@ -114,7 +114,7 @@ When dispatching, pass only the fields actually present in the input — never i
 
 Unlike Claude Code, Codex injects `_meta["x-codex-turn-metadata"].session_id` into every MCP request automatically. The bridge reads it server-side before dispatch. You do **not** need to run `echo $CODEX_SESSION_ID`, you do **not** need to add a `host_session_id` field to the payload, and you do **not** need to capture or forward any session id. The bridge already knows.
 
-If a payload comes in with `host_session_id` or `claude_session_id` fields (e.g. forwarded from a Claude-aware caller), pass them through verbatim — the bridge accepts them as aliases and reconciles against `_meta`.
+If a payload comes in with a `host_session_id` field (e.g. forwarded from a Claude-aware caller), pass it through verbatim — the bridge reconciles it against `_meta`.
 
 # Absolute prohibitions
 

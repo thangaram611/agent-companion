@@ -170,51 +170,6 @@ test('reinstall is idempotent, preserves user hooks, and writes backups only for
   });
 });
 
-test('install migrates legacy untagged agent-companion hook entries', () => {
-  withHome((home) => {
-    const f = join(home, '.codex', 'hooks.json');
-    mkdirSync(dirname(f), { recursive: true });
-    const legacy = (script) => ({
-      type: 'command',
-      command: `CLAUDE_PLUGIN_ROOT='${PLUGIN_ROOT}' bash '${join(PLUGIN_ROOT, script)}'`,
-    });
-    writeFileSync(f, JSON.stringify({
-      hooks: {
-        SessionStart: [{
-          hooks: [
-            legacy('hooks/install-agent-codex.sh'),
-            legacy('hooks/prewarm-target.sh'),
-            legacy('hooks/install-deps.sh'),
-            legacy('hooks/drain-completions.sh'),
-          ],
-        }],
-        UserPromptSubmit: [{
-          hooks: [legacy('hooks/drain-completions.sh')],
-        }],
-        PostToolUse: [{
-          matcher: '.*',
-          hooks: [legacy('hooks/drain-completions.sh')],
-        }],
-      },
-    }, null, 2));
-
-    const r = runScript(home);
-    assert.equal(r.code, 0, r.stderr);
-    const cfg = readHooks(home);
-
-    for (const ev of ['SessionStart', 'UserPromptSubmit', 'PostToolUse']) {
-      assert.equal(cfg.hooks[ev].length, 1, `${ev} legacy entry replaced`);
-      assert.equal(managedEntries(cfg, ev).length, 1, `${ev} has one managed entry`);
-    }
-
-    const commands = cfg.hooks.SessionStart[0].hooks.map((hook) => hook.command);
-    assert.ok(commands.every((command) => command.includes('AGENT_COMPANION_HOST=codex')),
-      'replacement commands are codex-host routed');
-    assert.ok(commands.every((command) => command.includes('AGENT_COMPANION_NODE=')),
-      'replacement commands bake the node executable');
-  });
-});
-
 test('uninstall removes only managed entries, preserves user entries', () => {
   withHome((home) => {
     // Seed user hooks

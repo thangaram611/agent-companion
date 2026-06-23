@@ -33,7 +33,6 @@ const MAX_SUMMARY_CHARS = 64 * 1024;
 const MAX_TRANSCRIPT_CHARS = 12_000;
 const SERVER_BOOT_TIMEOUT_MS = 15_000;
 const HEALTH_PROBE_TIMEOUT_MS = 2_000;
-const DEFAULT_ADAPTER = 'cli';
 // One server for the whole bridge; sessions are scoped per cwd via ?directory=.
 const SHARED_SERVER_KEY = 'shared';
 
@@ -42,7 +41,7 @@ const SHARED_SERVER_KEY = 'shared';
 // ---------------------------------------------------------------------------
 
 export function resolveOpenCodeAdapter(env = process.env) {
-  const raw = String(env.OPENCODE_RUNTIME_ADAPTER || DEFAULT_ADAPTER).trim().toLowerCase();
+  const raw = String(env.OPENCODE_RUNTIME_ADAPTER || 'cli').trim().toLowerCase();
   return raw === 'server' ? 'server' : 'cli';
 }
 

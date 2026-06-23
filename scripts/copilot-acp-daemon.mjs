@@ -41,18 +41,15 @@ import { DEFAULT_MODEL, readDefaultModel } from '../lib/state.mjs';
 // Precedence:
 //   1. $COPILOT_BIN override (for pinning a specific build)
 //   2. `command -v copilot` — honours the user's PATH
-//   3. /opt/homebrew/bin/copilot as a last-resort legacy fallback
-// Fails loudly with an actionable error if none resolve.
+// Fails loudly with an actionable error if neither resolves.
 function resolveCopilotBin() {
   if (process.env.COPILOT_BIN) return process.env.COPILOT_BIN;
   try {
     const found = execSync('command -v copilot', { encoding: 'utf8', shell: '/bin/sh' }).trim();
     if (found) return found;
   } catch {
-    // fall through to fallback
+    // fall through to the loud error
   }
-  const legacyFallback = '/opt/homebrew/bin/copilot';
-  if (existsSync(legacyFallback)) return legacyFallback;
   throw new Error(
     'copilot binary not found on PATH. Install GitHub Copilot CLI or set $COPILOT_BIN.'
   );

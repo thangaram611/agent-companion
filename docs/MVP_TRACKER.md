@@ -64,7 +64,7 @@ primary companion:
 
 - First-class onboarding (this pass):
   - `lib/target-registry.mjs` (moved from `bridge-server/`) now carries install/auth/permission/smoke metadata.
-  - `lib/target-diagnostics.mjs` — `inspectTarget`/`inspectTargets`/`selectConfiguredTarget`/`targetReadinessSummary`.
+  - `lib/target-diagnostics.mjs` — `inspectTarget`/`inspectTargets`/`targetReadinessSummary` (default target via `readDefaultTarget` in `lib/state.mjs`).
   - `lib/doctor.mjs` is target-aware: `targets` + `defaultTarget` sections, and `ok` no longer requires Copilot.
   - `scripts/onboard.mjs` — `--host/--target/--set-default/--yes/--json/--smoke/--list-targets/--doctor/--no-target-check`.
   - `setup.sh` — `--target opencode|copilot|auto|none`, `--no-target-check`, `--skip-tests`; dropped the Copilot hard requirement; delegates target validation/default-write to `onboard.mjs`; gates the Copilot reviewer agent by target.

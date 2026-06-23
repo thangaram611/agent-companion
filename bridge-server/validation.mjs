@@ -77,22 +77,19 @@ export const DEFAULT_PARALLEL = 'auto';
 
 // Field surface per action. Anything outside these is an "unknown key" error.
 //
-// Session-id input fields (either accepted, normalized to internal `host_session_id`):
-//   - claude_session_id: legacy Claude-host alias. The Claude subagent reads
-//     $CLAUDE_CODE_SESSION_ID via Bash at activation and forwards it on every
-//     call (Claude Code does NOT expand ${VAR} in MCP env: blocks).
-//   - host_session_id: host-neutral alias for any caller (Codex if MCP _meta
-//     adoption fails; future hosts; tests). Functionally identical to the
-//     above on input.
-// On Codex, the bridge also reads request.params._meta["x-codex-turn-metadata"]
-// .session_id directly in server.mjs's MCP handler — that path bypasses
-// the per-arg field entirely (host-injected, can't be spoofed by the agent).
+// Session-id input field: host_session_id — the host-neutral session id a caller
+// forwards. The Claude subagent forwards $CLAUDE_CODE_SESSION_ID under this key
+// (Claude Code does NOT expand ${VAR} in MCP env: blocks); Codex callers and
+// tests use it too. On Codex, the bridge also reads
+// request.params._meta["x-codex-turn-metadata"].session_id directly in
+// server.mjs's MCP handler — that path bypasses the per-arg field entirely
+// (host-injected, can't be spoofed by the agent).
 const ALLOWED_FIELDS = {
-  send:   new Set(['action', 'task', 'mode', 'template', 'template_args', 'cwd', 'thread', 'target', 'profile', 'strength', 'max_wait_sec', 'parallel', 'claude_session_id', 'host_session_id']),
-  wait:   new Set(['action', 'job_id', 'max_wait_sec', 'claude_session_id', 'host_session_id']),
-  status: new Set(['action', 'job_id', 'verbose', 'diagnostics', 'claude_session_id', 'host_session_id']),
-  reply:  new Set(['action', 'job_id', 'message', 'claude_session_id', 'host_session_id']),
-  cancel: new Set(['action', 'job_id', 'claude_session_id', 'host_session_id']),
+  send:   new Set(['action', 'task', 'mode', 'template', 'template_args', 'cwd', 'thread', 'target', 'profile', 'strength', 'max_wait_sec', 'parallel', 'host_session_id']),
+  wait:   new Set(['action', 'job_id', 'max_wait_sec', 'host_session_id']),
+  status: new Set(['action', 'job_id', 'verbose', 'diagnostics', 'host_session_id']),
+  reply:  new Set(['action', 'job_id', 'message', 'host_session_id']),
+  cancel: new Set(['action', 'job_id', 'host_session_id']),
 };
 
 // Per-template allowed keys. Plan_review and general have disjoint key sets;
@@ -357,27 +354,16 @@ export function validateAgentArgs(rawArgs) {
   }
 }
 
-// Accept either input alias and normalize to a single internal value.
-// host_session_id is the host-neutral name introduced for the dual-harness
-// rollout; claude_session_id remains accepted unchanged so existing Claude
-// callers (the Markdown subagent in templates/agent-companion.md) need
-// no code changes. If both are present they must agree — disagreement is
-// almost certainly a caller bug worth surfacing rather than silently
-// preferring one.
+// Validate and return the host session id — the host-neutral session id a
+// caller forwards (the Claude subagent forwards $CLAUDE_CODE_SESSION_ID under
+// this key). Null when absent.
 function normalizeHostSid(args) {
-  const claudeRaw = args.claude_session_id;
-  const hostRaw = args.host_session_id;
-  if (claudeRaw == null && hostRaw == null) return null;
-  for (const [name, raw] of [['claude_session_id', claudeRaw], ['host_session_id', hostRaw]]) {
-    if (raw == null) continue;
-    if (typeof raw !== 'string' || !raw) {
-      throw new Error(`agent: ${name} must be a non-empty string when provided`);
-    }
+  const raw = args.host_session_id;
+  if (raw == null) return null;
+  if (typeof raw !== 'string' || !raw) {
+    throw new Error('agent: host_session_id must be a non-empty string when provided');
   }
-  if (claudeRaw != null && hostRaw != null && claudeRaw !== hostRaw) {
-    throw new Error('agent: claude_session_id and host_session_id provided with different values; pass only one');
-  }
-  return claudeRaw ?? hostRaw;
+  return raw;
 }
 
 function validateReply(args) {
