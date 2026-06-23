@@ -42,7 +42,7 @@ test('ACP runtime adapter maps bridge methods to daemon socket commands', async 
       assert.equal(runtimeSupportsDetachedPromptResume(), true);
       await ensureRuntime({ reqId: 'req-1' });
       await runtimeStatus(123);
-      await promptBg({ sessionId: 'sid', text: 'hello', cwd: '/repo', model: 'gpt-5.5', reqId: 'req-2' });
+      await promptBg({ sessionId: 'sid', text: 'hello', cwd: '/repo', model: 'claude-sonnet-4.6', reqId: 'req-2' });
       await watchPrompt({ promptId: 'pid', wait: 10, summaryOnly: true }, 456);
       await inspectPrompt({ promptId: 'pid', includeTimeline: true, limit: 9 });
       await cancelPrompt({ promptId: 'pid' });
@@ -54,7 +54,7 @@ test('ACP runtime adapter maps bridge methods to daemon socket commands', async 
     assert.deepEqual(calls, [
       ['ensure', { reqId: 'req-1' }],
       ['send', { command: 'status' }, 123],
-      ['send', { command: 'prompt-bg', sessionId: 'sid', text: 'hello', cwd: '/repo', model: 'gpt-5.5', reqId: 'req-2' }, undefined],
+      ['send', { command: 'prompt-bg', sessionId: 'sid', text: 'hello', cwd: '/repo', model: 'claude-sonnet-4.6', reqId: 'req-2' }, undefined],
       ['send', { command: 'watch', promptId: 'pid', since: 0, raw: false, wait: 10, summaryOnly: true }, 456],
       ['send', { command: 'inspect', promptId: 'pid', includeTimeline: true, limit: 9 }, 15000],
       ['send', { command: 'cancel', promptId: 'pid' }, undefined],

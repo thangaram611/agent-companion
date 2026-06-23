@@ -15,11 +15,11 @@ fail() { printf "${RED}[FAIL]${NC} %s\n" "$1"; }
 
 # --- Argument parsing -------------------------------------------------------
 #
-# --host claude|codex|both    which host surface(s) to install (default both)
+# --host claude|codex|both    which harness surface(s) to install (default both)
 # --target opencode|copilot|auto|none
-#                             which agent target to onboard. Delegated to
+#                             which companion target to onboard. Delegated to
 #                             scripts/onboard.mjs. Default: none (host/plugin
-#                             surface only — "bring your target" later).
+#                             surface only — attach a companion later).
 # --no-target-check           write/select the target but don't fail if it
 #                             isn't ready yet.
 # --skip-tests                skip the unit-test step (lighter install path).
@@ -41,10 +41,10 @@ while [ "$#" -gt 0 ]; do
 Usage: $(basename "$0") [--host claude|codex|both] [--target opencode|copilot|auto|none]
                         [--no-target-check] [--skip-tests]
 
-  --host claude|codex|both   install that host surface (default both)
+  --host claude|codex|both   install that harness surface (default both)
   --target opencode|copilot|auto|none
-                             onboard an agent target (default none; "bring
-                             your target"). auto picks the only ready target.
+                             onboard a companion target (default none; attach
+                             one later). auto picks the only ready target.
   --no-target-check          select the target without failing on not-ready
   --skip-tests               skip the unit-test step
 EOF
@@ -77,9 +77,13 @@ esac
 
 echo "=== agent-companion setup (host=$HOST) ==="
 echo ""
-echo "This directory is a dual-host plugin (Claude Code + Codex CLI). The"
+echo "This directory is a dual-harness plugin (Claude Code + Codex CLI). The"
 echo "subagent-scoped MCP architecture stays the same on both sides — only"
 echo "the agent file format and per-host install location differ."
+echo ""
+echo "Terminology: setup uses --host for today's harness selector and --target"
+echo "for today's companion selector. Future strength routing will allow multiple"
+echo "companion profiles behind strength names such as reviewer or web_researcher."
 echo ""
 if [ "$DO_CLAUDE" = 1 ]; then
   echo "    .claude-plugin/plugin.json       Claude plugin manifest"
@@ -121,9 +125,9 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 ok "jq $(jq --version 2>/dev/null || echo found)"
 
-# Target binaries (copilot / opencode) are NOT common prerequisites — this is
-# a "bring your target" bridge. Target readiness is validated later, only for
-# the target selected via --target, by scripts/onboard.mjs.
+# Companion binaries (copilot / opencode) are NOT common prerequisites — this
+# bridge lets users attach their preferred companion. Readiness is validated
+# later, only for the target selected via --target, by scripts/onboard.mjs.
 
 if [ "$DO_CLAUDE" = 1 ]; then
   if command -v claude >/dev/null 2>&1; then
@@ -327,24 +331,24 @@ if [ "$DO_CODEX" = 1 ]; then
   echo ""
 fi
 
-# --- Step 7: Target onboarding (bring your target) --------------------------
+# --- Step 7: Companion onboarding (attach your companion) -------------------
 #
 # Delegated entirely to scripts/onboard.mjs. Writes the per-host default-target
 # and prints target install/auth next steps. Skipped for --target none.
 
 if [ "$TARGET" = "none" ]; then
-  ok "no target selected (--target none); first send must pass an explicit target, or run \`node scripts/onboard.mjs --target <id> --set-default\` later"
+  ok "no companion selected (--target none); first send must pass an explicit target, or run \`node scripts/onboard.mjs --target <id> --set-default\` later"
 else
   for h in claude codex; do
     case "$h" in
       claude) [ "$DO_CLAUDE" = 1 ] || continue ;;
       codex)  [ "$DO_CODEX" = 1 ] || continue ;;
     esac
-    printf "Onboarding target '%s' for host '%s'...\n" "$TARGET" "$h"
+    printf "Onboarding companion target '%s' for harness '%s'...\n" "$TARGET" "$h"
     ONBOARD_ARGS=(--host "$h" --target "$TARGET" --set-default --yes)
     [ "$NO_TARGET_CHECK" = 1 ] && ONBOARD_ARGS+=(--no-target-check)
     if AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}"; then
-      ok "target '$TARGET' onboarded for $h"
+      ok "companion target '$TARGET' onboarded for $h"
     else
       fail "target '$TARGET' is not ready (or onboarding failed) — see next steps above. Fix it and re-run, or pass --no-target-check to proceed anyway."
       exit 1

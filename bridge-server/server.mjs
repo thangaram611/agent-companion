@@ -1449,7 +1449,7 @@ async function handleSend(args) {
       code: 'TARGET_UNCONFIGURED',
       target: null,
       error:
-        'no agent target configured and none passed. Pass target on agent_send, ' +
+        'no companion target configured and none passed. Pass target on agent_send, ' +
         'or set a default with `node scripts/onboard.mjs --target <id> --set-default`.',
       targets: listTargets(),
     });
@@ -1461,7 +1461,7 @@ async function handleSend(args) {
       action: 'send',
       code: 'TARGET_UNSUPPORTED',
       target,
-      error: `target "${target}" is not a supported agent target (supported: ${listTargets().map((t) => t.id).join(', ')})`,
+      error: `target "${target}" is not a supported companion target (supported: ${listTargets().map((t) => t.id).join(', ')})`,
       targets: listTargets(),
     });
   }
@@ -1924,14 +1924,14 @@ const AGENT_TOOLS = [
   {
     name: 'agent_send',
     description:
-      'Enqueue a task on the selected/default agent target and return still_running ' +
+      'Enqueue a task on the selected/default companion target and return still_running ' +
       'immediately with job_id. The companion should then loop on agent_wait until terminal.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         target: TARGET_FIELD,
-        task: { type: 'string', description: 'Plain-language task for the selected agent target.' },
+        task: { type: 'string', description: 'Plain-language task for the selected companion target.' },
         mode: {
           type: 'string',
           enum: ['PLAN', 'ANALYZE', 'EXECUTE'],
@@ -1959,7 +1959,7 @@ const AGENT_TOOLS = [
         },
         thread: {
           type: 'string',
-          description: 'Optional thread name for conversation continuity where the target supports it.',
+          description: 'Optional thread name for conversation continuity where the companion supports it.',
           pattern: '^[a-zA-Z0-9._-]+$',
         },
         max_wait_sec: MAX_WAIT_FIELD,
@@ -2006,7 +2006,7 @@ const AGENT_TOOLS = [
   },
   {
     name: 'agent_reply',
-    description: 'Re-steer an in-flight agent job with a follow-up message when the target adapter supports replies.',
+    description: 'Re-steer an in-flight agent job with a follow-up message when the companion adapter supports replies.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,

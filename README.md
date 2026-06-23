@@ -2,15 +2,28 @@
 
 ![Agent Companion hero](assets/readme/hero.png)
 
-Agent Companion is a dual-host delegation plugin for **Claude Code** and
-**Codex CLI**. It gives the parent agent one clean move: spawn a private
-companion subagent, then let that subagent delegate large implementation,
-review, and research work to your chosen target runtime.
+Agent Companion is a delegation plugin for coding agents built around one
+public contract:
 
-The product posture is deliberately target-neutral:
+> Come with any harness and attach any companion of your choice to it.
 
-- **Bring your target.** Choose `opencode` or `copilot` on each send, or persist
-  one bridge default.
+A **harness** is the parent coding-agent surface you already work in. Supported
+now: **Claude Code** and **Codex CLI**.
+
+A **companion** is the downstream agent runtime that receives delegated work.
+Supported now: **OpenCode** and **GitHub Copilot CLI**.
+
+Today, each delegated send runs on one explicitly selected or configured
+companion. The roadmap is one-to-many: connect multiple companion profiles at
+once, assign each profile strengths, and let the harness ask for the strength
+instead of a concrete runtime.
+
+The product posture is deliberately companion-neutral:
+
+- **Bring your harness.** Install the Claude Code surface, the Codex CLI surface,
+  or both.
+- **Attach your companion.** Choose `opencode` or `copilot` on each send, or
+  persist one bridge default.
 - **Keep the parent clean.** Main Claude and main Codex never see the bridge MCP
   server directly.
 - **Use one public surface.** The subagent owns the generic `agent_*` tools:
@@ -18,9 +31,17 @@ The product posture is deliberately target-neutral:
   `agent_cancel`.
 - **Avoid silent behavior.** If no target is passed or configured,
   `agent_send` returns `TARGET_UNCONFIGURED` with onboarding guidance.
+- **Route by strengths next.** Future companion profiles can advertise strengths
+  such as `reviewer` or `web_researcher`; harnesses should consume those
+  strengths without hard-coding a vendor/runtime choice.
+
+Implementation note: today the CLI and MCP schema still use `host` for harness
+selection and `target` for companion selection. Those names are stable public
+flags for the MVP.
 
 Current implementation status lives in [docs/MVP_TRACKER.md](docs/MVP_TRACKER.md).
 Architecture details live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Public release gates live in [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.md).
 The delivered onboarding design record lives in
 [docs/ONBOARDING_HANDOFF.md](docs/ONBOARDING_HANDOFF.md).
 
@@ -29,12 +50,13 @@ The delivered onboarding design record lives in
 Agent Companion turns a natural-language delegation request into a background
 job owned by an isolated subagent:
 
-1. The parent host decides to spawn the `agent-companion` subagent.
+1. The parent harness decides to spawn the `agent-companion` subagent.
 2. The subagent calls its private `agent-bridge` MCP server.
-3. The bridge resolves the selected target, creates a job, and returns quickly.
-4. The target runtime runs the work in the requested `cwd`.
+3. The bridge resolves the selected companion, creates a job, and returns
+   quickly.
+4. The companion runtime runs the work in the requested `cwd`.
 5. The bridge writes progress digests and emits one terminal completion event.
-6. The subagent reports the result back to the parent.
+6. The subagent reports the result back to the harness.
 
 That means token-heavy work can happen outside the parent's main context while
 still giving the parent a structured result, status checks, cancellation, and
@@ -42,11 +64,22 @@ digest links.
 
 ![Agent Companion architecture](assets/readme/architecture.png)
 
-## Supported Targets
+## Supported Harnesses
+
+| Harness | Install selector | Status |
+| --- | --- | --- |
+| Claude Code | `--host claude` | implemented |
+| Codex CLI | `--host codex` | implemented |
+
+Future harnesses should add a host install surface, subagent template, hook or
+completion delivery path, and session-routing adapter without changing the
+companion runtime boundary.
+
+## Supported Companions
 
 ![Agent Companion target matrix](assets/readme/target-matrix.png)
 
-| Target | Runtime | Send | Wait | Status | Cancel | Reply | Restart resume |
+| Companion | Runtime | Send | Wait | Status | Cancel | Reply | Restart resume |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | OpenCode | `opencode run --format json --dir <cwd>` | yes | yes | yes | yes | no | no |
 | GitHub Copilot CLI | ACP daemon path | yes | yes | yes | yes | yes | yes, with ACP |
@@ -57,14 +90,36 @@ Notes:
   resume require a future server or ACP adapter.
 - Copilot keeps `/fleet` parallel orchestration. `parallel: "auto"` can prepend
   `/fleet` for broad Copilot tasks; OpenCode remains single-shot.
-- Goose and Aider are tracked as future adapter candidates.
+- Goose and Aider are tracked as future companion adapter candidates.
+
+## Strength Routing Roadmap
+
+The MVP has a one-to-one routing contract: one `agent_send` resolves to one
+companion target, either from the `target` argument or the configured
+`default-target`.
+
+The intended public model is one-to-many:
+
+- users connect multiple companion profiles at once;
+- a profile may represent a whole runtime, a provider-backed model inside that
+  runtime, or another configured adapter instance;
+- each profile declares strengths such as `reviewer`, `web_researcher`,
+  `planner`, or `fast_executor`;
+- the harness sees and requests strengths, while the bridge maps the strength to
+  the best configured companion profile.
+
+Example future profiles might look like `copilot_claude_sonnet_4_6` with
+`web_researcher`, `copilot_gpt_5_4` with `reviewer`, and a user-defined
+`opencode_provider_model` with `fast_executor`. That profile/strength router is
+not implemented yet; the current supported runtime selectors remain `opencode`
+and `copilot`.
 
 ## Requirements
 
 - Node.js `>= 22`.
 - `npm`.
 - `jq` for hook delivery.
-- At least one target runtime:
+- At least one companion runtime:
   - OpenCode on `PATH`, or `OPENCODE_BIN=/absolute/path/to/opencode`.
   - GitHub Copilot CLI on `PATH`, or `COPILOT_BIN=/absolute/path/to/copilot`.
 - Claude Code CLI when installing the Claude surface.
@@ -76,7 +131,7 @@ store provider secrets.
 
 ## Fast Path
 
-From the repository root, pick the host surface you actually use:
+From the repository root, pick the harness surface you actually use:
 
 ```bash
 # Codex source-checkout install, without selecting a default target yet.
@@ -104,7 +159,7 @@ bash setup.sh --host codex --target opencode
 # Claude only, Copilot default.
 bash setup.sh --host claude --target copilot
 
-# Host/plugin surface only. Every send must pass target explicitly.
+# Harness/plugin surface only. Every send must pass target explicitly.
 bash setup.sh --host both --target none
 ```
 
@@ -410,8 +465,8 @@ claude plugin validate .
 .claude-plugin/        Claude plugin manifest and local marketplace manifest
 .codex-plugin/         Codex plugin manifest
 assets/readme/         README PNG assets plus editable SVG diagram sources
-bridge-server/         MCP server plus target runtime adapters
-docs/                  Architecture, tracker, and onboarding handoff
+bridge-server/         MCP server plus companion runtime adapters
+docs/                  Architecture, tracker, onboarding, and release readiness
 hooks/                 Claude and Codex lifecycle hooks
 lib/                   Shared state, host routing, diagnostics, prompt helpers
 scripts/               Setup, onboarding, marketplace build, release validation

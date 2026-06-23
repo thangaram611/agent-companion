@@ -780,7 +780,7 @@ test('handleSend returns immediately and reattaches to existing jobs without dae
   }
 });
 
-test('OpenCode target adapter runs a fake CLI and surfaces terminal job state', async () => {
+test('OpenCode companion adapter runs a fake CLI and surfaces terminal job state', async () => {
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
   _resetForTest();

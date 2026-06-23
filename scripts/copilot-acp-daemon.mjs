@@ -28,7 +28,7 @@ import {
   buildPromptInspection,
 } from '../lib/prompt-inspect.mjs';
 import { selectLiveHeartbeat } from '../lib/heartbeat.mjs';
-import { readDefaultModel } from '../lib/state.mjs';
+import { DEFAULT_MODEL, readDefaultModel } from '../lib/state.mjs';
 
 // --- Constants ---------------------------------------------------------------
 
@@ -98,8 +98,6 @@ export const REPLY_DRAIN_TIMEOUT_MS = 10 * 1000;
 // the primary is a Claude model, Rubber Duck uses GPT-5.4 as the second
 // opinion. It requires GPT-5.4 access on the user's Copilot subscription; if
 // access is missing the flag is silently inert, no error.
-const COPILOT_DEFAULT_MODEL = 'gpt-5.5';
-
 // Read the host-routed effective model. lib/state.mjs chooses
 // ~/.claude/agent-companion or ~/.codex/agent-companion from
 // AGENT_COMPANION_HOST, so Codex and Claude config stay separate.
@@ -108,7 +106,7 @@ function readConfiguredModel() {
     const { model } = readDefaultModel();
     if (model) return model;
   } catch {}
-  return COPILOT_DEFAULT_MODEL;
+  return DEFAULT_MODEL;
 }
 
 function normalizeModel(model) {

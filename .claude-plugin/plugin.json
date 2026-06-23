@@ -2,7 +2,7 @@
   "name": "agent-companion",
   "version": "0.0.1",
   "defaultEnabled": false,
-  "description": "Agent delegation companion for Claude Code. Spawns a subagent that owns a dedicated MCP bridge and delegates token-heavy tasks to your chosen agent target (OpenCode or Copilot), freeing the parent's context.",
+  "description": "Attach an OpenCode or Copilot companion to the Claude Code harness. Agent Companion spawns a private subagent with a dedicated MCP bridge so token-heavy delegated work leaves the parent context clean.",
   "author": {
     "name": "thangaram611",
     "email": "thangaram611@gmail.com",

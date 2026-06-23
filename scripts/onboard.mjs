@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// onboard.mjs — first-class, target-first onboarding for agent-companion.
+// onboard.mjs — first-class companion onboarding for agent-companion.
 //
-// "Bring your target." Supported now: opencode and copilot. This is the one
-// place that selects a target, explains how to get it ready, and (with
-// --set-default) persists the choice. It never prompts for or stores provider
-// secrets — auth is delegated to the vendor tools (`opencode` /connect,
+// "Attach your companion." Supported now: opencode and copilot. This is the
+// one place that selects today's target id, explains how to get it ready, and
+// (with --set-default) persists the choice. It never prompts for or stores
+// provider secrets — auth is delegated to the vendor tools (`opencode` /connect,
 // `copilot login`).
 //
 // Usage:
@@ -150,8 +150,8 @@ const HELP = `agent-companion onboarding
   node scripts/onboard.mjs --list-targets [--json]
   node scripts/onboard.mjs --doctor [--json]
 
-Bring your target. Supported now: opencode and copilot. Onboarding never asks
-for or stores provider secrets — authenticate with the vendor tools.`;
+Attach your companion. Supported now: opencode and copilot. Onboarding never
+asks for or stores provider secrets — authenticate with the vendor tools.`;
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));

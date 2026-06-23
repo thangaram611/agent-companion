@@ -12,21 +12,34 @@ Last updated: 2026-06-19
 > digest `agent-digest://`, state dir `~/.{claude,codex}/agent-companion/`).
 > The sections below are retained as the design record.
 
+> **Public terminology update (2026-06-23):** current product copy uses
+> **harness** for the parent surface (`--host claude|codex`) and **companion**
+> for the delegated runtime (`target=opencode|copilot`). The implementation
+> still uses `host` and `target` as stable MVP flags/schema names. Future
+> routing should support multiple companion profiles and expose strengths such
+> as `reviewer` or `web_researcher` to harnesses instead of requiring each send
+> to name a concrete runtime.
+
 ## Objective
 
-Make onboarding target-first and host-aware:
+Make onboarding companion-aware and harness-aware:
 
-- Users bring their target.
-- The MVP supports two targets: `opencode` and `copilot`.
+- Users attach their companion.
+- The MVP supports two companion targets: `opencode` and `copilot`.
 - Setup must not require Copilot for OpenCode-only users.
-- Doctor/status must clearly say which hosts and targets are ready, missing, or partially configured.
-- Target selection must be explicit or configured, even though the runtime still has a bootstrap fallback.
+- Doctor/status must clearly say which harnesses and companion targets are
+  ready, missing, or partially configured.
+- Companion selection must be explicit or configured; the implemented bridge has
+  no bootstrap fallback.
 
 This is a handoff document for the next implementation pass. It is intentionally prescriptive so the work can be picked up without re-reading the whole repo.
 
-## Current Repo Baseline
+## Historical Repo Baseline
 
-Already implemented:
+This was the pre-implementation baseline used by the handoff. It is retained as
+design context, not current repo truth.
+
+Already implemented at the time:
 
 - Generic MCP tools: `agent_send`, `agent_wait`, `agent_status`, `agent_reply`, `agent_cancel`.
 - Legacy aliases: `copilot_*`, with `copilot_send` pinned to `target: "copilot"`.
@@ -35,12 +48,12 @@ Already implemented:
   - `AGENT_COMPANION_DEFAULT_TARGET`
   - legacy `COPILOT_COMPANION_DEFAULT_TARGET`
   - `~/.{claude,codex}/agent-companion/default-target`
-  - current bootstrap fallback: `opencode`
+  - then-current bootstrap fallback: `opencode`
 - OpenCode CLI adapter in `bridge-server/opencode-runtime.mjs`.
 - Copilot ACP adapter kept intact.
 - `agent_status({ diagnostics: true })` surfaces `lib/doctor.mjs`.
 
-Main gaps:
+Main gaps at the time:
 
 - `setup.sh` still hard-fails when `copilot` is missing, even for an OpenCode-only install.
 - `lib/doctor.mjs` still treats `copilot.found` as required for overall `ok`.
@@ -48,7 +61,7 @@ Main gaps:
 - There is no onboarding command to select/write `default-target`.
 - There is no target-specific readiness model: binary found, authenticated, configured, permission-safe, smoke-tested.
 - OpenCode permission mode is env-only and easy to miss.
-- README and tracker document target support, but there is no operational onboarding checklist or automated remediation path.
+- README and tracker document companion support, but there is no operational onboarding checklist or automated remediation path.
 
 ## Research Inputs
 
@@ -72,13 +85,19 @@ GitHub Copilot CLI:
 
 ## Product Posture
 
-Do not say "OpenCode is the default product target." Say:
+Do not say "OpenCode is the default product companion." Say:
 
-- "Bring your target."
-- "Supported now: OpenCode and Copilot."
-- "Choose target per send, or configure a bridge default."
+- "Bring your harness and attach your companion."
+- "Supported harnesses now: Claude Code and Codex CLI."
+- "Supported companions now: OpenCode and Copilot."
+- "Choose companion per send, or configure a bridge default."
+- "Future routing will expose strengths backed by configured companion
+  profiles."
 
-The implementation can keep the current bootstrap fallback to `opencode` for compatibility, but setup/onboarding should not hide target selection. Interactive onboarding should ask. Non-interactive onboarding should require `--target` unless an existing configured target is present.
+The implemented bridge deliberately removed the old bootstrap fallback to
+`opencode`: setup/onboarding must not hide companion selection. Interactive
+onboarding should ask. Non-interactive onboarding should require `--target`
+unless an existing configured target is present.
 
 ## Recommended Architecture
 
@@ -541,9 +560,9 @@ Expected:
    - Add test seam if practical; otherwise add a shell-level smoke in validation docs.
 
 7. Docs:
-   - Update README install sections with target-first setup commands.
+   - Update README install sections with companion-aware setup commands.
    - Link this handoff from `docs/MVP_TRACKER.md`.
-   - Keep the "bring your target" language consistent.
+   - Keep the "attach your companion" language consistent.
 
 8. Validation:
    - `node --check bridge-server/server.mjs`
@@ -570,5 +589,5 @@ Expected:
 
 - Should setup write `default-target` automatically when `--target` is passed, or require `--set-default`? Recommendation: write automatically for `setup.sh --target`, require `--set-default` for standalone diagnostic-only `onboard.mjs`.
 - Should OpenCode permissions be configured by generating a companion agent profile? Recommendation: not in the first onboarding pass; document permission config and keep dangerous auto-approval opt-in.
-- Should the bootstrap fallback remain `opencode` after target onboarding exists? Recommendation: keep for one release, but make onboarding and docs treat unconfigured fallback as a compatibility behavior, not the product UX.
+- Should the bootstrap fallback remain `opencode` after target onboarding exists? Resolved: no. The implemented bridge removed the fallback and returns `TARGET_UNCONFIGURED` with onboarding guidance.
 - Should `setup.sh --target auto --yes` choose OpenCode if both are installed? Recommendation: no. Fail and ask for explicit target to preserve the "bring your target" posture.

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Build a Codex marketplace root from this dual-host plugin source checkout.
+// Build a Codex marketplace root from this dual-harness plugin source checkout.
 //
 // Codex marketplace roots must contain `.agents/plugins/marketplace.json`,
 // and plugin entries are resolved from normal relative paths under that root.
