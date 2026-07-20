@@ -237,7 +237,7 @@ if [ "$TARGET" = "copilot" ] || command -v copilot >/dev/null 2>&1; then
   echo ""
 fi
 
-# --- Step 5: Claude-host install (subagent + permissions + agent-teams) -----
+# --- Step 5: Claude-host install (subagent + permissions) -------------------
 
 if [ "$DO_CLAUDE" = 1 ]; then
   printf "=== Claude Code host install ===\n"
@@ -263,20 +263,7 @@ if [ "$DO_CLAUDE" = 1 ]; then
     exit 1
   fi
 
-  # 5c. Agent Teams env var.
-  printf "Checking Agent Teams configuration...\n"
-  ZSHRC="$HOME/.zshrc"
-  if [ -f "$ZSHRC" ] && grep -q 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS' "$ZSHRC"; then
-    ok "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS already in $ZSHRC"
-  else
-    echo '' >> "$ZSHRC"
-    echo '# Claude Code: enable experimental agent teams for multi-agent orchestration' >> "$ZSHRC"
-    echo 'export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1' >> "$ZSHRC"
-    ok "Added CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 to $ZSHRC"
-    warn "Run 'source ~/.zshrc' or restart your terminal for this to take effect."
-  fi
-
-  # 5d. Diagnostic marker.
+  # 5c. Diagnostic marker.
   mkdir -p "$HOME/.claude/agent-companion"
   printf "claude\n" > "$HOME/.claude/agent-companion/.host"
   ok "diagnostic marker: ~/.claude/agent-companion/.host"
