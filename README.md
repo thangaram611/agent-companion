@@ -260,13 +260,24 @@ again". The allow-list shape is:
 Use `.claude/settings.local.json` if you want these permissions scoped to one
 repository.
 
-Claude thread continuity also requires:
+### Optional: `SendMessage` subagent resume
+
+Nothing in this plugin requires it. The bridge implements its own reply, wait,
+status and restart-resume over HTTP (`agent_reply` / `agent_wait` /
+`agent_status`, plus the `reply_available` / `resume_available` flags described
+in `docs/ARCHITECTURE.md`) — none of which goes through Claude Code's
+`SendMessage`.
+
+If you separately want Claude Code's built-in subagent resume — reattaching to
+a *completed* subagent's thread with its context intact — that is gated behind
+an experimental flag you can set yourself:
 
 ```bash
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 ```
 
-`setup.sh --host claude` appends that export to `~/.zshrc` when missing.
+`setup.sh` does **not** set this for you. It is an experimental Claude Code
+flag with effects well beyond this plugin, so opting in is your call.
 
 ## Install For Codex CLI
 
