@@ -2,8 +2,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -288,6 +288,103 @@ test('an empty queue still records a heartbeat, and runtime state stays 0700/060
     assert.equal(mode(runtime), '700');
     assert.equal(mode(heartbeats), '700');
     assert.equal(mode(hb), '600');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Queue-durability regression tests.
+//
+// The drain renames the queue out of the way before partitioning it. Anything
+// that exits between that rename and the kept-rows write used to leave every
+// row in a `.drain.<pid>` file that no code path reads again — permanent,
+// silent loss of completion events. These cover each way that could happen.
+// ---------------------------------------------------------------------------
+
+function runDrainRaw({ queuePath, payload, env = {} }) {
+  return execFileSync('bash', [SCRIPT], {
+    input: JSON.stringify(payload),
+    env: { ...process.env, AGENT_QUEUE_PATH: queuePath, ...env },
+    encoding: 'utf8',
+  });
+}
+
+/** Start a drain, wait for it to reach the post-rename delay, then signal it. */
+function killMidDrain(queuePath, signal) {
+  return new Promise((resolve) => {
+    const p = spawn('bash', [SCRIPT], {
+      env: { ...process.env, AGENT_QUEUE_PATH: queuePath, DEBUG_DRAIN_DELAY: '5' },
+      stdio: ['pipe', 'ignore', 'ignore'],
+    });
+    p.stdin.end(JSON.stringify({ session_id: 'sid-A', tool_response: {} }));
+    setTimeout(() => p.kill(signal), 1200);
+    p.on('close', () => resolve());
+  });
+}
+
+test('a malformed queue line cannot strand the whole queue', () => {
+  // jq -s aborts on the first invalid byte. Because that happens after the
+  // move-aside, one corrupt line used to destroy every row in the file and
+  // exit 5. Unparseable rows are undeliverable anyway, so they are dropped.
+  const { dir, path } = makeQueueFile([
+    { ts: FRESH_TS, kind: 'terminal', jobId: 'j-1', claudeSessionId: 'sid-A',
+      consumed: false, content: 'FIRST', meta: { status: 'completed' } },
+  ]);
+  try {
+    writeFileSync(path, readFileSync(path, 'utf8')
+      + 'this is not json\n'
+      + JSON.stringify({ ts: FRESH_TS, kind: 'terminal', jobId: 'j-2',
+          claudeSessionId: 'sid-A', consumed: false, content: 'SECOND',
+          meta: { status: 'completed' } }) + '\n');
+
+    const out = runDrainRaw({ queuePath: path, payload: { session_id: 'sid-A', tool_response: {} } });
+    assert.match(out, /FIRST/);
+    assert.match(out, /SECOND/);
+    assert.equal(existsSync(join(dir, 'completions.jsonl.drain')), false);
+    assert.equal(readdirSync(dir).filter((f) => f.includes('.drain.')).length, 0,
+      'no stranded snapshot may remain');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a drain killed mid-flight restores the queue instead of stranding it', async () => {
+  const { dir, path } = makeQueueFile([
+    { ts: FRESH_TS, kind: 'terminal', jobId: 'j-keep', claudeSessionId: 'sid-A',
+      consumed: false, content: 'KEEPME', meta: { status: 'completed' } },
+    { ts: FRESH_TS, kind: 'terminal', jobId: 'j-other', claudeSessionId: 'sid-B',
+      consumed: false, content: 'OTHER', meta: { status: 'completed' } },
+  ]);
+  try {
+    const before = readFileSync(path, 'utf8');
+    await killMidDrain(path, 'SIGTERM');
+    assert.ok(existsSync(path), 'queue file must be back');
+    assert.equal(readFileSync(path, 'utf8'), before, 'every row must survive');
+    assert.equal(existsSync(`${path}.lock`), false, 'lock must be released');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a SIGKILLed drain leaves an orphan the next drain adopts, and its lock is reclaimed', async () => {
+  // SIGKILL cannot be trapped, so the snapshot and the lock directory both
+  // survive the dead process. Without reclaim, mkdir would fail forever and
+  // every later drain would silently exit 0 — the queue wedged permanently.
+  const { dir, path } = makeQueueFile([
+    { ts: FRESH_TS, kind: 'terminal', jobId: 'j-adopt', claudeSessionId: 'sid-A',
+      consumed: false, content: 'ADOPTME', meta: { status: 'completed' } },
+  ]);
+  try {
+    await killMidDrain(path, 'SIGKILL');
+    assert.equal(existsSync(path), false, 'precondition: SIGKILL leaves no queue file');
+    assert.ok(readdirSync(dir).some((f) => f.includes('.drain.')), 'precondition: orphan exists');
+    assert.ok(existsSync(`${path}.lock`), 'precondition: stale lock exists');
+
+    const out = runDrainRaw({ queuePath: path, payload: { session_id: 'sid-A', tool_response: {} } });
+    assert.match(out, /ADOPTME/, 'the orphaned row must be recovered and delivered');
+    assert.equal(readdirSync(dir).filter((f) => f.includes('.drain.')).length, 0);
+    assert.equal(existsSync(`${path}.lock`), false, 'stale lock must be reclaimed and released');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

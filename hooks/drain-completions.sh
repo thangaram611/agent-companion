@@ -118,11 +118,24 @@ fi
 HB_SID="${MY_SID//[^a-zA-Z0-9._-]/_}"
 { : > "$HEARTBEAT_DIR/$HB_SID.heartbeat"; } 2>/dev/null || true
 
-# Fast path: no queue file, or empty file → no-op silently. Outside the lock
-# because the worst case is racing into the locked path and finding nothing.
-# Everything above this line is builtins, so this is where the hook returns on
-# the overwhelming majority of fires, having spawned no processes at all.
-[ -s "$QUEUE" ] || exit 0
+# Fast path: nothing queued AND no stranded snapshot → no-op silently. Outside
+# the lock because the worst case is racing into the locked path and finding
+# nothing. Everything above this line is builtins, so this is where the hook
+# returns on the overwhelming majority of fires, having spawned no processes.
+#
+# The orphan glob has to be part of THIS test rather than living after the
+# lock: the failure that strands a snapshot is a drain killed after its
+# move-aside, which leaves no queue file at all. A bare `-s "$QUEUE"` would
+# return here and the recovery below would be unreachable in precisely the case
+# it exists for. Glob expansion is a shell builtin — one readdir, no process —
+# so the zero-fork property is preserved.
+if [ ! -s "$QUEUE" ]; then
+  _stranded=0
+  for _o in "$QUEUE".drain.*; do
+    if [ -f "$_o" ]; then _stranded=1; break; fi
+  done
+  [ "$_stranded" = "1" ] || exit 0
+fi
 
 # From here on there is real work, so jq is mandatory. Resolving it here rather
 # than at the top means a machine without jq stays silent while idle and only
@@ -135,13 +148,55 @@ fi
 # Acquire the per-queue lock. mkdir is atomic and POSIX-portable (flock isn't
 # installed on macOS by default). Five 100ms attempts; if still contended,
 # skip this drain — the next hook event will retry.
+#
+# The holder's pid is recorded so a lock can be reclaimed when its owner died
+# without running its EXIT trap. hooks.json gives this hook a 5s timeout, so
+# being killed mid-drain is a real scenario, and without reclaim a single such
+# kill would leave the lock directory behind and wedge the queue permanently
+# for every later session — mkdir would fail forever and every drain would
+# silently exit 0.
+DRAIN=""
 acquired=0
 for _ in 1 2 3 4 5; do
   if mkdir "$LOCK" 2>/dev/null; then acquired=1; break; fi
+  _holder=""
+  [ -f "$LOCK/pid" ] && read -r _holder < "$LOCK/pid" 2>/dev/null || true
+  if [ -n "$_holder" ] && ! kill -0 "$_holder" 2>/dev/null; then
+    rm -rf "$LOCK" 2>/dev/null || true
+    if mkdir "$LOCK" 2>/dev/null; then acquired=1; break; fi
+  fi
   sleep 0.1
 done
 [ "$acquired" = "1" ] || exit 0
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+echo $$ > "$LOCK/pid" 2>/dev/null || true
+
+# Release the lock and, critically, put the snapshot back if we die still
+# holding it. The move-aside below renames the queue out of the way; anything
+# that exits between that rename and the kept-rows write would otherwise leave
+# every row in a `.drain.<pid>` file that no code path ever reads again.
+# Trapping TERM/INT explicitly is what makes the EXIT trap run on a timeout
+# kill rather than being bypassed.
+_release() {
+  if [ -n "$DRAIN" ] && [ -f "$DRAIN" ]; then
+    cat "$DRAIN" >> "$QUEUE" 2>/dev/null || true
+    rm -f "$DRAIN" 2>/dev/null || true
+  fi
+  rm -rf "$LOCK" 2>/dev/null || true
+}
+trap _release EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+# Adopt snapshots stranded by an earlier drain that died before it could
+# restore its own (a SIGKILL, which no trap can catch). Holding the lock means
+# no other drain can currently be between its move-aside and its cleanup, so
+# any `.drain.*` sitting here is by definition an orphan. This runs before the
+# emptiness re-check so orphans are recovered even when the live queue is gone.
+for _orphan in "$QUEUE".drain.*; do
+  [ -f "$_orphan" ] || continue
+  cat "$_orphan" >> "$QUEUE" 2>/dev/null || true
+  rm -f "$_orphan" 2>/dev/null || true
+done
 
 # Re-check after lock acquisition: the prior holder may have just emptied it.
 [ -s "$QUEUE" ] || exit 0
@@ -172,7 +227,7 @@ TERMINAL_CUTOFF=$((NOW_MS - TERMINAL_TTL_MS))
 #   .deliver — rows belonging to this session, fresh, unconsumed → injected
 #   .keep    — rows belonging to other sessions, fresh, unconsumed → retained
 #   (everything else dropped: untagged, own-already-consumed, any-stale-past-TTL)
-PARTITIONS=$("$JQ_BIN" -rs \
+PARTITIONS=$("$JQ_BIN" -Rrn \
   --arg sid "$MY_SID" \
   --argjson alertCutoff "$ALERT_CUTOFF" \
   --argjson terminalCutoff "$TERMINAL_CUTOFF" '
@@ -183,6 +238,13 @@ PARTITIONS=$("$JQ_BIN" -rs \
 
   def tagged: (.claudeSessionId // null) != null;
 
+  # -Rn + `inputs | fromjson?` parses line by line and DROPS anything that is
+  # not valid JSON. Under -s a single corrupt byte anywhere in the file aborts
+  # jq, and because that happens after the move-aside it used to strand every
+  # row in the snapshot — one bad line permanently killed the whole queue. A
+  # line that cannot be parsed can never be delivered to anyone anyway, so
+  # dropping it is both safe and self-healing.
+  [inputs | fromjson?] |
   {
     deliver: map(select(tagged and .claudeSessionId == $sid and .consumed != true and fresh)),
     keep:    map(select(tagged and .claudeSessionId != $sid and .consumed != true and fresh)),
