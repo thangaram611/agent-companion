@@ -17,7 +17,20 @@
 # Claude has no `mcp__agent-bridge__copilot_*` in its tool surface — there is
 # no plugin-level .mcp.json registration anywhere.
 #
-# Idempotent: rewrites the destination only when its checksum changes.
+# Idempotent, but not short-circuited: there is no checksum and no fast path.
+# Every session regenerates the file in full (template → sentinel → path and
+# node substitution) and byte-compares it against the destination, replacing it
+# only if they differ. So the destination's mtime is stable across no-op runs,
+# which is all that matters here — Claude Code hot-reloads agents on mtime.
+#
+# Deliberately no freshness check to skip the regeneration: the only cheap
+# signal available is comparing the template's mtime against the destination's,
+# and plugin upgrades arrive via tar / `cp -p` / `rsync -a`, all of which
+# preserve the source's original timestamps. A newer template can easily land
+# with an older mtime than the file it replaces, and the check would then skip
+# the update that mattered. Regenerating unconditionally costs a few subprocess
+# spawns and cannot be wrong.
+#
 # Sentinel-guarded: leaves alone any user-authored agent file at the same
 # path (no auto-generated header → don't touch).
 #
@@ -53,70 +66,20 @@ fi
 # .zshenv/.bashrc/etc are never sourced for that spawn. The spawn fails
 # and the tool surfaces as "not available in this environment".
 #
-# Resolution order (each candidate is validated against a stripped env
-# matching Claude Code's MCP-spawn env before being accepted):
-#   1. `type -P node` — bash builtin that returns the binary path while
-#      ignoring shell functions/aliases (robust against nvm's lazy loader).
-#      May return a mise/asdf shim — we canonicalize via process.execPath
-#      so the path baked into `command:` is the real binary, not the shim.
-#   2. nvm's `default` alias, resolved recursively. nvm stores aliases as
-#      plain files (not symlinks) and they can chain: `default` → `lts/*`
-#      → `lts/jod` → `v22.x.x`. We follow the chain up to 10 hops; cycles
-#      and dead ends fall through.
-#   3. Highest installed nvm node version by `sort -V` — a deterministic
-#      "latest local Node" fallback (semver-aware, so `v24` > `v4`).
-#   4. Common system locations (Homebrew, /usr/local, /usr/bin).
-# If none resolve, leave the template's literal `node` in place.
+# The resolution order and the stripped-env validation that canonicalizes shims
+# to their underlying binary both live in hooks/node-tools.sh. This script used
+# to carry its own hand-copy of that logic; the copy drifted and lost the
+# AGENT_COMPANION_NODE override, so the one escape hatch a user has when
+# auto-detection picks the wrong Node silently did nothing here. Sourcing the
+# shared resolver is the only way that stays fixed.
 #
-# Validation strategy: each candidate is executed under
-# `env -i HOME PATH=/usr/bin:/bin <candidate> -e 'console.log(process.execPath)'`.
-# This both (a) confirms the binary actually runs in a stripped env equivalent
-# to what Claude Code will provide at spawn time and (b) returns the canonical
-# binary path even when the candidate is a shim (mise/asdf) or a symlink chain
-# (Homebrew Cellar). A candidate that fails to run is discarded so the next
-# resolution step gets a chance.
-_validate_node() {
-  local candidate="$1"
-  [ -n "$candidate" ] && [ -x "$candidate" ] || return 1
-  env -i HOME="$HOME" PATH=/usr/bin:/bin \
-    "$candidate" -e 'const major=Number(process.versions.node.split(".")[0]); if (major < 22) process.exit(1); console.log(process.execPath)' 2>/dev/null
-}
-
+# If nothing resolves, leave the template's literal `node` in place.
+TOOLS="$ROOT/hooks/node-tools.sh"
 NODE_BIN=""
-if [ -z "$NODE_BIN" ]; then
-  NODE_BIN="$(_validate_node "$(type -P node 2>/dev/null)")"
-fi
-if [ -z "$NODE_BIN" ] && [ -r "$HOME/.nvm/alias/default" ]; then
-  ref="$(cat "$HOME/.nvm/alias/default" 2>/dev/null)"
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    case "$ref" in
-      v[0-9]*)
-        NODE_BIN="$(_validate_node "$HOME/.nvm/versions/node/$ref/bin/node")"
-        break
-        ;;
-    esac
-    if [ -r "$HOME/.nvm/alias/$ref" ]; then
-      next="$(cat "$HOME/.nvm/alias/$ref" 2>/dev/null)"
-      [ -n "$next" ] && [ "$next" != "$ref" ] || break
-      ref="$next"
-    else
-      break
-    fi
-  done
-  unset ref next
-fi
-if [ -z "$NODE_BIN" ] && [ -d "$HOME/.nvm/versions/node" ]; then
-  highest="$(ls -d "$HOME/.nvm/versions/node"/v* 2>/dev/null | sort -V | tail -n 1)"
-  if [ -n "$highest" ]; then
-    NODE_BIN="$(_validate_node "$highest/bin/node")"
-  fi
-  unset highest
-fi
-if [ -z "$NODE_BIN" ]; then
-  for candidate in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
-    NODE_BIN="$(_validate_node "$candidate")"
-    [ -n "$NODE_BIN" ] && break
-  done
+if [ -r "$TOOLS" ]; then
+  # shellcheck source=/dev/null
+  . "$TOOLS"
+  NODE_BIN="$(resolve_node 2>/dev/null || true)"
 fi
 
 # Materialize: insert sentinel as a YAML-comment line right after the opening
@@ -128,19 +91,31 @@ TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 SED_ROOT="$(printf '%s' "$ROOT" | sed 's/[\/&|]/\\&/g')"
 
+# The node rewrite is anchored to the YAML pattern (whitespace + `command:` +
+# space + `node` + end-of-line) so it can't touch `command:` fields outside the
+# MCP block, and is a no-op if the template ever switches to an absolute path.
+# When no node resolved it degrades to an expression that matches nothing, which
+# keeps this a single pipeline — the previous second-temp-file dance leaked a
+# /tmp file whenever the script was killed mid-rewrite.
+NODE_SED='s|^$||'
+if [ -n "$NODE_BIN" ]; then
+  SED_NODE_BIN="$(printf '%s' "$NODE_BIN" | sed 's/[\/&|]/\\&/g')"
+  NODE_SED="s|^\([[:space:]]*command:\) node[[:space:]]*\$|\1 ${SED_NODE_BIN}|"
+fi
+
+set -o pipefail
 awk -v sentinel="$SENTINEL" 'NR==1 { print; print sentinel; next } { print }' "$TEMPLATE" \
   | sed "s|\${CLAUDE_PLUGIN_ROOT}|$SED_ROOT|g" \
+  | sed "$NODE_SED" \
   > "$TMP"
+RENDER_STATUS=$?
+set +o pipefail
 
-if [ -n "$NODE_BIN" ]; then
-  # Anchor to the YAML pattern (whitespace + `command:` + space + `node` +
-  # end-of-line) to avoid touching `command:` fields outside the MCP block,
-  # and to be a no-op if the template ever switches to an absolute path.
-  NODE_TMP="$(mktemp)"
-  SED_NODE_BIN="$(printf '%s' "$NODE_BIN" | sed 's/[\/&|]/\\&/g')"
-  sed "s|^\([[:space:]]*command:\) node[[:space:]]*$|\1 ${SED_NODE_BIN}|" "$TMP" > "$NODE_TMP" \
-    && mv "$NODE_TMP" "$TMP"
-fi
+# Never install a partial render. Without this, a failing stage leaves $TMP
+# truncated, `cmp` duly reports "changed", and we would overwrite a working
+# agent file with the fragment.
+[ "$RENDER_STATUS" -eq 0 ] || exit 0
+[ -s "$TMP" ] || exit 0
 
 # Atomic update only if content actually changed (avoids spurious file mtime
 # bumps and Claude Code's hot-reload churn on identical writes).

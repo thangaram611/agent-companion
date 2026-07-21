@@ -248,6 +248,10 @@ function runSmoke(id, env) {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 120_000,
+      // `timeout` signals the child and then keeps blocking until it actually
+      // exits, so with the default (catchable) SIGTERM a companion that traps
+      // it — or whose shutdown path is itself wedged — is not bounded at all.
+      killSignal: 'SIGKILL',
       env,
     });
     return { supported: true, passed: true, detail: out.trim().split('\n').slice(-1)[0] || '(no output)' };
