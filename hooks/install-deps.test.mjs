@@ -17,9 +17,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, rmSync, chmodSync, lstatSync, readdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, rmSync, chmodSync, lstatSync, readdirSync, symlinkSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = resolve(fileURLToPath(import.meta.url), '..');
@@ -297,6 +297,203 @@ test('a failing npm reports the failure, clears the hash, and releases the lock'
     assert.match(r.stderr, /npm install failed/);
     assert.equal(existsSync(join(ctx.persist, '.manifest.sha256')), false);
     assert.equal(existsSync(ctx.lock), false, 'a failed install must not leave the lock behind');
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+// --- the node_modules link ---------------------------------------------------
+//
+// The fast path used to ask `[ -L "$SYMLINK" ]` — "is something symlink-shaped
+// here" — and never whether it RESOLVED or pointed at the install we manage. So
+// a dangling link, or one aimed at an unrelated directory, exited 0 as "healthy"
+// and every later session skipped over it identically. The bridge could not
+// resolve a single bare ESM import, and nothing ever repaired it.
+//
+// The second half of the fix is that a broken link no longer costs a full
+// `npm ci`: deps-current and link-correct are now separate questions.
+
+// Seed a completed, manifest-current managed install so DEPS_OK is 1 and only
+// the link is in question.
+function seedInstalled(ctx) {
+  mkdirSync(join(ctx.persist, 'node_modules', 'some-pkg'), { recursive: true });
+  const pkg = readFileSync(join(ctx.root, 'bridge-server', 'package.json'));
+  writeFileSync(join(ctx.persist, 'package.json'), pkg);
+  const hash = execFileSync('bash', ['-c',
+    `cat "${join(ctx.root, 'bridge-server', 'package.json')}" | shasum -a 256 | cut -d' ' -f1`,
+  ], { encoding: 'utf8' }).trim();
+  writeFileSync(join(ctx.persist, '.manifest.sha256'), hash + '\n');
+  return join(ctx.persist, 'node_modules');
+}
+
+function slotOf(ctx) { return join(ctx.root, 'bridge-server', 'node_modules'); }
+
+// Does the slot actually reach the managed install? Same question the hook asks.
+function slotReachesManaged(ctx) {
+  try {
+    return realpathSync(slotOf(ctx)) === realpathSync(join(ctx.persist, 'node_modules'));
+  } catch { return false; }
+}
+
+const BROKEN_SLOTS = [
+  {
+    name: 'a dangling symlink',
+    make: (ctx) => symlinkSync('/nonexistent/node_modules', slotOf(ctx)),
+  },
+  {
+    name: 'a symlink to an unrelated node_modules',
+    make: (ctx) => {
+      const other = join(ctx.dir, 'elsewhere', 'node_modules');
+      mkdirSync(other, { recursive: true });
+      symlinkSync(other, slotOf(ctx));
+    },
+  },
+  {
+    name: 'a symlink to an empty directory',
+    make: (ctx) => {
+      const empty = join(ctx.dir, 'empty');
+      mkdirSync(empty, { recursive: true });
+      symlinkSync(empty, slotOf(ctx));
+    },
+  },
+  {
+    name: 'a symlink to a regular file',
+    make: (ctx) => {
+      const f = join(ctx.dir, 'afile');
+      writeFileSync(f, 'x');
+      symlinkSync(f, slotOf(ctx));
+    },
+  },
+  {
+    name: 'a self-referential symlink loop',
+    make: (ctx) => symlinkSync(slotOf(ctx), slotOf(ctx)),
+  },
+  {
+    name: 'a stray regular file',
+    make: (ctx) => writeFileSync(slotOf(ctx), 'not a directory'),
+  },
+  {
+    name: 'an empty real directory',
+    make: (ctx) => mkdirSync(slotOf(ctx), { recursive: true }),
+  },
+  {
+    name: 'nothing at all',
+    make: () => {},
+  },
+];
+
+for (const slot of BROKEN_SLOTS) {
+  test(`link repair: ${slot.name} is repaired without reinstalling`, () => {
+    const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+    const runs = join(ctx.dir, 'runs');
+    try {
+      seedInstalled(ctx);
+      slot.make(ctx);
+
+      const r = runSync(ctx, { NPM_RUNS: runs });
+      assert.equal(r.code, 0, r.stderr);
+      assert.ok(slotReachesManaged(ctx), `${slot.name} must end up reaching the managed install`);
+      // The whole point of splitting deps-current from link-correct: a link
+      // fault must not drag a full npm ci behind it.
+      assert.equal(existsSync(runs), false, 'a link-only fault must not trigger npm');
+
+      // ...and the next session must then take the silent fast path.
+      const again = runSync(ctx, { NPM_RUNS: runs });
+      assert.equal(again.code, 0);
+      assert.equal(again.stdout.trim(), '', 'a repaired link must fast-path silently');
+    } finally {
+      rmSync(ctx.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('link repair: a populated real directory is converged to the managed link', () => {
+  // setup.sh:164 does an in-tree `npm ci` at exactly this path, and the slot is
+  // gitignored and regenerable, so converging it is correct — and it is what
+  // this hook has done since v0.0.1. It must be announced, not silent.
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+  const runs = join(ctx.dir, 'runs');
+  try {
+    seedInstalled(ctx);
+    mkdirSync(join(slotOf(ctx), 'left-over-pkg'), { recursive: true });
+
+    const r = runSync(ctx, { NPM_RUNS: runs });
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(slotReachesManaged(ctx));
+    assert.match(r.stdout, /replaced bridge-server\/node_modules/);
+    assert.equal(existsSync(runs), false, 'converging the slot must not reinstall');
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('link repair: a correct link is left completely alone', () => {
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+  const runs = join(ctx.dir, 'runs');
+  try {
+    const managed = seedInstalled(ctx);
+    symlinkSync(managed, slotOf(ctx));
+    const before = lstatSync(slotOf(ctx)).ino;
+
+    const r = runSync(ctx, { NPM_RUNS: runs });
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout.trim(), '', 'the healthy path must stay silent');
+    assert.equal(lstatSync(slotOf(ctx)).ino, before, 'the link must not be recreated');
+    assert.equal(existsSync(runs), false);
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('link repair: a relative link that resolves correctly is accepted', () => {
+  // `-ef` compares inodes after resolution, so link shape is irrelevant. A
+  // readlink string compare would have rejected this and churned the link.
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+  const runs = join(ctx.dir, 'runs');
+  try {
+    seedInstalled(ctx);
+    const rel = relative(join(ctx.root, 'bridge-server'), join(ctx.persist, 'node_modules'));
+    symlinkSync(rel, slotOf(ctx));
+
+    const r = runSync(ctx, { NPM_RUNS: runs });
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout.trim(), '', 'a correctly-resolving relative link is healthy');
+    assert.equal(readFileSync(join(ctx.persist, '.manifest.sha256'), 'utf8').trim().length, 64);
+    assert.equal(existsSync(runs), false);
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('link repair: an unlinkable slot fails loudly instead of claiming success', () => {
+  // The old code discarded ln's exit status and printed "deps ready" over a
+  // bridge that could not resolve a single import.
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules\n' });
+  const bridgeDir = join(ctx.root, 'bridge-server');
+  try {
+    seedInstalled(ctx);
+    chmodSync(bridgeDir, 0o500); // read+execute: cannot create entries
+    const r = runSync(ctx);
+    assert.equal(r.code, 1, 'an unlinkable slot must be a hard failure');
+    assert.match(r.stderr, /could not link/);
+    assert.doesNotMatch(r.stdout, /deps ready/);
+  } finally {
+    chmodSync(bridgeDir, 0o755);
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('a stale manifest still reinstalls, and the link is made after', () => {
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+  const runs = join(ctx.dir, 'runs');
+  try {
+    seedInstalled(ctx);
+    writeFileSync(join(ctx.persist, '.manifest.sha256'), 'stale-hash\n');
+    const r = runSync(ctx, { NPM_RUNS: runs });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /deps ready/);
+    assert.equal(readFileSync(runs, 'utf8').trim().split('\n').length, 1, 'a manifest change must reinstall');
+    assert.ok(slotReachesManaged(ctx));
   } finally {
     rmSync(ctx.dir, { recursive: true, force: true });
   }
