@@ -26,7 +26,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 
 import { resolveOpenCodeBin, resolveOpenCodePermissionMode, resolveOpenCodeTimeoutMs } from './opencode-runtime.mjs';
-import { openCodeServerRegistryPath, writePrivateFile } from '../lib/runtime-paths.mjs';
+import { openCodeServerRegistryPath, writePrivateFileAtomic } from '../lib/runtime-paths.mjs';
 import { truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
 
 const MAX_TRANSCRIPT_CHARS = 12_000;
@@ -292,6 +292,61 @@ export function createTurnAccumulator(sessionId) {
 const _serverCache = new Map(); // key -> { baseUrl, pid }
 const _spawnLocks = new Map();  // key -> Promise
 
+// A lease is one bridge process's claim that it has a job actively using the
+// shared server. Leases live in the on-disk registry rather than in memory
+// because the thing they protect is machine-wide: `opencode serve` is shared by
+// every bridge, and the bridge is spawned per subagent, so "this process has no
+// live jobs" says nothing about whether the server is in use.
+//
+// Each lease is renewed on its owner's GC tick. A lease whose owning pid is
+// gone, or that has not been renewed in LEASE_STALE_MS, is abandoned and gets
+// pruned — otherwise a hard-killed bridge would pin the server forever.
+const LEASE_STALE_MS = 5 * 60 * 1000;
+
+// How long a published disposal claim is honored. Long enough to cover the
+// dispose round-trip, short enough that a reaper killed mid-dispose cannot make
+// the server permanently unadoptable.
+const DISPOSAL_CLAIM_TTL_MS = 30 * 1000;
+
+// How long the shared server may sit unused before the reaper disposes it.
+//
+// This floor MUST clear the longest a single job can occupy the server. It used
+// to be a bare 30min constant in server.mjs while opencode jobs were allowed
+// 40min, so a job that simply ran long looked indistinguishable from an idle
+// server. Deriving it from the job timeout is what stops the two numbers from
+// being chosen independently and drifting apart again — which is how they got
+// out of step in the first place.
+const MIN_IDLE_TTL_MS = 30 * 60 * 1000;
+const IDLE_TTL_GRACE_MS = 5 * 60 * 1000;
+
+export function openCodeServerIdleTtlMs(env = process.env) {
+  return Math.max(MIN_IDLE_TTL_MS, resolveOpenCodeTimeoutMs(env) + IDLE_TTL_GRACE_MS);
+}
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means the pid exists but belongs to another user — still alive.
+    return err.code === 'EPERM';
+  }
+}
+
+// Drop leases whose owner died or stopped renewing. Returns a fresh object plus
+// whether anything was removed (so callers can skip a pointless registry write).
+function pruneLeases(leases, now) {
+  const kept = {};
+  let changed = false;
+  for (const [leaseId, lease] of Object.entries(leases || {})) {
+    const renewedAt = Number(lease?.renewedAt) || 0;
+    if (pidAlive(Number(lease?.pid)) && now - renewedAt < LEASE_STALE_MS) kept[leaseId] = lease;
+    else changed = true;
+  }
+  return { leases: kept, changed };
+}
+
 function readRegistry() {
   try {
     const path = openCodeServerRegistryPath();
@@ -301,10 +356,15 @@ function readRegistry() {
   } catch { return {}; }
 }
 
+// Atomic, because every bridge on the machine reads this file and lease renewal
+// now rewrites it on a heartbeat. A truncate-then-write would let a reader catch
+// the file mid-write; readRegistry treats unparseable as empty, and an empty
+// registry makes ensureOpenCodeServer spawn a SECOND `opencode serve` rather
+// than reattach to the live one.
 function writeRegistry(reg) {
   try {
     const path = openCodeServerRegistryPath();
-    writePrivateFile(path, JSON.stringify(reg, null, 2));
+    writePrivateFileAtomic(path, JSON.stringify(reg, null, 2));
   } catch { /* registry is best-effort */ }
 }
 
@@ -340,14 +400,24 @@ export async function probeOpenCodeServerHealth(baseUrl) {
 export async function ensureOpenCodeServer({ env = process.env } = {}) {
   const key = SHARED_SERVER_KEY;
 
+  // A server another bridge has claimed for disposal is about to stop answering
+  // even though it is healthy right now. Adopting it would hand this job a
+  // server that dies underneath it, so treat a live claim as "gone" and spawn
+  // our own. Health alone is not enough to tell those two apart.
+  const claimed = (base) => {
+    const reg = readRegistry()[key];
+    return reg?.baseUrl === base && !!disposalClaimedBy(reg);
+  };
+
   const cached = _serverCache.get(key);
-  if (cached && await probeHealth(cached.baseUrl)) {
+  if (cached && !claimed(cached.baseUrl) && await probeHealth(cached.baseUrl)) {
     recordServer(key, { ...readRegistry()[key], baseUrl: cached.baseUrl, pid: cached.pid });
     return { baseUrl: cached.baseUrl, pid: cached.pid, reused: true };
   }
+  if (cached) _serverCache.delete(key);
 
   const recorded = readRegistry()[key];
-  if (recorded?.baseUrl && await probeHealth(recorded.baseUrl)) {
+  if (recorded?.baseUrl && !disposalClaimedBy(recorded) && await probeHealth(recorded.baseUrl)) {
     _serverCache.set(key, { baseUrl: recorded.baseUrl, pid: recorded.pid });
     recordServer(key, recorded);
     return { baseUrl: recorded.baseUrl, pid: recorded.pid, reused: true };
@@ -389,20 +459,131 @@ export function openCodeServerPoolSnapshot() {
   return entry ? { ...entry } : null;
 }
 
-// Best-effort idle reaper: dispose the shared server if it has not been used
-// within `idleMs` and the bridge tracks no live jobs on it. Called opportunisti-
-// cally; failures are swallowed (the server is detached and self-contained).
-export async function reapIdleOpenCodeServer({ idleMs, hasLiveJobs = false } = {}) {
+// Publish this process's in-flight server-mode jobs as leases, and prune every
+// abandoned lease (ours or another bridge's) while we hold the file. Call this
+// on a heartbeat — it is a full reconcile, not an increment, so a lease lost to
+// a concurrent read-modify-write is simply re-added on the next tick.
+//
+// Holding a lease also refreshes `lastUsedAt`. That is what makes a job longer
+// than the idle TTL safe: the server counts as "in use" for as long as someone
+// is actually using it, instead of only at the moment the job started.
+export function syncOpenCodeServerLeases(jobIds = [], { now = Date.now(), pid = process.pid } = {}) {
+  const reg = readRegistry();
+  const entry = reg[SHARED_SERVER_KEY];
+  if (!entry) return { leases: {}, mine: 0 };
+
+  const { leases, changed } = pruneLeases(entry.leases, now);
+  // Reconcile our own leases: drop the ones whose jobs went terminal, then
+  // (re)stamp the live ones. Other processes' surviving leases are untouched.
+  let heldBefore = 0;
+  for (const [leaseId, lease] of Object.entries(leases)) {
+    if (Number(lease?.pid) === pid) { heldBefore += 1; delete leases[leaseId]; }
+  }
+  for (const jobId of jobIds) leases[`${pid}:${jobId}`] = { pid, jobId, renewedAt: now };
+
+  // An idle bridge with nothing to say must not touch the file. This runs on
+  // every GC tick in every bridge on the machine; writing unconditionally would
+  // be pure contention on a file they all read, for no change in content.
+  if (jobIds.length === 0 && heldBefore === 0 && !changed) return { leases, mine: 0 };
+
+  const next = { ...entry, leases };
+  if (jobIds.length > 0) next.lastUsedAt = now;
+  reg[SHARED_SERVER_KEY] = next;
+  writeRegistry(reg);
+  return { leases, mine: jobIds.length };
+}
+
+// Best-effort idle reaper: dispose the shared server only when it has gone
+// `idleMs` without use AND no bridge on this machine holds a live lease on it.
+//
+// `hasLiveJobs` is this process's own view and stays as a cheap short-circuit,
+// but it is not sufficient on its own: the server is shared machine-wide while
+// the bridge is spawned per subagent, so a second bridge with an empty job map
+// used to be able to dispose a server out from under someone else's running
+// turn. Leases close that hole.
+//
+// Failures are swallowed (the server is detached and self-contained).
+export async function reapIdleOpenCodeServer({ idleMs, hasLiveJobs = false, now = Date.now() } = {}) {
   if (hasLiveJobs) return false;
   const reg = readRegistry();
   const entry = reg[SHARED_SERVER_KEY];
   if (!entry?.baseUrl || !entry.lastUsedAt) return false;
-  if (Date.now() - entry.lastUsedAt < idleMs) return false;
+
+  const { leases, changed } = pruneLeases(entry.leases, now);
+  if (changed) {
+    reg[SHARED_SERVER_KEY] = { ...entry, leases };
+    writeRegistry(reg);
+  }
+  // Another bridge is mid-turn on this server. Its own reaper will dispose it
+  // once its jobs finish and the server actually goes idle.
+  if (Object.keys(leases).length > 0) return false;
+
+  if (now - entry.lastUsedAt < idleMs) return false;
+
+  // Claim the disposal BEFORE the HTTP call. Deciding and then disposing is not
+  // enough on its own: a lease can only exist once a job exists, so a bridge
+  // that adopts this server in the window between our check and our dispose
+  // landing has no way to warn us, and we would kill its turn. Publishing the
+  // intent lets the adopter see it (ensureOpenCodeServer refuses a server that
+  // is being disposed and spawns its own), and re-reading after we publish lets
+  // us see an adopter who got in first. Both sides fail safe: the worst case is
+  // one redundant server spawn, never a disposed server with a live job on it.
+  if (!claimDisposal(entry, now)) return false;
+
   try { await _impl.fetchJson(`${entry.baseUrl}/global/dispose`, { method: 'POST', timeoutMs: HEALTH_PROBE_TIMEOUT_MS }); }
   catch { /* server may already be gone */ }
-  forgetServer(SHARED_SERVER_KEY);
+  // Re-read rather than blind-delete: forgetServer drops the whole entry, so if
+  // another bridge replaced this server while we disposed the old one, an
+  // unconditional delete would erase the replacement and its leases too.
+  const after = readRegistry()[SHARED_SERVER_KEY];
+  if (!after || after.baseUrl === entry.baseUrl) forgetServer(SHARED_SERVER_KEY);
   return true;
 }
+
+// Publish `disposing` and confirm we still own the decision. Returns false if
+// anyone raced us — a lease appeared, the server was used again, the entry was
+// replaced, or another reaper claimed it first.
+function claimDisposal(entry, now) {
+  const reg = readRegistry();
+  const current = reg[SHARED_SERVER_KEY];
+  if (!current || current.baseUrl !== entry.baseUrl) return false;
+  if (disposalClaimedBy(current, now)) return false;
+
+  reg[SHARED_SERVER_KEY] = { ...current, disposing: { pid: process.pid, at: now } };
+  writeRegistry(reg);
+
+  const confirm = readRegistry()[SHARED_SERVER_KEY];
+  const claim = confirm?.disposing;
+  if (!confirm || confirm.baseUrl !== entry.baseUrl || claim?.pid !== process.pid) return false;
+  // Someone adopted the server between our decision and our claim. Stand down —
+  // and withdraw the claim, or it would block adoption until the TTL expires
+  // and cost them a redundant server spawn for nothing.
+  if (Object.keys(pruneLeases(confirm.leases, now).leases).length > 0 || confirm.lastUsedAt !== entry.lastUsedAt) {
+    releaseDisposalClaim(entry.baseUrl);
+    return false;
+  }
+  return true;
+}
+
+function releaseDisposalClaim(baseUrl) {
+  const reg = readRegistry();
+  const current = reg[SHARED_SERVER_KEY];
+  if (!current || current.baseUrl !== baseUrl || current.disposing?.pid !== process.pid) return;
+  const { disposing, ...rest } = current;
+  reg[SHARED_SERVER_KEY] = rest;
+  writeRegistry(reg);
+}
+
+// Is a disposal claim in force? Claims expire so a reaper that died mid-dispose
+// cannot make the server permanently unadoptable.
+function disposalClaimedBy(entry, now = Date.now()) {
+  const claim = entry?.disposing;
+  if (!claim) return null;
+  if (now - (Number(claim.at) || 0) > DISPOSAL_CLAIM_TTL_MS) return null;
+  return claim;
+}
+
+export { LEASE_STALE_MS };
 
 // Parse the `listening on http://host:port` boot line from the server's stdout.
 function waitForBootUrl(child) {

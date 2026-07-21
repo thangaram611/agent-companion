@@ -47,6 +47,12 @@ function run(command, commandArgs, { env = process.env, cwd = REPO_ROOT } = {}) 
     env,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Release validation installs and runs real binaries; a wedged one must
+    // fail the run rather than hang CI forever. SIGKILL because `timeout` only
+    // signals the child and keeps blocking until it exits, so a catchable
+    // signal is not a bound at all.
+    timeout: 300_000,
+    killSignal: 'SIGKILL',
   });
 
   if (result.error || result.status !== 0) {

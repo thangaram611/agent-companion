@@ -50,19 +50,88 @@ mkdir -p "$PERSIST_DIR"
 # Concurrent-install guard. Two sessions starting within seconds of each
 # other would otherwise race `npm install` against the same target and
 # corrupt node_modules. Portable mutex via atomic `mkdir` (macOS lacks
-# `flock` by default). Second process waits up to 60s; if the lock is
-# stale (holder PID dead) it reclaims. Trap cleans up on exit.
+# `flock` by default). If the lock is stale (holder PID dead) it reclaims.
+#
+# The wait budget MUST stay below this hook's timeout in hooks/hooks.json.
+# It used to be 60s against a 55s timeout, which meant the host killed the
+# hook while it was still sleeping and the clean bail-out below was dead
+# code: a contended install ended as a hard hook kill instead of a silent
+# "someone else has it". hooks/install-deps.test.mjs pins the invariant.
+HOOK_TIMEOUT_SEC=55
+LOCK_WAIT_SEC=45
+# Test seam. hooks/install-deps.test.mjs proves the contended path bails out
+# cleanly, which otherwise costs the full budget in wall-clock per assertion.
+# Validated and capped: a malformed value must not produce `[: abc: integer
+# expression expected` in the user's session banner, and an oversized one must
+# not reinstate the very overrun this budget exists to prevent.
+case "${AGENT_COMPANION_LOCK_WAIT_SEC:-}" in
+  '' | *[!0-9]*) ;;
+  *)
+    if [ "$AGENT_COMPANION_LOCK_WAIT_SEC" -gt 0 ] \
+        && [ "$AGENT_COMPANION_LOCK_WAIT_SEC" -lt "$HOOK_TIMEOUT_SEC" ]; then
+      LOCK_WAIT_SEC="$AGENT_COMPANION_LOCK_WAIT_SEC"
+    fi
+    ;;
+esac
+
+# Ages, in minutes, at which an unreleased lock is presumed abandoned. See
+# lock_is_stale.
+LOCK_ORPHAN_MIN=1
+LOCK_ABANDON_MIN=60
+
 LOCK_DIR="$PERSIST_DIR/.install.lock.d"
-WAIT=60
+
+# Only drop the lock if we are still the recorded holder. Once npm starts, the
+# pid file names the npm process, not this shell — see the install step below
+# for why. Releasing then would hand the next session a green light while npm
+# is still writing node_modules, which is exactly the corruption the lock
+# exists to prevent.
+release_lock() {
+  if [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$$" ]; then
+    rm -rf "$LOCK_DIR"
+  fi
+}
+
+# Is the lock abandoned? Three cases, most confident first:
+#   1. a holder is recorded but that process is gone   → stale, reclaim now.
+#   2. no holder was ever recorded                     → the previous shell died
+#      in the microsecond window between `mkdir` and the pid write. Without this
+#      case that lock is immortal: every future session waits out its budget and
+#      exits 0, node_modules is never installed, the bridge never starts, and
+#      every hook still reports success. Silent, permanent breakage.
+#   3. the lock is absurdly old                        → backstop for pid reuse,
+#      where `kill -0` is answering about an unrelated process. The threshold is
+#      far beyond any real `npm ci`.
+#
+# Cases 2 and 3 compare the lock dir's own age against now, via `find -mmin`
+# (portable across BSD and GNU find). That is safe here and is NOT the
+# mtime-freshness trap that rules out timestamp checks elsewhere in this plugin:
+# this directory is created locally by `mkdir` and never arrives via tar /
+# `cp -p` / `rsync -a`, so no preserved older timestamp can reach it.
+older_than_min() {
+  [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +"$1" 2>/dev/null)" ]
+}
+
+lock_is_stale() {
+  local holder
+  holder="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+  if [ -n "$holder" ]; then
+    kill -0 "$holder" 2>/dev/null || return 0
+    older_than_min "$LOCK_ABANDON_MIN"
+    return $?
+  fi
+  older_than_min "$LOCK_ORPHAN_MIN"
+}
+
+WAIT="$LOCK_WAIT_SEC"
 while [ "$WAIT" -gt 0 ]; do
   if mkdir "$LOCK_DIR" 2>/dev/null; then
     echo "$$" > "$LOCK_DIR/pid"
-    trap 'rm -rf "$LOCK_DIR"' EXIT
+    trap 'release_lock' EXIT
+    trap 'release_lock; exit 143' INT TERM HUP
     break
   fi
-  HOLDER=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-  if [ -n "$HOLDER" ] && ! kill -0 "$HOLDER" 2>/dev/null; then
-    # Holder process is gone — lock is stale.
+  if lock_is_stale; then
     rm -rf "$LOCK_DIR"
     continue
   fi
@@ -70,7 +139,7 @@ while [ "$WAIT" -gt 0 ]; do
   WAIT=$((WAIT - 1))
 done
 if [ ! -d "$LOCK_DIR" ] || [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" != "$$" ]; then
-  # Couldn't acquire in 60s — another SessionStart holds it; it'll finish
+  # Couldn't acquire in time — another SessionStart holds it; it'll finish
   # the install on our behalf. Exit cleanly so the hook banner stays green.
   exit 0
 fi
@@ -116,7 +185,30 @@ else
 fi
 
 cd "$PERSIST_DIR" || { echo "agent-companion: cd $PERSIST_DIR failed" >&2; exit 1; }
-if ! "$NPM_BIN" "${INSTALL_ARGS[@]}" >"$LOG" 2>&1; then
+
+# Run npm in the background and hand the lock to IT, not to this shell. The
+# process that owns node_modules is npm, and it outlives us: this hook has a
+# hard timeout, and when the host kills it npm is orphaned and keeps installing.
+# With the shell's pid in the lock, that kill made the lock instantly look stale
+# and the next session started a second `npm ci` on top of a live one. With
+# npm's pid there, the lock stays held for exactly as long as the install runs,
+# and goes stale the moment it doesn't.
+"$NPM_BIN" "${INSTALL_ARGS[@]}" >"$LOG" 2>&1 &
+NPM_PID=$!
+echo "$NPM_PID" > "$LOCK_DIR/pid"
+wait "$NPM_PID"
+NPM_STATUS=$?
+# Take the lock back ONLY if npm is still the recorded holder. In the instant
+# between npm exiting and this line the lock names a dead pid, so a waiter can
+# legitimately declare it stale and acquire it. Writing our pid unconditionally
+# would then make our EXIT trap delete a lock that a live holder owns — handing
+# a third session a green light and putting two `npm ci` runs on one target,
+# the exact corruption this lock exists to prevent.
+if [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$NPM_PID" ]; then
+  echo "$$" > "$LOCK_DIR/pid"
+fi
+
+if [ "$NPM_STATUS" -ne 0 ]; then
   rm -f "$MANIFEST_HASH"
   echo "agent-companion: npm install failed (see $LOG)" >&2
   exit 1

@@ -45,7 +45,16 @@ import { DEFAULT_MODEL, readDefaultModel } from '../lib/state.mjs';
 function resolveCopilotBin() {
   if (process.env.COPILOT_BIN) return process.env.COPILOT_BIN;
   try {
-    const found = execSync('command -v copilot', { encoding: 'utf8', shell: '/bin/sh' }).trim();
+    // Bounded like every other synchronous shell-out in this plugin. `command -v`
+    // is a shell builtin and effectively instant, but an unbounded sync exec is
+    // the shape of bug we are eliminating, not a judgement call to re-make per
+    // call site. SIGKILL because a catchable signal does not actually bound it.
+    const found = execSync('command -v copilot', {
+      encoding: 'utf8',
+      shell: '/bin/sh',
+      timeout: 10_000,
+      killSignal: 'SIGKILL',
+    }).trim();
     if (found) return found;
   } catch {
     // fall through to the loud error

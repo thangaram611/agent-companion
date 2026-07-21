@@ -105,6 +105,8 @@ import {
   probeOpenCodeServerHealth,
   openCodeServerPoolSnapshot,
   reapIdleOpenCodeServer,
+  syncOpenCodeServerLeases,
+  openCodeServerIdleTtlMs,
 } from './opencode-server-runtime.mjs';
 import {
   defaultTargetInfo,
@@ -256,18 +258,26 @@ const JOB_RETENTION_MS = 60 * 60 * 1000;
 const JOB_GC_INTERVAL_MS = 60 * 1000;
 
 // Dispose the shared `opencode serve` after it has been idle this long with no
-// live opencode-server job. The server is detached and survives bridge restarts
-// by design (that enables resume), so without a reaper it would persist forever.
-const OPENCODE_SERVER_IDLE_TTL_MS = 30 * 60 * 1000;
+// live opencode-server job anywhere on the machine. The server is detached and
+// survives bridge restarts by design (that enables resume), so without a reaper
+// it would persist forever. The TTL is derived from the job timeout — see
+// openCodeServerIdleTtlMs. Leases are the primary guard; this is the backstop.
+const OPENCODE_SERVER_IDLE_TTL_MS = openCodeServerIdleTtlMs();
 
 const jobsGcTimer = setInterval(() => {
   gcExpiredJobs();
+  const liveOpenCodeServerJobs = [...jobs.entries()]
+    .filter(([, j]) => j.target === 'opencode' && j.opencodeAdapter === 'server' && !j.terminalAt)
+    .map(([jobId]) => jobId);
+  // Renew our leases before reaping so this tick's view of machine-wide
+  // liveness includes our own jobs, and so other bridges see them too.
+  try { syncOpenCodeServerLeases(liveOpenCodeServerJobs); }
+  catch (err) { log('WARN', 'opencode server lease sync failed:', err.message); }
   // Fire-and-forget; never let a dispose HTTP call disrupt the GC tick.
-  const hasLiveOpenCodeServerJob = [...jobs.values()].some(
-    (j) => j.target === 'opencode' && j.opencodeAdapter === 'server' && !j.terminalAt,
-  );
-  Promise.resolve(reapIdleOpenCodeServer({ idleMs: OPENCODE_SERVER_IDLE_TTL_MS, hasLiveJobs: hasLiveOpenCodeServerJob }))
-    .catch(() => {});
+  Promise.resolve(reapIdleOpenCodeServer({
+    idleMs: OPENCODE_SERVER_IDLE_TTL_MS,
+    hasLiveJobs: liveOpenCodeServerJobs.length > 0,
+  })).catch(() => {});
 }, JOB_GC_INTERVAL_MS);
 if (jobsGcTimer.unref) jobsGcTimer.unref();
 
