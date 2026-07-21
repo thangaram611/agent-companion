@@ -7,10 +7,10 @@
 name: agent-companion
 description: |
   Agent delegation companion. Spawn this subagent whenever the user wants to
-  delegate a task to the configured companion runtime, check a running job's
-  state, reply to/re-steer an in-flight job when the companion supports it, or
-  cancel one. It owns the entire agent-bridge MCP surface — main Claude has
-  no direct MCP access.
+  delegate a task to the configured companion runtime (OpenCode / Copilot), check
+  a running job's state, reply to/re-steer an in-flight job when the companion
+  supports it, or cancel one. It owns the entire agent-bridge MCP surface — main
+  Claude has no direct MCP access.
 
   ## Invocation
 
@@ -20,70 +20,45 @@ description: |
 
     { "action": "send",
       "task":          "...",
-      "target":        "opencode" | "copilot",              // optional; omit when routing by strength/profile
-                                                               // or relying on bridge target config
-      "strength":      "reviewer" | "web_researcher"        // optional, PREFERRED; route by capability label.
-                       | "planner" | "fast_executor",       //   Discover the configured set via {action:status};
-                                                               //   do not hardcode. Mutually exclusive with profile.
-      "profile":       "...",                               // optional; a specific configured profile id (discover
-                                                               //   via {action:status,diagnostics:true}). Never pass
-                                                               //   companion or model ids. Mutually exclusive w/ strength.
-      "mode":          "EXECUTE" | "PLAN" | "ANALYZE",       // default EXECUTE
-      "template":      "general" | "research" | "plan_review", // default general
-      "template_args": {                                       // optional; per-template keys:
-        "plan_path":       "...",                              //   plan_review only
-        "focus_directive": "...",                              //   plan_review only
-        "scope_hint":      "..."                               //   general only; binds analysis to a
-                                                               //     specific scope (e.g. "imports only",
-                                                               //     "lines 1-120"). ≤500 chars.
-      },
-      "cwd":           "...",                                 // required for send; absolute target repo/worktree
-      "parallel":      "auto" | "always" | "never",           // optional; default auto.
-                                                              //   auto lets the bridge prepend "/fleet "
-                                                              //   only when the task looks broad enough.
-                                                              //   always forces Copilot's orchestrator
-                                                              //   when target="copilot";
-                                                              //   never skips it for linear/single-source
-                                                              //   work where coordination overhead would
-                                                              //   dominate.
-      "max_wait_sec":  <integer>                              // applies to subsequent `wait` calls only;
-                                                              // `send` returns still_running immediately.
-                                                              // default 480, clamped to [1,1200]
-                                                              // (single 20-min cap for all modes);
-                                                              // 0/missing/non-numeric → 480
+      "cwd":           "...",  // REQUIRED for send; absolute target repo/worktree path.
+                               //   Never omit and never guess — the bridge rejects a
+                               //   missing cwd rather than defaulting.
+      "strength":      "reviewer" | "web_researcher" | "planner" | "fast_executor",
+                               // optional, PREFERRED routing key. Do not hardcode —
+                               //   discover the configured set via `{action:status}`.
+                               //   An unconfigured one returns STRENGTH_UNCONFIGURED.
+      "profile":       "...",  // optional; a specific configured profile id (discover via
+                               //   {action:status,diagnostics:true}). Mutually exclusive
+                               //   with strength.
+      "target":        "opencode" | "copilot",  // optional; omit when routing by
+                               //   strength/profile or relying on bridge target config.
+                               //   In all three fields, never pass companion or model ids.
+      "mode":          "EXECUTE" | "PLAN" | "ANALYZE",          // default EXECUTE
+      "template":      "general" | "research" | "plan_review",  // default general
+      "template_args": { "plan_path":       "...",   // plan_review only (required there)
+                         "focus_directive": "...",   // plan_review only
+                         "scope_hint":      "..." }, // general only; <=500 chars, binds
+                               //   analysis to a scope (e.g. "imports only", "lines 1-120")
+      "parallel":      "auto" | "always" | "never",  // default auto — the bridge prepends
+                               //   Copilot's "/fleet " only when the task looks broad.
+                               //   "always" forces it; "never" skips it for linear or
+                               //   single-source work.
+      "max_wait_sec":  <integer>  // default 480, clamped [1,1200]. Bounds every wait
+                               //   iteration, so it is also the worst-case cancel /
+                               //   interrupt latency — pass 60 on the initial send if
+                               //   urgent cancel matters.
     }
     { "action": "status" }                                    // global bridge state
-    { "action": "status", "diagnostics": true }                // global state + doctor report
+    { "action": "status", "diagnostics": true }               // + doctor report and profiles
     { "action": "status", "job_id": "opencode-...", "verbose": true }
     { "action": "reply",  "job_id": "copilot-...", "message": "..." }  // Copilot target only in MVP
     { "action": "cancel", "job_id": "opencode-..." }
     { "action": "cancel" }                                    // cancels this companion's tracked job
 
-  Route by `strength` (preferred) or `profile` instead of a concrete target; do
-  not hardcode strengths — discover the configured set via `{action:status}`, and
-  never pass companion or model ids. The JSON has no `thread` field — the
-  companion manages thread continuity
-  internally. Every `send` must include `cwd` as the absolute target repo or
-  worktree path; the bridge rejects missing `cwd` instead of defaulting to the
-  companion's own working directory. For `send`, spawn with
-  `run_in_background: true` (jobs may take minutes to hours; main is
-  auto-woken on completion). For status / reply / cancel, spawn synchronously
-  — they return in seconds.
-
-  Cancel latency is bounded by the current MCP wait window: pass
-  `max_wait_sec: 60` on the initial send if urgent cancel matters. The
-  companion propagates that ceiling through every wait iteration so the
-  bound holds for the lifetime of the job.
-
-  Copilot target output for `general` and `research` templates includes a
-  server-appended `RUBBER-DUCK: clean|revised` verdict line; not configurable.
-  OpenCode MVP output is relay-only and does not inject the rubber-duck wrapper.
-  The `plan_review` template has its own critique baked in and skips the
-  wrapper.
-
-  See `README.md` (`## Thread continuity` and `## SendMessage invocation form`)
-  for multi-turn SendMessage examples and the parallel-task pattern.
-
+  The payload has no `thread` field — the companion manages thread continuity
+  internally. Spawn `send` with `run_in_background: true` (jobs may take minutes
+  to hours; main is auto-woken on completion). Spawn status / reply / cancel
+  synchronously — they return in seconds.
 model: sonnet
 tools: mcp__agent-bridge__agent_send, mcp__agent-bridge__agent_wait, mcp__agent-bridge__agent_status, mcp__agent-bridge__agent_reply, mcp__agent-bridge__agent_cancel, Bash, Read, Write, Edit, Grep, Glob, WebFetch, TodoWrite
 mcpServers:
@@ -177,6 +152,7 @@ Initial call to `mcp__agent-bridge__agent_send`:
   "template":      "<from input, else \"general\">",
   "template_args": <from input, else omit>,
   "cwd":           "<from input; required absolute target repo/worktree>",
+  "parallel":      "<from input, else omit>",
   "thread":        "<your remembered MY_THREAD value, or omit if this is your first send ever>",
   "max_wait_sec":  <integer; from input, else 480>
 }

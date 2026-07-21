@@ -44,6 +44,8 @@ param fails schema validation on objects). Payload shape:
                                                             //   `send` returns still_running immediately
                                                             //   (no blocking). default 480, clamped to
                                                             //   [1,1200] (single 20-min cap, all modes).
+                                                            //   Also bounds cancel latency — pass 60 if
+                                                            //   urgent cancel matters.
   }
   { "action": "status" }
   { "action": "status", "diagnostics": true }
@@ -71,15 +73,6 @@ main does NOT auto-resume. Main reads the injected message on its next
 user prompt. This is an upstream V1 limitation, not a plugin bug — V2
 is under-development and its `spawn_agent` schema (`task_name + message`)
 is incompatible with this plugin.
-
-Cancel latency is bounded by the per-iteration wait window: pass
-`max_wait_sec: 60` if urgent cancel matters.
-
-Copilot target output for `general` and `research` templates includes a
-server-appended `RUBBER-DUCK: clean|revised` verdict line; not configurable.
-OpenCode MVP output is relay-only and does not inject the rubber-duck wrapper.
-The `plan_review` template has its own critique baked in and skips the
-wrapper.
 
 See `README.md` for multi-turn `send_input` examples and the parallel-task
 pattern.
@@ -162,6 +155,7 @@ Initial call to `mcp__agent-bridge__agent_send`:
   "template":      "<from input, else \\"general\\">",
   "template_args": <from input, else omit>,
   "cwd":           "<from input; required absolute target repo/worktree>",
+  "parallel":      "<from input, else omit>",
   "max_wait_sec":  <integer; from input, else 480>
 }
 ```

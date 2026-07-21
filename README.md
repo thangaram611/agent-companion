@@ -369,6 +369,19 @@ Templates:
 | `research` | Multi-source research. |
 | `plan_review` | Plan verification with a required `plan_path`. |
 
+### Output wrapper
+
+Copilot-target output for the `general` and `research` templates carries a
+server-appended `RUBBER-DUCK: clean|revised` verdict line. It is not
+configurable and there is no payload field controlling it. `plan_review` has
+its own critique built in and skips the wrapper, and OpenCode MVP output is
+relay-only so it never carries one.
+
+This lives here rather than in the subagent descriptions because it describes
+what the caller *receives*, not how to construct a call — and the server
+already appends a self-explaining footer next to the verdict at the point of
+consumption.
+
 General modes:
 
 | Mode | Purpose |
