@@ -44,11 +44,23 @@ HEARTBEAT_DIR="${AGENT_HEARTBEAT_DIR:-$RUNTIME_DIR/heartbeats}"
 # for jq, or for any external binary, is deferred until there is actual work.
 # ---------------------------------------------------------------------------
 
-# `$(<...)` is a bash redirection, not a `cat` fork, and unlike `read -n` it
-# consumes the stream fully — a truncated buffer would later reach jq as
-# invalid JSON and abort the hook under `set -e`. Verified on a pipe (not just
-# a file redirect) with a 200KB payload.
-PAYLOAD=$(</dev/stdin)
+# Slurp stdin with a builtin, no fork — the fork budget above is the whole
+# point of this arrangement.
+#
+# NOT `$(</dev/stdin)`. That reopens stdin by path, and on Linux /dev/stdin is a
+# symlink to /proc/self/fd/0, which for an ANONYMOUS PIPE resolves to a
+# `pipe:[N]` entry that cannot be opened: the hook dies with
+# "/dev/stdin: No such device or address". Hosts feed hook payloads over exactly
+# such a pipe, so that form works on macOS (where /dev/stdin dups fd 0) and is
+# dead on every Linux install. `read` uses the already-open fd 0 instead and
+# never reopens anything, so it is correct on both.
+#
+# `-d ''` reads to EOF rather than to a newline, so the buffer is complete —
+# a truncated one would reach jq as invalid JSON and abort the hook under
+# `set -e`. `IFS=` keeps leading whitespace, `-r` keeps backslashes, and the
+# `|| true` absorbs the non-zero status `read` returns when it stops at EOF
+# instead of finding the delimiter. Verified on a piped 200KB payload.
+IFS= read -r -d '' PAYLOAD || true
 
 # Resolve jq lazily and without a subshell where possible. `command -v` runs in
 # a command substitution (a fork), so probe the standard locations with builtin

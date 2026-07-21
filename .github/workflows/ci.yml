@@ -20,9 +20,15 @@ jobs:
       - name: Shell syntax
         run: bash -n setup.sh hooks/*.sh
       - name: JavaScript syntax
-        run: find bridge-server lib scripts hooks templates -name '*.mjs' -print0 | xargs -0 -n1 node --check
+        run: find . -name '*.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 -n1 node --check
+      # Discover from the repo root rather than an allowlist of directories:
+      # the old list omitted test/, so both cross-cutting guard suites (the
+      # profiles.json single-reader guard and the sync-exec timeout guard) never
+      # ran in CI. This matches the command in the README.
       - name: Tests with coverage
-        run: node --test --experimental-test-coverage $(find bridge-server lib scripts hooks templates -name '*.test.mjs')
+        run: |
+          find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 \
+            | xargs -0 node --test --experimental-test-coverage
       - name: Production dependency audit
         run: npm audit --omit=dev --audit-level=moderate
         working-directory: bridge-server

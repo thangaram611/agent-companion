@@ -389,3 +389,50 @@ test('a SIGKILLed drain leaves an orphan the next drain adopts, and its lock is 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- stdin plumbing ----------------------------------------------------------
+
+test('the payload is read from a pipe, not by reopening /dev/stdin', () => {
+  // Hosts spawn hooks with stdin as an anonymous pipe. `$(</dev/stdin)` reopens
+  // stdin BY PATH, and on Linux /dev/stdin -> /proc/self/fd/0 resolves to a
+  // `pipe:[N]` entry that cannot be opened — ENXIO, "No such device or address".
+  // So that form works on macOS and is dead on every Linux install, taking the
+  // whole completion-drain with it. This test cannot reproduce the Linux ENXIO
+  // on macOS, so it pins the invariant that actually prevents it: the script
+  // must never name /dev/stdin.
+  // Comment lines are excluded on purpose: the script explains at length why
+  // /dev/stdin is wrong, and that prose must not trip the check.
+  const code = readFileSync(SCRIPT, 'utf8')
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+  assert.doesNotMatch(
+    code,
+    /\/dev\/stdin/,
+    'read stdin from the already-open fd 0 (IFS= read -r -d ...); reopening it by path is not portable',
+  );
+  assert.match(code, /IFS=\s+read\s+-r\s+-d\s+''\s+PAYLOAD/, 'the builtin slurp must remain fork-free');
+});
+
+test('a large piped payload is slurped whole, and without forking', () => {
+  // Truncation would reach jq as invalid JSON and abort the hook under `set -e`,
+  // and a `cat` fork would undo the fork budget this hook is built around.
+  const { dir, path } = makeQueueFile([
+    { ts: Date.now() - 30_000, kind: 'terminal', jobId: 'j-big', claudeSessionId: 'sid-A',
+      consumed: false, content: 'done', meta: { status: 'completed' } },
+  ]);
+  try {
+    // A payload far past any pipe buffer, so a partial read would show up.
+    const payload = { hook_event_name: 'PostToolUse', session_id: 'sid-A', pad: 'x'.repeat(200_000) };
+    const out = execFileSync('bash', [SCRIPT], {
+      input: JSON.stringify(payload),
+      env: { ...process.env, AGENT_QUEUE_PATH: path },
+      encoding: 'utf8',
+    });
+    // The session id sits BEFORE the padding, but a short read would still
+    // corrupt the JSON and lose the row entirely.
+    assert.match(out, /done/, 'a 200KB piped payload must be read in full');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
