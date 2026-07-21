@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -169,6 +169,125 @@ test('move-aside drain preserves rows appended after the drain snapshot is renam
     assert.doesNotMatch(ctx, /j-late/);
     assert.ok(readQueueRows(path).map((r) => r.jobId).includes('j-late'),
       'late-appended row must not be overwritten by the drain');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Fast-path regression tests.
+//
+// The empty-queue path fires after EVERY tool call, so it was rewritten to
+// spawn no subprocesses. Each case below is a concrete failure an adversarial
+// review reproduced against a rejected version of that optimisation; they exist
+// so a future round of fork-trimming cannot quietly reintroduce one.
+// ---------------------------------------------------------------------------
+
+test('large payloads still deliver — the buffer fed to jq must be complete JSON', () => {
+  // A bounded `read -n 8192` truncates mid-string; jq then fails to parse and
+  // `set -e` aborts the hook. Any PostToolUse after reading a ~200-line file is
+  // this size, so the drain would have been dead in ordinary use.
+  for (const size of [9_000, 200_000]) {
+    const { dir, path } = makeQueueFile([
+      { ts: FRESH_TS, kind: 'terminal', jobId: 'j-big', claudeSessionId: 'sid-A',
+        consumed: false, content: 'big ok', meta: { status: 'completed' } },
+    ]);
+    try {
+      const out = runDrain({
+        queuePath: path,
+        payload: { session_id: 'sid-A', hook_event_name: 'PostToolUse',
+                   tool_response: { f: 'x'.repeat(size) } },
+      });
+      assert.match(out, /big ok/, `payload of ${size} bytes must still deliver`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a nested session_id never displaces the top-level one', () => {
+  // bridge-server declares session_id in AGENT_OUTPUT_SCHEMA, so an
+  // agent-bridge tool_response genuinely carries the key inside the payload.
+  // An unanchored scan would pick it up and deliver another session's rows.
+  const { dir, path } = makeQueueFile([
+    { ts: FRESH_TS, kind: 'terminal', jobId: 'j-mine', claudeSessionId: 'sid-A',
+      consumed: false, content: 'MINE', meta: { status: 'completed' } },
+    { ts: FRESH_TS, kind: 'terminal', jobId: 'j-theirs', claudeSessionId: 'sid-EVIL',
+      consumed: false, content: 'THEIRS', meta: { status: 'completed' } },
+  ]);
+  try {
+    const out = runDrain({
+      queuePath: path,
+      payload: { session_id: 'sid-A', tool_response: { ok: true, session_id: 'sid-EVIL' } },
+    });
+    assert.match(out, /MINE/);
+    assert.doesNotMatch(out, /THEIRS/);
+    // The other session's row must survive for its own drain to collect.
+    assert.deepEqual(readQueueRows(path).map((r) => r.jobId), ['j-theirs']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session ids outside [A-Za-z0-9._-] still drain', () => {
+  // A character-class capture yields an empty match rather than degrading, and
+  // an empty session id exits 0 above the heartbeat — disabling both delivery
+  // and daemon liveness silently and permanently.
+  for (const sid of ['agent:main:01HX', 'sess/abc+def', 'café-1']) {
+    const { dir, path } = makeQueueFile([
+      { ts: FRESH_TS, kind: 'terminal', jobId: 'j-x', claudeSessionId: sid,
+        consumed: false, content: 'EXOTIC', meta: { status: 'completed' } },
+    ]);
+    try {
+      const out = runDrain({ queuePath: path, payload: { session_id: sid, tool_response: {} } });
+      assert.match(out, /EXOTIC/, `session id ${sid} must deliver`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('session_id anywhere in the payload still resolves', () => {
+  // The cheap path only matches session_id as the first key; every other shape
+  // must fall through to jq rather than give up.
+  const { dir, path } = makeQueueFile([
+    { ts: FRESH_TS, kind: 'terminal', jobId: 'j-r', claudeSessionId: 'sid-A',
+      consumed: false, content: 'REORDERED', meta: { status: 'completed' } },
+  ]);
+  try {
+    const out = runDrain({
+      queuePath: path,
+      payload: { hook_event_name: 'PostToolUse', tool_response: {}, session_id: 'sid-A' },
+    });
+    assert.match(out, /REORDERED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an empty queue still records a heartbeat, and runtime state stays 0700/0600', () => {
+  // The heartbeat is the ONLY liveness signal keeping the Copilot ACP daemon
+  // alive through a Claude session with no Copilot traffic, and the queue is
+  // empty on virtually every fire — so it must be written before the
+  // queue-empty return, not after it.
+  const dir = mkdtempSync(join(tmpdir(), 'drain-hb-'));
+  try {
+    const runtime = join(dir, 'runtime');
+    const heartbeats = join(runtime, 'heartbeats');
+    execFileSync('bash', [SCRIPT], {
+      input: JSON.stringify({ session_id: 'sid-HB', tool_response: {} }),
+      env: { ...process.env,
+             AGENT_RUNTIME_DIR: runtime,
+             AGENT_QUEUE_PATH: join(runtime, 'completions.jsonl'),
+             AGENT_HEARTBEAT_DIR: heartbeats },
+      encoding: 'utf8',
+    });
+    const hb = join(heartbeats, 'sid-HB.heartbeat');
+    assert.ok(existsSync(hb), 'heartbeat must be written even with no queue file');
+    const mode = (p) => (statSync(p).mode & 0o777).toString(8);
+    assert.equal(mode(runtime), '700');
+    assert.equal(mode(heartbeats), '700');
+    assert.equal(mode(hb), '600');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
