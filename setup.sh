@@ -16,7 +16,7 @@ fail() { printf "${RED}[FAIL]${NC} %s\n" "$1"; }
 # --- Argument parsing -------------------------------------------------------
 #
 # --host claude|codex|both    which harness surface(s) to install (default both)
-# --target opencode|copilot|auto|none
+# --target opencode|copilot|codex|auto|none
 #                             which companion target to onboard. Delegated to
 #                             scripts/onboard.mjs. Default: none (host/plugin
 #                             surface only — attach a companion later).
@@ -38,11 +38,11 @@ while [ "$#" -gt 0 ]; do
     --skip-tests)      SKIP_TESTS=1; shift ;;
     -h|--help)
       cat <<EOF
-Usage: $(basename "$0") [--host claude|codex|both] [--target opencode|copilot|auto|none]
+Usage: $(basename "$0") [--host claude|codex|both] [--target opencode|copilot|codex|auto|none]
                         [--no-target-check] [--skip-tests]
 
   --host claude|codex|both   install that harness surface (default both)
-  --target opencode|copilot|auto|none
+  --target opencode|copilot|codex|auto|none
                              onboard a companion target (default none; attach
                              one later). auto picks the only ready target.
   --no-target-check          select the target without failing on not-ready
@@ -63,8 +63,8 @@ case "$HOST" in
 esac
 
 case "$TARGET" in
-  opencode|copilot|auto|none) ;;
-  *) fail "--target must be one of: opencode, copilot, auto, none (got: $TARGET)"; exit 2 ;;
+  opencode|copilot|codex|auto|none) ;;
+  *) fail "--target must be one of: opencode, copilot, codex, auto, none (got: $TARGET)"; exit 2 ;;
 esac
 
 DO_CLAUDE=0

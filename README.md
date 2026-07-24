@@ -11,7 +11,10 @@ A **harness** is the parent coding-agent surface you already work in. Supported
 now: **Claude Code** and **Codex CLI**.
 
 A **companion** is the downstream agent runtime that receives delegated work.
-Supported now: **OpenCode** and **GitHub Copilot CLI**.
+Supported now: **OpenCode**, **GitHub Copilot CLI**, and **Codex CLI** (Codex CLI
+can be both the harness and a downstream companion — the two roles are
+independent; running Codex as a companion does not require Codex as the harness,
+or vice versa).
 
 Today, each delegated send runs on one explicitly selected or configured
 companion. The roadmap is one-to-many: connect multiple companion profiles at
@@ -22,8 +25,8 @@ The product posture is deliberately companion-neutral:
 
 - **Bring your harness.** Install the Claude Code surface, the Codex CLI surface,
   or both.
-- **Attach your companion.** Choose `opencode` or `copilot` on each send, or
-  persist one bridge default.
+- **Attach your companion.** Choose `opencode`, `copilot`, or `codex` on each
+  send, or persist one bridge default.
 - **Keep the parent clean.** Main Claude and main Codex never see the bridge MCP
   server directly.
 - **Use one public surface.** The subagent owns the generic `agent_*` tools:
@@ -82,6 +85,7 @@ companion runtime boundary.
 | OpenCode (cli, default) | `opencode run --format json --dir <cwd>` | yes | yes | yes | yes | no | no |
 | OpenCode (server) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
 | GitHub Copilot CLI | ACP daemon path | yes | yes | yes | yes | yes | yes, with ACP |
+| Codex CLI | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
 
 Notes:
 
@@ -98,7 +102,30 @@ Notes:
     OpenCode's own config (the `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip`
     flag applies to the cli adapter only).
 - Copilot keeps `/fleet` parallel orchestration. `parallel: "auto"` can prepend
-  `/fleet` for broad Copilot tasks; OpenCode remains single-job.
+  `/fleet` for broad Copilot tasks; OpenCode and Codex remain single-job.
+- Codex is send-only in v1 (no reply, no restart resume — `codex exec` is a
+  one-shot non-interactive subprocess with no live control channel and no
+  surviving daemon to reattach to after a bridge restart). Sandbox defaults to
+  `workspace-write` with network **ON** by default — the inverse of codex's own
+  `codex exec` default (network OFF) — because a companion that can't `npm
+  install` fails tasks confusingly; opt out per job with
+  `AGENT_COMPANION_CODEX_NETWORK=off`. Override the sandbox mode with
+  `AGENT_COMPANION_CODEX_SANDBOX_MODE=read-only|workspace-write|danger-full-access|bypass`
+  (`danger-full-access` and `bypass` are both dangerous and flagged as such;
+  `bypass` exists for environments that already sandbox the bridge itself,
+  since macOS Seatbelt sandboxes do not nest). `.git`/`.codex`/`.agents` stay
+  read-only inside the workspace even under `workspace-write` (a carve-out that
+  wins over any extra writable roots); jobs that must write git internals need
+  `danger-full-access` or `bypass`. Every delegated job persists a full rollout
+  transcript under `$CODEX_HOME/sessions` (default `~/.codex/sessions`) with no
+  auto-cleanup in v1 — deliberate groundwork for a future `codex exec resume`
+  thread-continuity lever. Codex inherits the user's own `~/.codex/config.toml`
+  by default (no `--ignore-user-config` for real jobs): every enabled MCP server
+  boots on each spawn and can stall the first turn up to its configured
+  `startup_timeout_sec`, and shell env is inherited into the child minus
+  `*KEY*`/`*SECRET*`/`*TOKEN*` names. Optional model pin:
+  `AGENT_COMPANION_CODEX_MODEL=<model id>`; timeout default 40 minutes, override
+  with `AGENT_COMPANION_CODEX_TIMEOUT_MS`.
 - Goose and Aider are tracked as future companion adapter candidates.
 
 ## Strength Routing Roadmap
@@ -120,8 +147,8 @@ The intended public model is one-to-many:
 Example future profiles might look like `copilot_claude_sonnet_4_6` with
 `web_researcher`, `copilot_gpt_5_4` with `reviewer`, and a user-defined
 `opencode_provider_model` with `fast_executor`. That profile/strength router is
-not implemented yet; the current supported runtime selectors remain `opencode`
-and `copilot`.
+not implemented yet; the current supported runtime selectors are `opencode`,
+`copilot`, and `codex`.
 
 ## Requirements
 
@@ -131,12 +158,14 @@ and `copilot`.
 - At least one companion runtime:
   - OpenCode on `PATH`, or `OPENCODE_BIN=/absolute/path/to/opencode`.
   - GitHub Copilot CLI on `PATH`, or `COPILOT_BIN=/absolute/path/to/copilot`.
+  - Codex CLI on `PATH`, or `CODEX_BIN=/absolute/path/to/codex`, authenticated
+    via `codex login` (ChatGPT plan) or an API key.
 - Claude Code CLI when installing the Claude surface.
 - Codex CLI when installing the Codex surface.
 
 OpenCode authentication and provider setup stays inside OpenCode. Copilot
-authentication stays inside Copilot CLI. Agent Companion does not ask for or
-store provider secrets.
+authentication stays inside Copilot CLI. Codex authentication stays inside
+Codex CLI. Agent Companion does not ask for or store provider secrets.
 
 ## Fast Path
 
@@ -182,6 +211,7 @@ node scripts/onboard.mjs --list-targets
 node scripts/onboard.mjs --doctor
 node scripts/onboard.mjs --target opencode --set-default
 node scripts/onboard.mjs --target copilot --set-default
+node scripts/onboard.mjs --target codex --set-default
 node scripts/onboard.mjs --target opencode --smoke
 ```
 
@@ -190,7 +220,7 @@ Useful flags:
 | Flag | Purpose |
 | --- | --- |
 | `--host` | Label/scope onboarding output as `claude`, `codex`, or `both`. |
-| `--target` | Select `opencode`, `copilot`, `auto`, or `none`. |
+| `--target` | Select `opencode`, `copilot`, `codex`, `auto`, or `none`. |
 | `--set-default` | Write `~/.{claude,codex}/agent-companion/default-target`. |
 | `--json` | Emit machine-readable reports. |
 | `--no-target-check` | Persist the target even if readiness checks fail. |
@@ -349,8 +379,8 @@ Important rules:
 
 - `cwd` is required on every send and must be an absolute target repo/worktree
   path.
-- `target` may be `opencode` or `copilot`. If omitted, resolution checks
-  `AGENT_COMPANION_DEFAULT_TARGET`, then the host state file.
+- `target` may be `opencode`, `copilot`, or `codex`. If omitted, resolution
+  checks `AGENT_COMPANION_DEFAULT_TARGET`, then the host state file.
 - `agent_send` returns `still_running` immediately with a `job_id`.
 - `agent_wait` blocks in bounded intervals. The max wait is 1200 seconds.
 - `agent_status({ diagnostics: true })` embeds the same environment report as
@@ -488,8 +518,10 @@ claude plugin validate .
 - Direct parent-agent calls to the bridge.
 - Slash commands or skills as the public surface.
 - Session opt-in or pause.
-- OpenCode in-flight reply/re-steer.
-- OpenCode restart resume.
+- OpenCode CLI in-flight reply/re-steer (server mode supports it).
+- OpenCode CLI restart resume (server mode supports it).
+- Codex in-flight reply/re-steer or restart resume (`codex exec` is a one-shot
+  non-interactive subprocess — see Supported Companions notes).
 - MCP elicitation or `NEEDS_USER_INPUT` flows.
 
 ## Repository Map

@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // onboard.mjs — first-class companion onboarding for agent-companion.
 //
-// "Attach your companion." Supported now: opencode and copilot. This is the
+// "Attach your companion." Supported now: opencode, copilot, and codex. This is the
 // one place that selects today's target id, explains how to get it ready, and
 // (with --set-default) persists the choice. It never prompts for or stores
 // provider secrets — auth is delegated to the vendor tools (`opencode` /connect,
 // `copilot login`).
 //
 // Usage:
-//   node scripts/onboard.mjs --host claude|codex|both --target opencode|copilot|auto|none [--set-default] [--yes] [--json]
+//   node scripts/onboard.mjs --host claude|codex|both --target opencode|copilot|codex|auto|none [--set-default] [--yes] [--json]
 //   node scripts/onboard.mjs --list-targets [--json]
 //   node scripts/onboard.mjs --doctor [--json]
 //   node scripts/onboard.mjs --target opencode --smoke
@@ -236,11 +236,14 @@ function printTargetReport(report, { json } = {}) {
 }
 
 // Opt-in, clearly-warned smoke. Single-shot only for targets with a
-// non-interactive run path (OpenCode). Returns { supported, passed, detail }.
+// non-interactive run path (OpenCode, Codex). Returns { supported, passed, detail }.
 function runSmoke(id, env) {
-  if (id !== 'opencode') {
-    return { supported: false, passed: null, detail: `${id} has no non-interactive smoke path; start it once interactively to verify.` };
-  }
+  if (id === 'opencode') return runOpenCodeSmoke(env);
+  if (id === 'codex') return runCodexSmoke(env);
+  return { supported: false, passed: null, detail: `${id} has no non-interactive smoke path; start it once interactively to verify.` };
+}
+
+function runOpenCodeSmoke(env) {
   const bin = String(env.OPENCODE_BIN || 'opencode').trim() || 'opencode';
   const dir = mkdtempSync(join(tmpdir(), 'agent-onboard-smoke-'));
   try {
@@ -251,6 +254,36 @@ function runSmoke(id, env) {
       // `timeout` signals the child and then keeps blocking until it actually
       // exits, so with the default (catchable) SIGTERM a companion that traps
       // it — or whose shutdown path is itself wedged — is not bounded at all.
+      killSignal: 'SIGKILL',
+      env,
+    });
+    return { supported: true, passed: true, detail: out.trim().split('\n').slice(-1)[0] || '(no output)' };
+  } catch (err) {
+    return { supported: true, passed: false, detail: String(err.stderr || err.message || 'smoke failed').trim() };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Config-isolated by design (the one deliberate exception to "inherit the
+// user's codex config", D11): without --ignore-user-config the user's
+// enabled MCP servers boot on this turn too, and node_repl's 120s
+// startup_timeout_sec races this smoke's own 120s budget → false-fail.
+// --ephemeral additionally skips persisting a rollout file for this
+// throwaway turn (auth still resolves via CODEX_HOME).
+function runCodexSmoke(env) {
+  const bin = String(env.CODEX_BIN || 'codex').trim() || 'codex';
+  const dir = mkdtempSync(join(tmpdir(), 'agent-onboard-smoke-'));
+  try {
+    const out = execFileSync(bin, [
+      'exec', '--sandbox', 'read-only', '--skip-git-repo-check',
+      '--ignore-user-config', '--ephemeral', '--json', '-C', dir, '-',
+    ], {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      input: 'Reply with the single word: ready',
+      timeout: 120_000,
+      // See runOpenCodeSmoke's comment — same uncatchable-signal reasoning.
       killSignal: 'SIGKILL',
       env,
     });
@@ -334,19 +367,19 @@ export function runProfileCommand(options, env = process.env, io = console) {
 
 const HELP = `agent-companion onboarding
 
-  node scripts/onboard.mjs --target opencode|copilot|auto|none [--host claude|codex|both]
+  node scripts/onboard.mjs --target opencode|copilot|codex|auto|none [--host claude|codex|both]
                            [--set-default] [--yes] [--json] [--smoke] [--no-target-check]
   node scripts/onboard.mjs --list-targets [--json]
   node scripts/onboard.mjs --doctor [--json]
 
   # Strength-routed companion profiles (authoring; ids/models/labels only, no secrets):
   node scripts/onboard.mjs --list-profiles [--json]
-  node scripts/onboard.mjs --define-profile <id> --companion opencode|copilot \\
+  node scripts/onboard.mjs --define-profile <id> --companion opencode|copilot|codex \\
                            [--model <m>] [--adapter cli|server] [--strength reviewer,planner] [--yes]
   node scripts/onboard.mjs --assign-strength <id> --strength <labels> [--yes]
   node scripts/onboard.mjs --set-default-profile <id>
 
-Attach your companion. Supported now: opencode and copilot. Onboarding never
+Attach your companion. Supported now: opencode, copilot, and codex. Onboarding never
 asks for or stores provider secrets — authenticate with the vendor tools.`;
 
 async function main() {
@@ -388,7 +421,7 @@ async function main() {
   // Interactive target selection when required and a tty is available.
   if (plan.kind === 'ask') {
     if (!process.stdin.isTTY) {
-      console.error('[FAIL] no --target given and not a tty; pass --target opencode|copilot|none.');
+      console.error('[FAIL] no --target given and not a tty; pass --target opencode|copilot|codex|none.');
       process.exit(2);
     }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

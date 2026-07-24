@@ -1,6 +1,6 @@
 # Release Readiness
 
-Last updated: 2026-06-23
+Last updated: 2026-07-24
 
 This page is the public-readiness checklist for the harness + companion launch.
 It records the source-backed compatibility assumptions behind the repo copy,
@@ -17,7 +17,7 @@ Current vocabulary:
 | Product term | Current implementation term | Supported now |
 | --- | --- | --- |
 | Harness | `host` | Claude Code, Codex CLI |
-| Companion | `target` | OpenCode, GitHub Copilot CLI |
+| Companion | `target` | OpenCode, GitHub Copilot CLI, Codex CLI |
 | Companion profile | not implemented yet | planned |
 | Strength | not implemented yet | planned |
 
@@ -84,6 +84,40 @@ GitHub Copilot CLI companion:
   <https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference>.
   Public docs and defaults should not advertise an undocumented Copilot model id.
 
+Codex CLI companion:
+
+- **Pinned to codex-cli 0.145.0** (the installed/verified version). The
+  `--json` ThreadEvent schema (`thread.started`/`item.*`/`turn.*`/top-level
+  `error`) and the `-c sandbox_workspace_write.network_access=<bool>` override
+  key are version-sensitive; a silently-renamed key degrades without an error
+  since the adapter does not pass `--strict-config`. Re-verify against
+  `codex --version` before bumping the pin.
+- `codex exec --json` is documented as the non-interactive entrypoint
+  (`codex exec --help`; `learn.chatgpt.com/docs/non-interactive-mode`). Default
+  sandbox is `read-only` (edit-incapable); the bridge always passes
+  `--sandbox workspace-write` (or an explicit override) plus
+  `--skip-git-repo-check` (codex refuses non-git cwds by default, and the
+  bridge dispatches into arbitrary cwds).
+- `codex login status` is documented as exiting 0 with credentials present,
+  non-zero otherwise, and is explicitly called out as automation-friendly
+  (`learn.chatgpt.com/docs/developer-commands`). Live-verified on 0.145.0: the
+  verdict prints to **stderr** with **empty stdout** in both the logged-in
+  ("Logged in using ChatGPT") and logged-out ("Not logged in", confirmed via
+  `CODEX_HOME=$(mktemp -d) codex login status; echo $?` → exit 1) cases — the
+  stock stdout-based auth probe would false-red a logged-in machine, hence the
+  descriptor's `auth.checkByExitCode: true`.
+- Sandbox modes (`read-only`/`workspace-write`/`danger-full-access`) and the
+  `--dangerously-bypass-approvals-and-sandbox` escape hatch are documented at
+  `learn.chatgpt.com/docs/sandboxing`; network-in-workspace-write defaults OFF
+  in codex's own default and is maintainer-confirmed working via `-c
+  sandbox_workspace_write.network_access=true` on macOS CLI
+  (openai/codex#13373). The `.git`/`.codex`/`.agents` read-only carve-out
+  inside writable roots — which wins over `--add-dir`/`writable_roots` — is
+  documented in openai/codex#24461.
+- Seatbelt (macOS sandbox-exec) does not nest; `codex sandbox` runs a no-turn
+  sandbox preflight. Both are DeepWiki/local-`--help`-sourced, not from the
+  primary docs site.
+
 ## Release Gates
 
 Automated gates:
@@ -104,6 +138,11 @@ Manual smoke gates before a public tag:
 4. Copilot default-target onboarding and one real delegated send.
 5. Codex marketplace build/install using `node scripts/validate-codex-release.mjs`.
 6. Claude marketplace install or `claude --plugin-dir` smoke.
+7. Codex CLI companion (downstream target) default-target onboarding and one
+   real delegated send, including a network-using step (e.g. a trivial
+   `npm install`/fetch inside the sandbox) to prove the
+   `AGENT_COMPANION_CODEX_NETWORK` override actually reaches the sandbox — not
+   just that a send completes.
 
 ### Smoke evidence
 
@@ -131,6 +170,24 @@ the real config verified byte-identical.
   then `claude plugin install agent-companion@agent-companion` (sandboxed `$HOME`)
   installed `agent-companion@agent-companion` v0.0.1, disabled by default (matches
   `defaultEnabled: false`).
+- **Gate 7 — Codex CLI companion delegated send: PASS (2026-07-24, codex-cli
+  0.145.0, ChatGPT auth).** Three live checks, all green:
+  - **JSONL schema** — one throwaway `codex exec --json` turn (read-only,
+    `--ignore-user-config --ephemeral`) emitted exactly the parsed ThreadEvent
+    shapes: `thread.started.thread_id`, `item.completed`/`agent_message.text`,
+    `turn.completed.usage`.
+  - **Bridge dispatch** — `dispatch()` driven directly under a temp
+    `AGENT_COMPANION_HOME`: job `codex-mryly512-9gal` completed a real
+    workspace-write file edit (exact content verified), digest written,
+    thread id persisted as `companionSessionId`,
+    `reply_available/resume_available` false.
+  - **Full chain incl. network override** — headless Claude Code with
+    `--plugin-dir` → `agent-companion` subagent → bridge → codex: job
+    `codex-mrym3itg-jpfj` wrote `NETCHECK.txt` containing `200` from a live
+    `curl https://example.com` (proves `-c
+    sandbox_workspace_write.network_access=true` reached the Seatbelt
+    sandbox); job `codex-mrym5oqi-29s7` verified the subagent-wrapper path
+    end-to-end.
 
 OpenCode server adapter (added 2026-06-23, same environment):
 
