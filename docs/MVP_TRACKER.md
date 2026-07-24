@@ -1,6 +1,6 @@
 # MVP Tracker
 
-Last updated: 2026-06-23
+Last updated: 2026-07-24
 
 ## MVP Definition
 
@@ -9,7 +9,7 @@ primary companion:
 
 - Generic `agent_*` MCP tools are the only subagent surface.
 - Users bring their harness; supported harnesses are Claude Code and Codex CLI.
-- Users attach their companion; supported companions are OpenCode and Copilot.
+- Users attach their companion; supported companions are OpenCode, Copilot, and Codex.
 - Copilot keeps working as a first-class companion adapter (no legacy MCP
   aliases).
 - Repo docs and tests make the current state and remaining work recoverable.
@@ -95,6 +95,35 @@ primary companion:
     model (`claude-sonnet-4.6`), and Copilot model validation is separated from
     the Codex subagent role model allow-list.
 
+- Added the Codex CLI companion adapter (send-only v1):
+  - `bridge-server/codex-runtime.mjs` spawns `codex exec --json` (resolves
+    `CODEX_BIN` or `codex`), one resolver for sandbox + network
+    (`resolveCodexSandbox`), a D10 ThreadEvent JSONL collector
+    (`createCodexCollector`), and `cancelCodexRun`.
+  - `lib/target-registry.mjs` carries the `codex` descriptor: `implemented:
+    true`, `reply:false`/`resume:false` (architecture-forced — `codex exec` is
+    a one-shot non-interactive subprocess), permissive `modelSelection`, and
+    the documented consequences (network-on-by-default inversion, the
+    `.git`/`.codex`/`.agents` carve-out, rollout accumulation, MCP-boot/env-
+    inheritance, the nested-sandbox caveat) as descriptor notes.
+  - `bridge-server/server.mjs` consolidates the non-copilot worker/cancel/info
+    dispatch into one `CLI_RUNTIMES` table (`opencode`, `codex`) instead of a
+    third id-literal branch; digest routing needed no change (`writeOpenCodeDigest`
+    was already target-neutral, so codex jobs render `# codex job ...` for free).
+  - `lib/target-diagnostics.mjs` gained an exit-code auth mode
+    (`descriptor.auth.checkByExitCode`) for `codex login status`, which prints
+    its verdict to stderr with empty stdout in both the logged-in and
+    logged-out case on 0.145.0 — the stock stdout-based probe would have
+    false-red a logged-in machine — and a sandbox-aware `probePermission` path
+    (`descriptor.permission.dangerousModes`) that flags BOTH
+    `danger-full-access` and `bypass` as dangerous.
+  - `scripts/onboard.mjs` gained a config-isolated codex smoke branch
+    (`--ignore-user-config --ephemeral --sandbox read-only`, the one
+    deliberate exception to inheriting the user's own codex config).
+  - Verified at build time: logged-out `codex login status` exits non-zero
+    (`CODEX_HOME=$(mktemp -d) codex login status` → exit 1, empty stdout,
+    "Not logged in" on stderr) — confirms the exit-code auth mode.
+
 ## MVP Limitations
 
 - Routing supports strength/profile/target: `agent_send` accepts `strength`
@@ -114,7 +143,17 @@ primary companion:
   permission config (the bridge does not auto-approve).
 - OpenCode `acp` stdio mode is not implemented; server mode covers reply, resume,
   and streamed digests.
+- Codex is send-only (no reply, no restart resume — `codex exec` is a one-shot
+  non-interactive subprocess); no `/fleet`-equivalent parallel orchestration;
+  every delegated job persists a rollout transcript under `$CODEX_HOME/sessions`
+  with no auto-cleanup in v1; nested Seatbelt sandboxing is documented, not
+  worked around (use `AGENT_COMPANION_CODEX_SANDBOX_MODE=bypass` in an
+  externally-sandboxed bridge).
 - Goose and Aider are not implemented yet.
+- `assets/readme/target-matrix.png` / `.svg` predate the codex companion and do
+  not yet depict its row; regeneration is deferred (tracked here, not
+  reflected in the image yet — `scripts/validate-codex-release.mjs` only
+  asserts the file's existence, not its content).
 
 ## Next Backlog
 
@@ -160,6 +199,12 @@ primary companion:
      model: send→completed, reply re-steer, and cancel→cancelled all pass.
 
 4. Additional companion adapters:
+   - Codex CLI — DONE (this pass, send-only v1): `codex exec --json` adapter;
+     see the Done section above for the full breakdown. Deferred to a later
+     pass: reply/resume via the experimental app-server/exec-server surfaces,
+     thread continuity via `codex exec resume <thread_id>` (groundwork already
+     laid — the thread_id persists into the existing `companionSessionId`
+     slot), fleet/parallel, and shared opencode+codex spawn-core extraction.
    - Goose first candidate for desktop/CLI/API plus MCP/ACP fit.
    - Aider second candidate for git-native terminal workflows.
    - Keep adapters capability-driven; do not assume reply/resume/parallel support.
@@ -171,6 +216,7 @@ node --check bridge-server/server.mjs
 node --check bridge-server/validation.mjs
 node --check bridge-server/opencode-runtime.mjs
 node --check bridge-server/opencode-server-runtime.mjs
+node --check bridge-server/codex-runtime.mjs
 node --check lib/profile-registry.mjs
 node --check lib/target-registry.mjs
 node --check lib/target-diagnostics.mjs

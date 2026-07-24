@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 
 import { digestPath } from '../lib/prompt-digest.mjs';
 import { writePrivateFile } from '../lib/runtime-paths.mjs';
-import { truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
+import { appendCapped, truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
 
 const running = new Map();
 const cancelRequested = new Set();
@@ -330,10 +330,4 @@ function collectMessageLike(value, out, { shallow = false } = {}) {
     }
     if (!shallow && child && typeof child === 'object') collectMessageLike(child, out);
   }
-}
-
-function appendCapped(current, chunk, maxBytes) {
-  const next = current + chunk;
-  if (Buffer.byteLength(next, 'utf8') <= maxBytes) return next;
-  return next.slice(Math.max(0, next.length - maxBytes));
 }

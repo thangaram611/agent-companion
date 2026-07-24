@@ -1024,6 +1024,250 @@ test('OpenCode timeout is terminal and target-specific', async () => {
   }
 });
 
+// --- Codex CLI adapter (bridge-server/codex-runtime.mjs) --------------------
+//
+// Same fakeBin-subprocess style as the OpenCode CLI tests above, adapted to
+// codex's `exec --json` ThreadEvent stream (D10) instead of opencode's
+// `run --format json` NDJSON. Per the safety contract, this NEVER invokes a
+// real `codex` binary — CODEX_BIN always points at a fake script.
+
+test('Codex companion adapter runs a fake CLI and surfaces terminal job state', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+
+  const tmp = mkdtempSync(join(tmpdir(), 'codex-fake-'));
+  const fakeBin = join(tmp, 'codex-fake.mjs');
+  writeFileSync(fakeBin, [
+    '#!/usr/bin/env node',
+    'const args = process.argv.slice(2);',
+    'if (args[0] !== "exec" || !args.includes("--json")) {',
+    '  console.error("unexpected args: " + args.join(" "));',
+    '  process.exit(2);',
+    '}',
+    'process.stdin.on("data", () => {});',
+    'process.stdin.on("end", () => {',
+    '  console.log(JSON.stringify({ type: "thread.started", thread_id: "th-fake-codex" }));',
+    '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Codex fake completed" } }));',
+    '  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));',
+    '});',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  chmodSync(fakeBin, 0o700);
+
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldBin = process.env.CODEX_BIN;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-codex';
+  process.env.CODEX_BIN = fakeBin;
+
+  try {
+    const send = parse(await dispatch({
+      action: 'send',
+      target: 'codex',
+      task: 'exercise the codex adapter',
+      mode: 'EXECUTE',
+      template: 'general',
+      cwd: TEST_CWD,
+      host_session_id: 'sid-codex',
+      max_wait_sec: 5,
+      parallel: 'never',
+    }));
+    assert.equal(send.ok, true);
+    assert.equal(send.target, 'codex');
+    assert.match(send.job_id, /^codex-/);
+    assert.equal(send.status, 'still_running');
+    assert.match(send.hint, /agent_wait/);
+
+    const terminal = parse(await dispatch({
+      action: 'wait',
+      job_id: send.job_id,
+      host_session_id: 'sid-codex',
+      max_wait_sec: 5,
+    }));
+    assert.equal(terminal.status, 'completed');
+    assert.equal(terminal.target, 'codex');
+    assert.equal(terminal.meta.target, 'codex');
+    assert.match(terminal.content, /Codex fake completed/);
+    assert.match(terminal.meta.digest_uri, new RegExp(`agent-digest://${send.job_id}`));
+
+    // Digest renders through the SHARED writer (writeOpenCodeDigest) — the
+    // header names the job's own target, not a codex-only renderer (D7).
+    const { digestPath } = await import('../lib/prompt-digest.mjs');
+    const digestText = readFileSync(digestPath(send.job_id), 'utf8');
+    assert.match(digestText, /^# codex job /);
+
+    const status = parse(await dispatch({
+      action: 'status',
+      job_id: send.job_id,
+      host_session_id: 'sid-codex',
+      verbose: true,
+    }));
+    assert.equal(status.ok, true);
+    assert.equal(status.target, 'codex');
+    assert.equal(status.inspect_available, false);
+    // v1 codex is send-only (D1): neither flag is ever true for a codex job.
+    assert.equal(status.reply_available, false);
+    assert.equal(status.resume_available, false);
+
+    // The codex thread_id lands in the existing target-neutral
+    // companionSessionId slot (v2 exec-resume continuity groundwork; no v1
+    // consumer reads it back).
+    const state = await import('../lib/state.mjs');
+    const persisted = state.readJob(send.job_id);
+    assert.equal(persisted.companionSessionId, 'th-fake-codex');
+
+    jobs.set('codex-running-reply', {
+      jobId: 'codex-running-reply',
+      target: 'codex',
+      claudeSessionId: 'sid-codex',
+      status: 'running',
+      promptId: 'codex-reply',
+      task: 'running codex job',
+      mode: 'EXECUTE',
+      cwd: TEST_CWD,
+      startedAt: Date.now(),
+    });
+    const reply = parse(await dispatch({
+      action: 'reply',
+      job_id: 'codex-running-reply',
+      message: 'revise this',
+      host_session_id: 'sid-codex',
+    }));
+    assert.equal(reply.ok, false);
+    assert.equal(reply.code, 'TARGET_UNSUPPORTED');
+    assert.equal(reply.target, 'codex');
+  } finally {
+    jobs.delete('codex-running-reply');
+    for (const id of [...jobs.keys()]) {
+      if (jobs.get(id)?.claudeSessionId === 'sid-codex') jobs.delete(id);
+    }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldBin === undefined) delete process.env.CODEX_BIN;
+    else process.env.CODEX_BIN = oldBin;
+    rmSync(tmp, { recursive: true, force: true });
+    _resetForTest();
+  }
+});
+
+test("Codex cancel kills the codex child via codex-runtime (not OpenCode's maps) and returns a standard terminal envelope", async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+
+  const tmp = mkdtempSync(join(tmpdir(), 'codex-cancel-fake-'));
+  const fakeBin = join(tmp, 'codex-fake.mjs');
+  writeFileSync(fakeBin, [
+    '#!/usr/bin/env node',
+    'process.on("SIGTERM", () => {',
+    '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "cancelled partial output" } }));',
+    '  process.exit(0);',
+    '});',
+    'process.stdin.on("data", () => {});',
+    'setInterval(() => {}, 1000);',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  chmodSync(fakeBin, 0o700);
+
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldBin = process.env.CODEX_BIN;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-codex-cancel';
+  process.env.CODEX_BIN = fakeBin;
+
+  try {
+    const send = parse(await dispatch({
+      action: 'send',
+      target: 'codex',
+      task: 'cancel the codex adapter',
+      mode: 'EXECUTE',
+      template: 'general',
+      cwd: TEST_CWD,
+      host_session_id: 'sid-codex-cancel',
+      parallel: 'never',
+    }));
+    assert.equal(send.status, 'still_running');
+
+    const cancelled = parse(await dispatch({
+      action: 'cancel',
+      job_id: send.job_id,
+      host_session_id: 'sid-codex-cancel',
+    }));
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(cancelled.target, 'codex');
+    assert.equal(cancelled.meta.target, 'codex');
+    assert.match(cancelled.content, /Codex CLI job was cancelled/);
+  } finally {
+    for (const id of [...jobs.keys()]) {
+      if (jobs.get(id)?.claudeSessionId === 'sid-codex-cancel') jobs.delete(id);
+    }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldBin === undefined) delete process.env.CODEX_BIN;
+    else process.env.CODEX_BIN = oldBin;
+    rmSync(tmp, { recursive: true, force: true });
+    _resetForTest();
+  }
+});
+
+test('Codex timeout is terminal, tagged codex_timeout, and names the codex timeout env var', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+
+  const tmp = mkdtempSync(join(tmpdir(), 'codex-timeout-fake-'));
+  const fakeBin = join(tmp, 'codex-fake.mjs');
+  writeFileSync(fakeBin, [
+    '#!/usr/bin/env node',
+    'setInterval(() => {}, 1000);',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  chmodSync(fakeBin, 0o700);
+
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldBin = process.env.CODEX_BIN;
+  const oldTimeout = process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-codex-timeout';
+  process.env.CODEX_BIN = fakeBin;
+  process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS = '50';
+
+  try {
+    const send = parse(await dispatch({
+      action: 'send',
+      target: 'codex',
+      task: 'timeout the codex adapter',
+      mode: 'EXECUTE',
+      template: 'general',
+      cwd: TEST_CWD,
+      host_session_id: 'sid-codex-timeout',
+      parallel: 'never',
+    }));
+    const terminal = parse(await dispatch({
+      action: 'wait',
+      job_id: send.job_id,
+      host_session_id: 'sid-codex-timeout',
+      max_wait_sec: 5,
+    }));
+    assert.equal(terminal.status, 'timeout');
+    assert.equal(terminal.target, 'codex');
+    assert.equal(terminal.meta.detail, 'codex_timeout');
+    assert.match(terminal.content, /Codex CLI did not finish within the target timeout/);
+    assert.match(terminal.content, /AGENT_COMPANION_CODEX_TIMEOUT_MS/);
+    assert.doesNotMatch(terminal.content, /\/fleet/);
+  } finally {
+    for (const id of [...jobs.keys()]) {
+      if (jobs.get(id)?.claudeSessionId === 'sid-codex-timeout') jobs.delete(id);
+    }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldBin === undefined) delete process.env.CODEX_BIN;
+    else process.env.CODEX_BIN = oldBin;
+    if (oldTimeout === undefined) delete process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS;
+    else process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS = oldTimeout;
+    rmSync(tmp, { recursive: true, force: true });
+    _resetForTest();
+  }
+});
+
 // --- OpenCode server-mode adapter (OPENCODE_RUNTIME_ADAPTER=server) ---------
 //
 // These drive the bridge through the server-runtime module's `_impl` seam: the

@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-06-23
+Last updated: 2026-07-24
 
 ## Goal
 
@@ -9,8 +9,8 @@ Agent Companion is organized around a harness + companion model:
 - **Harnesses outward:** Claude Code and Codex CLI install surfaces today; future
   harnesses should plug in at the host/template/hook/session-routing boundary.
 - **MCP middle:** one subagent-only MCP server with generic `agent_*` tools.
-- **Companion adapters inward:** OpenCode, Copilot, and future companions behind
-  a small runtime boundary.
+- **Companion adapters inward:** OpenCode, Copilot, Codex, and future companions
+  behind a small runtime boundary.
 - **Strength routing:** installs can expose strengths to the harness while the
   bridge maps each strength to one configured companion profile (see
   `profiles.json` and `resolveRouting`).
@@ -22,7 +22,7 @@ Agent Companion is organized around a harness + companion model:
 | Product term | Current implementation term | Meaning |
 | --- | --- | --- |
 | Harness | host | Parent coding-agent surface, currently Claude Code or Codex CLI. |
-| Companion | target | Downstream agent runtime, currently OpenCode or GitHub Copilot CLI. |
+| Companion | target | Downstream agent runtime, currently OpenCode, GitHub Copilot CLI, or Codex CLI. |
 | Companion profile | `profiles.json` entry | A configured runtime/model instance, such as a Copilot model profile or OpenCode provider/model profile. |
 | Strength | `agent_send({ strength })` | A public capability label such as `reviewer`, `web_researcher`, `planner`, or `fast_executor`. |
 
@@ -40,8 +40,10 @@ flowchart LR
   MCP --> Registry["companion registry (target-registry.mjs)"]
   Registry --> OpenCode["opencode-runtime.mjs"]
   Registry --> Copilot["copilot-runtime.mjs + ACP daemon"]
+  Registry --> CodexRuntime["codex-runtime.mjs"]
   OpenCode --> Job["job ledger + queue + digest"]
   Copilot --> Job
+  CodexRuntime --> Job
   Job --> Subagent
   Subagent --> Main
 ```
@@ -56,7 +58,7 @@ The only tools are the generic `agent_*` set:
 - `agent_reply`
 - `agent_cancel`
 
-`agent_send` accepts an optional `target` (`opencode` | `copilot`). When
+`agent_send` accepts an optional `target` (`opencode` | `copilot` | `codex`). When
 omitted, the target resolves from `AGENT_COMPANION_DEFAULT_TARGET`, then the
 `default-target` state file. **There is no silent fallback** — if nothing is
 configured and no `target` is passed, `agent_send` returns a
@@ -71,6 +73,7 @@ identity is complete.
 | OpenCode (cli) | Implemented CLI adapter (default) | yes | yes | yes | yes | no | no |
 | OpenCode (server) | Implemented HTTP server adapter | yes | yes | yes | yes | yes | yes |
 | Copilot CLI | Implemented ACP adapter | yes | yes | yes | yes | yes | yes with ACP |
+| Codex CLI | Implemented `codex exec` adapter (send-only) | yes | yes | yes | yes | no | no |
 | Goose | Planned | no | no | no | no | no | no |
 | Aider | Planned | no | no | no | no | no | no |
 

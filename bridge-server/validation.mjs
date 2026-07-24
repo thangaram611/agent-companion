@@ -65,7 +65,7 @@ export const VALID_ACTIONS   = new Set(['send', 'wait', 'status', 'reply', 'canc
 export const VALID_MODES     = new Set(['PLAN', 'ANALYZE', 'EXECUTE']);
 export const VALID_TEMPLATES = new Set(['general', 'research', 'plan_review']);
 export const VALID_PARALLEL_STRATEGIES = new Set(['auto', 'always', 'never']);
-export const VALID_TARGETS = new Set(['opencode', 'copilot']);
+export const VALID_TARGETS = new Set(['opencode', 'copilot', 'codex']);
 export const DEFAULT_MODE    = 'EXECUTE';
 export const DEFAULT_PARALLEL = 'auto';
 

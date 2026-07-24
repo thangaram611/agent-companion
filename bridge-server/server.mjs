@@ -2,8 +2,8 @@
 // agent-bridge MCP server (subagent-isolated, target-generic architecture)
 //
 // MCP tools: agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
-// agent_send takes an optional `target` (opencode | copilot); omitting it uses
-// the configured default target, and there is no silent fallback.
+// agent_send takes an optional `target` (opencode | copilot | codex); omitting
+// it uses the configured default target, and there is no silent fallback.
 // No start/stop/pause/session-gate — this server is spawned inline per invocation
 // from the agent-companion subagent's frontmatter, so there is no separate
 // activation lifecycle. Model selection and rubber-duck critique are internal
@@ -89,6 +89,11 @@ import {
   writeOpenCodeDigest,
 } from './opencode-runtime.mjs';
 import {
+  cancelCodexRun,
+  codexRuntimeInfo,
+  startCodexRun,
+} from './codex-runtime.mjs';
+import {
   resolveOpenCodeAdapter,
   openCodeServerActive,
   openCodeServerRuntimeInfo,
@@ -114,6 +119,22 @@ import {
   getTarget,
   listTargets,
 } from '../lib/target-registry.mjs';
+
+// Per-target dispatch table for the non-copilot (single-shot CLI-shaped)
+// runtimes: worker start, cancel, and runtime-info. Consolidates the id-
+// literal branches that a third CLI target would otherwise force at every
+// send/cancel/status call site (worker-dispatch, handleCancel, agent_status).
+// Copilot stays outside this table — it is genuinely different runtime
+// semantics (daemon, supervisor, /fleet) — and digest routing is
+// deliberately NOT here: writeOpenCodeDigest is already target-neutral and
+// every non-copilot digest call site routes to it correctly without a table
+// lookup (see refreshDigestForJob below). Safe to reference the worker fns
+// here before their textual definition — they are hoisted `async function`
+// declarations, not const arrow functions.
+const CLI_RUNTIMES = {
+  opencode: { start: runOpenCodeWorker, cancel: cancelOpenCodeRun, info: openCodeRuntimeInfo },
+  codex:    { start: runCodexWorker,    cancel: cancelCodexRun,    info: codexRuntimeInfo },
+};
 
 // --- Queue (replaces dev-channel notifications) -----------------------------
 
@@ -450,6 +471,9 @@ function capabilityGate(prof, env) {
           error: `model "${model}" is not a documented Copilot model`,
           hint: `set the Copilot model to a documented model id (one of: ${[...ALLOWED_MODELS].join(', ')}), or remove it to use the ${DEFAULT_MODEL} default`,
         };
+      }
+      if (prof.companion === 'codex') {
+        return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: 'codex', model, error: `codex model "${model}" is invalid — model ids must contain no whitespace (bare ids like gpt-5.6-sol; no provider/ prefix)` };
       }
       return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `companion "${prof.companion}" model "${model}" is not a valid provider/model pin (expected provider/model)` };
     }
@@ -1039,12 +1063,13 @@ export function formatTerminalContent({
       'It contains the partial assistant message, /fleet sub-agent reports (often near-complete), files touched, and todos. ' +
       'You may be able to finalise from the digest alone, or use it to scope a much smaller follow-up send.');
     if (target !== 'copilot') {
+      const timeoutEnv = getTarget(target)?.timeoutEnv || 'AGENT_COMPANION_OPENCODE_TIMEOUT_MS';
       return taskHeader +
         `${label} did not finish within the target timeout (${Math.round(duration / 1000)}s).\n\n` +
         'The bridge terminated the target process. Recommended next steps for the parent:\n' +
         '- Read the digest resource URI below for any partial output and stderr.\n' +
         '- Decompose the task into a smaller, explicitly-scoped send.\n' +
-        '- If the task is genuinely long, raise `AGENT_COMPANION_OPENCODE_TIMEOUT_MS` and retry.' +
+        `- If the task is genuinely long, raise \`${timeoutEnv}\` and retry.` +
         failedLine + targetDigestLine;
     }
     const retiredLine = sessionRetired
@@ -1067,9 +1092,18 @@ export function formatTerminalContent({
         'Start a fresh send and restate the needed context. ACP remains the default adapter for restart-resumable jobs.';
     }
     const detailLine = detail ? ` (detail: ${detail})` : '';
-    const runtimeHint = target === 'copilot'
-      ? `check \`ps -ef | grep copilot-acp-daemon\` and tail \`${bridgeLogFile()}\` / \`${daemonLogFile()}\` to confirm the daemon is alive.`
-      : `check the target binary/configuration and read the digest/logs under \`${runtimeDir()}\`; for OpenCode verify \`OPENCODE_BIN\` or the \`opencode\` CLI is available.`;
+    let runtimeHint;
+    if (target === 'copilot') {
+      runtimeHint = `check \`ps -ef | grep copilot-acp-daemon\` and tail \`${bridgeLogFile()}\` / \`${daemonLogFile()}\` to confirm the daemon is alive.`;
+    } else {
+      // Descriptor-driven, not a hardcoded "for OpenCode" lead-in — reachable
+      // for any non-copilot target via the restart-hydrate non-resumable path.
+      const descriptor = getTarget(target);
+      const binHint = descriptor
+        ? `verify \`${descriptor.binaryEnv}\` or the \`${descriptor.binaryNames[0]}\` CLI is available`
+        : 'verify the target binary is installed and on PATH';
+      runtimeHint = `check the target binary/configuration and read the digest/logs under \`${runtimeDir()}\`; ${binHint}.`;
+    }
     return taskHeader +
       `Bridge could not reach the ${label} runtime${detailLine}.\n\n` +
       `This is infrastructure-level — ${runtimeHint}`;
@@ -1570,14 +1604,21 @@ function finalizeResumedOpenCodeTranscript(job, transcript, reqId, startedAt) {
   log('INFO', 'opencode-server resume terminal:', jobId, `status=${status} (from transcript)`);
 }
 
-async function runOpenCodeCliWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, model = null, parallel, target }) {
+// Shared worker for the single-shot CLI adapters (OpenCode CLI, codex exec):
+// spawn via the adapter's startRun, patch the job on start, then retain the
+// terminal state, refresh the digest, and emit the completion event. The two
+// adapters have identical single-shot semantics — only the spawn function
+// differs — so the per-target detail codes derive from `target`. Reuses the
+// shared writeOpenCodeDigest writer (D7: it is already target-neutral). No
+// previousSid read (thread continuity stays copilot-only), no reply/resume.
+async function runSingleShotCliWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, model = null, parallel, target, startRun }) {
   const startedAt = Date.now();
   const rlog = withReq(reqId, { job_id: jobId, target });
   rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target, model: model || null });
-  log('INFO', 'opencode worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} parallel=${parallel} model=${model || '-'}`);
+  log('INFO', `${target} worker start:`, jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} parallel=${parallel} model=${model || '-'}`);
   try {
     const formatted = formatPrompt({ template, task, mode, template_args, parallel: 'never' });
-    const result = await startOpenCodeRun({
+    const result = await startRun({
       jobId,
       cwd,
       prompt: formatted,
@@ -1593,17 +1634,24 @@ async function runOpenCodeCliWorker({ jobId, reqId, task, mode, template, templa
         });
         writeOpenCodeDigest(jobs.get(jobId), null);
         rlog.info('worker.prompt_started', { prompt_id: promptId, pid, command });
-        log('INFO', 'opencode worker started:', jobId, `promptId=${promptId} pid=${pid || '-'}`);
+        log('INFO', `${target} worker started:`, jobId, `promptId=${promptId} pid=${pid || '-'}`);
       },
     });
     const duration = Date.now() - startedAt;
     const detail = result.status === 'failed'
-      ? (result.exitCode == null ? result.signal || 'opencode_failed' : `exit_${result.exitCode}`)
+      ? (result.exitCode == null ? result.signal || `${target}_failed` : `exit_${result.exitCode}`)
       : result.status === 'cancelled'
         ? (result.signal || 'cancelled')
         : result.status === 'timeout'
-          ? 'opencode_timeout'
+          ? `${target}_timeout`
           : null;
+    // Persist the adapter's session id (codex thread_id; null for OpenCode
+    // CLI, whose result carries none) BEFORE the terminal patch, so
+    // retainTerminalJob's persistJob write and the terminal emitNotification
+    // both see it. It lands on disk under the target-neutral
+    // `companionSessionId` key — v2 groundwork for
+    // `codex exec resume <thread_id>` thread continuity; no v1 consumer.
+    updateJob(jobId, { sessionId: result.sessionId ?? null });
     retainTerminalJob(jobId, {
       status: result.status,
       summary: result.summary,
@@ -1629,7 +1677,7 @@ async function runOpenCodeCliWorker({ jobId, reqId, task, mode, template, templa
       cwd,
       thread,
       promptId: jobs.get(jobId)?.promptId || null,
-      sessionId: null,
+      sessionId: result.sessionId ?? null,
       failedTools: [],
       reqId,
       target,
@@ -1643,7 +1691,7 @@ async function runOpenCodeCliWorker({ jobId, reqId, task, mode, template, templa
       summary: null,
       error: err.message,
       stuckReason: null,
-      detail: 'opencode_worker_error',
+      detail: `${target}_worker_error`,
       failedTools: [],
       durationMs: duration,
       terminalAt: Date.now(),
@@ -1654,7 +1702,7 @@ async function runOpenCodeCliWorker({ jobId, reqId, task, mode, template, templa
       summary: null,
       error: err.message,
       stuckReason: null,
-      detail: 'opencode_worker_error',
+      detail: `${target}_worker_error`,
       duration,
       task,
       mode,
@@ -1667,11 +1715,19 @@ async function runOpenCodeCliWorker({ jobId, reqId, task, mode, template, templa
       target,
     });
     rlog.warn('worker.catch', { error: err.message });
-    log('WARN', 'opencode worker catch:', jobId, `err="${err.message}"`);
+    log('WARN', `${target} worker catch:`, jobId, `err="${err.message}"`);
   } finally {
     rlog.info('worker.end', { duration_ms: Date.now() - startedAt });
-    log('INFO', 'opencode worker end:', jobId, `duration_ms=${Date.now() - startedAt}`);
+    log('INFO', `${target} worker end:`, jobId, `duration_ms=${Date.now() - startedAt}`);
   }
+}
+
+function runOpenCodeCliWorker(args) {
+  return runSingleShotCliWorker({ ...args, startRun: startOpenCodeRun });
+}
+
+function runCodexWorker(args) {
+  return runSingleShotCliWorker({ ...args, startRun: startCodexRun });
 }
 
 // Watch-loop and terminal handling, factored out so a rehydrated bridge can
@@ -2086,15 +2142,15 @@ async function handleSend(args) {
       cwd: args.cwd, thread, profileId, model, previousSid,
       parallel: args.parallel,
     }).catch((err) => log('ERROR', 'worker error:', err.message));
-  } else if (target === 'opencode') {
-    runOpenCodeWorker({
+  } else if (CLI_RUNTIMES[target]) {
+    CLI_RUNTIMES[target].start({
       jobId, reqId,
       task: args.task, mode: args.mode,
       template: args.template, template_args: args.template_args,
       cwd: args.cwd, thread, profileId, model,
       parallel: args.parallel,
       target,
-    }).catch((err) => log('ERROR', 'opencode worker error:', err.message));
+    }).catch((err) => log('ERROR', `${target} worker error:`, err.message));
   }
 
   // Return immediately with still_running. The worker continues in the
@@ -2171,7 +2227,14 @@ async function handleCancel({ job_id }) {
         error: resp.error || 'opencode session abort not confirmed',
       });
     }
-    const resp = cancelOpenCodeRun(job_id, job.pid || null);
+    // CLI mode (opencode `run` or codex `exec`) signals the spawned child via
+    // that target's own cancel — routing every non-copilot cancel through
+    // cancelOpenCodeRun would cross-wire a codex job into OpenCode's
+    // `running`/`cancelRequested` bookkeeping.
+    const runtime = CLI_RUNTIMES[target];
+    const resp = runtime
+      ? runtime.cancel(job_id, job.pid || null)
+      : { ok: false, reason: `no cancel runtime registered for target "${target}"` };
     if (resp.ok) {
       return buildCancelFollowup(job_id, target, {
         reason: resp.reason,
@@ -2391,6 +2454,7 @@ async function handleStatus({ job_id, verbose, diagnostics }) {
     strengths: flatStrengths(registry),
     runtime_adapter: selectedRuntimeAdapter(),
     opencode_runtime: { ...openCodeRuntimeInfo(), ...openCodeServerRuntimeInfo(), server_pool: openCodeServerPoolSnapshot() },
+    codex_runtime: codexRuntimeInfo(),
     default_model: modelInfo,
     threads: listThreads(),
     jobs_in_memory: jobs.size,
@@ -2482,9 +2546,9 @@ const MAX_WAIT_FIELD = {
 
 const TARGET_FIELD = {
   type: 'string',
-  enum: ['opencode', 'copilot'],
+  enum: ['opencode', 'copilot', 'codex'],
   description:
-    'Target agent runtime. Supported now: opencode and copilot. Omit only when relying on the configured bridge target.',
+    'Target agent runtime. Supported now: opencode, copilot, and codex. Omit only when relying on the configured bridge target.',
 };
 
 const AGENT_OUTPUT_SCHEMA = {

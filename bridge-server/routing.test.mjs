@@ -246,6 +246,51 @@ test('opencode adapter:server profile inherits reply/resume capabilities', () =>
   assert.equal(r.resolved.capabilities.resume, true);
 });
 
+// Codex's model gate is PERMISSIVE (isModelAllowedFor('codex', m) accepts any
+// non-blank id — codex ids are bare, no mandatory slash, and the catalog
+// churns too fast for a curated set). There is therefore no
+// MODEL_NOT_ALLOWED/CAPABILITY_UNAVAILABLE path to assert for a valid codex
+// model id — only that the gate does NOT reject it.
+test('codex profile with an arbitrary model resolves (permissive gate, no curated catalog)', () => {
+  reset();
+  setProfiles({ profiles: [{ id: 'cx-sol', companion: 'codex', model: 'gpt-5.6-sol', strengths: [] }] });
+  const r = resolveRouting({ profile: 'cx-sol' }, {});
+  assert.equal(r.ok, true);
+  assert.equal(r.resolved.companion, 'codex');
+  assert.equal(r.resolved.model, 'gpt-5.6-sol');
+});
+
+// ---- codex bare target / target refinement -----------------------------------
+
+test('bare codex target picks the lone matching profile; ambiguous without tiebreak → PROFILE_AMBIGUOUS', () => {
+  reset();
+  setProfiles({ profiles: [
+    { id: 'cx-a', companion: 'codex', strengths: [] },
+    { id: 'cx-b', companion: 'codex', strengths: [] },
+    { id: 'cop-only', companion: 'copilot', strengths: [] },
+  ] });
+  const cop = resolveRouting({ target: 'copilot' }, {});
+  assert.equal(cop.ok, true);
+  assert.equal(cop.resolved.profileId, 'cop-only');
+
+  const amb = resolveRouting({ target: 'codex' }, {});
+  assert.equal(amb.ok, false);
+  assert.equal(amb.code, 'PROFILE_AMBIGUOUS');
+  assert.deepEqual(amb.candidates.sort(), ['cx-a', 'cx-b']);
+});
+
+test('target refinement: codex matches its own strength but conflicts with a different explicit target', () => {
+  reset();
+  setProfiles({ profiles: [{ id: 'cx-fast', companion: 'codex', strengths: ['fast_executor'] }] });
+  const ok = resolveRouting({ strength: 'fast_executor', target: 'codex' }, {});
+  assert.equal(ok.ok, true);
+  assert.equal(ok.resolved.companion, 'codex');
+
+  const conflict = resolveRouting({ strength: 'fast_executor', target: 'opencode' }, {});
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.code, 'ROUTING_CONFLICT');
+});
+
 // ---- committed regressions ---------------------------------------------------
 
 test('P4 status: always-on id-free strengths[], diagnostics-gated profiles[], no leakage', async () => {
@@ -409,6 +454,68 @@ test('REGRESSION copilot daemon model: a profile model reaches the daemon prompt
     for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-copmodel') jobs.delete(id);
     state.clearProfiles();
     if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+  }
+});
+
+test('P4 status strengths[] stays id-free with a codex profile in the mix', async () => {
+  reset();
+  const { dispatch, _resetForTest } = server;
+  _resetForTest();
+  setProfiles({ profiles: [{ id: 'cx-review', companion: 'codex', model: 'gpt-5.6-sol', strengths: ['reviewer'] }] });
+  try {
+    const status = JSON.parse((await dispatch({ action: 'status' })).content[0].text);
+    const byName = Object.fromEntries(status.strengths.map((s) => [s.name, s]));
+    assert.equal(byName.reviewer.ready, true);
+    const blob = JSON.stringify(status.strengths);
+    for (const id of ['cx-review', 'codex', 'gpt-5.6-sol']) {
+      assert.ok(!blob.includes(id), `strengths payload leaks "${id}": ${blob}`);
+    }
+  } finally {
+    state.clearProfiles();
+  }
+});
+
+test('REGRESSION codex model: a profile model reaches `codex exec -m` spawn args', async () => {
+  reset();
+  const { dispatch, jobs, _resetForTest } = server;
+  _resetForTest();
+  const tmp = mkdtempSync(join(tmpdir(), 'codex-model-fake-'));
+  const argvFile = join(tmp, 'argv.json');
+  const fakeBin = join(tmp, 'codex-fake.mjs');
+  writeFileSync(fakeBin, [
+    '#!/usr/bin/env node',
+    'import { writeFileSync } from "node:fs";',
+    'const args = process.argv.slice(2);',
+    `writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(args));`,
+    'console.log(JSON.stringify({ type: "thread.started", thread_id: "th-model-test" }));',
+    'console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "ok" } }));',
+    'console.log(JSON.stringify({ type: "turn.completed", usage: {} }));',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  chmodSync(fakeBin, 0o700);
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldBin = process.env.CODEX_BIN;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cxmodel';
+  process.env.CODEX_BIN = fakeBin;
+  setProfiles({ profiles: [{ id: 'cx-pin', companion: 'codex', model: 'gpt-5.6-sol', strengths: [] }] });
+  try {
+    const send = JSON.parse((await dispatch({
+      action: 'send', profile: 'cx-pin', task: 'pin the model', mode: 'EXECUTE', template: 'general',
+      cwd: TEST_CWD, host_session_id: 'sid-cxmodel', max_wait_sec: 5, parallel: 'never',
+    })).content[0].text);
+    assert.equal(send.ok, true);
+    assert.equal(send.target, 'codex');
+    JSON.parse((await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cxmodel', max_wait_sec: 5 })).content[0].text);
+    const args = JSON.parse(readFileSync(argvFile, 'utf8'));
+    const i = args.indexOf('-m');
+    assert.ok(i >= 0, `-m not in args: ${args.join(' ')}`);
+    assert.equal(args[i + 1], 'gpt-5.6-sol');
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cxmodel') jobs.delete(id);
+    state.clearProfiles();
+    rmSync(tmp, { recursive: true, force: true });
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldBin === undefined) delete process.env.CODEX_BIN; else process.env.CODEX_BIN = oldBin;
   }
 });
 

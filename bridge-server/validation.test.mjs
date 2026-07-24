@@ -18,6 +18,7 @@ import {
   VALID_ACTIONS,
   VALID_MODES,
   VALID_TEMPLATES,
+  VALID_TARGETS,
   DEFAULT_MODE,
   formatPrompt,
   appendRubberDuckReview,
@@ -137,6 +138,12 @@ test('send validation handles strength/profile open-string siblings with mutual 
 
   // MCP boundary still rejects unknown keys.
   assert.throws(() => validateAgentArgs(sendArgs({ strengths: 'reviewer' })), /unknown field "strengths"/);
+});
+
+test('target:"codex" is accepted alongside opencode and copilot', () => {
+  assert.deepEqual([...VALID_TARGETS].sort(), ['codex', 'copilot', 'opencode']);
+  assert.equal(validateAgentArgs(sendArgs({ target: 'codex' })).target, 'codex');
+  assert.throws(() => validateAgentArgs(sendArgs({ target: 'goose' })), /target must be one of/);
 });
 
 test('plan_review validates plan path existence, canonicalization, latest resolution, focus, and symlink escape', () => {
