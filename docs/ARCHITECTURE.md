@@ -105,6 +105,15 @@ No silent fallback: an unresolvable or ambiguous request returns an explicit
 `STRENGTH_AMBIGUOUS`, `PROFILE_UNKNOWN`, `PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`,
 `CAPABILITY_UNAVAILABLE`), mirroring the existing `TARGET_UNCONFIGURED` posture.
 
+The invariant is two-sided, and the subagent half is the one that broke in the
+field: on any of those codes the companion subagent must return the error
+envelope and **stop**. It may not re-send with a `target`, `profile`, or
+`strength` the harness did not supply. A bridge that refuses to guess is worth
+nothing if the layer above it guesses instead — observed once as a
+`STRENGTH_UNCONFIGURED` rejection re-sent 30s later against an unnamed target.
+Both agent templates carry the prohibition, and both template test suites assert
+it.
+
 When no `profiles.json` exists, the bridge synthesizes a single degenerate
 profile from `default-target` / `default-model`, so a legacy one-to-one install
 routes byte-identically (same job object, same `<thread>.sid` filename).

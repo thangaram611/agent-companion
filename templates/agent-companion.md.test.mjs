@@ -30,3 +30,59 @@ test('Claude template documents strength/profile routing without hardcoding ids'
   // The tool allow-list must NOT grow — still the 5 agent_* tools plus host tools.
   assert.doesNotMatch(text, /agent_route|agent_strength|agent_profile/);
 });
+
+// Every routing-resolution code resolveRouting/resolveProfileRouting can return
+// before a job ever exists (bridge-server/server.mjs). Each one means "the
+// parent's routing key did not resolve" — never "try another key". The list is
+// closed on purpose, so the two ambiguity codes belong in it: a strength two
+// profiles declare with no defaultProfile tiebreak fails as STRENGTH_AMBIGUOUS
+// (server.mjs resolveRouting), and a bare target two profiles claim fails as
+// PROFILE_AMBIGUOUS (resolveBareTarget) — the same "key did not resolve" class
+// that the prohibition exists to close.
+const ROUTING_ERROR_CODES = [
+  'STRENGTH_UNCONFIGURED', 'STRENGTH_AMBIGUOUS', 'PROFILE_UNKNOWN',
+  'PROFILE_AMBIGUOUS', 'ROUTING_CONFLICT', 'CAPABILITY_UNAVAILABLE',
+  'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
+];
+
+test('Claude template sets the MCP deadline as a per-server field, not an env var', () => {
+  const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
+  assert.ok(fm, 'frontmatter block extractable');
+  const frontmatter = fm[1];
+
+  // Measured: an `env: MCP_TOOL_TIMEOUT` does reach the bridge child process
+  // and the Claude Code host ignores it outright. It is a no-op that reads like
+  // a configured deadline, so it must not come back as a live key. The
+  // template's own YAML comment names it on purpose (that is the warning), so
+  // strip comment lines before asserting rather than banning the string.
+  const active = frontmatter.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
+  assert.doesNotMatch(active, /MCP_TOOL_TIMEOUT/,
+    'the inert MCP_TOOL_TIMEOUT env var must not return as a live frontmatter key');
+
+  // The field the host honours is a SIBLING of command/args, so anchor the
+  // assertion to command's own indentation rather than to any leading space.
+  const command = frontmatter.match(/^(\s*)command:\s*node\s*$/m);
+  assert.ok(command, 'agent-bridge server entry declares `command: node`');
+  const timeout = frontmatter.match(new RegExp(`^${command[1]}timeout:\\s*(\\d+)\\s*$`, 'm'));
+  assert.ok(timeout, 'per-server `timeout` declared as a sibling of `command`');
+
+  // It must clear clampWaitSec's 1200s cap (bridge-server/server.mjs) so the
+  // bridge always answers before the host abandons the call. The field both
+  // raises the per-call wall clock and floors the MCP idle window.
+  assert.ok(Number(timeout[1]) > 1200 * 1000,
+    `timeout ${timeout[1]}ms must exceed clampWaitSec's 1200s cap`);
+});
+
+test('Claude template forbids re-routing a dispatch the bridge refused to route', () => {
+  // Reported as "strength advertised but not wired"; forensics showed the
+  // bridge answered STRENGTH_UNCONFIGURED in 23ms and the subagent re-sent the
+  // task 30s later with target:"codex" — a target the parent never named.
+  assert.match(text, /A routing error ≠ permission to pick your own route/);
+  for (const code of ROUTING_ERROR_CODES) {
+    assert.match(text, new RegExp(`\`${code}\``),
+      `${code} named in the no-re-route prohibition`);
+  }
+  assert.match(text,
+    /Do NOT re-send the task with a `target`, `profile`, or `strength` the parent did not supply/);
+  assert.match(text, /and do NOT drop the one it did supply/);
+});
