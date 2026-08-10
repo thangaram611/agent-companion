@@ -80,8 +80,17 @@ test('mcp_servers.agent-bridge declares the Codex-specific command, args, env, a
   // paths under ~/.codex/. If this drifts to "claude" or gets dropped,
   // the Codex install will write into the Claude state directory.
   assert.match(bridgeTable, /AGENT_COMPANION_HOST\s*=\s*"codex"/);
-  assert.doesNotMatch(bridgeTable, /MCP_TOOL_TIMEOUT/);
+  // Widened from the bridge table to the whole document: MCP_TOOL_TIMEOUT is
+  // inert on BOTH hosts (measured — the variable reaches the bridge child and
+  // the host ignores it), so it must not reappear anywhere, env block or not.
+  assert.doesNotMatch(text, /MCP_TOOL_TIMEOUT/);
+  // Codex owns the deadline through this table-level field, in SECONDS. The
+  // Claude template expresses the same budget as a per-server `timeout` in
+  // milliseconds — different host, different honoured field and unit, so do
+  // not port the YAML form here.
   assert.match(bridgeTable, /^tool_timeout_sec\s*=\s*1320\s*$/m);
+  assert.doesNotMatch(bridgeTable, /^\s*timeout\s*=/m,
+    'Codex honours tool_timeout_sec, not a bare `timeout` key');
   // The Claude template tells the agent to forward CLAUDE_CODE_SESSION_ID
   // by hand. The Codex template must NOT carry that instruction, since
   // session id is read server-side from MCP _meta.
@@ -98,4 +107,29 @@ test('template documents strength/profile routing without hardcoding ids', () =>
   assert.match(text, /discover the configured set via `\{action:status\}`/);
   assert.match(text, /never pass companion or model ids/);
   assert.doesNotMatch(text, /agent_route|agent_strength|agent_profile/);
+});
+
+test('template forbids re-routing a dispatch the bridge refused to route', () => {
+  // Same prohibition as the Claude template, authored host-neutrally so both
+  // suites can assert it. Reported as "strength advertised but not wired";
+  // forensics showed the bridge answered STRENGTH_UNCONFIGURED in 23ms and the
+  // subagent re-sent the task 30s later with target:"codex" — a target the
+  // parent never named. It belongs in developer_instructions (the behavioral
+  // contract), not in description (the wire-payload doc).
+  const di = topLevel.match(/^developer_instructions\s*=\s*"""([\s\S]*?)"""/m);
+  assert.ok(di, 'developer_instructions block extractable');
+  const body = di[1];
+  assert.match(body, /A routing error ≠ permission to pick your own route/);
+  // Includes both ambiguity codes: STRENGTH_AMBIGUOUS and PROFILE_AMBIGUOUS are
+  // routing-resolution failures too, and a code missing from the enumeration is
+  // exactly the gap the subagent reroutes through.
+  for (const code of ['STRENGTH_UNCONFIGURED', 'STRENGTH_AMBIGUOUS', 'PROFILE_UNKNOWN',
+    'PROFILE_AMBIGUOUS', 'ROUTING_CONFLICT', 'CAPABILITY_UNAVAILABLE',
+    'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED']) {
+    assert.match(body, new RegExp(`\`${code}\``),
+      `${code} named in the no-re-route prohibition`);
+  }
+  assert.match(body,
+    /Do NOT re-send the task with a `target`, `profile`, or `strength` the parent did not supply/);
+  assert.match(body, /and do NOT drop the one it did supply/);
 });

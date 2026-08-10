@@ -260,6 +260,16 @@ materializing `templates/agent-companion.md` to:
 
 The standalone materialized agent owns the private MCP bridge.
 
+The agent's MCP call deadline is set per host, on the server entry itself:
+`timeout: 1320000` (milliseconds) in the Claude frontmatter, `tool_timeout_sec =
+1320` in the Codex TOML. Both clear the bridge's own 1200s wait cap
+(`clampWaitSec`) so the bridge always answers before the host abandons the call.
+On the Claude side this must be a **sibling of `command`/`args`**, not an `env:`
+entry — an `MCP_TOOL_TIMEOUT` environment variable reaches the bridge child
+process but the host ignores it, and it silently buys nothing. The per-server
+field also floors the MCP idle window, which is what keeps a long silent
+`agent_wait` from being cut at the host's watchdog tick.
+
 ### Claude Permissions
 
 The subagent needs permission to call the split MCP tools. Source checkout setup
