@@ -185,6 +185,53 @@ model boundary, never mid-write.
 config stays the single source of truth. Bonus: `session_meta.originator` is taken from
 `clientInfo.name`, so the bridge gets a free ownership stamp; `source` defaults to `"vscode"`.
 
+### Broker probe — RUN 2026-08-10, architecture validated
+
+A ~100-line broker prototype (owns one `codex app-server` over stdio, exposes a UDS,
+remaps JSON-RPC ids per client) was built and exercised. Results:
+
+**stdio alone gives NO survival.** `codex app-server` spawned as a child dies when its stdio
+parent exits, and the in-flight turn ends `turn_aborted / reason:"interrupted"` — the same
+failure as `codex exec`. The broker, not the transport, is what buys survival, and the broker
+must therefore be long-lived and detached from any bridge process.
+
+**The broker delivers the bridge lifecycle exactly.** Client 1 connected, started a thread and
+a turn, and disconnected at t=6.2 s. **21 seconds passed with zero clients.** Client 2 — a
+fresh process — connected, saw the thread in `thread/loaded/list`, got
+`thread/resume → status:{type:"active"}`, received the live tail and `turn/completed`
+(`BROKERDONE`). That is precisely "subagent spawns, works, returns; a later subagent picks up".
+
+**Two-tier durability, both tiers measured:**
+- *Bridge dies* (every subagent return): nothing lost — the broker keeps the turn running.
+- *Broker dies* (rare): only the in-flight turn is lost. A fresh broker resumed the dead
+  broker's thread from disk and the model knew exactly where it stopped — *"You asked for
+  `sleep 40 && echo LONG`; no, it was interrupted before completion."*
+
+**Broker death is clean but leaves a stale socket.** SIGKILLing the broker killed its
+app-server child too (stdio pipe closed) with **no orphaned processes** — but the socket file
+survives, because SIGKILL skips the unlink handler. **Socket presence is not liveness:** a
+connect-probe against the stale socket returned `ECONNREFUSED`, which is the correct
+safe-to-unlink test. The broker must connect-probe before binding and must never infer a live
+broker from a present socket.
+
+**Concurrency is correct; broadcast is not.** Two simultaneous clients on two threads got
+their own correct answers (`ALPHA` / `BETA`), so id remapping is sound. But the prototype's
+notification fan-out means client A also received client B's thread events — **a real broker
+must filter notifications by threadId subscription**, or every bridge sees every other job.
+
+**Error taxonomy** (all are JSON-RPC `-32600`; only the *message* distinguishes them, so the
+adapter must key on text):
+- `thread not loaded: <id>` — `thread/read` on a thread that has not been resumed. **`thread/read`
+  is not a disk reader: resume first, then read.**
+- `no rollout found for thread id <id>` — the same signature the exec transport emits;
+  the `thread_not_resumable` class already added in W1.3′ covers both.
+- `thread not found: <id>` — `turn/interrupt` / `turn/steer` on an unknown thread.
+- `no active turn to steer` — steering an idle thread, or a stale `expectedTurnId`.
+- ⚠️ **`turn/start` on a thread with a turn already in progress SUCCEEDS** and returns a new
+  turn id rather than rejecting. The adapter must check thread status (or use `turn/steer`)
+  before starting a turn, or it will silently double-dispatch.
+- `turn/interrupt` returns `{}` and the turn settles `status:"interrupted"` with no answer.
+
 ### Transport — this corrects the `ws://` recommendation above
 
 `--listen ws://` works, but it is **explicitly gated as experimental/unstable with bounded
@@ -563,9 +610,9 @@ exec-specific work the daemon deletes rather than reuses.
   sandbox. Still open: the mapping of `AGENT_COMPANION_CODEX_SANDBOX_MODE` onto
   `thread/start`'s `sandbox`, and whether the bridge should ever expose an approval policy
   other than `never`.
-- **The broker.** Nothing has been built or measured for a long-lived stdio broker: restart
-  semantics, one-broker-per-workspace vs per-host, health probe, idle reaping, and what
-  happens to live threads when the broker itself dies (the app-server process, not the client).
+- ~~**The broker.**~~ **Prototyped and measured 2026-08-10** — see "Broker probe" below. Still
+  open: one-broker-per-workspace vs per-host, idle reaping policy, and whether the broker
+  should be spawned lazily by the first bridge or by a SessionStart hook.
 - **Whether `thread/read` ever carries tool items.** It returned messages only
   (`itemsView:"full"`), while the rollout for the same thread had `custom_tool_call`,
   `custom_tool_call_output` and `reasoning`. If tool activity is wanted in a salvage digest,
