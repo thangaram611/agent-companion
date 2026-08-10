@@ -2184,20 +2184,31 @@ test('the app-server -32600 family classifies on message text, never on the code
     classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: no rollout found for thread id 0199a1'),
     'thread_not_resumable',
   );
+  // `thread not loaded` is thread/read's wording for the same condition: this
+  // app-server has no readable rollout for that id.
   assert.equal(
-    classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: thread not found: 0199a1'),
+    classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: thread not loaded: 0199a1'),
     'thread_not_resumable',
   );
 
-  // Alive, and must NOT be called unrecoverable. `no active turn to steer` is an
-  // idle thread or a stale expectedTurnId; `thread not loaded` is the bridge
-  // calling thread/read without resuming first — a protocol misuse, not a death.
+  // Alive, and must NOT be called unrecoverable.
+  //
+  // `thread not found` is the regression this arm exists for: measured in
+  // probes/codex-app-server/unloaded.mjs, a thread with a completed turn whose
+  // app-server was SIGKILLed answers a FRESH app-server `thread not found` to
+  // turn/interrupt and turn/steer — while thread/resume on that same id succeeds
+  // with status idle. Calling it unrecoverable would report a broker restart, the
+  // case the whole app-server transport was chosen for, as lost work.
+  assert.equal(
+    classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: thread not found: 0199a1'),
+    'unknown',
+  );
   assert.equal(
     classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: no active turn to steer'),
     'unknown',
   );
   assert.equal(
-    classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: thread not loaded: 0199a1'),
+    classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: no active turn to interrupt'),
     'unknown',
   );
 

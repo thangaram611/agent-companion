@@ -1037,8 +1037,10 @@ const TRANSPORT_RE = /\b(?:EPIPE|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT)
 //   `codex exec`       — measured on 0.147.0: JSON-RPC code -32600 with the human
 //                        reason `no rollout found for thread id`, delivered on
 //                        stderr with a completely empty stdout.
-//   `codex app-server` — `thread not found: <id>` from `turn/interrupt` /
-//                        `turn/steer`, plus the same `no rollout found` reason.
+//   `codex app-server` — the same `no rollout found for thread id` reason from
+//                        `thread/resume`, and `thread not loaded: <id>` from
+//                        `thread/read`. Both mean this app-server has no readable
+//                        rollout for that id.
 //
 // The bare `-32600` code is deliberately NOT a signature. On `codex exec` it was a
 // safe synonym for the resume rejection because that was the only -32600 the
@@ -1049,22 +1051,33 @@ const TRANSPORT_RE = /\b(?:EPIPE|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT)
 // exists to kill. Nothing is lost by dropping it: the exec rejection carries the
 // message text as well as the code.
 //
-// OPEN, and to be settled before the app-server adapter starts calling
-// `turn/interrupt` / `turn/steer` with a recorded threadId: the probe behind
-// `thread not found` (probes/codex-app-server/errs.mjs) only ever asked about an
-// all-zero id that exists nowhere, so it does not establish whether a thread that
-// is on disk but not yet loaded into *this* app-server process answers
-// `thread not found` or `thread not loaded`. If it is the former, a broker restart
-// — which the plan measures as fully recoverable, "a fresh broker resumed the dead
-// broker's thread from disk" — would land here and be reported unrecoverable.
-// Re-probe against a disk-resident unloaded thread before relying on this arm.
-const THREAD_NOT_RESUMABLE_RE = /no rollout found for thread id|thread not found/i;
+// `thread not found` is deliberately NOT in this class, and that is the opposite of
+// what the plan's first taxonomy said. Settled by measurement
+// (probes/codex-app-server/unloaded.mjs): a thread with a COMPLETED turn, whose
+// app-server was then SIGKILLed, answers a fresh app-server like this —
+//
+//   thread/loaded/list  -> []                                (not loaded here)
+//   thread/read         -> OK, full transcript                (reads from disk!)
+//   turn/interrupt      -> -32600 `thread not found: <id>`
+//   turn/steer          -> -32600 `thread not found: <id>`
+//   thread/resume       -> OK, status {type:"idle"}           (fully recoverable)
+//
+// So `thread not found` means "not loaded into THIS process", not "gone" — the very
+// case the plan measures as fully recoverable. It is also what a genuinely
+// nonexistent id returns, so the message cannot tell the two apart and must not be
+// used to declare a death. The earlier reading came from
+// probes/codex-app-server/errs.mjs, which only ever asked about an all-zero id that
+// exists nowhere; with n=1 and that one case degenerate, the generalization did not
+// hold. The adapter's answer is structural, not textual: always `thread/resume`
+// before `turn/interrupt` / `turn/steer` on a thread this connection did not start.
+const THREAD_NOT_RESUMABLE_RE = /no rollout found for thread id|thread not loaded/i;
 
-// The other two app-server -32600s are deliberately left to the `unknown` fallback:
-//   `no active turn to steer` — steering an idle thread, or a stale `expectedTurnId`.
-//   `thread not loaded: <id>` — `thread/read` before `thread/resume`; `thread/read`
-//                               is not a disk reader. A bridge protocol misuse.
-// In both the thread is alive, so `thread_not_resumable` would be a lie. Neither is
+// Left to the `unknown` fallback, because the thread is alive and only the bridge's
+// aim was off:
+//   `thread not found: <id>`      — see above: not loaded here, resume fixes it.
+//   `no active turn to steer`     — steering an idle thread, or a stale expectedTurnId.
+//   `no active turn to interrupt` — cancelling a turn that already ended.
+// In all three the thread is alive, so `thread_not_resumable` would be a lie. Neither is
 // a lifecycle event (nothing lost ownership of the job), nor a transport flap (the
 // RPC round-tripped fine and came back with an answer), and `runtime_unavailable`
 // is the only class allowed to name `binaryEnv` — the binary is plainly running.

@@ -221,12 +221,37 @@ must filter notifications by threadId subscription**, or every bridge sees every
 
 **Error taxonomy** (all are JSON-RPC `-32600`; only the *message* distinguishes them, so the
 adapter must key on text):
-- `thread not loaded: <id>` — `thread/read` on a thread that has not been resumed. **`thread/read`
-  is not a disk reader: resume first, then read.**
-- `no rollout found for thread id <id>` — the same signature the exec transport emits;
-  the `thread_not_resumable` class already added in W1.3′ covers both.
-- `thread not found: <id>` — `turn/interrupt` / `turn/steer` on an unknown thread.
-- `no active turn to steer` — steering an idle thread, or a stale `expectedTurnId`.
+- `no rollout found for thread id <id>` — `thread/resume` with nothing readable on disk; the
+  same signature the exec transport emits. The `thread_not_resumable` class added in W1.3′
+  covers both.
+- `thread not loaded: <id>` — `thread/read` for an id this app-server has no rollout for. Same
+  condition as above, different method's wording.
+- `thread not found: <id>` — `turn/interrupt` / `turn/steer` on a thread **not loaded into this
+  process**. ⚠️ This does *not* mean the thread is gone.
+- `no active turn to steer` / `no active turn to interrupt` — an idle thread, a stale
+  `expectedTurnId`, or a turn that already ended.
+
+> **⚠️ Corrected 2026-08-10 — two claims in the first taxonomy did not survive**
+> (`probes/codex-app-server/unloaded.mjs`). Both came from `errs.mjs`, which only ever asked
+> about the all-zero id — a thread that exists nowhere — so neither generalized. Re-measured
+> against a thread with a **completed turn** whose app-server was then SIGKILLed, asked of a
+> **fresh** app-server:
+>
+> | call | result |
+> |---|---|
+> | `thread/loaded/list` | `[]` — not loaded here |
+> | `thread/read` | **OK, full transcript** — it *does* read from disk, with no prior resume |
+> | `turn/interrupt` / `turn/steer` | `-32600 thread not found: <id>` |
+> | `thread/resume` | **OK, `status:{type:"idle"}`** — fully recoverable |
+>
+> So: **`thread/read` IS a disk reader** — "resume first, then read" was an artefact of probing
+> an id that never existed. And **`thread not found` is a recoverable state**, not a death; it
+> is also what a genuinely nonexistent id returns, so the message cannot distinguish the two and
+> must never be used to declare a thread lost. Classifying it as `thread_not_resumable` would
+> report a broker restart — the exact case this transport was chosen for — as lost work.
+>
+> The adapter's guard is therefore **structural, not textual**: always `thread/resume` before
+> `turn/interrupt` / `turn/steer` on a thread this connection did not itself start.
 - ⚠️ **`turn/start` on a thread with a turn already in progress SUCCEEDS** and returns a new
   turn id rather than rejecting. The adapter must check thread status (or use `turn/steer`)
   before starting a turn, or it will silently double-dispatch.
@@ -343,9 +368,11 @@ Four classes as before — `bridge_lifecycle` (never names `binaryEnv`), `runtim
 (**the only class allowed to**), `runtime_transport`, `unknown` — plus two the experiments
 found:
 - **`thread_not_resumable`** — keyed on the message *text* (`no rollout found for thread id`,
-  `thread not found`) and explicitly **not** on the `-32600` code: see "Error taxonomy" above —
+  `thread not loaded`) and explicitly **not** on the `-32600` code: see "Error taxonomy" above —
   on `codex app-server` every error is `-32600`, so keying on the code puts a live thread's
-  failed steer in this class. This is the load-bearing new failure mode W3.1 introduces.
+  failed steer in this class. `thread not found` is likewise **excluded**: it means "not loaded
+  into this process", which `thread/resume` fixes. This is the load-bearing new failure mode
+  W3.1 introduces.
 - **`bridge_transport_closed`** — from W1.4′(d).
 
 Three rendering fixes the experiments forced:
