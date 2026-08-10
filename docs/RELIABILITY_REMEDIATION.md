@@ -342,8 +342,10 @@ level. Note `item.id` is **turn-scoped** and restarts at `item_0` every turn inc
 Four classes as before — `bridge_lifecycle` (never names `binaryEnv`), `runtime_unavailable`
 (**the only class allowed to**), `runtime_transport`, `unknown` — plus two the experiments
 found:
-- **`thread_not_resumable`** — keyed on the `-32600 / no rollout found for thread id` stderr
-  signature. This is the load-bearing new failure mode W3.1 introduces.
+- **`thread_not_resumable`** — keyed on the message *text* (`no rollout found for thread id`,
+  `thread not found`) and explicitly **not** on the `-32600` code: see "Error taxonomy" above —
+  on `codex app-server` every error is `-32600`, so keying on the code puts a live thread's
+  failed steer in this class. This is the load-bearing new failure mode W3.1 introduces.
 - **`bridge_transport_closed`** — from W1.4′(d).
 
 Three rendering fixes the experiments forced:

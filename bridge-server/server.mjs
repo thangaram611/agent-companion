@@ -1048,6 +1048,16 @@ const TRANSPORT_RE = /\b(?:EPIPE|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT)
 // perfectly alive thread is unrecoverable — the exact misdiagnosis this function
 // exists to kill. Nothing is lost by dropping it: the exec rejection carries the
 // message text as well as the code.
+//
+// OPEN, and to be settled before the app-server adapter starts calling
+// `turn/interrupt` / `turn/steer` with a recorded threadId: the probe behind
+// `thread not found` (probes/codex-app-server/errs.mjs) only ever asked about an
+// all-zero id that exists nowhere, so it does not establish whether a thread that
+// is on disk but not yet loaded into *this* app-server process answers
+// `thread not found` or `thread not loaded`. If it is the former, a broker restart
+// — which the plan measures as fully recoverable, "a fresh broker resumed the dead
+// broker's thread from disk" — would land here and be reported unrecoverable.
+// Re-probe against a disk-resident unloaded thread before relying on this arm.
 const THREAD_NOT_RESUMABLE_RE = /no rollout found for thread id|thread not found/i;
 
 // The other two app-server -32600s are deliberately left to the `unknown` fallback:
@@ -1058,8 +1068,13 @@ const THREAD_NOT_RESUMABLE_RE = /no rollout found for thread id|thread not found
 // a lifecycle event (nothing lost ownership of the job), nor a transport flap (the
 // RPC round-tripped fine and came back with an answer), and `runtime_unavailable`
 // is the only class allowed to name `binaryEnv` — the binary is plainly running.
-// `unknown` renders the message verbatim under "will not guess a cause", which is
-// exactly what a wrong call from the bridge needs the operator to see.
+// `unknown` is what is left, and it is the honest landing: its rendering asserts
+// no cause beyond "could not reach", says outright that the bridge will not guess
+// one, and hands the operator the captured channels as the evidence.
+// One caveat for whoever lands the adapter, to be fixed there and not here: the
+// unreachable branches render stdout/stderr only, so a JSON-RPC reason that
+// arrives on the job's `error` alone — what codex-runtime.mjs does when the reason
+// comes off an event rather than stderr — is classified but never shown.
 
 // Classify an `unreachable` job into one of five failure classes. `evidence` is
 // the raw failure text (`error` + stderr) — required because the two
