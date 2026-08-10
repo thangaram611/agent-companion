@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 
 import { digestPath } from '../lib/prompt-digest.mjs';
-import { writePrivateFile } from '../lib/runtime-paths.mjs';
+import { writePrivateFileAtomic } from '../lib/runtime-paths.mjs';
 import { appendCapped, truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
 
 const running = new Map();
@@ -194,7 +194,13 @@ export function writeOpenCodeDigest(job, result = null) {
     lines.push('## Raw stderr', '', '```text', stderr, '```', '');
   }
   try {
-    writePrivateFile(path, lines.join('\n'));
+    // Atomic (temp + rename), not truncate-then-write: this digest is rewritten
+    // on every status request while other processes read the same path, and a
+    // truncating write hands them a zero-length or half-written file (measured:
+    // 20,945 of 119,401 concurrent cross-process reads returned 0 bytes).
+    // `digestPath` has already created the digest dir via `digestDir()`, and the
+    // temp file lands in that same dir, so the rename stays intra-filesystem.
+    writePrivateFileAtomic(path, lines.join('\n'));
     return existsSync(path) ? path : null;
   } catch {
     return null;
