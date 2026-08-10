@@ -13,6 +13,8 @@ import {
   resolveCodexSandbox,
   resolveCodexTimeoutMs,
   startCodexRun,
+  _resetForTest,
+  _setForTest,
 } from './codex-runtime.mjs';
 
 function fakeBin(source) {
@@ -194,8 +196,11 @@ test('createCodexCollector: last completed agent_message wins, reasoning/toolCal
   assert.equal(result.sessionId, 'th-collect');
   assert.equal(result.message, 'final answer');
   assert.equal(result.thoughts, 'thinking about it');
+  // A command_execution entry now carries its outcome alongside the
+  // invocation (see the enrichment test at the end of this file). With no
+  // `status` on the wire the fallback names the EVENT, not the exit outcome.
   assert.deepEqual(result.toolCalls, [
-    { name: 'shell', input: { command: 'ls -la' } },
+    { name: 'shell', input: { command: 'ls -la' }, status: 'completed', exit_code: null, aggregated_output: null },
     { name: 'file_change', input: { path: 'src/foo.ts', kind: 'update' } },
   ]);
   assert.equal(result.fatalError, null);
@@ -312,4 +317,231 @@ test('createCodexCollector reassembles chunk-split lines and flushes an untermin
   const result = collector.finish();
   assert.equal(result.sessionId, 'th-split');
   assert.equal(result.message, 'unterminated final');
+});
+
+// W1.1 — the thread id must be knowable while the run is still in flight, not
+// only in the resolved result. `thread.started` is line 1 of the stream at
+// +0.20 s in 12/12 measured 0.147.0 runs, so a caller that only learns the id
+// at resolve time loses it on exactly the runs it most needs it for.
+test('onSession fires with the thread id while the run is still in flight, once per id', async () => {
+  const { dir, bin } = fakeBin(`
+    process.stdin.on('data', () => {});
+    process.stdin.on('end', () => {
+      console.log(JSON.stringify({ type: 'thread.started', thread_id: 'th-early' }));
+      // A duplicate line must not re-fire the callback.
+      console.log(JSON.stringify({ type: 'thread.started', thread_id: 'th-early' }));
+      setTimeout(() => {
+        console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }));
+      }, 150);
+    });
+  `);
+  try {
+    const seen = [];
+    let settled = false;
+    let settledWhenSeen = null;
+    let announce;
+    const firstSession = new Promise((r) => { announce = r; });
+    const runPromise = startCodexRun({
+      jobId: 'j-onsession', cwd: dir, prompt: 'x',
+      env: { ...process.env, CODEX_BIN: bin },
+      onSession: (threadId) => {
+        if (settledWhenSeen === null) settledWhenSeen = settled;
+        seen.push(threadId);
+        announce();
+      },
+    });
+    runPromise.then(() => { settled = true; });
+    await firstSession;
+    assert.equal(settledWhenSeen, false, 'onSession fired before the run resolved');
+    const result = await runPromise;
+    assert.deepEqual(seen, ['th-early'], 'a repeated thread.started does not re-fire onSession');
+    assert.equal(result.sessionId, 'th-early');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A throwing consumer runs inside the child's stdout 'data' handler, where an
+// exception is an uncaughtException — this test would crash the runner, not
+// merely fail, if the callback were not isolated.
+test('a throwing onSession consumer neither crashes the process nor derails the run', async () => {
+  const { dir, bin } = completingBin([
+    { type: 'thread.started', thread_id: 'th-throwing' },
+    { type: 'item.completed', item: { type: 'agent_message', text: 'survived' } },
+    { type: 'turn.completed', usage: {} },
+  ]);
+  try {
+    const result = await startCodexRun({
+      jobId: 'j-onsession-throw', cwd: dir, prompt: 'x',
+      env: { ...process.env, CODEX_BIN: bin },
+      onSession: () => { throw new Error('consumer blew up'); },
+    });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.sessionId, 'th-throwing');
+    assert.equal(result.summary.message, 'survived');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// W0.1 — the clock seam. macOS counts machine sleep in libuv's timer clock and
+// linux does not, so a real clock cannot express a suspend-crossing duration
+// on CI in either direction; injection is the only way to assert on one.
+test('the injectable clock seam supplies the adapter-measured duration', async () => {
+  const { dir, bin } = completingBin([{ type: 'turn.completed', usage: {} }]);
+  // Exactly two reads per run: the pre-spawn stamp and the one in finish().
+  const ticks = [1_000, 61_000];
+  _setForTest({ now: () => (ticks.length ? ticks.shift() : 61_000) });
+  try {
+    const result = await startCodexRun({
+      jobId: 'j-clock', cwd: dir, prompt: 'x',
+      env: { ...process.env, CODEX_BIN: bin },
+    });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.durationMs, 60_000);
+  } finally {
+    _resetForTest();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// W0.2 — the cancelRequested leak. The pid branch has no child whose close
+// handler would clear the set, so marking before the kill left the id in it
+// forever when process.kill threw; the next run under that jobId then resolved
+// `cancelled` with nothing having been cancelled.
+test('a cancelCodexRun pid kill that throws leaves no cancellation marked behind', async () => {
+  const { dir, bin } = completingBin([
+    { type: 'thread.started', thread_id: 'th-leak' },
+    { type: 'item.completed', item: { type: 'agent_message', text: 'ran normally' } },
+    { type: 'turn.completed', usage: {} },
+  ]);
+  try {
+    // ESRCH — nothing is running under this jobId and the pid does not exist.
+    const cancelResp = cancelCodexRun('j-leak', 2147483647);
+    assert.equal(cancelResp.ok, false);
+    const result = await startCodexRun({
+      jobId: 'j-leak', cwd: dir, prompt: 'x',
+      env: { ...process.env, CODEX_BIN: bin },
+    });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.error, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// W1.3′ — `error` used to be gated on status === 'failed', so a timeout or a
+// cancellation rendered with a blank error even when the reason was captured.
+test('timeout and cancelled terminals report their reason; completed still reports none', async () => {
+  const silent = fakeBin(`
+    setInterval(() => {}, 1000);
+  `);
+  // Writes stderr first, then announces itself on stdout a tick later, so the
+  // parent can wait for a signal the child controls instead of racing a wall
+  // clock against node's own startup (which is what made a timeout-based
+  // version of this assertion flaky under a loaded suite).
+  const noisy = fakeBin(`
+    process.stderr.write('codex: stalled talking to the model\\n');
+    setTimeout(() => {
+      console.log(JSON.stringify({ type: 'thread.started', thread_id: 'th-noisy' }));
+    }, 20);
+    setInterval(() => {}, 1000);
+  `);
+  const clean = completingBin([
+    { type: 'item.completed', item: { type: 'agent_message', text: 'all good' } },
+    { type: 'turn.completed', usage: {} },
+  ]);
+  try {
+    // Nothing was captured, so the adapter synthesizes an honest reason for
+    // each non-completed terminal rather than handing the renderer a null.
+    const timedOut = await startCodexRun({
+      jobId: 'j-timeout-err', cwd: silent.dir, prompt: 'x',
+      env: { ...process.env, CODEX_BIN: silent.bin, AGENT_COMPANION_CODEX_TIMEOUT_MS: '50' },
+    });
+    assert.equal(timedOut.status, 'timeout');
+    assert.match(timedOut.error, /timeout/);
+
+    const bareCancel = startCodexRun({
+      jobId: 'j-cancel-err', cwd: silent.dir, prompt: 'x',
+      env: { ...process.env, CODEX_BIN: silent.bin },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    cancelCodexRun('j-cancel-err');
+    const cancelled = await bareCancel;
+    assert.equal(cancelled.status, 'cancelled');
+    assert.match(cancelled.error, /cancelled/);
+
+    // And when something WAS captured, that is what a non-failed terminal
+    // reports — this is the case that used to render blank.
+    let announce;
+    const started = new Promise((r) => { announce = r; });
+    const noisyCancel = startCodexRun({
+      jobId: 'j-cancel-stderr', cwd: noisy.dir, prompt: 'x',
+      env: { ...process.env, CODEX_BIN: noisy.bin },
+      onSession: () => announce(),
+    });
+    await started;
+    cancelCodexRun('j-cancel-stderr');
+    const cancelledNoisy = await noisyCancel;
+    assert.equal(cancelledNoisy.status, 'cancelled');
+    assert.match(cancelledNoisy.error, /stalled talking to the model/);
+
+    // A clean run is unchanged: stderr noise stays in summary.error for the
+    // digest and never becomes a top-level failure.
+    const completed = await startCodexRun({
+      jobId: 'j-completed-err', cwd: clean.dir, prompt: 'x',
+      env: { ...process.env, CODEX_BIN: clean.bin },
+    });
+    assert.equal(completed.status, 'completed');
+    assert.equal(completed.error, null);
+  } finally {
+    for (const t of [noisy, silent, clean]) rmSync(t.dir, { recursive: true, force: true });
+  }
+});
+
+// W1.2′ collector amendment. `item.started` is the ONLY event that exists
+// while a command runs (12 s gaps measured on 0.147.0), and `item.completed`
+// is what distinguishes a failed command from a successful one — before this,
+// both rendered as a bare `{command}`.
+test('command_execution carries in-flight state, status, exit_code and truncated output, keyed per turn', () => {
+  const collector = createCodexCollector();
+  const bigOutput = 'y'.repeat(6_000);
+  const lines = [
+    { type: 'thread.started', thread_id: 'th-cmd' },
+    { type: 'turn.started' },
+    { type: 'item.started', item: { id: 'item_0', type: 'command_execution', command: 'npm run build' } },
+    { type: 'item.completed', item: { id: 'item_0', type: 'command_execution', command: 'npm run build', status: 'failed', exit_code: 1, aggregated_output: bigOutput } },
+    // Started and never completed — the shape a run that dies mid-command
+    // leaves behind. It must survive as the record of what was running.
+    { type: 'item.started', item: { id: 'item_1', type: 'command_execution', command: 'sleep 30' } },
+    // Second turn: `item.id` restarts at item_0, so this must NOT fold into
+    // the first turn's entry.
+    { type: 'turn.started' },
+    { type: 'item.started', item: { id: 'item_0', type: 'command_execution', command: 'echo hi' } },
+    { type: 'item.completed', item: { id: 'item_0', type: 'command_execution', command: 'echo hi', status: 'completed', exit_code: 0, aggregated_output: 'hi\n' } },
+  ];
+  for (const line of lines) collector.push(JSON.stringify(line) + '\n');
+  const result = collector.finish();
+
+  assert.equal(result.toolCalls.length, 3, 'one entry per command — item.started never double-counts');
+  const [failed, inFlight, ok] = result.toolCalls;
+
+  assert.equal(failed.input.command, 'npm run build');
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.exit_code, 1);
+  assert.ok(failed.aggregated_output.length < bigOutput.length, 'aggregated_output is truncated');
+  assert.match(failed.aggregated_output, /\[truncated \d+ chars\]$/);
+
+  assert.deepEqual(inFlight, {
+    name: 'shell', input: { command: 'sleep 30' }, status: 'in_progress', exit_code: null, aggregated_output: null,
+  });
+
+  assert.deepEqual(ok, {
+    name: 'shell', input: { command: 'echo hi' }, status: 'completed', exit_code: 0, aggregated_output: 'hi\n',
+  });
+
+  // The outcome fields sit on the entry, never inside `input` — that keeps
+  // formatTerminalContent's `tc.input.path` extraction (file_change entries)
+  // collision-free.
+  assert.deepEqual(Object.keys(ok.input), ['command']);
 });

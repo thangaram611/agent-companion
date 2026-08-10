@@ -13,6 +13,9 @@ const cancelRequested = new Set();
 const MAX_CAPTURE_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 40 * 60 * 1000;
 const DEFAULT_KILL_GRACE_MS = 5_000;
+// A single `aggregated_output` can be a whole build log; the toolCalls entry
+// is a digest-facing artifact, not a transcript, so it keeps only a head.
+const MAX_COMMAND_OUTPUT_CHARS = 4_000;
 
 export function resolveCodexBin(env = process.env) {
   return String(env.CODEX_BIN || 'codex').trim() || 'codex';
@@ -92,6 +95,34 @@ export function codexPromptId(jobId) {
   return `codex-${jobId}`;
 }
 
+// ---------------------------------------------------------------------------
+// Injectable clock seam
+// ---------------------------------------------------------------------------
+//
+// Same shape as opencode-server-runtime.mjs's `_impl` record and
+// daemon-client.mjs's impl pointers: one module-local object, swapped
+// wholesale by tests, restored by _resetForTest.
+//
+// Why the adapter reads the clock through an indirection rather than calling
+// Date.now() inline: libuv's timer clock is `mach_continuous_time()` on darwin
+// (which counts machine sleep) and `CLOCK_MONOTONIC` on linux (which does
+// not), so the two platforms have OPPOSITE suspend semantics. Any duration
+// this adapter reports — and any idle threshold later built on one — is
+// therefore not exercisable on linux CI in a way that reflects production
+// behaviour on macOS. Injection is the only way to test it; this is a
+// portability seam, not a flakiness workaround.
+const realNow = () => Date.now();
+
+let _impl = { now: realNow };
+
+export function _setForTest(overrides = {}) {
+  _impl = { ..._impl, ...overrides };
+}
+
+export function _resetForTest() {
+  _impl = { now: realNow };
+}
+
 export function startCodexRun({
   jobId,
   cwd,
@@ -99,6 +130,10 @@ export function startCodexRun({
   model = null,
   env = process.env,
   onStarted = () => {},
+  // Fires the moment `thread.started` arrives (line 1 of the stream, +0.20 s
+  // in 12/12 measured 0.147.0 runs) — long before this promise resolves, so a
+  // caller can persist a resumable thread id that survives the run dying.
+  onSession = () => {},
 }) {
   const bin = resolveCodexBin(env);
   const sandbox = resolveCodexSandbox(env);
@@ -120,6 +155,7 @@ export function startCodexRun({
   ];
 
   let timedOut = false;
+  const startedAt = _impl.now();
   const child = spawn(bin, args, {
     cwd,
     env,
@@ -144,7 +180,7 @@ export function startCodexRun({
 
   let stdout = '';
   let stderr = '';
-  const collector = createCodexCollector();
+  const collector = createCodexCollector({ onSession });
   child.stdout?.on('data', (chunk) => {
     const text = chunk.toString('utf8');
     stdout = appendCapped(stdout, text, MAX_CAPTURE_BYTES);
@@ -171,7 +207,10 @@ export function startCodexRun({
       clearTimeout(timeout);
       running.delete(jobId);
       cancelRequested.delete(jobId);
-      resolve(result);
+      // The adapter's own view of the child's lifetime, read through the
+      // injectable clock above (server.mjs separately measures the whole
+      // worker, prompt formatting included).
+      resolve({ ...result, durationMs: _impl.now() - startedAt });
     };
 
     child.on('error', (err) => {
@@ -200,9 +239,20 @@ export function startCodexRun({
           : (code === 0 && !turnFailed)
             ? 'completed'
             : 'failed';
+      // Every NON-completed terminal states its reason. This used to be gated
+      // on `status === 'failed'`, so a `timeout` or `cancelled` job rendered
+      // with a blank error even when the stream or stderr had said exactly
+      // what went wrong. `completed` still reports null — stderr banners are
+      // noise on a good run, and summary.error carries them for the digest.
+      const failureReason = summary.error
+        || (timedOut
+          ? `codex exec exceeded its ${timeoutMs} ms timeout`
+          : cancelled
+            ? `codex exec was cancelled (${signal || 'no signal'})`
+            : `codex exited with code ${code}`);
       finish({
         status,
-        error: status === 'failed' ? (summary.error || `codex exited with code ${code}`) : null,
+        error: status === 'completed' ? null : failureReason,
         summary,
         sessionId: collected.sessionId || null,
         stdout,
@@ -225,12 +275,17 @@ export function cancelCodexRun(jobId, pid = null) {
   }
   if (pid) {
     try {
-      cancelRequested.add(jobId);
       process.kill(pid, 'SIGTERM');
-      return { ok: true, reason: 'signalled-pid', pid };
     } catch (err) {
       return { ok: false, reason: err.message, pid };
     }
+    // Mark AFTER the kill lands. Marking first leaked the jobId permanently
+    // whenever process.kill threw (ESRCH on a reaped pid, EPERM on a foreign
+    // one): unlike the child branch above, nothing here owns a process whose
+    // close handler would clear the set — so a later run reusing that jobId
+    // would resolve `cancelled` for no reason.
+    cancelRequested.add(jobId);
+    return { ok: true, reason: 'signalled-pid', pid };
   }
   return { ok: false, reason: 'no running Codex process found', pid: null };
 }
@@ -250,39 +305,58 @@ function summarizeCodexOutput(stderr, collected) {
 }
 
 // Line-buffered parser for the `codex exec --json` ThreadEvent stream (typed
-// thread/turn/item schema on 0.145.0 — distinct from the older
+// thread/turn/item schema — distinct from the older
 // session_configured/agent_message EventMsg schema that only appears in
 // on-disk rollout files). Exported for tests. Tolerates unknown event/item
 // types by ignoring them.
 //
-//   thread.started{thread_id}        → sessionId (persists as
-//                                       companionSessionId; v2 exec-resume
-//                                       continuity groundwork).
-//   item.completed{item:{type,...}}  → only COMPLETED items are terminal
-//                                       material (mirrors opencode's "last
-//                                       completed wins"); item.started/
-//                                       item.updated are progress-only and
-//                                       ignored here.
-//     agent_message   → .text is the final answer; last completed one wins.
-//     reasoning        → .text joined into thoughts ('' fallback — field name
-//                        is unverified against a real turn, per D10; the dry
-//                        run is the deferred JSONL-shape validation step).
-//     command_execution → toolCalls entry {name:'shell', input:{command}}.
-//     file_change      → one toolCalls entry per file, {name:'file_change',
-//                        input:{path, kind}} so formatTerminalContent's
-//                        "Files touched" `tc.input.path` extraction works.
-//     mcp_tool_call    → toolCalls entry.
-//     web_search       → toolCalls entry.
-//     todo_list        → informational only, not surfaced in toolCalls.
-//     error            → NON-fatal (tolerated; does not fail the turn) —
-//                        only the top-level `error` type and `turn.failed`
-//                        do that.
-//   turn.completed          → recognized and ignored (usage stats have no
-//                             v1 consumer; re-add capture with the digest
-//                             enrichment pass if it lands).
-//   turn.failed             → fatal; reason becomes the failure message.
-//   error (top-level)       → fatal; .message becomes the failure message.
-export function createCodexCollector() {
+// MEASURED CONTRACT — codex 0.147.0, census over ~24 real runs on this
+// machine. What the stream actually emits:
+//
+//   thread.started{thread_id}   → line 1 of every run, at +0.20 s in 12/12
+//                                 measured runs, and the id is stable across
+//                                 resumes. Fires `onSession` on arrival so the
+//                                 caller can persist a resumable id long
+//                                 before the run resolves.
+//   turn.started                → turn boundary. `item.id` is TURN-scoped and
+//                                 restarts at `item_0` on every turn including
+//                                 resumes, so nothing may be keyed on it
+//                                 across turns (hence the turn counter below).
+//   item.started{command_execution}
+//                               → carries the FULL command and is the ONLY
+//                                 event that exists while a command runs
+//                                 (12 s gaps observed). Recorded as an
+//                                 in-flight toolCalls entry so a long build
+//                                 does not look frozen, and so a run that dies
+//                                 mid-command still names the command.
+//   item.completed{command_execution}
+//                               → adds status ('completed'|'failed'),
+//                                 exit_code and aggregated_output; folded into
+//                                 the entry item.started opened, so a failed
+//                                 command no longer renders identically to a
+//                                 successful one.
+//   item.completed{agent_message}
+//                               → the answer, emitted ATOMICALLY at turn end;
+//                                 last completed one wins.
+//   item.completed{error}       → NON-fatal (tolerated; does not fail the
+//                                 turn) — only the top-level `error` type and
+//                                 `turn.failed` do that.
+//   turn.completed              → recognized and ignored (usage stats have no
+//                                 consumer here). Note its
+//                                 usage.reasoning_output_tokens is non-zero on
+//                                 reasoning turns, which PROVES reasoning
+//                                 happens even though no reasoning item ever
+//                                 streams on this transport.
+//   turn.failed                 → fatal; reason becomes the failure message.
+//   error (top-level)           → fatal; .message becomes the failure message.
+//
+// DEFINED BUT NEVER OBSERVED on 0.147.0 across that census: the `reasoning`,
+// `file_change`, `mcp_tool_call`, `web_search` and `todo_list` item types —
+// and `item.updated`, which does not occur at all. Their branches below are
+// deliberate forward-compatible dead code, NOT validated behaviour; the
+// `file_change` shape in particular is still a guess (see
+// fileChangeToolCalls). Re-run the census before building anything on them.
+export function createCodexCollector({ onSession = () => {} } = {}) {
   let pending = '';
   let eventCount = 0;
   let sessionId = null;
@@ -291,6 +365,12 @@ export function createCodexCollector() {
   const toolCalls = [];
   let fatalError = null;
   let turnFailedReason = null;
+  // Turn counter + in-flight command index. `item.id` alone is not a key: it
+  // restarts at `item_0` every turn, so `${turnSeq}:${item.id}` is the
+  // narrowest scope in which an item.started can be matched to its
+  // item.completed.
+  let turnSeq = 0;
+  const inFlightCommands = new Map();
 
   return {
     push(text) {
@@ -322,7 +402,19 @@ export function createCodexCollector() {
     eventCount++;
     const type = String(event?.type || '');
     if (type === 'thread.started') {
-      sessionId = event.thread_id || sessionId;
+      const threadId = event.thread_id || null;
+      if (threadId && threadId !== sessionId) {
+        sessionId = threadId;
+        // Swallow a throwing consumer: this runs inside the child's stdout
+        // 'data' handler, where an exception is an uncaughtException that
+        // takes the whole bridge down (same reasoning as the no-op stdin
+        // error listener in startCodexRun).
+        try { onSession(threadId); } catch { /* consumer's problem, not the stream's */ }
+      }
+      return;
+    }
+    if (type === 'turn.started') {
+      turnSeq++;
       return;
     }
     if (type === 'turn.completed') return;
@@ -338,8 +430,28 @@ export function createCodexCollector() {
       consumeItem(event.item);
       return;
     }
-    // item.started / item.updated / turn.started / any unrecognized type —
-    // ignored (progress-only, not terminal-summary material).
+    if (type === 'item.started') {
+      consumeStartedItem(event.item);
+      return;
+    }
+    // item.updated (never emitted on 0.147.0) and any unrecognized type —
+    // ignored.
+  }
+
+  // The only in-flight signal worth keeping: a command_execution that has
+  // started but not completed. Every other item type reaches its terminal
+  // form in one hop, so recording its `started` twin would only double-count
+  // toolCalls.
+  function consumeStartedItem(item) {
+    if (!item || typeof item !== 'object') return;
+    if (String(item.type || '') !== 'command_execution') return;
+    const key = commandKey(item);
+    // An item with no id cannot be correlated to its completion; leave those
+    // to item.completed alone rather than emitting a duplicate entry.
+    if (!key || inFlightCommands.has(key)) return;
+    const entry = commandEntry(item.command);
+    inFlightCommands.set(key, entry);
+    toolCalls.push(entry);
   }
 
   function consumeItem(item) {
@@ -354,7 +466,19 @@ export function createCodexCollector() {
       return;
     }
     if (type === 'command_execution') {
-      toolCalls.push({ name: 'shell', input: { command: item.command ?? null } });
+      const key = commandKey(item);
+      const started = key ? inFlightCommands.get(key) : null;
+      const entry = started || commandEntry(item.command);
+      if (item.command != null) entry.input.command = item.command;
+      // A missing `status` names the EVENT ('the item completed'), never the
+      // exit outcome — `exit_code` stays the authoritative signal there.
+      entry.status = typeof item.status === 'string' && item.status ? item.status : 'completed';
+      entry.exit_code = item.exit_code ?? null;
+      entry.aggregated_output = typeof item.aggregated_output === 'string' && item.aggregated_output
+        ? truncateChars(item.aggregated_output, MAX_COMMAND_OUTPUT_CHARS)
+        : null;
+      if (started) inFlightCommands.delete(key);
+      else toolCalls.push(entry);
       return;
     }
     if (type === 'file_change') {
@@ -372,12 +496,35 @@ export function createCodexCollector() {
     // todo_list (informational only) and a non-fatal item-level `error` are
     // both tolerated without contributing to toolCalls or failing the turn.
   }
+
+  // Outcome fields live on the ENTRY, not inside `input`: `input` stays the
+  // invocation, which is what formatTerminalContent's "Files touched"
+  // `tc.input.path` extraction reads for file_change entries, so nothing a
+  // command reports back can ever collide with it. `in_progress` is a
+  // bridge-side state — codex has no such status — and is what a run that
+  // died mid-command leaves behind.
+  function commandEntry(command) {
+    return {
+      name: 'shell',
+      input: { command: command ?? null },
+      status: 'in_progress',
+      exit_code: null,
+      aggregated_output: null,
+    };
+  }
+
+  function commandKey(item) {
+    const id = item.id == null ? '' : String(item.id);
+    return id ? `${turnSeq}:${id}` : null;
+  }
 }
 
-// A file_change item may describe one file or a batch (shape unconfirmed
-// against a real turn — see D10's deferred dry-run). Normalize either shape
-// to one toolCalls entry per file so downstream "Files touched" extraction
-// never has to branch on it.
+// A file_change item may describe one file or a batch. The shape is STILL a
+// guess: no `file_change` item appeared in the ~24-run 0.147.0 census (every
+// probe ran without workspace-write, which is what produces one), so
+// `{files:[…]}` vs `{path,kind}` is unvalidated and "Files touched" depends on
+// it. Normalizing both shapes to one toolCalls entry per file at least keeps
+// downstream extraction from having to branch.
 function fileChangeToolCalls(item) {
   const files = Array.isArray(item.files) && item.files.length ? item.files : [item];
   return files
