@@ -12,12 +12,20 @@
 // `send` enqueues the task and returns `status=still_running` with the job_id
 // immediately (no blocking — the worker keeps running in the background). The
 // subagent then loops on `wait` until terminal, emitting a short line between
-// iterations to reset the host's stream-idle watchdog. Both hosts have
-// generous per-tool-call budgets (Claude 600s, Codex 120s per
-// `codex-rs/codex-mcp/src/rmcp_client.rs:79`); a single wait bounded by
-// clampWaitSec (≤1200s) is fine for both hosts — Claude Code's 600s
-// stream-idle watchdog is satisfied by the companion's per-iteration
-// "still running" emission, and Codex callers raise tool_timeout_sec.
+// iterations so a human watching the transcript can see progress.
+//
+// The host budget that actually bounds a wait is the MCP *tool idle* timeout,
+// not a stream watchdog. Measured from the Claude Code 2.1.226 binary: the
+// stdio-transport default is 1,800,000 ms (30 min), polled on a 30 s tick, and
+// it is satisfied by each `agent_wait` **returning** — an emission mid-call does
+// not reset it (only a `notifications/progress` would, and that is not what the
+// per-iteration line is). So the budget is: clampWaitSec's 1200 s ceiling
+// against an 1,800,000 ms stdio idle default = 600 s of headroom, which is why
+// clampWaitSec needs no change. Never raise it past 1500 s without also setting
+// a per-server `timeout` on the MCP server entry — the `env: MCP_TOOL_TIMEOUT`
+// form is a host no-op (it reaches only this child). Codex's own per-tool-call
+// budget is 120 s (`codex-rs/codex-mcp/src/rmcp_client.rs:79`); Codex callers
+// raise tool_timeout_sec.
 //
 // Completion surfacing: each terminal/alert event is appended to a JSONL queue
 // file with `consumed:false`; the drain script (invoked from the subagent's
@@ -993,6 +1001,126 @@ function emitRebirthAlert({ jobId, task, promptId, thread, previousSid, newSessi
   log('WARN', 'rebirth:', jobId, `thread=${thread || '-'} prev=${previousSid || '-'} new=${newSessionId}`);
 }
 
+// --- Failure classification -------------------------------------------------
+//
+// `unreachable` used to be rendered by splitting on **target**: copilot got the
+// daemon hint, everything else got `verify <binaryEnv> or the <cli> CLI is
+// available` from the target descriptor. That is how a pure bridge-lifecycle
+// event (this process restarted while a job was in flight) told the operator to
+// go check a binary that was never involved. Classify by FAILURE CLASS instead;
+// the target only selects wording *inside* a class.
+
+// Bridge-owned lifecycle details: the owning bridge process went away, or a
+// restarted bridge found a job it structurally cannot reattach to. Nothing in
+// this class implicates the target binary, its config, or PATH.
+const BRIDGE_LIFECYCLE_DETAILS = new Set([
+  'target_adapter_non_resumable_after_restart',
+  'sdk_adapter_non_resumable_after_restart',
+  'rehydrate_no_promptid',
+  'target_child_orphaned_by_bridge_restart',
+  // Emitted by the hydrate ownership guard when both the owning bridge pid and
+  // the companion child pid are gone (the transport-close path, which leaves no
+  // hydrate trace of its own).
+  'bridge_transport_closed',
+]);
+
+// Target-prefix-stripped details that mean "the socket/stream carrying this job
+// closed", e.g. `opencode_server_gone` → `server_gone`.
+const TRANSPORT_DETAILS = new Set(['server_gone', 'server_unreachable', 'server_watch_error']);
+
+// The runtime is not there to be run: spawn could not find/exec it, or the
+// shell reported the 127 "command not found" exit.
+const RUNTIME_MISSING_RE = /\b(?:ENOENT|EACCES|ENOTDIR)\b|\bexited with code 127\b|\bcommand not found\b/i;
+// Socket/stream flap. The runtime may be perfectly healthy; the pipe is not.
+const TRANSPORT_RE = /\b(?:EPIPE|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT)\b|socket hang up|stream (?:closed|ended)/i;
+// codex's resume rejection. Measured on 0.147.0: JSON-RPC code -32600 with the
+// human reason `no rollout found for thread id`, delivered on stderr with a
+// completely empty stdout.
+const THREAD_NOT_RESUMABLE_RE = /(?:^|[^\d-])-32600\b|no rollout found for thread id/i;
+
+// Classify an `unreachable` job into one of five failure classes. `evidence` is
+// the raw failure text (`error` + stderr) — required because the two
+// signature-keyed classes cannot be told apart from `detail` alone.
+//
+// ORDERING IS LOAD-BEARING. Every detail-keyed test runs BEFORE any text regex.
+// A `detail` is set deliberately by the bridge at the point of failure and is
+// definitive; the regexes are heuristics over free text that the companion also
+// writes to. Testing text first re-creates the exact misdiagnosis this function
+// exists to kill: `opencode_server_unreachable` (a transport flap) reclassified
+// as `runtime_unavailable` because the assistant's own output happened to quote
+// `bash: pnpm: command not found`.
+//
+// Correspondingly, the caller must NOT feed stdout into `evidence`: on the
+// opencode server adapter stdout *is* the assistant's prose. Both signatures the
+// text classes exist for (codex's resume rejection, spawn ENOENT / exit 127)
+// arrive on stderr, so stdout contributes only false positives here. It is still
+// rendered in the operator-facing excerpt — classification and display are
+// deliberately different corpora.
+//
+// `target` is used ONLY to strip the target prefix that the generic worker
+// paths bake into their detail strings, so the classifier keys on the condition
+// and never on which companion produced it.
+export function classifyUnreachable(detail, target, evidence = '') {
+  const raw = detail ? String(detail) : '';
+  const prefix = target ? `${target}_` : '';
+  const key = prefix && raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
+  const text = typeof evidence === 'string' ? evidence : String(evidence ?? '');
+
+  // --- definitive: keyed on a detail the bridge set itself ---
+  if (BRIDGE_LIFECYCLE_DETAILS.has(raw)) return 'bridge_lifecycle';
+  if (raw === 'thread_not_resumable') return 'thread_not_resumable';
+  // The only class permitted to name `descriptor.binaryEnv`.
+  if (raw === 'bridge_daemon_unreachable') return 'runtime_unavailable';
+  if (raw === 'bridge_timeout' || TRANSPORT_DETAILS.has(key)) return 'runtime_transport';
+
+  // --- heuristic: signature over the failure text, only when no detail spoke ---
+  if (THREAD_NOT_RESUMABLE_RE.test(text)) return 'thread_not_resumable';
+  if (RUNTIME_MISSING_RE.test(text)) return 'runtime_unavailable';
+  if (TRANSPORT_RE.test(text)) return 'runtime_transport';
+  // Honest fallback: no signature matched, so do not guess a cause.
+  return 'unknown';
+}
+
+// Unwrap exactly one level of JSON from an error message. codex delivers
+// `error.message` and `turn.failed.error.message` as a JSON-ENCODED STRING
+// carrying an API error envelope, e.g.
+//   {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"…"}}
+// so the operator sees a wall of punctuation with the one useful sentence
+// buried inside it. Parse defensively — anything that is not JSON, or is JSON
+// without an inner message, is returned verbatim. Never throws: a mangled error
+// must still render as *something*.
+export function unwrapErrorMessage(raw) {
+  if (raw == null) return '';
+  if (typeof raw !== 'string') return String(raw);
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('"')) return raw;
+  let parsed;
+  try { parsed = JSON.parse(trimmed); } catch { return raw; }
+  if (typeof parsed === 'string') return parsed;
+  if (!parsed || typeof parsed !== 'object') return raw;
+  const inner = (parsed.error && typeof parsed.error === 'object') ? parsed.error : parsed;
+  if (typeof inner.message === 'string' && inner.message) return inner.message;
+  if (typeof parsed.message === 'string' && parsed.message) return parsed.message;
+  return raw;
+}
+
+const MAX_CHANNEL_CHARS = 700;
+
+function tailChars(s, n) { return s.length > n ? `…${s.slice(s.length - (n - 1))}` : s; }
+
+// Inline a truncated tail of one captured channel. Measured on codex 0.147.0:
+// a bad `-m <model>` exits 1 with a COMPLETELY EMPTY stderr and the whole error
+// on stdout, while a bogus `resume <id>` gives a COMPLETELY EMPTY stdout with
+// the whole reason on stderr. Rendering stderr alone therefore loses half the
+// failure population outright — and these are precisely the failures where
+// nobody opens the digest file. So: both channels, always; empty ones cost
+// nothing because they render as nothing.
+function channelExcerpt(name, text) {
+  const body = typeof text === 'string' ? text.trim() : '';
+  if (!body) return '';
+  return `\n\n**${name} (tail):**\n\`\`\`\n${tailChars(body, MAX_CHANNEL_CHARS)}\n\`\`\``;
+}
+
 // Pure formatter: takes the fields a terminal job carries and returns the
 // human-readable body. Extracted from emitNotification so buildWaitResponse
 // can reuse the exact same formatting when the subagent blocks to completion.
@@ -1001,6 +1129,10 @@ export function formatTerminalContent({
   summary, error, stuckReason, detail, failedTools, promptId,
   sessionReborn = false, sessionRetired = false, digestUri = null,
   target = 'copilot',
+  // Captured channels. buildWaitResponse spreads the whole job, so
+  // `adapterResult` arrives for free on that path; explicit stdout/stderr let a
+  // caller (or a test) supply them directly.
+  adapterResult = null, stdout = null, stderr = null,
 }) {
   const label = targetLabel(target);
   const rebirthBanner = sessionReborn
@@ -1010,6 +1142,11 @@ export function formatTerminalContent({
   const taskHeader = rebirthBanner + `Task: ${truncate(task, 200)}\n\n`;
   const duration = durationMs || 0;
   const rubberDuck = classifyRubberDuck(summary?.message);
+  const outText = typeof stdout === 'string' ? stdout
+    : (typeof adapterResult?.stdout === 'string' ? adapterResult.stdout : '');
+  const errText = typeof stderr === 'string' ? stderr
+    : (typeof adapterResult?.stderr === 'string' ? adapterResult.stderr : '');
+  const channels = channelExcerpt('stdout', outText) + channelExcerpt('stderr', errText);
 
   if (status === 'completed' && summary?.message) {
     const filesTouched = (summary.toolCalls || [])
@@ -1044,7 +1181,11 @@ export function formatTerminalContent({
         : 'Prompt inspection is unavailable for this job; decide whether to re-fire or recover directly.');
   }
   if (status === 'failed') {
-    return taskHeader + `${label} job failed: ${error || 'unknown error'}`;
+    // `error` is frequently a JSON-encoded API envelope (a bad `-m` produces
+    // exactly that, on stdout, with an empty stderr) — unwrap one level so the
+    // operator reads a sentence rather than an escaped blob, and inline both
+    // channels so the sentence has its context attached.
+    return taskHeader + `${label} job failed: ${unwrapErrorMessage(error) || 'unknown error'}` + channels;
   }
   if (status === 'cancelled') {
     return taskHeader + `${label} job was cancelled.` +
@@ -1087,27 +1228,87 @@ export function formatTerminalContent({
       failedLine + digestLine + retiredLine;
   }
   if (status === 'unreachable') {
-    if (detail === 'sdk_adapter_non_resumable_after_restart') {
-      return taskHeader +
-        'The experimental Copilot SDK adapter cannot reattach an in-flight prompt after the bridge process restarts.\n\n' +
-        'Start a fresh send and restate the needed context. ACP remains the default adapter for restart-resumable jobs.';
-    }
     const detailLine = detail ? ` (detail: ${detail})` : '';
-    let runtimeHint;
-    if (target === 'copilot') {
-      runtimeHint = `check \`ps -ef | grep copilot-acp-daemon\` and tail \`${bridgeLogFile()}\` / \`${daemonLogFile()}\` to confirm the daemon is alive.`;
-    } else {
-      // Descriptor-driven, not a hardcoded "for OpenCode" lead-in — reachable
-      // for any non-copilot target via the restart-hydrate non-resumable path.
-      const descriptor = getTarget(target);
-      const binHint = descriptor
-        ? `verify \`${descriptor.binaryEnv}\` or the \`${descriptor.binaryNames[0]}\` CLI is available`
-        : 'verify the target binary is installed and on PATH';
-      runtimeHint = `check the target binary/configuration and read the digest/logs under \`${runtimeDir()}\`; ${binHint}.`;
+    // Classification corpus is `error` + stderr ONLY. stdout is deliberately
+    // excluded: on the opencode server adapter it carries the assistant's own
+    // prose, so a model quoting `command not found` would otherwise be read as
+    // a missing binary. stdout is still rendered below in `channels`.
+    const evidence = [error, errText].filter((s) => typeof s === 'string' && s.trim()).join('\n');
+    const failureClass = classifyUnreachable(detail, target, evidence);
+    const classLine = `\n\n**Failure class:** \`${failureClass}\``;
+    const digestPointer = digestUri
+      ? `the digest resource \`${digestUri}\``
+      : `the digest/logs under \`${runtimeDir()}\``;
+
+    if (failureClass === 'bridge_lifecycle') {
+      // Causally neutral by construction: the bridge genuinely cannot tell
+      // which of several outcomes applied, and saying so is more useful than
+      // an authoritative-sounding guess. Never names `binaryEnv` — no binary
+      // is implicated by a bridge losing ownership of its own job.
+      const cause = detail === 'sdk_adapter_non_resumable_after_restart'
+        ? 'The experimental Copilot SDK adapter cannot reattach an in-flight prompt after the bridge process restarts. ACP remains the default adapter for restart-resumable jobs.'
+        : detail === 'rehydrate_no_promptid'
+          ? 'A restarted bridge found this job in flight with no prompt id recorded, so there is nothing left to reattach to.'
+          : 'The bridge process that owned this job went away while the job was in flight, and the bridge that replaced it cannot reattach to the work.';
+      return taskHeader +
+        `The bridge lost ownership of this ${label} job${detailLine}.\n\n` +
+        `${cause}\n\n` +
+        `This is a bridge-lifecycle event, not a ${label} problem — nothing here implicates the ` +
+        'target binary, its configuration, or your PATH. The bridge also cannot tell which of ' +
+        'several outcomes actually applied: the companion turn may have completed, may have died ' +
+        'when its pipe closed, or may still be running detached. Treat the outcome as unknown ' +
+        'rather than failed.\n\n' +
+        `**Next:** read ${digestPointer} for whatever was captured before the handover, then ` +
+        're-send with the needed context restated.' + classLine + channels;
     }
+
+    if (failureClass === 'thread_not_resumable') {
+      return taskHeader +
+        `The recorded ${label} thread could not be resumed${detailLine}.\n\n` +
+        'The runtime rejected the thread id itself — its rollout is missing, pruned, or was ' +
+        'written under a different home directory. This is not a missing-binary condition and ' +
+        'retrying the same resume will fail identically.\n\n' +
+        '**Next:** start a fresh send and restate the context you need from ' +
+        `${digestPointer}.\n\n` +
+        'Note: codex reports this on stderr with a completely empty stdout, so the excerpt below ' +
+        'may carry only one channel.' + classLine + channels;
+    }
+
+    if (failureClass === 'runtime_unavailable') {
+      // The one class where the binary really is the suspect, and therefore
+      // the only one allowed to name `descriptor.binaryEnv`. Wording unchanged.
+      let runtimeHint;
+      if (target === 'copilot') {
+        runtimeHint = `check \`ps -ef | grep copilot-acp-daemon\` and tail \`${bridgeLogFile()}\` / \`${daemonLogFile()}\` to confirm the daemon is alive.`;
+      } else {
+        // Descriptor-driven, not a hardcoded "for OpenCode" lead-in — reachable
+        // for any non-copilot target whose binary is missing or not executable.
+        const descriptor = getTarget(target);
+        const binHint = descriptor
+          ? `verify \`${descriptor.binaryEnv}\` or the \`${descriptor.binaryNames[0]}\` CLI is available`
+          : 'verify the target binary is installed and on PATH';
+        runtimeHint = `check the target binary/configuration and read the digest/logs under \`${runtimeDir()}\`; ${binHint}.`;
+      }
+      return taskHeader +
+        `Bridge could not reach the ${label} runtime${detailLine}.\n\n` +
+        `This is infrastructure-level — ${runtimeHint}` + classLine + channels;
+    }
+
+    if (failureClass === 'runtime_transport') {
+      return taskHeader +
+        `The bridge's transport to the ${label} runtime failed mid-job${detailLine}.\n\n` +
+        'The runtime may well be installed and healthy: the socket or stream carrying this job ' +
+        'closed under it, so the turn can no longer be observed. Whatever the turn completed is ' +
+        'simply not visible to the bridge.\n\n' +
+        `**Next:** read ${digestPointer}, confirm the runtime process is still alive, and re-send. ` +
+        'A repeat means the transport, not the task.' + classLine + channels;
+    }
+
     return taskHeader +
       `Bridge could not reach the ${label} runtime${detailLine}.\n\n` +
-      `This is infrastructure-level — ${runtimeHint}`;
+      'The bridge has no signature for this failure, so it will not guess a cause. The captured ' +
+      `output below and ${digestPointer} are the evidence; do not assume the target binary is at fault ` +
+      'without checking it.' + classLine + channels;
   }
   return taskHeader + `Unexpected terminal status: ${status}`;
 }
@@ -1205,6 +1406,12 @@ export function emitNotification({
     jobId, status, task, mode, durationMs: duration,
     summary, error, stuckReason, detail, failedTools, promptId,
     sessionReborn, sessionRetired, digestUri, target,
+    // buildWaitResponse spreads the whole job, so it gets this for free. This
+    // surface enumerates its fields, so without the explicit hand-off the same
+    // job renders with a different failure class and zero channel excerpts when
+    // it is delivered through the queue drain — which is the path the parent
+    // actually reads when it did not block on agent_wait.
+    adapterResult: jobs.get(jobId)?.adapterResult ?? null,
   });
 
   enqueueEvent({ kind: 'terminal', jobId, content, meta });
@@ -2013,7 +2220,11 @@ async function handleSend(args) {
       targets: listTargets(),
       profiles: listProfilesPublic(routing.load),
     };
-    if (routing.candidates) envelope.candidates = routing.candidates;
+    // `?.length`, not truthiness: `publicIds()` returns `[]` when nothing is
+    // configured, and `[]` is truthy — so PROFILE_UNKNOWN and
+    // STRENGTH_UNCONFIGURED used to ship `candidates: []`, which reads exactly
+    // like a deliberately withheld list. Omit the key instead.
+    if (routing.candidates?.length) envelope.candidates = routing.candidates;
     if (routing.code === 'MODEL_NOT_ALLOWED') {
       envelope.reason = 'model-not-allowed';
       envelope.model = routing.model;
