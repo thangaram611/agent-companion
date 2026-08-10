@@ -306,7 +306,7 @@ the first-finisher shared-teardown hazard disappears entirely.
 **W1.4′ — Hydrate ownership guard** *(small; deps W0.1, W0.2)* — **was "liveness gate"**
 Hydrate must **neither retire nor rewrite the digest** of a non-terminal job whose recorded
 owner pid is alive and is not this process. Reuse the existing `pidAlive()` from
-`opencode-server-runtime.mjs` (it already treats EPERM as alive) rather than adding a raw
+`lib/shared-runtime-registry.mjs` (it already treats EPERM as alive) rather than adding a raw
 `process.kill`.
 
 > **Hard constraint:** hydrate must never call `writeOpenCodeDigest` for a job it did not

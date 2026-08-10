@@ -1974,7 +1974,7 @@ test('hydrate retires an orphaned CLI job honestly and never rewrites a digest i
   const { jobs, hydrateJobsFromLedger, _resetForTest } = mod;
   const state = await import('../lib/state.mjs');
   const { digestPath } = await import('../lib/prompt-digest.mjs');
-  const { pidAlive } = await import('./opencode-server-runtime.mjs');
+  const { pidAlive } = await import('../lib/shared-runtime-registry.mjs');
 
   await withLiveFakeChild(async (child) => {
     const oldS = process.env.CLAUDE_CODE_SESSION_ID;

@@ -120,8 +120,8 @@ import {
   reapIdleOpenCodeServer,
   syncOpenCodeServerLeases,
   openCodeServerIdleTtlMs,
-  pidAlive,
 } from './opencode-server-runtime.mjs';
+import { pidAlive } from '../lib/shared-runtime-registry.mjs';
 import {
   defaultTargetInfo,
   defaultTargetId,
