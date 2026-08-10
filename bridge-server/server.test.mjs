@@ -2172,6 +2172,54 @@ test('classifyUnreachable keys on failure class, not on which target produced th
   assert.equal(classifyUnreachable(undefined, undefined, undefined), 'unknown');
 });
 
+// On the `codex app-server` transport EVERY error is JSON-RPC -32600 and only the
+// message distinguishes them, so the code itself carries no information. A
+// classifier keying on the code would tell an operator whose *steer* failed that
+// their live thread is unrecoverable — the misdiagnosis in a new costume.
+test('the app-server -32600 family classifies on message text, never on the code', async () => {
+  const { classifyUnreachable } = await bridge();
+
+  // Genuinely gone → thread_not_resumable.
+  assert.equal(
+    classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: no rollout found for thread id 0199a1'),
+    'thread_not_resumable',
+  );
+  assert.equal(
+    classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: thread not found: 0199a1'),
+    'thread_not_resumable',
+  );
+
+  // Alive, and must NOT be called unrecoverable. `no active turn to steer` is an
+  // idle thread or a stale expectedTurnId; `thread not loaded` is the bridge
+  // calling thread/read without resuming first — a protocol misuse, not a death.
+  assert.equal(
+    classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: no active turn to steer'),
+    'unknown',
+  );
+  assert.equal(
+    classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: thread not loaded: 0199a1'),
+    'unknown',
+  );
+
+  // The exec transport's resume rejection is unaffected by dropping the code arm:
+  // it carries the human reason alongside -32600, on stderr with an empty stdout.
+  assert.equal(
+    classifyUnreachable(null, 'codex', 'ERROR: -32600 no rollout found for thread id 0199a1'),
+    'thread_not_resumable',
+  );
+
+  // And a -32600 with no recognised reason at all stays honest rather than
+  // inheriting the resume class from its neighbours.
+  assert.equal(classifyUnreachable(null, 'codex', 'JSON-RPC error -32600: Invalid Request'), 'unknown');
+
+  // A set detail still outranks all of it: a steer that failed while the bridge
+  // was losing ownership is a lifecycle event, whatever the RPC said.
+  assert.equal(
+    classifyUnreachable('bridge_transport_closed', 'codex', 'JSON-RPC error -32600: no active turn to steer'),
+    'bridge_lifecycle',
+  );
+});
+
 test('bridge_lifecycle rendering never names the target binary env and points at the digest', async () => {
   const { formatTerminalContent } = await bridge();
 
