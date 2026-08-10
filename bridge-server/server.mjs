@@ -1038,8 +1038,23 @@ const TRANSPORT_RE = /\b(?:EPIPE|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT)
 const THREAD_NOT_RESUMABLE_RE = /(?:^|[^\d-])-32600\b|no rollout found for thread id/i;
 
 // Classify an `unreachable` job into one of five failure classes. `evidence` is
-// the raw failure text (error + both captured channels) — required because the
-// two signature-keyed classes cannot be told apart from `detail` alone.
+// the raw failure text (`error` + stderr) — required because the two
+// signature-keyed classes cannot be told apart from `detail` alone.
+//
+// ORDERING IS LOAD-BEARING. Every detail-keyed test runs BEFORE any text regex.
+// A `detail` is set deliberately by the bridge at the point of failure and is
+// definitive; the regexes are heuristics over free text that the companion also
+// writes to. Testing text first re-creates the exact misdiagnosis this function
+// exists to kill: `opencode_server_unreachable` (a transport flap) reclassified
+// as `runtime_unavailable` because the assistant's own output happened to quote
+// `bash: pnpm: command not found`.
+//
+// Correspondingly, the caller must NOT feed stdout into `evidence`: on the
+// opencode server adapter stdout *is* the assistant's prose. Both signatures the
+// text classes exist for (codex's resume rejection, spawn ENOENT / exit 127)
+// arrive on stderr, so stdout contributes only false positives here. It is still
+// rendered in the operator-facing excerpt — classification and display are
+// deliberately different corpora.
 //
 // `target` is used ONLY to strip the target prefix that the generic worker
 // paths bake into their detail strings, so the classifier keys on the condition
@@ -1050,11 +1065,17 @@ export function classifyUnreachable(detail, target, evidence = '') {
   const key = prefix && raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
   const text = typeof evidence === 'string' ? evidence : String(evidence ?? '');
 
+  // --- definitive: keyed on a detail the bridge set itself ---
   if (BRIDGE_LIFECYCLE_DETAILS.has(raw)) return 'bridge_lifecycle';
-  if (raw === 'thread_not_resumable' || THREAD_NOT_RESUMABLE_RE.test(text)) return 'thread_not_resumable';
+  if (raw === 'thread_not_resumable') return 'thread_not_resumable';
   // The only class permitted to name `descriptor.binaryEnv`.
-  if (raw === 'bridge_daemon_unreachable' || RUNTIME_MISSING_RE.test(text)) return 'runtime_unavailable';
-  if (raw === 'bridge_timeout' || TRANSPORT_DETAILS.has(key) || TRANSPORT_RE.test(text)) return 'runtime_transport';
+  if (raw === 'bridge_daemon_unreachable') return 'runtime_unavailable';
+  if (raw === 'bridge_timeout' || TRANSPORT_DETAILS.has(key)) return 'runtime_transport';
+
+  // --- heuristic: signature over the failure text, only when no detail spoke ---
+  if (THREAD_NOT_RESUMABLE_RE.test(text)) return 'thread_not_resumable';
+  if (RUNTIME_MISSING_RE.test(text)) return 'runtime_unavailable';
+  if (TRANSPORT_RE.test(text)) return 'runtime_transport';
   // Honest fallback: no signature matched, so do not guess a cause.
   return 'unknown';
 }
@@ -1207,7 +1228,11 @@ export function formatTerminalContent({
   }
   if (status === 'unreachable') {
     const detailLine = detail ? ` (detail: ${detail})` : '';
-    const evidence = [error, errText, outText].filter((s) => typeof s === 'string' && s.trim()).join('\n');
+    // Classification corpus is `error` + stderr ONLY. stdout is deliberately
+    // excluded: on the opencode server adapter it carries the assistant's own
+    // prose, so a model quoting `command not found` would otherwise be read as
+    // a missing binary. stdout is still rendered below in `channels`.
+    const evidence = [error, errText].filter((s) => typeof s === 'string' && s.trim()).join('\n');
     const failureClass = classifyUnreachable(detail, target, evidence);
     const classLine = `\n\n**Failure class:** \`${failureClass}\``;
     const digestPointer = digestUri
@@ -1380,6 +1405,12 @@ export function emitNotification({
     jobId, status, task, mode, durationMs: duration,
     summary, error, stuckReason, detail, failedTools, promptId,
     sessionReborn, sessionRetired, digestUri, target,
+    // buildWaitResponse spreads the whole job, so it gets this for free. This
+    // surface enumerates its fields, so without the explicit hand-off the same
+    // job renders with a different failure class and zero channel excerpts when
+    // it is delivered through the queue drain — which is the path the parent
+    // actually reads when it did not block on agent_wait.
+    adapterResult: jobs.get(jobId)?.adapterResult ?? null,
   });
 
   enqueueEvent({ kind: 'terminal', jobId, content, meta });

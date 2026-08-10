@@ -2079,3 +2079,99 @@ test('send error envelopes omit an empty candidates list instead of shipping `[]
     assert.equal('candidates' in body, false);
   });
 });
+
+test('a definitive detail outranks free text from the companion\'s own stdout', async () => {
+  const { classifyUnreachable, formatTerminalContent } = await bridge();
+
+  // On the opencode server adapter, `adapterResult.stdout` IS the assistant's
+  // prose (opencode-server-runtime.mjs `stdout: message`). A model quoting a
+  // shell transcript must never reclassify a bridge transport flap as a missing
+  // binary — that is the original misdiagnosis, re-entered through the back door.
+  const assistantProse = 'I tried to run the build but got: bash: line 1: pnpm: command not found';
+  const content = formatTerminalContent({
+    jobId: 'jf-prose', status: 'unreachable', task: 't', target: 'opencode',
+    detail: 'opencode_server_unreachable',
+    error: 'opencode /event stream closed before session.idle',
+    adapterResult: { stdout: assistantProse, stderr: '' },
+  });
+  assert.match(content, /\*\*Failure class:\*\* `runtime_transport`/);
+  assert.doesNotMatch(content, /OPENCODE_BIN/);
+  assert.doesNotMatch(content, /is available/);
+  // The prose is still SHOWN — classification and display are different corpora.
+  assert.match(content, /pnpm: command not found/);
+
+  // Same for the other text signatures: a set detail always wins.
+  assert.equal(
+    classifyUnreachable('opencode_server_gone', 'opencode', 'spawn opencode ENOENT'),
+    'runtime_transport',
+  );
+  assert.equal(
+    classifyUnreachable('rehydrate_no_promptid', 'codex', 'no rollout found for thread id 0199a1'),
+    'bridge_lifecycle',
+  );
+  assert.equal(
+    classifyUnreachable('bridge_daemon_unreachable', 'copilot', 'socket hang up'),
+    'runtime_unavailable',
+  );
+
+  // Only stderr + `error` feed the classifier; stdout alone never classifies.
+  const stdoutOnly = formatTerminalContent({
+    jobId: 'jf-out-only', status: 'unreachable', task: 't', target: 'codex',
+    stdout: 'the agent said: spawn foo ENOENT while running your tests', stderr: '',
+  });
+  assert.match(stdoutOnly, /\*\*Failure class:\*\* `unknown`/);
+  assert.doesNotMatch(stdoutOnly, /CODEX_BIN/);
+  // ...but the same text on stderr, with no detail set, does.
+  const stderrOnly = formatTerminalContent({
+    jobId: 'jf-err-only', status: 'unreachable', task: 't', target: 'codex',
+    stdout: '', stderr: 'spawn codex ENOENT',
+  });
+  assert.match(stderrOnly, /\*\*Failure class:\*\* `runtime_unavailable`/);
+  assert.match(stderrOnly, /verify `CODEX_BIN`/);
+});
+
+test('the queue-drain surface renders the same class and channel excerpts as the wait surface', async () => {
+  const mod = await bridge();
+  const { emitNotification, jobs } = mod;
+
+  // A codex resume rejection: EMPTY stdout, the reason only on stderr, no detail.
+  // Delivered through the drain (the path the parent reads when it did not block
+  // on agent_wait) this used to render `unknown` with zero evidence, because
+  // emitNotification enumerates its formatTerminalContent fields and dropped
+  // adapterResult on the floor.
+  jobs.set('jf-drain', terminalJob('jf-drain', 'unreachable', {
+    target: 'codex',
+    adapterResult: { stdout: '', stderr: 'ERROR: JSON-RPC error -32600: no rollout found for thread id 0199a1' },
+  }));
+  try {
+    await withQueue(async (queueFile) => {
+      emitNotification({
+        jobId: 'jf-drain', status: 'unreachable', summary: null, error: null,
+        stuckReason: null, detail: null, duration: 1000,
+        task: 'X', mode: 'EXECUTE', cwd: TEST_CWD, target: 'codex',
+      });
+      const event = readQueue(queueFile).at(-1);
+      assert.equal(event.kind, 'terminal');
+      assert.match(event.content, /\*\*Failure class:\*\* `thread_not_resumable`/);
+      assert.match(event.content, /\*\*stderr \(tail\):\*\*/);
+      assert.match(event.content, /no rollout found for thread id/);
+
+      // And the bad-`-m` mirror image, whose ONLY channel is stdout.
+      jobs.set('jf-drain2', terminalJob('jf-drain2', 'failed', {
+        target: 'codex',
+        adapterResult: { stdout: '{"type":"error","status":400,"error":{"message":"unknown model"}}', stderr: '' },
+      }));
+      emitNotification({
+        jobId: 'jf-drain2', status: 'failed', summary: null,
+        error: 'codex exited with code 1', stuckReason: null, detail: null, duration: 1000,
+        task: 'X', mode: 'EXECUTE', cwd: TEST_CWD, target: 'codex',
+      });
+      const failedEvent = readQueue(queueFile).at(-1);
+      assert.match(failedEvent.content, /\*\*stdout \(tail\):\*\*/);
+      assert.match(failedEvent.content, /unknown model/);
+    });
+  } finally {
+    jobs.delete('jf-drain');
+    jobs.delete('jf-drain2');
+  }
+});
