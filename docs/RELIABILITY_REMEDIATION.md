@@ -140,12 +140,74 @@ directory"* — it is a symlink), and `/private/tmp` gave `Operation not permitt
 sandbox. **Build on `ws://` with a `/readyz` + `/healthz` health probe** (the server advertises
 both), mirroring `opencode-server-runtime.mjs`'s base-URL model.
 
-Honest remaining costs: app-server is `[experimental]` (mitigate by vendoring
-`generate-json-schema` output as a CI drift fixture); **approval routing is still entirely
-uncosted** — with `approvalPolicy:'never'` no `ServerRequest` ever arrived, so
-`ExecCommandApproval` / `ApplyPatchApproval` handling is unwritten and untested; and codex
-boots every configured MCP server **per thread** (`mcpServer/startupStatus/updated` for
-`codex_apps` and `node_repl`, ready at 0.2–6.4 s), so thread creation is not free.
+### Follow-up probes — RUN 2026-08-10
+
+**The server owns the work, not the client.** A turn ran **50 s with zero clients attached**
+and completed normally. On reattach, `thread/loaded/list` still listed the thread,
+`thread/resume` reported `status: {type:"active"}`, the reattached client received the
+remaining live events and `turn/completed` (`THREEDONE`), and `thread/read` gave the full
+transcript with `durationMs: 83511`. The bridge is a *detachable observer* — which is the
+whole property this plan needs.
+
+**⚠️ Approval auto-accept silently defeats the sandbox.** Measured matrix:
+
+| `approvalPolicy` | `sandbox` | approvals fired | outcome |
+|---|---|---|---|
+| `never` | read-only | 0 | write **blocked** — sandbox is the hard boundary |
+| `on-request` | workspace-write | 0 | wrote (in-sandbox; no approval needed) |
+| `on-request` | read-only + `accept` | 1 | **WROTE — escalated past the sandbox** |
+| `on-request` | read-only + `decline` | 2 | blocked; turn continued gracefully |
+
+So a client that blanket-approves turns every sandbox setting into `danger-full-access`.
+**The adapter must use `approvalPolicy: 'never'`** unless and until it implements a real
+policy. Under `never`, no `ServerRequest` is ever sent and the sandbox is authoritative.
+
+**The approval wire contract** (needed the moment `never` is relaxed) — note the decision
+vocabulary differs **per method**, and getting it wrong reads as a denial:
+- `item/commandExecution/requestApproval` → `{decision}`:
+  `accept` | `acceptForSession` | `acceptWithExecpolicyAmendment` | `applyNetworkPolicyAmendment` | `decline` | `cancel`
+- `item/fileChange/requestApproval` → `{decision}`: `accept` | `acceptForSession` | `decline` | `cancel`
+- `item/permissions/requestApproval` → `{permissions, scope?, strictAutoReview?}`
+- Legacy `execCommandApproval` / `applyPatchApproval` → `ReviewDecision`:
+  `approved` | `approved_for_session` | `denied` | `abort` | …
+- Also in the server→client set: `item/tool/requestUserInput`, `mcpServer/elicitation/request`,
+  `item/tool/call`, `account/chatgptAuthTokens/refresh`, `attestation/generate`.
+- A client that answers `-32601` to everything works only until the first approval.
+
+**`turn/steer` mid-`apply_patch` is safe.** Steer fired the instant
+`item/started {type:"fileChange"}` arrived. The in-flight patch completed **atomically**
+(`p01.txt`, exactly 400 lines, uncorrupted), no further files were created, the steer landed
+as a `userMessage` 0.14 s later, and the turn ended `PINEAPPLE`. Steering applies at the next
+model boundary, never mid-write.
+
+**Config inheritance works — do not pin.** With `model: null`, `turn_context` recorded
+`model: "gpt-5.6-sol"`, `effort: "xhigh"` — exactly `~/.codex/config.toml`. Pass nothing and
+config stays the single source of truth. Bonus: `session_meta.originator` is taken from
+`clientInfo.name`, so the bridge gets a free ownership stamp; `source` defaults to `"vscode"`.
+
+### Transport — this corrects the `ws://` recommendation above
+
+`--listen ws://` works, but it is **explicitly gated as experimental/unstable with bounded
+queues** (overload returns RPC `-32001`), and OpenAI's guidance is not to depend on it in
+production. **stdio is the stable transport.** Two further local results:
+`--listen unix://<path>` accepts a connection and then immediately closes it without
+answering `initialize` (it is not a plain JSON-RPC endpoint), and `app-server proxy --sock`
+targets the *managed daemon's control socket* — which needs the standalone installer build
+this machine does not have, so both are dead ends here.
+
+**Therefore: the broker pattern, not a raw socket.** A long-lived broker process owns
+`codex app-server` over **stdio** and exposes a UDS to bridge processes. This is precisely
+what the repo already does twice — `scripts/copilot-acp-daemon.mjs` + `bridge-server/daemon-client.mjs`,
+and the detached `opencode serve` in `opencode-server-runtime.mjs`. Codex plugs into the
+existing pattern rather than needing a new one.
+
+**Version pinning is mandatory.** There is no protocol version field; schemas drift with the
+CLI and breakage surfaces only as a shape mismatch. Pin the codex version and vendor
+`codex app-server generate-json-schema` output as a CI drift fixture.
+
+Remaining cost: codex boots every configured MCP server **per thread**
+(`mcpServer/startupStatus/updated` for `codex_apps` and `node_repl`, ready at 0.2–6.4 s), so
+thread creation is not free.
 
 ---
 
@@ -494,12 +556,16 @@ exec-specific work the daemon deletes rather than reuses.
 
 - ~~**The app-server survival claim.**~~ **Verified 2026-08-10** — see §2.
 - **Whether a session-scoped bridge survives `/clear` and `/compact`.** Gates W1.0.
-- **`turn/steer` landing mid-`apply_patch`.** The write-mode steer test caught the model
-  mid-*reasoning*, not mid-patch. Still the risky case for exposing `agent_reply` on running
-  write-mode jobs.
-- **app-server approval routing.** With `approvalPolicy:'never'` no `ServerRequest` ever
-  arrived; `ExecCommandApproval` / `ApplyPatchApproval` handling and the mapping of
-  `AGENT_COMPANION_CODEX_SANDBOX_MODE` onto `thread/start`'s `sandbox` remain uncosted.
+- ~~**`turn/steer` mid-`apply_patch`.**~~ **Resolved 2026-08-10** — safe; the in-flight patch
+  completes atomically and the steer applies at the next model boundary.
+- ~~**app-server approval routing.**~~ **Resolved 2026-08-10** — full wire contract captured;
+  the adapter must run `approvalPolicy: 'never'`, because auto-accept escalates past the
+  sandbox. Still open: the mapping of `AGENT_COMPANION_CODEX_SANDBOX_MODE` onto
+  `thread/start`'s `sandbox`, and whether the bridge should ever expose an approval policy
+  other than `never`.
+- **The broker.** Nothing has been built or measured for a long-lived stdio broker: restart
+  semantics, one-broker-per-workspace vs per-host, health probe, idle reaping, and what
+  happens to live threads when the broker itself dies (the app-server process, not the client).
 - **Whether `thread/read` ever carries tool items.** It returned messages only
   (`itemsView:"full"`), while the rollout for the same thread had `custom_tool_call`,
   `custom_tool_call_output` and `reasoning`. If tool activity is wanted in a salvage digest,
