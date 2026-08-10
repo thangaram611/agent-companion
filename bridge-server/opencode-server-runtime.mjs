@@ -290,7 +290,7 @@ export function createTurnAccumulator(sessionId) {
 }
 
 // ---------------------------------------------------------------------------
-// Server pool — one detached `opencode serve` per working directory
+// Shared server — ONE detached `opencode serve`, sessions scoped per cwd via `?directory=`
 // ---------------------------------------------------------------------------
 
 const _spawnLocks = new Map();  // key -> Promise

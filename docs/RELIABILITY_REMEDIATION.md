@@ -546,10 +546,13 @@ emits **no abort marker** on SIGTERM.
   job. No detach, no `unref`, no file-backed stdout, no pid+deadline file, no reaper, no EPIPE
   analysis, and orphans are answered by protocol (`thread/loaded/list`) rather than by `ps`.
 - **If `exec` is retained: file-backed stdout WITHOUT `detached`.** Measured to give full
-  survival while retaining free group-kill reapability. Gate it on **generalizing**
-  `opencode-server-runtime.mjs`'s registry (leases, pid liveness, stale pruning, idle TTL,
-  reaper — all already written) into a runtime-neutral owner module, per the project's
-  consolidate-don't-layer rule. The ownership machinery is **not** greenfield.
+  survival while retaining free group-kill reapability. Gate it on
+  `lib/shared-runtime-registry.mjs` — the runtime-neutral owner module extracted out of
+  `opencode-server-runtime.mjs` in A1, which already owns leases, pid liveness, stale pruning,
+  idle TTL and the reaper. Construct a registry with the broker's own `registryPath` / `key` /
+  `identity` / `dispose` rather than re-deriving pruning, the two-phase disposal claim, or the
+  reaper. Per the project's consolidate-don't-layer rule, the ownership machinery is **not**
+  greenfield and must **not** be re-written inside the codex broker.
 
 > **Re-attributed hazard.** The orphan risk belongs to *"the child's stdout is no longer a live
 > bridge pipe"*, **not** to `detached:true`. That means any implementation of W1.2′ that hands
