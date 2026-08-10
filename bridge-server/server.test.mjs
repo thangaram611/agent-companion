@@ -1938,3 +1938,179 @@ test('a codex job persists its thread id while still running, not only at termin
     _resetForTest();
   }
 });
+
+// ---- TRACK: hydrate-guard ----
+// W1.4′: hydrate must neither mislabel nor overwrite a job it did not start.
+// A fresh bridge used to retire every non-terminal, non-copilot ledger row on
+// sight and then rewrite its digest from `adapterResult || null` — which is
+// null by construction in a fresh process. In the field incident that declared
+// two jobs dead 56.1s and 4.1s before their children actually died and shrank a
+// live 11,754-byte digest to 228 bytes.
+
+// A long-lived fake companion binary, built the way codex-runtime.test.mjs
+// builds its fakes (a node script, never a real `sleep`), spawned so the test
+// owns a pid that is unambiguously alive — no PID-reuse exposure, because the
+// pid belongs to a child this process holds open for the duration.
+async function withLiveFakeChild(body) {
+  const { spawn } = await import('node:child_process');
+  const dir = mkdtempSync(join(tmpdir(), 'hydrate-guard-bin-'));
+  const bin = join(dir, 'codex-fake.mjs');
+  writeFileSync(bin, ['#!/usr/bin/env node', 'setInterval(() => {}, 1 << 30);', ''].join('\n'), { mode: 0o700 });
+  chmodSync(bin, 0o700);
+  const child = spawn(process.execPath, [bin], { stdio: 'ignore' });
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  try { return await body(child); }
+  finally {
+    child.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('hydrate retires an orphaned CLI job honestly and never rewrites a digest it did not write', async () => {
+  const mod = await bridge();
+  const { jobs, hydrateJobsFromLedger, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  const { pidAlive } = await import('./opencode-server-runtime.mjs');
+
+  await withLiveFakeChild(async (child) => {
+    const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+    process.env.CLAUDE_CODE_SESSION_ID = 'sid-hydrate-guard';
+    const digest = digestPath('j-orphan-live');
+    // Stand in for the live digest the previous bridge had already written.
+    const digestBody = ['# codex job j-orphan-live - digest', '', 'x'.repeat(11_754), ''].join('\n');
+    writeFileSync(digest, digestBody);
+    const retiredNote = digest.replace(/agent-digest-([^/]+)\.md$/, 'agent-retired-$1.md');
+    try {
+      _resetForTest();
+      jobs.clear();
+      state.writeJob('j-orphan-live', {
+        jobId: 'j-orphan-live', claudeSessionId: 'sid-hydrate-guard',
+        target: 'codex', status: 'running', task: 'long codex turn', mode: 'EXECUTE',
+        pid: child.pid, companionSessionId: 'thread-uuid-1',
+        startedAt: Date.now() - 60_000,
+      });
+
+      // Probe injected (delegating to the real rule) so the assertion is about
+      // the guard, not about the scheduler: CI never depends on an unowned pid.
+      const probed = [];
+      hydrateJobsFromLedger({ pidAlive: (pid) => { probed.push(pid); return pidAlive(pid); } });
+
+      const job = jobs.get('j-orphan-live');
+      // (i) not silently mislabelled: the recorded child pid was actually
+      // probed, and the verdict names the bridge restart rather than the adapter.
+      assert.deepEqual(probed, [child.pid]);
+      assert.equal(job.status, 'unreachable');
+      assert.equal(job.childPidAlive, true);
+      assert.match(job.error, /still running/);
+      assert.match(job.error, /orphaned/);
+      // (ii) the honest detail, and specifically NOT the blanket adapter verdict.
+      assert.equal(job.detail, 'target_child_orphaned_by_bridge_restart');
+      assert.notEqual(job.detail, 'target_adapter_non_resumable_after_restart');
+      // Salvage pointers, since the digest holds ~0.2% of an aborted turn.
+      assert.match(job.error, /thread-uuid-1/);
+      assert.ok(job.error.includes(digest), 'the digest path is named as a salvage pointer');
+      // (iii) hard constraint: byte-identical digest. The retirement is
+      // recorded in a sibling file, never inside the body.
+      assert.equal(readFileSync(digest, 'utf8'), digestBody);
+      assert.equal(job.retiredNote, retiredNote);
+      assert.equal(existsSync(retiredNote), true);
+      const note = readFileSync(retiredNote, 'utf8');
+      assert.match(note, /target_child_orphaned_by_bridge_restart/);
+      assert.match(note, new RegExp(`Child pid:\\*\\* ${child.pid} \\(still alive`));
+      // The note must stay OUT of the digest-resource namespace: named
+      // `<digest>-retired.md` it would match DIGEST_RESOURCE_FILE_RE and
+      // publish a phantom `agent-digest://j-orphan-live-retired` resource
+      // describing a job that never existed.
+      const uris = mod.listDigestResources().map((r) => r.uri);
+      assert.deepEqual(uris.filter((u) => u.includes('j-orphan-live')), ['agent-digest://j-orphan-live']);
+    } finally {
+      state.deleteJob('j-orphan-live');
+      rmSync(digest, { force: true });
+      rmSync(retiredNote, { force: true });
+      jobs.clear();
+      if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+      else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+      _resetForTest();
+    }
+  });
+});
+
+test('hydrate reports a dead child as a closed bridge transport, still without touching the digest', async () => {
+  const mod = await bridge();
+  const { jobs, hydrateJobsFromLedger, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-hydrate-guard-dead';
+  const digest = digestPath('j-orphan-dead');
+  const digestBody = '# codex job j-orphan-dead - digest\n\npartial work\n';
+  writeFileSync(digest, digestBody);
+  try {
+    _resetForTest();
+    jobs.clear();
+    state.writeJob('j-orphan-dead', {
+      jobId: 'j-orphan-dead', claudeSessionId: 'sid-hydrate-guard-dead',
+      target: 'codex', status: 'running', task: 't', mode: 'EXECUTE',
+      pid: 424242, startedAt: Date.now() - 60_000,
+    });
+    // Injected false rather than a real reaped pid: asserting "this pid is
+    // dead" against the OS is exactly the PID-reuse race CI must not run.
+    hydrateJobsFromLedger({ pidAlive: () => false });
+
+    const job = jobs.get('j-orphan-dead');
+    assert.equal(job.status, 'unreachable');
+    assert.equal(job.detail, 'bridge_transport_closed');
+    assert.equal(job.childPidAlive, false);
+    assert.match(job.error, /died with the bridge process/);
+    assert.equal(readFileSync(digest, 'utf8'), digestBody);
+  } finally {
+    state.deleteJob('j-orphan-dead');
+    rmSync(digest, { force: true });
+    rmSync(digest.replace(/agent-digest-([^/]+)\.md$/, 'agent-retired-$1.md'), { force: true });
+    jobs.clear();
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('hydrate never believes a ledger pid that has been reused by this bridge process', async () => {
+  const mod = await bridge();
+  const { jobs, hydrateJobsFromLedger, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-hydrate-guard-self';
+  try {
+    _resetForTest();
+    jobs.clear();
+    state.writeJob('j-orphan-self', {
+      jobId: 'j-orphan-self', claudeSessionId: 'sid-hydrate-guard-self',
+      target: 'codex', status: 'running', task: 't', mode: 'EXECUTE',
+      pid: process.pid, startedAt: Date.now() - 60_000,
+    });
+    // The probe would say "alive" (it is us), but a fresh bridge cannot have
+    // started this job's child, so the pid must not be believed — and the
+    // probe must not even be consulted.
+    let probes = 0;
+    hydrateJobsFromLedger({ pidAlive: () => { probes++; return true; } });
+
+    const job = jobs.get('j-orphan-self');
+    assert.equal(probes, 0);
+    assert.equal(job.childPidAlive, false);
+    assert.equal(job.detail, 'bridge_transport_closed');
+  } finally {
+    state.deleteJob('j-orphan-self');
+    rmSync(digestPath('j-orphan-self').replace(/agent-digest-([^/]+)\.md$/, 'agent-retired-$1.md'), { force: true });
+    jobs.clear();
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});

@@ -112,6 +112,7 @@ import {
   reapIdleOpenCodeServer,
   syncOpenCodeServerLeases,
   openCodeServerIdleTtlMs,
+  pidAlive,
 } from './opencode-server-runtime.mjs';
 import {
   defaultTargetInfo,
@@ -2806,6 +2807,98 @@ export async function dispatch(normalized) {
 let _hydrated = false;
 let _swept = false;
 
+// Record a hydrate retirement NEXT TO the digest, never inside it.
+//
+// Hard constraint (W1.4′): hydrate must never call writeOpenCodeDigest for a
+// job it did not start. A fresh bridge has `adapterResult === null` by
+// construction, so the "refresh" it used to do rendered a header-only stub over
+// whatever the previous bridge had already written — measured shrinking a live
+// 11,754-byte digest to 228 bytes. Appending to a sibling file keeps the
+// retirement on disk without ever touching the digest body.
+function writeRetirementNote(job, { detail, error, childPid, childAlive }) {
+  const digest = digestPath(job.jobId);
+  if (!digest) return null;
+  // `agent-retired-<jobId>.md`, NOT `<digest>-retired.md`: the latter still
+  // matches DIGEST_RESOURCE_FILE_RE, so digestJobIdsFromDisk() would read the
+  // note back as a job id `<jobId>-retired` and listDigestResources() would
+  // publish a phantom `agent-digest://<jobId>-retired` resource for a job that
+  // never existed — one per retirement, and nothing GCs them. The `agent-`
+  // prefix change keeps the note beside the digest but out of that namespace.
+  const path = digest.replace(/agent-digest-([^/]+)\.md$/, 'agent-retired-$1.md');
+  // Defensive: if the digest filename ever stops matching, writing anyway would
+  // append the note INTO the digest, which is the exact thing this must not do.
+  if (path === digest) return null;
+  const lines = [
+    `# ${job.target || 'unknown target'} job ${job.jobId} - retired by bridge hydrate`,
+    '',
+    `**Retired:** ${new Date().toISOString()} by bridge pid ${process.pid}`,
+    `**Detail:** \`${detail}\``,
+    `**Reason:** ${error}`,
+    `**Child pid:** ${childPid || '(never recorded)'} (${childAlive ? 'still alive at retirement' : 'gone'})`,
+    `**Digest (not modified):** ${digest}`,
+  ];
+  if (job.sessionId) lines.push(`**Companion session/thread id:** \`${job.sessionId}\``);
+  lines.push('');
+  try {
+    appendPrivateFile(path, lines.join('\n') + '\n');
+    return path;
+  } catch (err) {
+    log('WARN', 'hydrate retirement note failed:', job.jobId, err.message);
+    return null;
+  }
+}
+
+// Retire a non-terminal single-shot job left behind by a previous bridge.
+//
+// The pid probe is TELEMETRY, NOT A RESUMABILITY TEST. A piped, non-detached
+// companion child is doomed at its next stdout write once the bridge that owned
+// the pipe dies (measured: pipe + no-detach → `turn_aborted` in 2.2s, no signal
+// ever reaching the child), so "alive" describes a window of seconds, not a job
+// anything can rejoin. We still retire — leaving the job non-terminal would
+// hang every agent_wait to its clamp, because runWatchLoop is copilot-only and
+// wait blocks rather than polls. What the probe buys is an honest message: the
+// old code declared two jobs dead 56.1s and 4.1s BEFORE their children actually
+// died, and blamed the adapter for what a bridge restart did.
+//
+// Caveat worth knowing when reading the message: a zombie (exited but unreaped)
+// child still reports alive, because the pid remains in the table until waited on.
+function retireOrphanedCliJob(job, isPidAlive) {
+  const label = targetLabel(job.target);
+  // The recorded pid is the CHILD this job spawned (worker `onStarted`), and a
+  // fresh bridge never started it — so a pid equal to our own can only be a
+  // stale ledger row that pid reuse landed on this process. Never claim that.
+  const childPid = Number(job.pid);
+  const childAlive = childPid !== process.pid && isPidAlive(childPid);
+  const detail = childAlive
+    ? 'target_child_orphaned_by_bridge_restart'
+    : 'bridge_transport_closed';
+  const head = childAlive
+    ? `${label} child (pid ${childPid}) is still running but was orphaned when the bridge that owned its stdout pipe restarted; nothing can read its output, so it will die at its next write`
+    : childPid > 0
+      ? `${label} child (pid ${childPid}) died with the bridge process that owned it`
+      : `${label} job never recorded a child pid — the bridge died before the runtime started`;
+  // Pointers, because the answer to "where did the work go" is on disk, not in
+  // this envelope: codex emits its substance atomically at turn end, so the
+  // digest of an aborted job holds ~0.2% of the work product and the rollout
+  // (keyed by the companion session/thread id) holds the rest.
+  const pointers = [];
+  const digest = digestPath(job.jobId);
+  if (digest) pointers.push(`digest \`${digest}\``);
+  if (job.sessionId) pointers.push(`${job.target} session/thread \`${job.sessionId}\` (its rollout holds the full turn)`);
+  const error = pointers.length
+    ? `${head}. Salvage: ${pointers.join('; ')}.`
+    : `${head}.`;
+  const retiredNote = writeRetirementNote(job, { detail, error, childPid, childAlive });
+  retainTerminalJob(job.jobId, {
+    status: 'unreachable',
+    error,
+    detail,
+    childPidAlive: childAlive,
+    retiredNote,
+    terminalAt: Date.now(),
+  });
+}
+
 // On bridge startup (or on first sid-bearing action in fallback mode), claim
 // any persisted jobs belonging to this Claude Code session. The previous
 // bridge for this session (killed by stdio reconnect, crash, etc.) may have
@@ -2813,7 +2906,10 @@ let _swept = false;
 // detached daemon. Re-attach the watch loop so wait/status/reply/cancel
 // resolve correctly. Idempotent: subsequent calls within the same process
 // are no-ops.
-export function hydrateJobsFromLedger() {
+// `pidAlive` is a parameter so the ownership guard is testable without a real
+// pid: CI must never depend on a pid it does not own still being alive (or
+// still being dead) at probe time.
+export function hydrateJobsFromLedger({ pidAlive: isPidAlive = pidAlive } = {}) {
   if (_hydrated) return;
   const mySid = getHostSessionId();
   if (!mySid) {
@@ -2854,24 +2950,21 @@ export function hydrateJobsFromLedger() {
     }
 
     if (target !== 'copilot') {
-      // OpenCode server jobs survive a bridge restart: the detached `opencode
-      // serve` is still listening and the session is persisted on disk. Resume
-      // reattaches by base URL + session id. Everything else (CLI single-shot,
-      // or a server job with no session yet) is non-resumable.
-      if (!isTerminal && target === 'opencode' && job.opencodeAdapter === 'server' && job.sessionId && job.baseUrl) {
+      // Restart-resumability is a per-JOB property, not a per-target one, and
+      // `jobResumeAvailable` is already the predicate that answers it on the
+      // wire (`resume_available`) — so hydrate asks it rather than keeping a
+      // second copy of the same rule. Outside copilot only an OpenCode
+      // server-mode job with a live session + base URL can satisfy it (the
+      // detached `opencode serve` is still listening and the session is
+      // persisted on disk), which is why that resumer is the exhaustive
+      // dispatch here; a future restart-resumable target must add its branch to
+      // both the predicate and this call site.
+      if (!isTerminal && jobResumeAvailable(job)) {
         resumeOpenCodeServerJob(job).catch((err) => log('ERROR', 'opencode-server resume error:', job.jobId, err.message));
         resumed++;
         continue;
       }
-      if (!isTerminal) {
-        retainTerminalJob(job.jobId, {
-          status: 'unreachable',
-          error: `${targetLabel(target)} job cannot be resumed after a bridge restart`,
-          detail: 'target_adapter_non_resumable_after_restart',
-          terminalAt: Date.now(),
-        });
-        writeOpenCodeDigest(jobs.get(job.jobId), jobs.get(job.jobId)?.adapterResult || null);
-      }
+      if (!isTerminal) retireOrphanedCliJob(job, isPidAlive);
       continue;
     }
 

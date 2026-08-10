@@ -323,7 +323,11 @@ export function openCodeServerIdleTtlMs(env = process.env) {
   return Math.max(MIN_IDLE_TTL_MS, resolveOpenCodeTimeoutMs(env) + IDLE_TTL_GRACE_MS);
 }
 
-function pidAlive(pid) {
+// Exported because the hydrate ownership guard (server.mjs) needs exactly this
+// rule and must not grow a second copy of it: a naive `process.kill(pid, 0)`
+// wrapper reports a pid owned by another user as dead, which would make hydrate
+// declare a live companion child orphaned on any multi-user box.
+export function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
