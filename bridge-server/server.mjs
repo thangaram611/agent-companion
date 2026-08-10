@@ -1636,6 +1636,18 @@ async function runSingleShotCliWorker({ jobId, reqId, task, mode, template, temp
         rlog.info('worker.prompt_started', { prompt_id: promptId, pid, command });
         log('INFO', `${target} worker started:`, jobId, `promptId=${promptId} pid=${pid || '-'}`);
       },
+      // Codex reports its thread id on line 1 of the event stream (+0.20 s in
+      // 12/12 measured runs), so persist it the instant it arrives instead of
+      // waiting for the run to resolve — a bridge or child that dies mid-run
+      // then still leaves a resumable id in the ledger. Write-once: the id is
+      // stable across resumes, so the first arrival wins and a duplicate
+      // `thread.started` cannot churn the row. Adapters that report no session
+      // (OpenCode CLI) simply never call this.
+      onSession: (sessionId) => {
+        if (!sessionId || jobs.get(jobId)?.sessionId) return;
+        updateJob(jobId, { sessionId });
+        rlog.info('worker.session_captured', { session_id: sessionId });
+      },
     });
     const duration = Date.now() - startedAt;
     const detail = result.status === 'failed'
@@ -1651,7 +1663,11 @@ async function runSingleShotCliWorker({ jobId, reqId, task, mode, template, temp
     // both see it. It lands on disk under the target-neutral
     // `companionSessionId` key — v2 groundwork for
     // `codex exec resume <thread_id>` thread continuity; no v1 consumer.
-    updateJob(jobId, { sessionId: result.sessionId ?? null });
+    // The already-captured id is the fallback, never the loser: the
+    // `child.on('error')` path resolves `sessionId: null` by construction, and
+    // a plain `result.sessionId ?? null` there would clobber a good id back to
+    // null after onSession had already banked it.
+    updateJob(jobId, { sessionId: result.sessionId ?? jobs.get(jobId)?.sessionId ?? null });
     retainTerminalJob(jobId, {
       status: result.status,
       summary: result.summary,
@@ -1677,7 +1693,9 @@ async function runSingleShotCliWorker({ jobId, reqId, task, mode, template, temp
       cwd,
       thread,
       promptId: jobs.get(jobId)?.promptId || null,
-      sessionId: result.sessionId ?? null,
+      // Read back the job rather than the result, for the same reason as the
+      // patch above — the notification must carry the surviving id.
+      sessionId: jobs.get(jobId)?.sessionId ?? null,
       failedTools: [],
       reqId,
       target,

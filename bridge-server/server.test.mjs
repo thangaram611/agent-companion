@@ -1854,3 +1854,87 @@ test('handleReply preserves fleet on the reply terminal notification (regression
     }
   });
 });
+
+// ---- TRACK: codex-adapter ----
+//
+// W1.1 at the worker seam: runSingleShotCliWorker must bank the codex thread
+// id the moment `thread.started` arrives, not when the run resolves. Same
+// fakeBin discipline as the codex adapter tests above — CODEX_BIN never points
+// at a real binary.
+test('a codex job persists its thread id while still running, not only at terminal', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+
+  const tmp = mkdtempSync(join(tmpdir(), 'codex-early-sid-'));
+  const fakeBin = join(tmp, 'codex-fake.mjs');
+  writeFileSync(fakeBin, [
+    '#!/usr/bin/env node',
+    'process.stdin.on("data", () => {});',
+    'process.stdin.on("end", () => {',
+    // Line 1 of the stream, exactly as measured on 0.147.0 — then the child
+    // holds the turn open, which is the whole point: the id has to be usable
+    // long before any terminal result exists.
+    '  console.log(JSON.stringify({ type: "thread.started", thread_id: "th-early-capture" }));',
+    '});',
+    'process.on("SIGTERM", () => process.exit(0));',
+    'setInterval(() => {}, 1000);',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  chmodSync(fakeBin, 0o700);
+
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldBin = process.env.CODEX_BIN;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-codex-early';
+  process.env.CODEX_BIN = fakeBin;
+
+  try {
+    const send = parse(await dispatch({
+      action: 'send',
+      target: 'codex',
+      task: 'capture the thread id early',
+      mode: 'EXECUTE',
+      template: 'general',
+      cwd: TEST_CWD,
+      host_session_id: 'sid-codex-early',
+      max_wait_sec: 1,
+      parallel: 'never',
+    }));
+    assert.equal(send.status, 'still_running');
+
+    let captured = null;
+    for (let i = 0; i < 300 && !captured; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      captured = jobs.get(send.job_id)?.sessionId || null;
+    }
+    assert.equal(captured, 'th-early-capture');
+    assert.equal(jobs.get(send.job_id)?.status, 'running', 'the id landed while the job was still running');
+
+    // On disk too — that is what makes it survive the bridge dying mid-run.
+    const state = await import('../lib/state.mjs');
+    assert.equal(state.readJob(send.job_id).companionSessionId, 'th-early-capture');
+
+    const cancelled = parse(await dispatch({
+      action: 'cancel',
+      job_id: send.job_id,
+      host_session_id: 'sid-codex-early',
+    }));
+    assert.equal(cancelled.ok, true);
+    // The terminal patch must not walk the id back: it reads
+    // `result.sessionId ?? jobs.get(jobId)?.sessionId ?? null`, so a run that
+    // resolves without one (the child.on('error') path resolves
+    // `sessionId: null` by construction) keeps what onSession already banked.
+    assert.equal(jobs.get(send.job_id)?.sessionId, 'th-early-capture');
+    assert.equal(state.readJob(send.job_id).companionSessionId, 'th-early-capture');
+  } finally {
+    for (const id of [...jobs.keys()]) {
+      if (jobs.get(id)?.claudeSessionId === 'sid-codex-early') jobs.delete(id);
+    }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldBin === undefined) delete process.env.CODEX_BIN;
+    else process.env.CODEX_BIN = oldBin;
+    rmSync(tmp, { recursive: true, force: true });
+    _resetForTest();
+  }
+});
