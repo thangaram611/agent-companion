@@ -80,6 +80,7 @@ console.log(`  ${n.length} server notifications: `
   + `${n.filter((e) => e.routing === 'threadId').length} threadId, `
   + `${n.filter((e) => e.routing === 'nested').length} nested, `
   + `${n.filter((e) => e.routing === 'global').length} global`);
+console.log(`  ${n.filter((e) => e.optional).length} of those declare the thread id optional`);
 console.log(`  ${contract.serverRequests.length} server requests, `
   + `${contract.serverRequests.filter((r) => r.threadScoped).length} thread-scoped`);
 console.log(`  ${Object.keys(contract.approvalDecisions).length} decision vocabularies`);

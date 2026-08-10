@@ -101,394 +101,484 @@
     {
       "method": "account/login/completed",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "account/rateLimits/updated",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "account/updated",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "app/list/updated",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "command/exec/outputDelta",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "configWarning",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "deprecationNotice",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "error",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "externalAgentConfig/import/completed",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "externalAgentConfig/import/progress",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "fs/changed",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "fuzzyFileSearch/sessionCompleted",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "fuzzyFileSearch/sessionUpdated",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "guardianWarning",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "hook/completed",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "hook/started",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/agentMessage/delta",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/autoApprovalReview/completed",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/autoApprovalReview/started",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/commandExecution/outputDelta",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/commandExecution/terminalInteraction",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/completed",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/fileChange/outputDelta",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/fileChange/patchUpdated",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/mcpToolCall/progress",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/plan/delta",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/reasoning/summaryPartAdded",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/reasoning/summaryTextDelta",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/reasoning/textDelta",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/started",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "mcpServer/oauthLogin/completed",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": true
     },
     {
       "method": "mcpServer/startupStatus/updated",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": true
     },
     {
       "method": "model/rerouted",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "model/safetyBuffering/updated",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "model/verification",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "process/exited",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "process/outputDelta",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "remoteControl/status/changed",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "serverRequest/resolved",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "skills/changed",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "thread/archived",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/closed",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/compacted",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/deleted",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/environment/connected",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/environment/disconnected",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/goal/cleared",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/goal/updated",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/name/updated",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/realtime/closed",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/realtime/error",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/realtime/itemAdded",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/realtime/outputAudio/delta",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/realtime/sdp",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/realtime/started",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/realtime/transcript/delta",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/realtime/transcript/done",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/settings/updated",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/started",
       "routing": "nested",
-      "key": "params.thread.id"
+      "key": "params.thread.id",
+      "optional": false
     },
     {
       "method": "thread/status/changed",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/tokenUsage/updated",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "thread/unarchived",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "turn/completed",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "turn/diff/updated",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "turn/moderationMetadata",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "turn/plan/updated",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "turn/started",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "warning",
       "routing": "threadId",
-      "key": "params.threadId"
+      "key": "params.threadId",
+      "optional": true
     },
     {
       "method": "windows/worldWritableWarning",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     },
     {
       "method": "windowsSandbox/setupCompleted",
       "routing": "global",
-      "key": null
+      "key": null,
+      "optional": false
     }
   ],
   "serverRequests": [
     {
       "method": "account/chatgptAuthTokens/refresh",
-      "threadScoped": false
+      "threadScoped": false,
+      "key": null,
+      "optional": false
     },
     {
       "method": "applyPatchApproval",
-      "threadScoped": true
+      "threadScoped": true,
+      "key": "params.conversationId",
+      "optional": false
     },
     {
       "method": "attestation/generate",
-      "threadScoped": false
+      "threadScoped": false,
+      "key": null,
+      "optional": false
     },
     {
       "method": "execCommandApproval",
-      "threadScoped": true
+      "threadScoped": true,
+      "key": "params.conversationId",
+      "optional": false
     },
     {
       "method": "item/commandExecution/requestApproval",
-      "threadScoped": true
+      "threadScoped": true,
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/fileChange/requestApproval",
-      "threadScoped": true
+      "threadScoped": true,
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/permissions/requestApproval",
-      "threadScoped": true
+      "threadScoped": true,
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/tool/call",
-      "threadScoped": true
+      "threadScoped": true,
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "item/tool/requestUserInput",
-      "threadScoped": true
+      "threadScoped": true,
+      "key": "params.threadId",
+      "optional": false
     },
     {
       "method": "mcpServer/elicitation/request",
-      "threadScoped": true
+      "threadScoped": true,
+      "key": "params.threadId",
+      "optional": false
     }
   ],
   "threadStatusTypes": [
