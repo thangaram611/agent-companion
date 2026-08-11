@@ -89,6 +89,48 @@ W1.2′ and W1.4′ to protocol calls. It is also the pattern this repo already 
 existing `OPENCODE_RUNTIME_ADAPTER=server|cli` switch), keeping `exec` as the fallback so
 every existing test survives.
 
+> **⚠️ BUILT 2026-08-11 — the 150–300 line estimate was wrong by ~5×, and wrong in shape.**
+> Measured on the shipped tree, so the next estimate starts from a number rather than an
+> analogy:
+>
+> | piece | lines | what the estimate got wrong |
+> |---|---|---|
+> | `bridge-server/codex-app-server-runtime.mjs` | **1,480** | The adapter itself, ~5× the top of the range. |
+> | `scripts/codex-app-server-broker.mjs` | **1,328** | Not in the estimate at all. |
+> | `lib/codex-app-server-contract.mjs` (+648-line generated `.json`) | **385** | Not in the estimate at all. |
+> | `lib/shared-runtime-registry.mjs` | **291** | Not new work — *extracted* from `opencode-server-runtime.mjs`, which shrank 938 → 669. |
+> | wiring in `bridge-server/server.mjs` | **+746 / −24** | "Keep `exec` as the fallback" is a branch at every call site, not one. |
+> | `scripts/gen-codex-app-server-contract.mjs` | 86 | The drift fixture's generator. |
+> | tests + fakes (5 suites, 2 shared fakes) | **3,200** (+961 in `server.test.mjs`) | Unestimated, and larger than the adapter. |
+>
+> **Why the analogy misled.** "Codex ships the daemon" is true and still did not make this
+> `opencode serve`-shaped. Three costs the comparison hid:
+> 1. **`codex app-server` over stdio dies with its stdio parent** (measured — `probeA.mjs`),
+>    so unlike `opencode serve` it cannot be spawned-and-detached. A whole extra
+>    process — the broker — exists solely to own it, and that process needs its own socket
+>    hardening, id remapping, per-thread subscription routing, idle reaper and test suite.
+> 2. **Every protocol answer is JSON-RPC `-32600`**, and three of its behaviours are traps
+>    rather than errors (`turn/start` on a busy thread SUCCEEDS; `thread not found` means "not
+>    loaded here"; auto-accepting an approval escalates past the sandbox). Each one is a
+>    *structural* guard in the adapter, not a line of parsing.
+> 3. **There is no protocol version field**, so the contract had to be vendored and generated.
+>
+> The estimate's own framing is the lesson: it was sized by *analogy to the nearest adapter*
+> and the two adapters differ in exactly the dimension that dominates — who owns the process.
+
+**Decision status: RESOLVED and BUILT.** `CODEX_RUNTIME_ADAPTER=appserver` works end to end.
+`exec` remains the default and its behaviour is unchanged when the variable is unset — asserted
+positively (an unset variable never opens a broker connection), and re-verified on this tree by
+`smoke.mjs` 12/12 and `orphan.mjs` 8/8, which still exercise the exec transport including its
+orphan verdict.
+
+The app-server side is proven against the real bridge by `probes/smoke/appserver.mjs`
+(15/15, 2026-08-11): bridge A SIGKILLed mid-turn; the broker, its app-server and a live shell
+descendant still running the turn with **zero bridges alive**; bridge B hydrating, resuming the
+same thread, and the job reaching `completed` 72.6 s after the kill with the answer intact and
+A's streamed digest carried forward rather than clobbered. That is the F1 incident, run
+deliberately, with nothing lost.
+
 ### The gating experiment — RUN 2026-08-10, PASSED
 
 Bridge A opened a thread and started a ~60 s turn (three sequential `sleep 12` shell calls).
@@ -221,12 +263,37 @@ must filter notifications by threadId subscription**, or every bridge sees every
 
 **Error taxonomy** (all are JSON-RPC `-32600`; only the *message* distinguishes them, so the
 adapter must key on text):
-- `thread not loaded: <id>` — `thread/read` on a thread that has not been resumed. **`thread/read`
-  is not a disk reader: resume first, then read.**
-- `no rollout found for thread id <id>` — the same signature the exec transport emits;
-  the `thread_not_resumable` class already added in W1.3′ covers both.
-- `thread not found: <id>` — `turn/interrupt` / `turn/steer` on an unknown thread.
-- `no active turn to steer` — steering an idle thread, or a stale `expectedTurnId`.
+- `no rollout found for thread id <id>` — `thread/resume` with nothing readable on disk; the
+  same signature the exec transport emits. The `thread_not_resumable` class added in W1.3′
+  covers both.
+- `thread not loaded: <id>` — `thread/read` for an id this app-server has no rollout for. Same
+  condition as above, different method's wording.
+- `thread not found: <id>` — `turn/interrupt` / `turn/steer` on a thread **not loaded into this
+  process**. ⚠️ This does *not* mean the thread is gone.
+- `no active turn to steer` / `no active turn to interrupt` — an idle thread, a stale
+  `expectedTurnId`, or a turn that already ended.
+
+> **⚠️ Corrected 2026-08-10 — two claims in the first taxonomy did not survive**
+> (`probes/codex-app-server/unloaded.mjs`). Both came from `errs.mjs`, which only ever asked
+> about the all-zero id — a thread that exists nowhere — so neither generalized. Re-measured
+> against a thread with a **completed turn** whose app-server was then SIGKILLed, asked of a
+> **fresh** app-server:
+>
+> | call | result |
+> |---|---|
+> | `thread/loaded/list` | `[]` — not loaded here |
+> | `thread/read` | **OK, full transcript** — it *does* read from disk, with no prior resume |
+> | `turn/interrupt` / `turn/steer` | `-32600 thread not found: <id>` |
+> | `thread/resume` | **OK, `status:{type:"idle"}`** — fully recoverable |
+>
+> So: **`thread/read` IS a disk reader** — "resume first, then read" was an artefact of probing
+> an id that never existed. And **`thread not found` is a recoverable state**, not a death; it
+> is also what a genuinely nonexistent id returns, so the message cannot distinguish the two and
+> must never be used to declare a thread lost. Classifying it as `thread_not_resumable` would
+> report a broker restart — the exact case this transport was chosen for — as lost work.
+>
+> The adapter's guard is therefore **structural, not textual**: always `thread/resume` before
+> `turn/interrupt` / `turn/steer` on a thread this connection did not itself start.
 - ⚠️ **`turn/start` on a thread with a turn already in progress SUCCEEDS** and returns a new
   turn id rather than rejecting. The adapter must check thread status (or use `turn/steer`)
   before starting a turn, or it will silently double-dispatch.
@@ -306,7 +373,7 @@ the first-finisher shared-teardown hazard disappears entirely.
 **W1.4′ — Hydrate ownership guard** *(small; deps W0.1, W0.2)* — **was "liveness gate"**
 Hydrate must **neither retire nor rewrite the digest** of a non-terminal job whose recorded
 owner pid is alive and is not this process. Reuse the existing `pidAlive()` from
-`opencode-server-runtime.mjs` (it already treats EPERM as alive) rather than adding a raw
+`lib/shared-runtime-registry.mjs` (it already treats EPERM as alive) rather than adding a raw
 `process.kill`.
 
 > **Hard constraint:** hydrate must never call `writeOpenCodeDigest` for a job it did not
@@ -342,8 +409,12 @@ level. Note `item.id` is **turn-scoped** and restarts at `item_0` every turn inc
 Four classes as before — `bridge_lifecycle` (never names `binaryEnv`), `runtime_unavailable`
 (**the only class allowed to**), `runtime_transport`, `unknown` — plus two the experiments
 found:
-- **`thread_not_resumable`** — keyed on the `-32600 / no rollout found for thread id` stderr
-  signature. This is the load-bearing new failure mode W3.1 introduces.
+- **`thread_not_resumable`** — keyed on the message *text* (`no rollout found for thread id`,
+  `thread not loaded`) and explicitly **not** on the `-32600` code: see "Error taxonomy" above —
+  on `codex app-server` every error is `-32600`, so keying on the code puts a live thread's
+  failed steer in this class. `thread not found` is likewise **excluded**: it means "not loaded
+  into this process", which `thread/resume` fixes. This is the load-bearing new failure mode
+  W3.1 introduces.
 - **`bridge_transport_closed`** — from W1.4′(d).
 
 Three rendering fixes the experiments forced:
@@ -404,6 +475,13 @@ routing-resolution codes get ids + a `remedy` string; `TARGET_UNCONFIGURED` /
 `TARGET_UNSUPPORTED` keep the full descriptor. Report `default_model` per target or omit it.
 
 **W2.2′ — Codex idle watchdog, rebuilt** *(medium; deps W1.2′, and only if `exec` is retained)*
+> **NOT BUILT — deleted by the transport gate, 2026-08-11.** The condition ("only if `exec` is
+> retained") did not hold. The app-server adapter has no stdout stream to go idle: liveness is
+> `thread/loaded/list` and `thread/resume`'s status, and the turn's deadline is the one shared
+> `AGENT_COMPANION_CODEX_TIMEOUT_MS` both adapters read. The 60-session/1,339-gap corpus and the
+> clamped-accumulator design below stay on the record — they are the right answer *for the exec
+> transport*, and the exec adapter still ships as the default with no idle watchdog at all.
+
 **Delete the suspend guard entirely.** Two quantities, not three:
 - the **unchanged wall `setTimeout`** — already correct across suspend on macOS (libuv darwin
   uses `mach_continuous_time`, which counts sleep; verified on this machine, and F9's own timer
@@ -432,6 +510,19 @@ p95 = 61.7 s, p99 = 192.8 s, **max = 600.3 s**.
   between last stdout line and `close`: 1.2 s, so 5 s is comfortable.
 
 ### Wave 3 — thread continuity *(all of it deleted if app-server is adopted)*
+
+> **The gate fired. W3.1, W3.2′ and W3.4′ are DELETED — not built, and not to be built.**
+> Confirmed absent from the tree 2026-08-11: no `startCodexResumeRun`, no `codex exec resume`
+> argv, no rollout parser, no codex `writeThreadSid` call. What replaced each:
+>
+> | deleted | replaced by |
+> |---|---|
+> | W3.1 durable thread→session mapping + rollout stat | The ledger already persists the thread id as `companionSessionId` (W1.1 writes it from `thread/start`, *before* the turn), and `thread/start` returns the rollout `path` directly, which the job stores as `rolloutPath`. |
+> | W3.2′ `startCodexResumeRun` (argv, flag inventory, the sandbox de-escalation trap) | `thread/resume`, one RPC. The de-escalation trap is answered structurally: `threadParams` sends `sandbox` and `approvalPolicy` on **resume as well as start**, and no caller can override either. |
+> | W3.4′ rollout backstop (two extractors, 32 KB lines, ownership stamping) | `thread/read{includeTurns:true}` over RPC — measured to be a **disk reader** that returns a full transcript from a fresh app-server with no prior resume (`unloaded.mjs`). Its one caveat is unchanged and still open below: messages only, no tool activity. |
+>
+> W3.3′ (`agent_reply`) **was** built, on its app-server branch only. Everything below is kept
+> as the record of what the exec transport would have required.
 
 **W3.1 — Durable thread → codex session mapping** *(small; deps W1.1)*
 Write the thread id into the **existing** thread store (`writeThreadSid` / `retireThreadSid`,
@@ -463,15 +554,29 @@ spawn's own `cwd` (verified: thread created under `-C dirA`, resumed from proces
 > rollout's per-turn `turn_context.sandbox_policy` record.
 
 **W3.3′ — `agent_reply` for Codex** *(medium; deps W3.2′ or the app-server adapter)*
-- **Under `exec`** — terminal → new turn on the same thread; running → queued steer applied at
-  turn end; running + `interrupt:true` → cancel-then-resume. Label all three as **transport**
-  limitations of `codex exec`, not codex limitations.
+> **BUILT 2026-08-11, app-server branch only.** The `exec` bullet below is deleted with W3.2′ —
+> codex under `exec` still reports `reply_available: false`, truthfully, per job.
+- ~~**Under `exec`** — terminal → new turn on the same thread; running → queued steer applied at
+  turn end; running + `interrupt:true` → cancel-then-resume.~~ Deleted with W3.2′. The
+  labelling point survives and was acted on: these are **transport** limitations of
+  `codex exec`, not codex limitations.
 - **Under app-server** — `agent_reply` on a running job maps to `turn/steer` (real mid-flight,
   no restart, no cost beyond tokens); interrupt maps to `turn/interrupt` (thread stays live).
+  Both shipped. Two things the build added that the plan did not anticipate: the steer path
+  takes a synchronous in-flight lock and re-reads the job after its RPCs (two replies in one
+  tick would otherwise both dispatch, and a job that went terminal inside the window would be
+  resurrected and re-billed), and it deliberately does **not** bump the watch generation — the
+  watcher already driving the turn is the one that answers it.
 - Update `lib/target-registry.mjs:147-157`: `reply:false, resume:false` and the
-  "architecture-forced" comment are both wrong. It must say **transport**-forced.
+  "architecture-forced" comment are both wrong. It must say **transport**-forced. **Done** —
+  and `applyAdapterCapabilities` now upgrades codex under `appserver` through the one table it
+  shares with opencode.
 
 **W3.4′ — Rollout backstop** *(medium; deps W1.2′, W3.1 — **cut entirely if app-server lands**)*
+> **CUT — app-server landed.** Kept below as the measured record of what the exec transport
+> would have needed. The one fact worth carrying forward regardless: **the live stream is
+> lossy** (reproduced 2/2, `codex exec --json` omits `command_execution` items the rollout
+> records), which is why the exec adapter's digest is still not a salvage artefact.
 Promoted from "residual case only" to the **primary salvage channel** on the exec transport,
 for two measured reasons: the digest holds ~0.2 % of an aborted job's work, and **the live
 stream is lossy** — reproduced 2/2, `codex exec --json` silently omits `command_execution`
@@ -542,14 +647,25 @@ emits **no abort marker** on SIGTERM.
   semantics), not "flakiness".
 
 **W4.3′ — Move codex off the owned-subprocess model** *(large; deps the transport decision)*
+> **BUILT on the preferred branch, 2026-08-11.** The exec branch below is **deleted**: no
+> file-backed stdout, no pid+deadline file, no reaper for `codex exec` children — the exec
+> adapter is unchanged and remains the default, orphan risk and all (`probes/smoke/orphan.mjs`
+> is what keeps its verdict honest). One correction to the preferred bullet: *"no reaper"* was
+> wrong. Moving the process out of the bridge does not remove the reaper, it **moves** it —
+> the broker is detached and machine-wide precisely so it outlives every bridge, so something
+> has to stop it. Two now do: the broker's own inactivity timer and the bridge-side
+> `reapIdleCodexBroker`, both gated on `thread/loaded/list` rather than on `ps`.
 - **Preferred: the app-server daemon.** A bridge replacement then drops a socket client, not a
   job. No detach, no `unref`, no file-backed stdout, no pid+deadline file, no reaper, no EPIPE
   analysis, and orphans are answered by protocol (`thread/loaded/list`) rather than by `ps`.
 - **If `exec` is retained: file-backed stdout WITHOUT `detached`.** Measured to give full
-  survival while retaining free group-kill reapability. Gate it on **generalizing**
-  `opencode-server-runtime.mjs`'s registry (leases, pid liveness, stale pruning, idle TTL,
-  reaper — all already written) into a runtime-neutral owner module, per the project's
-  consolidate-don't-layer rule. The ownership machinery is **not** greenfield.
+  survival while retaining free group-kill reapability. Gate it on
+  `lib/shared-runtime-registry.mjs` — the runtime-neutral owner module extracted out of
+  `opencode-server-runtime.mjs` in A1, which already owns leases, pid liveness, stale pruning,
+  idle TTL and the reaper. Construct a registry with the broker's own `registryPath` / `key` /
+  `identity` / `dispose` rather than re-deriving pruning, the two-phase disposal claim, or the
+  reaper. Per the project's consolidate-don't-layer rule, the ownership machinery is **not**
+  greenfield and must **not** be re-written inside the codex broker.
 
 > **Re-attributed hazard.** The orphan risk belongs to *"the child's stdout is no longer a live
 > bridge pipe"*, **not** to `detached:true`. That means any implementation of W1.2′ that hands
@@ -578,13 +694,32 @@ honest, attributable failure with the thread id preserved.
 **Do not build W2.2′, W3.1, W3.2′ or W3.4′ before the transport decision** — all four are
 exec-specific work the daemon deletes rather than reuses.
 
+> **Executed 2026-08-11.** The gate resolved to app-server and the branch was taken: the four
+> exec-specific items were deleted unbuilt, and the plan shipped in three waves —
+> **A** (`lib/shared-runtime-registry.mjs` extracted out of `opencode-server-runtime.mjs`; the
+> vendored contract + drift fixture; W1.3′'s classifier and its `-32600` rule),
+> **B** (the broker, then the adapter),
+> **C** (the bridge wiring, and this documentation pass).
+> W1.0 was **not** taken — the templates still declare the bridge inline, so decision 2 below
+> is still open and the first-finisher teardown is still live. It no longer destroys codex
+> work on the app-server transport, which is the point of the whole exercise, but it is not
+> fixed.
+
 ## 5. Open decisions
 
 1. ~~**Codex transport — app-server vs exec pipe.**~~ **RESOLVED 2026-08-10 in favour of
-   app-server**, by the experiment in §2. What remains is a scheduling call, not a technical
+   app-server**, by the experiment in §2 — and **BUILT 2026-08-11**. Shipped as
+   `CODEX_RUNTIME_ADAPTER=appserver`: a detached broker (`scripts/codex-app-server-broker.mjs`)
+   owning one `codex app-server` over stdio, a bridge-side adapter
+   (`bridge-server/codex-app-server-runtime.mjs`), a vendored protocol contract, and per-call-site
+   wiring in `server.mjs`. `exec` stays the default and is untouched. The end-to-end proof is
+   `probes/smoke/appserver.mjs` (15/15). See the cost correction in §2 — the estimate that
+   informed this recommendation was ~5× low.
+   ~~What remains is a scheduling call, not a technical
    one: build the adapter now, or land the Wave-0/Wave-1 minimum merge first and build it
    next. Recommendation: **minimum merge first** (it is small, transport-neutral and fixes the
-   false-verdict/clobber bugs that hurt regardless), then the adapter.
+   false-verdict/clobber bugs that hurt regardless), then the adapter.~~ Both landed, in that
+   order.
 2. **Bridge scope — session-referenced vs inline frontmatter.** Session scope is measured to
    give one process per session and kills both hazards; the cost is five tool descriptions in
    main's context. Accept, or mitigate with `disallowedTools`? And: does it survive `/compact`?
@@ -610,9 +745,23 @@ exec-specific work the daemon deletes rather than reuses.
   sandbox. Still open: the mapping of `AGENT_COMPANION_CODEX_SANDBOX_MODE` onto
   `thread/start`'s `sandbox`, and whether the bridge should ever expose an approval policy
   other than `never`.
-- ~~**The broker.**~~ **Prototyped and measured 2026-08-10** — see "Broker probe" below. Still
-  open: one-broker-per-workspace vs per-host, idle reaping policy, and whether the broker
-  should be spawned lazily by the first bridge or by a SessionStart hook.
+- ~~**The broker.**~~ **Prototyped and measured 2026-08-10, shipped 2026-08-11** — see "Broker
+  probe" below. The three open sub-questions were answered by the build, and the answers are
+  worth stating because two of them were decided by constraint rather than by preference:
+  - *per-workspace vs per-host* → **per-host, one broker at one fixed socket path.** `cwd` is a
+    `thread/start` parameter, not a server property, so a second broker would buy isolation
+    nothing needs and cost a second `codex app-server` boot (which starts every configured MCP
+    server). It also makes the address a constant, which is what lets a bridge that lost the
+    registry file re-adopt by connect-probing the socket.
+  - *idle reaping policy* → **both ends, and neither trusts a pid.** 15 min inactivity in the
+    broker (refusing while clients are connected, a host heartbeat is fresh, or
+    `thread/loaded/list` is non-empty), plus the bridge-side lease/disposal-claim reaper.
+  - *lazy vs SessionStart hook* → **lazy, by the first dispatch that needs it.** A hook would
+    boot a `codex app-server` for every session including the ones that never delegate to
+    codex; the ensure path already has to handle a cold socket anyway.
+  - Still genuinely open: the broker is spawned with the **first** dispatching bridge's env, so
+    a second bridge with a different `CODEX_BIN` or `CODEX_HOME` silently reuses the first
+    one's. Unmeasured, and there is no probe for it.
 - **Whether `thread/read` ever carries tool items.** It returned messages only
   (`itemsView:"full"`), while the rollout for the same thread had `custom_tool_call`,
   `custom_tool_call_output` and `reasoning`. If tool activity is wanted in a salvage digest,

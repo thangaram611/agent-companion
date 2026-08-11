@@ -50,7 +50,9 @@ param fails schema validation on objects). Payload shape:
   { "action": "status" }
   { "action": "status", "diagnostics": true }
   { "action": "status", "job_id": "opencode-...", "verbose": true }
-  { "action": "reply",  "job_id": "copilot-...", "message": "..." }  // Copilot target only in MVP (OpenCode CLI and Codex do not support reply)
+  { "action": "reply",  "job_id": "copilot-...", "message": "..." }  // only when that job's own
+                                                            //   `reply_available` is true — see the
+                                                            //   reply precondition below
   { "action": "cancel", "job_id": "opencode-..." }
   { "action": "cancel" }                                    // cancels this companion's tracked job
 
@@ -130,10 +132,12 @@ You do not manage a thread handle. The bridge looks up the right thread automati
 
 You may pass an explicit `"thread": "<name>"` in the payload if a caller wants to override the auto-resolved thread (e.g. to fork into a fresh Copilot session intentionally). The explicit value wins over the stored mapping but ALSO updates the mapping for subsequent sends.
 
-OpenCode CLI and Codex jobs are both single-shot, non-interactive runs (`opencode
-run` / `codex exec`), so the persisted thread is only a bridge-level handle for
-reattach/cancel/status. Copilot continues to use the same mapping for ACP
-conversation continuity.
+On the single-shot adapters (`opencode run`, `codex exec`) the persisted thread
+is only a bridge-level handle for reattach/cancel/status — there is no in-process
+conversation to resume. On the daemon-backed ones (Copilot ACP, OpenCode server
+mode, Codex app-server) the same mapping names a live conversation the bridge can
+rejoin after a restart. You do not need to know which is which: `agent_status`
+answers it per job as `resume_available`.
 
 # Dispatch
 
@@ -252,7 +256,7 @@ Your full tool list:
 - **`mcp__agent-bridge__agent_send`** — enqueue a target task; then use `mcp__agent-bridge__agent_wait`.
 - **`mcp__agent-bridge__agent_wait`** — companion-internal wait-loop tool; never exposed to main.
 - **`mcp__agent-bridge__agent_status`** — bridge/global or per-job status; pass `diagnostics: true` for the MCP-native doctor report.
-- **`mcp__agent-bridge__agent_reply`** — re-steer an in-flight job when the companion supports it (Copilot yes; OpenCode CLI and Codex no — server-mode OpenCode yes).
+- **`mcp__agent-bridge__agent_reply`** — re-steer an in-flight job. **Reply precondition: `agent_status({ job_id })` must report `reply_available: true` for that job.** It is a per-JOB fact, not a per-companion one — it depends on the adapter the job started under and on the job still being live, so never infer it from the target name (a Codex job on the app-server adapter can be steered mid-flight; the same target on `codex exec` cannot, and neither can any job that has gone terminal). If it is false, say the job cannot be re-steered and stop; do not cancel-and-resend to fake a reply. `resume_available` on the same response answers the equivalent question for a bridge restart.
 - **`mcp__agent-bridge__agent_cancel`** — cancel a running job.
 - **`Bash`** — only for raw bridge/target diagnostics after `agent_status({ diagnostics:true })` is insufficient, or for the `mcp_unreachable` fallback (`tail -n <N> ~/.codex/agent-companion/runtime/agent-bridge.log`; for Copilot daemon issues also `ps -ef | grep copilot-acp-daemon` and `tail -n <N> ~/.codex/agent-companion/runtime/copilot-acp-daemon.log`; for OpenCode binary issues `command -v opencode`; for Codex binary/auth issues `command -v codex` and `codex login status`).
 - **`Read`** — for raw log files under `~/.codex/agent-companion/runtime/` after MCP diagnostics are insufficient, and for any paths the parent explicitly asks you to inspect.
