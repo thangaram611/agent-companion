@@ -34,7 +34,12 @@ import {
 } from '../lib/target-diagnostics.mjs';
 import { writeDefaultTarget, readDefaultTarget, writeProfiles, isModelAllowedFor } from '../lib/state.mjs';
 import { buildDoctorReport, renderDoctorReport } from '../lib/doctor.mjs';
-import { loadProfiles, VALID_STRENGTHS } from '../lib/profile-registry.mjs';
+import {
+  loadProfiles,
+  VALID_STRENGTHS,
+  COMPANION_ADAPTERS,
+  adapterValuesFor,
+} from '../lib/profile-registry.mjs';
 
 const VALID_HOSTS = new Set(['claude', 'codex', 'both']);
 const VALID_TARGET_OPTS = new Set([...TARGET_IDS, 'auto', 'none']);
@@ -146,10 +151,14 @@ export function planProfile({ id, companion, model = null, strengths = [], adapt
   if (!TARGET_IDS.has(comp)) {
     return { kind: 'error', code: 'bad_companion', message: `--companion must be one of ${[...TARGET_IDS].join(', ')} (got "${companion}")` };
   }
+  // Same rule, one table: the valid adapter set is per companion and lives in
+  // lib/profile-registry.mjs, so the CLI cannot drift from what loadProfiles
+  // will accept back off disk. Companion first — the set depends on it.
   let adp = adapter ? String(adapter).trim().toLowerCase() : null;
   if (adp) {
-    if (!['cli', 'server'].includes(adp)) return { kind: 'error', code: 'bad_adapter', message: '--adapter must be cli or server' };
-    if (comp !== 'opencode') return { kind: 'error', code: 'bad_adapter', message: '--adapter is opencode-only' };
+    const values = adapterValuesFor(comp);
+    if (!values) return { kind: 'error', code: 'bad_adapter', message: `--adapter is not selectable for companion "${comp}" (accepted on: ${Object.keys(COMPANION_ADAPTERS).join(', ')})` };
+    if (!values.includes(adp)) return { kind: 'error', code: 'bad_adapter', message: `--adapter must be ${values.join(' or ')} for companion "${comp}"` };
   }
   const mdl = model ? String(model).trim() : null;
   if (mdl && !isModelAllowedFor(comp, mdl)) {
@@ -375,7 +384,8 @@ const HELP = `agent-companion onboarding
   # Strength-routed companion profiles (authoring; ids/models/labels only, no secrets):
   node scripts/onboard.mjs --list-profiles [--json]
   node scripts/onboard.mjs --define-profile <id> --companion opencode|copilot|codex \\
-                           [--model <m>] [--adapter cli|server] [--strength reviewer,planner] [--yes]
+                           [--model <m>] [--adapter cli|server (opencode) | exec|appserver (codex)] \\
+                           [--strength reviewer,planner] [--yes]
   node scripts/onboard.mjs --assign-strength <id> --strength <labels> [--yes]
   node scripts/onboard.mjs --set-default-profile <id>
 

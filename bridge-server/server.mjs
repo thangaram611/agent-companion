@@ -146,6 +146,7 @@ import {
   defaultTargetId,
   getTarget,
   listTargets,
+  daemonAdapterFor,
 } from '../lib/target-registry.mjs';
 
 // Per-target dispatch table for the non-copilot (single-shot CLI-shaped)
@@ -524,8 +525,16 @@ function capabilityGate(prof, env) {
       return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `companion "${prof.companion}" model "${model}" is not a valid provider/model pin (expected provider/model)` };
     }
   }
-  if (prof.companion === 'opencode' && prof.adapter === 'server' && !caps.serverMode) {
-    return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: 'opencode adapter:"server" requested but server mode is unavailable in this environment' };
+  // Coherence, not selection: a profile that named its companion's DAEMON adapter
+  // must actually have the daemon capabilities, whichever companion it is. Keyed
+  // off the target registry's own upgrade table rather than the literal 'server',
+  // so codex's `appserver` is covered by the rule that already covered opencode's
+  // `server` instead of by a second line beside it — the wording is unchanged for
+  // opencode, which is the point. A profile naming the single-shot adapter never
+  // trips this: it is asking for fewer capabilities, not more.
+  const daemonAdapter = daemonAdapterFor(prof.companion);
+  if (daemonAdapter && prof.adapter === daemonAdapter && !caps.serverMode) {
+    return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `${prof.companion} adapter:"${prof.adapter}" requested but server mode is unavailable in this environment` };
   }
   // STRENGTH_CAPABILITY_REQUIREMENTS — no-op under the v1 empty map; populating
   // it later enforces a requirement pre-spawn here with zero other changes.

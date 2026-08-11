@@ -43,6 +43,14 @@ test('planProfile validates id, companion, model, adapter, strengths, and duplic
   assert.equal(planProfile({ id: 'ok', companion: 'opencode', model: 'anthropic/claude-sonnet-4.6' }).kind, 'ok');
   assert.equal(planProfile({ id: 'ok', companion: 'copilot', adapter: 'server' }).code, 'bad_adapter');
   assert.equal(planProfile({ id: 'ok', companion: 'opencode', adapter: 'server' }).kind, 'ok');
+  // Companion-scoped, like the registry that reads the file back: each
+  // companion's own pair only, and the rejection names that pair.
+  assert.equal(planProfile({ id: 'ok', companion: 'codex', adapter: 'appserver' }).kind, 'ok');
+  assert.equal(planProfile({ id: 'ok', companion: 'codex', adapter: 'exec' }).profile.adapter, 'exec');
+  assert.equal(planProfile({ id: 'ok', companion: 'codex', adapter: 'server' }).code, 'bad_adapter');
+  assert.match(planProfile({ id: 'ok', companion: 'codex', adapter: 'server' }).message, /exec or appserver/);
+  assert.equal(planProfile({ id: 'ok', companion: 'opencode', adapter: 'appserver' }).code, 'bad_adapter');
+  assert.match(planProfile({ id: 'ok', companion: 'copilot', adapter: 'server' }).message, /not selectable/);
   assert.equal(planProfile({ id: 'ok', companion: 'copilot', strengths: ['archivist'] }).code, 'bad_strength');
   assert.equal(planProfile({ id: 'dup', companion: 'copilot', existing: [{ id: 'dup', companion: 'opencode', strengths: [] }] }).code, 'duplicate_id');
 });

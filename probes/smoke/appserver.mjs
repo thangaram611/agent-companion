@@ -310,6 +310,40 @@ try {
     digestAfter.length >= digestBefore.length && survived,
     `${digestBefore.length} -> ${digestAfter.length} bytes, streamed text ${survived ? 'preserved' : 'LOST'}`);
 
+  // --- The sandbox the turn actually ran under, read from codex's own record.
+  //
+  // `turn/start`'s `sandboxPolicy` is the ONLY place the network decision can go
+  // on this transport (`thread/start`'s `sandbox` is the bare mode enum), and
+  // "the server accepted the field" is not "the turn ran with it". The rollout's
+  // `turn_context` is codex's own account of what the turn was given, so this
+  // asserts APPLIED, not accepted — the same distinction the steer confirmation
+  // makes. Its path came from `thread/start` and is already in the ledger.
+  //
+  // `network_access: true` is the exec adapter's default carried onto this
+  // transport; before it was wired, every broker-originated rollout on this
+  // machine recorded `false` while `codex_exec`'s recorded `true` — i.e. the
+  // adapter a job ran on changed what it could reach. `model`/`effort` are
+  // asserted alongside because the same call could have pinned them: they must
+  // still come from ~/.codex/config.toml.
+  const rolloutPath = after?.rolloutPath || row?.rolloutPath || null;
+  let turnContext = null;
+  if (rolloutPath && existsSync(rolloutPath)) {
+    for (const line of readFileSync(rolloutPath, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let entry = null;
+      try { entry = JSON.parse(line); } catch { continue; }
+      if (entry?.type === 'turn_context' && entry.payload?.sandbox_policy) { turnContext = entry.payload; break; }
+    }
+  }
+  const policy = turnContext?.sandbox_policy || null;
+  check('the turn/start sandboxPolicy was APPLIED, not merely accepted',
+    policy?.type === 'workspace-write' && policy?.network_access === true,
+    `sandbox_policy=${JSON.stringify(policy)} rollout=${rolloutPath || 'unknown'}`);
+  check('applying the sandbox did not pin the model or effort (config stays authoritative)',
+    !!turnContext && turnContext.approval_policy === 'never'
+    && !!turnContext.model && !!turnContext.effort,
+    `approval=${turnContext?.approval_policy} model=${turnContext?.model} effort=${turnContext?.effort}`);
+
   const doneStatus = await B.tool('agent_status', { job_id: jobId, verbose: true });
   // Truthful, not merely true: reply needs a live turn and this one is over,
   // while the THREAD is still resumable — `thread/resume` reloads it from the

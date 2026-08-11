@@ -171,17 +171,105 @@ const APP_SERVER_SANDBOX_BY_EXEC_MODE = {
   bypass: 'danger-full-access',
 };
 
+// Where the network decision actually lives on this transport — measured
+// 2026-08-11 against codex-cli 0.147.0's own schema, after shipping with it
+// unmeasured and `network_applied: false`.
+//
+// `thread/start`/`thread/resume` carry `sandbox`, which is the bare `SandboxMode`
+// enum (`read-only | workspace-write | danger-full-access`) and has NO network
+// option at all; the start response echoes `networkAccess: false` whatever the
+// mode. The network lives one level down, on `turn/start`'s `sandboxPolicy` — a
+// tagged union whose variants are:
+//   {type:'workspaceWrite',  networkAccess, writableRoots, excludeSlashTmp, excludeTmpdirEnvVar}
+//   {type:'readOnly',        networkAccess}
+//   {type:'dangerFullAccess'}
+//   {type:'externalSandbox', networkAccess:'restricted'|'enabled'}
+//
+// EVERY VARIANT'S `networkAccess` DEFAULTS TO ITS RESTRICTIVE VALUE — `false` for
+// the two booleans, `'restricted'` for `externalSandbox`'s enum (the schema
+// declares both defaults). So silence here is the RESTRICTIVE direction, the
+// exact opposite of the exec transport, where omitting
+// `-c sandbox_workspace_write.network_access=` defers to the user's config.toml
+// and fails OPEN. Both adapters must therefore be explicit, for opposite
+// reasons, and this builds an explicit variant for every mode:
+//
+//   workspace-write     → `networkAccess` = the exec resolver's answer, i.e. ON
+//                         by default (so a delegated job can `npm install`) and
+//                         OFF only on AGENT_COMPANION_CODEX_NETWORK=off. Silence
+//                         would fall OFF and quietly diverge from exec.
+//   read-only           → `networkAccess: false`. The exec resolver reports
+//                         `network: null` here — its toggle is the
+//                         workspace-write-scoped config key, so the bridge has
+//                         no opinion in this mode — and false is both the
+//                         union's own default and what `--sandbox read-only`
+//                         gives on exec. Stated rather than left to silence, so
+//                         the two transports agree by construction.
+//   danger-full-access  → no `networkAccess` field exists on the variant: the
+//                         sandbox is gone, so nothing is restricted. Falls open,
+//                         which is what the mode asks for on both transports.
+//   bypass              → collapses onto `dangerFullAccess`, exactly as the mode
+//                         mapping above already does. NOT `externalSandbox`,
+//                         even though "the bridge is already sandboxed" is
+//                         literally what bypass means here: that variant's
+//                         network vocabulary is a different one
+//                         (`restricted|enabled`, not a boolean), its semantics
+//                         were never measured, and the exec flag it translates
+//                         (`--dangerously-bypass-approvals-and-sandbox`) has one
+//                         sandbox effect — removing it. A second, unmeasured
+//                         spelling of the same intent could only disagree with
+//                         the mode already sent on `thread/start`.
+//
+// THE TAGS ARE camelCase WHILE `thread/start`'s MODE ENUM IS kebab-case, and the
+// same job sends both on the same transport — so mis-spelling one as the other is
+// the live hazard here, not a hypothetical. Measured against the real 0.147.0
+// server for zero tokens (every call aimed at the all-zero thread id, so anything
+// that survives deserialization dies on `thread not found` before a model runs):
+//   {type:'workspaceWrite', networkAccess:true|false}  → thread not found
+//   {type:'readOnly', networkAccess:false}             → thread not found
+//   {type:'dangerFullAccess'}                          → thread not found
+//     …i.e. all three literals below are ACCEPTED shapes, not merely plausible.
+//   {type:'workspace-write', …}  → -32600 "unknown variant `workspace-write`,
+//                                  expected one of `dangerFullAccess`, `readOnly`,
+//                                  `externalSandbox`, `workspaceWrite`"
+//   {type:'workspaceWrite', networkAccess:'enabled'} → invalid type: string
+//   {networkAccess:true}                             → missing field `type`
+// The fakes cannot catch that first refusal — the pinned contract validates
+// top-level field PRESENCE only, by design (lib/codex-app-server-contract.mjs) —
+// so the adapter's own test asserts the tag against that measured vocabulary.
+//
+// ⚠️ A sandboxPolicy REPLACES the policy, it does not patch it, and
+// `writableRoots` defaults to `[]`. The job's own working root is NOT at risk —
+// measured, the rollout records it under `turn_context.workspace_roots`, derived
+// from the `cwd` this adapter sends, separately from `sandbox_policy`. What is
+// at risk is an EXTRA `[sandbox_workspace_write] writable_roots` list in the
+// user's config.toml: it reaches `thread/start`'s mode-derived policy and not
+// the per-turn override. The bridge has no source for that list (it deliberately
+// parses no config.toml), and the only alternative — omitting `sandboxPolicy` —
+// reinstates the network divergence this exists to close. Recorded as the known
+// cost of applying the network at all; unmeasured, since this machine configures
+// no extra roots.
+function sandboxPolicyFor(mode, network) {
+  if (mode === 'danger-full-access') return { type: 'dangerFullAccess' };
+  if (mode === 'read-only') return { type: 'readOnly', networkAccess: false };
+  return { type: 'workspaceWrite', networkAccess: network === true };
+}
+
 export function codexAppServerSandbox(env = process.env) {
   const exec = resolveCodexSandbox(env);
+  const mode = APP_SERVER_SANDBOX_BY_EXEC_MODE[exec.mode] || 'workspace-write';
   return {
-    mode: APP_SERVER_SANDBOX_BY_EXEC_MODE[exec.mode] || 'workspace-write',
-    // Reported, deliberately NOT sent. On `codex exec` the network toggle is
-    // `-c sandbox_workspace_write.network_access=…`; the app-server's param name
-    // for it was never measured (docs/RELIABILITY_REMEDIATION.md §6 lists the
-    // sandbox mapping as open), and inventing one would either fail open or fail
-    // closed silently. `network_applied: false` says so out loud instead.
+    mode,
     network: exec.network,
-    network_applied: false,
+    // The union that goes on `turn/start`. Reported here too, because the
+    // sandbox an operator reads in `agent_status` should be the object that
+    // reached the wire and not a paraphrase of it.
+    policy: sandboxPolicyFor(mode, exec.network),
+    // True since the param was measured: the policy above is sent on every
+    // `turn/start`, and the rollout's `turn_context.sandbox_policy` records it
+    // applied (`{"type":"workspace-write","network_access":true,…}`) rather than
+    // merely accepted. It read `false` while the param name was unknown, which
+    // was honest then and is a lie now.
+    network_applied: true,
     source: exec.source,
   };
 }
@@ -301,6 +389,11 @@ export function _resetForTest() {
 // Built once, for `thread/start` AND `thread/resume`. `extra` is spread FIRST so
 // a caller cannot overwrite `sandbox` or `approvalPolicy`; nothing here reads an
 // env var for the policy, so no env var can relax it either.
+//
+// `sandbox` here is the MODE only — that is all these two methods accept. The
+// network half of the same decision rides `turn/start`'s `sandboxPolicy`; see
+// `sandboxPolicyFor`. The split is the protocol's, not this module's, and the
+// two halves come from one resolver so they cannot disagree.
 //
 // `model` is ABSENT unless a job pins one. `~/.codex/config.toml` (gpt-5.6-sol /
 // xhigh here) is the single source of truth and inheritance is measured to work;
@@ -1344,7 +1437,22 @@ export async function startCodexTurn({ conn, threadId, prompt, env = process.env
   }
   const result = await conn.call(
     'turn/start',
-    { threadId, input: [{ type: 'text', text: prompt == null ? '' : String(prompt) }] },
+    {
+      threadId,
+      input: [{ type: 'text', text: prompt == null ? '' : String(prompt) }],
+      // The ONE call that carries the network decision — `thread/start`'s
+      // `sandbox` is the mode enum and has nowhere to put it. Sent on every
+      // turn, not just the first, for the same reason `sandbox` rides both
+      // `thread/start` and `thread/resume`: the schema calls it an override "for
+      // this turn and subsequent turns", so a turn that omitted it would inherit
+      // whatever the last one set, and a resumed thread would inherit from a
+      // process this bridge never spoke to.
+      //
+      // `turn/steer` has no sandbox parameter at all, so a steered turn keeps
+      // the policy the `turn/start` beneath it established — which is why this
+      // must be right on the way in rather than corrigible later.
+      sandboxPolicy: codexAppServerSandbox(env).policy,
+    },
     { timeoutMs, [INTERNAL]: true },
   );
   return { threadId, turnId: result?.turn?.id ?? null, attached: false, status: state.status };

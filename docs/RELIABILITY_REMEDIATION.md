@@ -125,14 +125,17 @@ positively (an unset variable never opens a broker connection), and re-verified 
 orphan verdict.
 
 The app-server side is proven against the real bridge by two probes. The control surface is
-`probes/smoke/appserver-control.mjs` (17/17, 2026-08-11): a running turn steered mid-flight
+`probes/smoke/appserver-control.mjs` (18/18, 2026-08-11 — re-run after the sandbox policy
+landed on `turn/start`, since steer and interrupt both ride the turn it opens): a running turn
+steered mid-flight
 and obeying the injected instruction, and a running turn interrupted with the job settling
 `cancelled` and the thread surviving, resumable. It exists because the restart proof below
 went 15/15 while `turn/steer` and `turn/interrupt` were both unconditionally broken — see the
 D1 correction under W3.3′.
 
 The survival property is `probes/smoke/appserver.mjs`
-(15/15, 2026-08-11): bridge A SIGKILLed mid-turn; the broker, its app-server and a live shell
+(17/17, 2026-08-11 — 15 restart assertions plus the two that read the applied sandbox policy off
+the rollout): bridge A SIGKILLed mid-turn; the broker, its app-server and a live shell
 descendant still running the turn with **zero bridges alive**; bridge B hydrating, resuming the
 same thread, and the job reaching `completed` 72.6 s after the kill with the answer intact and
 A's streamed digest carried forward rather than clobbered. That is the F1 incident, run
@@ -788,7 +791,7 @@ exec-specific work the daemon deletes rather than reuses.
    owning one `codex app-server` over stdio, a bridge-side adapter
    (`bridge-server/codex-app-server-runtime.mjs`), a vendored protocol contract, and per-call-site
    wiring in `server.mjs`. `exec` stays the default and is untouched. The end-to-end proof is
-   `probes/smoke/appserver.mjs` (15/15). See the cost correction in §2 — the estimate that
+   `probes/smoke/appserver.mjs` (17/17). See the cost correction in §2 — the estimate that
    informed this recommendation was ~5× low.
    ~~What remains is a scheduling call, not a technical
    one: build the adapter now, or land the Wave-0/Wave-1 minimum merge first and build it
@@ -817,9 +820,49 @@ exec-specific work the daemon deletes rather than reuses.
   completes atomically and the steer applies at the next model boundary.
 - ~~**app-server approval routing.**~~ **Resolved 2026-08-10** — full wire contract captured;
   the adapter must run `approvalPolicy: 'never'`, because auto-accept escalates past the
-  sandbox. Still open: the mapping of `AGENT_COMPANION_CODEX_SANDBOX_MODE` onto
-  `thread/start`'s `sandbox`, and whether the bridge should ever expose an approval policy
-  other than `never`.
+  sandbox. Still open: whether the bridge should ever expose an approval policy other than
+  `never`.
+- ~~**The sandbox/network mapping onto the app-server.**~~ **Measured and wired 2026-08-11.**
+  `thread/start`/`thread/resume`'s `sandbox` is the bare `SandboxMode` enum
+  (`read-only|workspace-write|danger-full-access`) and carries **no** network option — the
+  start response echoes `networkAccess: false` whatever the mode. The network lives on
+  **`turn/start`'s `sandboxPolicy`**, a tagged union
+  (`workspaceWrite{networkAccess,writableRoots,excludeSlashTmp,excludeTmpdirEnvVar}` /
+  `readOnly{networkAccess}` / `dangerFullAccess` /
+  `externalSandbox{networkAccess:'restricted'|'enabled'}`) whose every variant defaults
+  `networkAccess` to its **restrictive** value (`false` for the two booleans, `'restricted'`
+  for `externalSandbox`'s enum) — so on this transport silence is the *restrictive* direction,
+  the exact opposite of `codex exec`, where omitting `-c sandbox_workspace_write.network_access=`
+  defers to config.toml and fails open. Both adapters must therefore be explicit, for
+  opposite reasons. Verified applied, not merely accepted: a `turn/start` carrying
+  `sandboxPolicy:{type:'workspaceWrite',networkAccess:true}` recorded
+  `turn_context.sandbox_policy = {"type":"workspace-write","network_access":true,…}` in the
+  rollout, with `model: "gpt-5.6-sol"` / `effort: "xhigh"` still inherited from config.toml in
+  the same record (the no-pin rule is unaffected). The controlled comparison is on disk: every
+  rollout from `originator: agent-companion-broker` before this landed records
+  `network_access: false` while the exec adapter's record `true` on the same machine and the
+  same config — **the adapter a job ran on was changing what it could reach.** It no longer
+  does, and `network_applied` is `true`. One known cost, recorded rather than hidden: a
+  `sandboxPolicy` **replaces** the policy rather than patching it, and `writableRoots` defaults
+  to `[]`, so a config.toml `[sandbox_workspace_write] writable_roots` list reaches
+  `thread/start`'s mode-derived policy but not the per-turn override. Unmeasured on a machine
+  that configures none.
+  **The tags are camelCase while the mode enum on the same job is kebab-case**, which is the
+  live hazard the fakes cannot see: the pinned contract validates top-level field *presence*
+  only, so `{type:'workspace-write'}` would pass every fake in this repo. Measured against the
+  real 0.147.0 server for **zero tokens** — every call aimed at the all-zero thread id, so
+  anything surviving deserialization dies on `thread not found` before a model runs:
+  `workspaceWrite{networkAccess:true|false}`, `readOnly{networkAccess:false}` and
+  `dangerFullAccess` all reached `thread not found` (i.e. the shapes are accepted, not merely
+  plausible), while `{type:'workspace-write'}` answered
+  `-32600 "unknown variant \`workspace-write\`, expected one of \`dangerFullAccess\`,
+  \`readOnly\`, \`externalSandbox\`, \`workspaceWrite\`"`,
+  `{type:'workspaceWrite',networkAccess:'enabled'}` answered `invalid type: string`, and
+  `{networkAccess:true}` answered `missing field \`type\``. All four refusals are recorded in
+  `lib/codex-app-server-contract.mjs`'s list of nested checks it deliberately does not
+  reproduce; the tag itself is asserted against that measured vocabulary where it is built
+  (`codex-app-server-runtime.test.mjs`), which is cheaper and more honest than teaching the
+  contract to guess at nested shapes.
 - ~~**The broker.**~~ **Prototyped and measured 2026-08-10, shipped 2026-08-11** — see "Broker
   probe" below. The three open sub-questions were answered by the build, and the answers are
   worth stating because two of them were decided by constraint rather than by preference:

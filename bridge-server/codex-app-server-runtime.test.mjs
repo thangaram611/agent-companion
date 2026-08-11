@@ -122,8 +122,103 @@ test('the sandbox comes from the exec adapter\'s one resolver, with bypass colla
   assert.equal(codexAppServerSandbox({ AGENT_COMPANION_CODEX_SANDBOX_MODE: 'bypass' }).mode, 'danger-full-access');
   // An unrecognised value never reaches the wire verbatim and never escalates.
   assert.equal(codexAppServerSandbox({ AGENT_COMPANION_CODEX_SANDBOX_MODE: 'yolo' }).mode, 'workspace-write');
-  // The network toggle is reported but not sent — said out loud, not implied.
-  assert.equal(codexAppServerSandbox({}).network_applied, false);
+});
+
+test('every sandbox mode maps to an EXPLICIT sandboxPolicy, network included', () => {
+  // The mode enum is all `thread/start` accepts; the network decision rides
+  // `turn/start`'s `sandboxPolicy`, whose every variant defaults `networkAccess`
+  // to its RESTRICTIVE value (`false` for the booleans, `'restricted'` for
+  // `externalSandbox`'s enum). So silence here is the restrictive direction — the
+  // opposite of the exec transport, where omitting the `-c` key defers to
+  // config.toml and fails OPEN. Both adapters are explicit, for opposite reasons,
+  // and this is the table that keeps them agreeing.
+  const policyFor = (env) => codexAppServerSandbox(env).policy;
+
+  // Default and explicit workspace-write: network ON, because a delegated job
+  // that cannot `npm install` fails confusingly (codex's own exec default is
+  // OFF; the bridge turns it on deliberately).
+  assert.deepEqual(policyFor({}), { type: 'workspaceWrite', networkAccess: true });
+  assert.deepEqual(policyFor({ AGENT_COMPANION_CODEX_SANDBOX_MODE: 'workspace-write' }),
+    { type: 'workspaceWrite', networkAccess: true });
+  // An unrecognised mode behaves like unset — same policy, never an escalation.
+  assert.deepEqual(policyFor({ AGENT_COMPANION_CODEX_SANDBOX_MODE: 'yolo' }),
+    { type: 'workspaceWrite', networkAccess: true });
+
+  // The off switch is an EXPLICIT false, not an omitted field. It happens to
+  // coincide with the union's default here, which is exactly why it has to be
+  // asserted: a future variant whose default flipped would take the bridge's
+  // "off" with it.
+  assert.deepEqual(policyFor({ AGENT_COMPANION_CODEX_NETWORK: 'off' }),
+    { type: 'workspaceWrite', networkAccess: false });
+  assert.deepEqual(policyFor({ AGENT_COMPANION_CODEX_NETWORK: 'OFF' }),
+    { type: 'workspaceWrite', networkAccess: false });
+  // Only `off` turns it off — no other value is a secret second spelling.
+  assert.deepEqual(policyFor({ AGENT_COMPANION_CODEX_NETWORK: 'no' }),
+    { type: 'workspaceWrite', networkAccess: true });
+
+  // read-only carries the field the variant has, at the value the mode means.
+  // The exec resolver reports `network: null` here (its toggle is the
+  // workspace-write-scoped config key), so the bridge has no opinion and the
+  // network env var must not acquire one.
+  assert.deepEqual(policyFor({ AGENT_COMPANION_CODEX_SANDBOX_MODE: 'read-only' }),
+    { type: 'readOnly', networkAccess: false });
+  assert.deepEqual(policyFor({ AGENT_COMPANION_CODEX_SANDBOX_MODE: 'read-only', AGENT_COMPANION_CODEX_NETWORK: 'off' }),
+    { type: 'readOnly', networkAccess: false });
+
+  // dangerFullAccess has NO networkAccess field — the sandbox is gone, so
+  // nothing is restricted. Asserting the exact object is what catches a future
+  // edit that "helpfully" adds one.
+  assert.deepEqual(policyFor({ AGENT_COMPANION_CODEX_SANDBOX_MODE: 'danger-full-access' }),
+    { type: 'dangerFullAccess' });
+  // bypass collapses onto it, exactly as the mode mapping does. Deliberately
+  // NOT `externalSandbox`: that variant's network vocabulary is
+  // `restricted|enabled` rather than a boolean and its semantics were never
+  // measured.
+  assert.deepEqual(policyFor({ AGENT_COMPANION_CODEX_SANDBOX_MODE: 'bypass' }),
+    { type: 'dangerFullAccess' });
+  assert.deepEqual(policyFor({ AGENT_COMPANION_CODEX_SANDBOX_MODE: 'bypass', AGENT_COMPANION_CODEX_NETWORK: 'off' }),
+    { type: 'dangerFullAccess' });
+
+  // And the report is true now that the policy is sent. It read `false` for as
+  // long as the param name was unmeasured, which was honest then.
+  assert.equal(codexAppServerSandbox({}).network_applied, true);
+  assert.equal(codexAppServerSandbox({}).network, true);
+  assert.equal(codexAppServerSandbox({ AGENT_COMPANION_CODEX_NETWORK: 'off' }).network, false);
+  assert.equal(codexAppServerSandbox({ AGENT_COMPANION_CODEX_SANDBOX_MODE: 'read-only' }).network, null);
+});
+
+test('the policy tag is one the real server parses — camelCase, never the mode spelling', () => {
+  // The one thing the fakes cannot catch. The pinned contract validates top-level
+  // field PRESENCE only (deliberately — lib/codex-app-server-contract.mjs records
+  // why), so `{type:'workspace-write'}` would sail through every fake in this
+  // repo and be refused by codex. And it is an easy slip to make: this union's
+  // tags are camelCase while `thread/start`'s `SandboxMode` enum, which the SAME
+  // job sends on the SAME transport, is kebab-case.
+  //
+  // The vocabulary is the server's own words, recited back by 0.147.0 when it
+  // refused `{type:'workspace-write'}`:
+  //   -32600 "Invalid request: unknown variant `workspace-write`, expected one of
+  //           `dangerFullAccess`, `readOnly`, `externalSandbox`, `workspaceWrite`"
+  // Measured for zero tokens by aiming each call at the all-zero thread id: the
+  // three tags the adapter can emit all got as far as `thread not found`, i.e.
+  // the shapes were accepted, while the kebab-case one died at deserialization.
+  const PARSED_BY_0_147_0 = new Set(['dangerFullAccess', 'readOnly', 'externalSandbox', 'workspaceWrite']);
+  const envs = [
+    {},
+    { AGENT_COMPANION_CODEX_SANDBOX_MODE: 'workspace-write' },
+    { AGENT_COMPANION_CODEX_SANDBOX_MODE: 'read-only' },
+    { AGENT_COMPANION_CODEX_SANDBOX_MODE: 'danger-full-access' },
+    { AGENT_COMPANION_CODEX_SANDBOX_MODE: 'bypass' },
+    { AGENT_COMPANION_CODEX_SANDBOX_MODE: 'yolo' },
+    { AGENT_COMPANION_CODEX_NETWORK: 'off' },
+  ];
+  for (const env of envs) {
+    const { policy, mode } = codexAppServerSandbox(env);
+    assert.ok(PARSED_BY_0_147_0.has(policy.type), `${JSON.stringify(env)} → unparseable tag ${policy.type}`);
+    // And the two halves of one decision never disagree: the kebab-case mode goes
+    // on `thread/start`, the camelCase tag on `turn/start`, both from one resolver.
+    assert.equal(policy.type, { 'workspace-write': 'workspaceWrite', 'read-only': 'readOnly', 'danger-full-access': 'dangerFullAccess' }[mode]);
+  }
 });
 
 test('promptId keeps the codex prefix and encodes reply generation', () => {
@@ -343,6 +438,56 @@ test('every thread/start and thread/resume carries approvalPolicy never and the 
     // is the measured silent-de-escalation trap. It is sent on BOTH.
     assert.equal(params.sandbox, 'read-only');
   }
+});
+
+test('every turn/start carries the sandboxPolicy — the only call that can', async () => {
+  // The parity fix: the mode on `thread/start` says nothing about the network,
+  // so a turn started without a `sandboxPolicy` ran with `networkAccess` at the
+  // union's `false` default while the SAME job on the exec adapter ran with it
+  // on. Measured on this machine before the fix: every rollout from
+  // `originator: agent-companion-broker` recorded
+  // `"network_access": false` while `codex_exec`'s recorded `true`.
+  const env = { AGENT_COMPANION_CODEX_SANDBOX_MODE: 'workspace-write' };
+  const { conn, sock } = await connectFake({}, { env });
+  const { threadId } = await startCodexThread({ conn, cwd: '/w', env });
+  await startCodexTurn({ conn, threadId, prompt: 'go', env });
+  conn.close();
+
+  assert.deepEqual(sock.wire(), ['thread/start', 'turn/start']);
+  assert.deepEqual(sock.paramsFor('turn/start')[0].sandboxPolicy, {
+    type: 'workspaceWrite', networkAccess: true,
+  });
+  // The mode still rides thread/start; the two halves come from one resolver.
+  assert.equal(sock.paramsFor('thread/start')[0].sandbox, 'workspace-write');
+});
+
+test('AGENT_COMPANION_CODEX_NETWORK=off reaches the wire as an explicit false', async () => {
+  // On exec, omission defers to config.toml and fails OPEN, so the off switch
+  // has to be explicit. On this transport omission falls CLOSED — a different
+  // hazard with the same answer: say it.
+  const env = { AGENT_COMPANION_CODEX_NETWORK: 'off' };
+  const { conn, sock } = await connectFake({}, { env });
+  const { threadId } = await startCodexThread({ conn, cwd: '/w', env });
+  await startCodexTurn({ conn, threadId, prompt: 'go', env });
+  conn.close();
+  const policy = sock.paramsFor('turn/start')[0].sandboxPolicy;
+  assert.equal(policy.networkAccess, false);
+  assert.equal('networkAccess' in policy, true, 'off is a field, never an omission');
+});
+
+test('a turn attached to a running one sends no policy, because it sends no turn/start', async () => {
+  // `turn/start` on a busy thread SUCCEEDS and double-dispatches, so the adapter
+  // attaches instead — and the turn it attaches to already carries the policy
+  // the `turn/start` beneath it set. `turn/steer` has no sandbox parameter at
+  // all, which is why the policy has to be right on the way in.
+  const { conn, sock } = await connectFake({
+    statuses: { BUSY: 'active' },
+    turns: { BUSY: [{ id: 'TURN_RUNNING', status: 'inProgress' }] },
+  });
+  await startCodexTurn({ conn, threadId: 'BUSY', prompt: 'do the thing', env: {} });
+  conn.close();
+  assert.deepEqual(sock.wire(), ['thread/resume']);
+  assert.deepEqual(sock.paramsFor('turn/start'), []);
 });
 
 test('no env var can relax the approval policy', async () => {
