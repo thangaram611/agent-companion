@@ -1634,6 +1634,20 @@ async function withCodexAppServer({ handlers = {}, statuses = {}, connect = null
   }
 }
 
+// A realistic digest left behind by a bridge that died mid-turn: multi-KB of
+// streamed work carrying a marker string. The size is the point — the W1.4′
+// regression is a multi-KB body collapsing to a few hundred bytes, and a
+// length-ratio assertion on a 97-byte seed cannot see it.
+function _cxDeadBridgeDigest(jobId, marker) {
+  const body = Array.from({ length: 60 }, (_, i) => `${marker} streamed line ${i} — work the dead bridge already paid for.`).join('\n');
+  return [
+    `# codex job ${jobId} - digest`, '',
+    '**Updated:** 2026-08-11T00:00:00.000Z', '**Status:** `running`', '',
+    '## Task', '', 't', '',
+    '## Final / partial assistant message', '', body, '',
+  ].join('\n');
+}
+
 // Seed a live app-server job the way runCodexAppServerWorker would have.
 function _cxLiveJob(jobs, jobId, sid, extra = {}) {
   jobs.set(jobId, {
@@ -1956,6 +1970,90 @@ test('Codex app-server mode: the bridge owns the cancel verdict when the turn ra
   }
 });
 
+test('Codex app-server mode: a cancel whose interrupt never lands does not later relabel a finished turn as cancelled', async () => {
+  // The intent is recorded BEFORE the interrupt so the watch can own the
+  // verdict. If the interrupt then fails, that intent has to go with it —
+  // otherwise the turn runs to a normal completion and the watch stamps it
+  // `cancelled` with `error: null`, so the parent throws away a finished answer
+  // it was already told the cancel had failed to stop.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-cancelfail';
+  let workerSock = null;
+  try {
+    await withCodexAppServer({
+      handlers: {
+        'turn/interrupt': () => { throw new Error('broker busy: interrupt not acknowledged'); },
+      },
+    }, async ({ live }) => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'codex', task: 'uncancellable turn', mode: 'EXECUTE',
+        template: 'general', cwd: TEST_CWD, host_session_id: 'sid-cx-cancelfail', parallel: 'never', max_wait_sec: 5,
+      }));
+      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.status === 'running'), 'job running');
+      workerSock = live();
+      assert.ok(await _cxUntil(() => workerSock.wire().includes('turn/start')), 'turn started');
+
+      const cancel = parse(await dispatch({ action: 'cancel', job_id: send.job_id, host_session_id: 'sid-cx-cancelfail' }));
+      assert.equal(cancel.ok, false);
+      assert.equal(cancel.status, 'cancel_failed');
+      assert.equal(cancel.cancelled, false);
+      assert.equal(jobs.get(send.job_id).cancelRequested, false, 'the unfulfilled intent was withdrawn');
+
+      // The turn the operator was told could not be cancelled now finishes.
+      workerSock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [
+        { id: 'm1', type: 'agentMessage', text: 'finished anyway', phase: 'final_answer' },
+      ] } });
+      const term = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-cancelfail', max_wait_sec: 5 }));
+      assert.equal(term.status, 'completed', 'a turn that finished is reported as finished');
+      assert.match(term.content, /finished anyway/);
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-cancelfail') jobs.delete(id);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: a watch that breaks after the thread opened records WHY in the digest', async () => {
+  // The digest is where the operator is sent for salvage, so a failed
+  // app-server job that leaves a header-only file tells them nothing. Once the
+  // thread is open the job HAS a promptId, which is what makes
+  // emitNotification re-render the body from `adapterResult` — so the failure
+  // text has to live there, not only in the write just above it.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-watchfail';
+  try {
+    await withCodexAppServer({
+      // The thread opens, then the subscription the watcher needs is refused.
+      handlers: { 'broker/subscribe': () => { throw new Error('broker refused the subscription'); } },
+    }, async () => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'codex', task: 'watch breaks', mode: 'EXECUTE',
+        template: 'general', cwd: TEST_CWD, host_session_id: 'sid-cx-watchfail', parallel: 'never', max_wait_sec: 5,
+      }));
+      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.terminalAt), 'the job settles');
+      const job = jobs.get(send.job_id);
+      assert.equal(job.status, 'failed');
+      assert.equal(job.detail, 'codex_server_watch_error');
+      assert.ok(job.promptId, 'the thread opened, so the digest refresh on notify is live');
+      assert.match(readFileSync(digestPath(send.job_id), 'utf8'), /broker refused the subscription/,
+        'the digest names the failure, not just the header');
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-watchfail') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
 test('Codex app-server mode: reply on a running turn steers it — no cancel, no restart, no generation bump', async () => {
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
@@ -1978,12 +2076,81 @@ test('Codex app-server mode: reply on a running turn steers it — no cancel, no
       assert.equal(jobs.get('codex-steer').replyTurn, 1);
       assert.equal(jobs.get('codex-steer').terminalAt, undefined);
 
+      // The lock is held across the RPCs and released on the way out, so the
+      // next steer is not locked out by the previous one.
+      assert.equal(jobs.get('codex-steer').replyInFlight, false);
+
       const sock = sockets[sockets.length - 1];
       assert.deepEqual(sock.wire(), ['thread/resume', 'turn/steer'], 'steer only: no interrupt, no second turn/start');
       assert.equal(sock.paramsFor('turn/steer')[0].input[0].text, 'actually, use ripgrep');
     });
   } finally {
     jobs.delete('codex-steer');
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: a job that goes terminal DURING the reply RPCs is rejected, not resurrected', async () => {
+  // The reply's two round trips (`thread/resume`, then steer or turn/start) are
+  // a window the live watcher can settle the job inside. Clearing `terminalAt`
+  // afterwards un-settles a result the parent has already been handed and bills
+  // a fresh turn for it.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  try {
+    await withCodexAppServer({
+      handlers: {
+        'thread/resume': (p) => {
+          // Settle the job mid-call, exactly as the watcher's terminal would.
+          mod.retainTerminalJob('codex-race-reply', { status: 'completed', summary: { message: 'done' }, terminalAt: Date.now() });
+          return { thread: { id: p.threadId, status: { type: 'idle' } } };
+        },
+      },
+    }, async ({ sockets }) => {
+      _cxLiveJob(jobs, 'codex-race-reply', 'sid-cx-race');
+      const reply = parse(await dispatch({ action: 'reply', job_id: 'codex-race-reply', message: 'follow up', host_session_id: 'sid-cx-race' }));
+      assert.equal(reply.ok, false);
+      assert.match(reply.error, /already completed/);
+      const job = jobs.get('codex-race-reply');
+      assert.ok(job.terminalAt, 'the terminal survived the reply');
+      assert.equal(job.status, 'completed');
+      assert.equal(job.replyInFlight, false, 'the reply lock was released');
+      // No second billed turn was dispatched on the way out.
+      assert.equal(sockets.at(-1).wire().includes('turn/start'), false);
+      assert.equal(sockets.at(-1).wire().includes('turn/steer'), false);
+    });
+  } finally {
+    jobs.delete('codex-race-reply');
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: two replies in the same tick cannot both dispatch a turn', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  try {
+    await withCodexAppServer({ statuses: { T1: 'idle' } }, async ({ sockets }) => {
+      _cxLiveJob(jobs, 'codex-double-reply', 'sid-cx-double');
+      // Fired without awaiting the first: the lock has to be taken before the
+      // first await or both calls compute replyTurn 1 and the same `-r1`
+      // promptId, and neither watcher can supersede the other.
+      const [a, b] = (await Promise.all([
+        dispatch({ action: 'reply', job_id: 'codex-double-reply', message: 'first', host_session_id: 'sid-cx-double' }),
+        dispatch({ action: 'reply', job_id: 'codex-double-reply', message: 'second', host_session_id: 'sid-cx-double' }),
+      ])).map(parse);
+      const accepted = [a, b].filter((r) => r.ok);
+      const refused = [a, b].filter((r) => !r.ok);
+      assert.equal(accepted.length, 1, `exactly one reply may win: ${JSON.stringify([a, b])}`);
+      assert.match(refused[0].error, /reply already in flight/);
+      assert.equal(jobs.get('codex-double-reply').replyTurn, 1);
+      const starts = () => sockets.flatMap((s) => s.wire()).filter((m) => m === 'turn/start');
+      assert.ok(await _cxUntil(() => starts().length > 0), 'the accepted reply dispatched its turn');
+      assert.equal(starts().length, 1, 'one billed turn, not two');
+    });
+  } finally {
+    jobs.delete('codex-double-reply');
     _resetForTest();
   }
 });
@@ -2062,10 +2229,12 @@ test('Codex app-server mode: hydrate resumes the job instead of retiring it, and
     }, async () => {
       _cxLiveJob(jobs, 'codex-hydrate', 'sid-cx-hydrate');
       mod.persistJob('codex-hydrate');
-      // A digest with live content, exactly what the previous bridge left.
+      // A REALISTIC dead-bridge digest: multi-KB, with a marker no render on
+      // the resume path can reproduce. A short seed proves nothing here — a
+      // full replacement by the salvaged answer would still be "longer than
+      // half of it", which is how the clobber survived its first test.
       const digest = digestPath('codex-hydrate');
-      writeFileSync(digest, '# codex job codex-hydrate - digest\n\n## Final / partial assistant message\n\nLIVE PARTIAL WORK\n');
-      const before = readFileSync(digest, 'utf8').length;
+      writeFileSync(digest, _cxDeadBridgeDigest('codex-hydrate', 'MARKER-HYDRATE-TIER1'));
       jobs.delete('codex-hydrate');
       mod._resetForTest();
 
@@ -2078,15 +2247,64 @@ test('Codex app-server mode: hydrate resumes the job instead of retiring it, and
       assert.notEqual(job.detail, 'target_child_orphaned_by_bridge_restart');
       assert.notEqual(job.detail, 'bridge_transport_closed');
       assert.equal(existsSync(digest.replace('agent-digest-', 'agent-retired-')), false, 'no retirement note was written');
-      // And the digest gained the salvaged answer rather than being overwritten
-      // with a header-only stub (the W1.4′ invariant orphan.mjs guards).
+      // The digest gained the salvaged answer AND still holds every byte the
+      // dead bridge streamed (the W1.4′ invariant orphan.mjs guards).
       const after = readFileSync(digest, 'utf8');
       assert.match(after, /finished while the bridge was down/);
-      assert.match(after, /## Final \/ partial assistant message/);
-      assert.ok(after.length > before / 2, 'the digest did not collapse to a stub');
+      assert.match(after, /MARKER-HYDRATE-TIER1/, 'the dead bridge\'s streamed work survived the resume');
     });
   } finally {
     for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-hydrate') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: resuming a STILL-RUNNING turn streams into the digest without destroying what the dead bridge wrote', async () => {
+  // The main incident path: broker alive, turn still active, bridge restarted.
+  // The resumed watcher's accumulator starts EMPTY, so every progress refresh
+  // renders a body far smaller than the one already on disk. That render is a
+  // full replacement, which is exactly how a multi-KB digest became a stub.
+  const mod = await bridge();
+  const { jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-active';
+  try {
+    await withCodexAppServer({ statuses: { T1: 'active' } }, async ({ sockets }) => {
+      _cxLiveJob(jobs, 'codex-active', 'sid-cx-active');
+      mod.persistJob('codex-active');
+      const digest = digestPath('codex-active');
+      writeFileSync(digest, _cxDeadBridgeDigest('codex-active', 'MARKER-ACTIVE-TURN'));
+      const before = readFileSync(digest, 'utf8').length;
+      jobs.delete('codex-active');
+      mod._resetForTest();
+
+      mod.hydrateJobsFromLedger();
+      assert.ok(await _cxUntil(() => sockets.length > 0 && sockets.at(-1).wire().includes('broker/subscribe')), 'the resumed watcher subscribed');
+      const sock = sockets.at(-1);
+
+      // A mid-turn delta — the first progress refresh this bridge makes.
+      sock.notify('item/agentMessage/delta', { itemId: 'm2', delta: 'tail of the answer' });
+      assert.ok(await _cxUntil(() => readFileSync(digest, 'utf8').includes('tail of the answer')), 'streaming reached the digest');
+      const mid = readFileSync(digest, 'utf8');
+      assert.match(mid, /MARKER-ACTIVE-TURN/, 'the dead bridge\'s body survived the streaming refresh');
+      assert.ok(mid.length >= before, `digest shrank mid-flight: ${before} -> ${mid.length}`);
+
+      // …and it is still there once the resumed turn settles.
+      sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [
+        { id: 'm2', type: 'agentMessage', text: 'tail of the answer', phase: 'final_answer' },
+      ] } });
+      assert.ok(await _cxUntil(() => jobs.get('codex-active')?.terminalAt), 'the resumed turn settles');
+      assert.equal(jobs.get('codex-active').status, 'completed');
+      const after = readFileSync(digest, 'utf8');
+      assert.match(after, /MARKER-ACTIVE-TURN/, 'the dead bridge\'s body survived the terminal render');
+      assert.match(after, /tail of the answer/);
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-active') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
     if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
     _resetForTest();
   }
@@ -2096,6 +2314,7 @@ test('Codex app-server mode: hydrate with a DEAD broker resumes from the rollout
   const mod = await bridge();
   const { jobs, _resetForTest } = mod;
   const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
   _resetForTest();
   const oldS = process.env.CLAUDE_CODE_SESSION_ID;
   process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-dead';
@@ -2119,6 +2338,11 @@ test('Codex app-server mode: hydrate with a DEAD broker resumes from the rollout
     }, async () => {
       _cxLiveJob(jobs, 'codex-dead-broker', 'sid-cx-dead');
       mod.persistJob('codex-dead-broker');
+      // Salvage is a `thread/read` summary — messages only, no reasoning and no
+      // tool calls — so it is routinely SHORTER than what the dead bridge had
+      // already streamed. Writing it over the body is still destruction.
+      const digest = digestPath('codex-dead-broker');
+      writeFileSync(digest, _cxDeadBridgeDigest('codex-dead-broker', 'MARKER-TIER2-SALVAGE'));
       jobs.delete('codex-dead-broker');
       mod._resetForTest();
 
@@ -2134,6 +2358,9 @@ test('Codex app-server mode: hydrate with a DEAD broker resumes from the rollout
       assert.match(job.error, /in-flight turn was lost/);
       assert.match(job.error, /lost turn, not a lost thread/);
       assert.equal(/thread_not_resumable/.test(job.error), false);
+      const after = readFileSync(digest, 'utf8');
+      assert.match(after, /partial work before the broker died/, 'the salvage reached the digest');
+      assert.match(after, /MARKER-TIER2-SALVAGE/, 'the salvage did not overwrite the dead bridge\'s body');
     });
   } finally {
     for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-dead') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
@@ -2160,25 +2387,32 @@ test('Codex app-server mode: a resume that salvages nothing leaves the dead brid
       spawnBroker: () => ({ on: () => {}, unref: () => {} }),
       // The rollout has no assistant message yet — the turn died in reasoning.
     }, async () => {
-      _cxLiveJob(jobs, 'codex-nosalvage', 'sid-cx-nosalvage');
-      mod.persistJob('codex-nosalvage');
-      const digest = digestPath('codex-nosalvage');
-      writeFileSync(digest, '# codex job codex-nosalvage - digest\n\n## Final / partial assistant message\n\nLIVE PARTIAL WORK FROM THE DEAD BRIDGE\n');
-      jobs.delete('codex-nosalvage');
-      mod._resetForTest();
+      await withQueue(async (queueFile) => {
+        _cxLiveJob(jobs, 'codex-nosalvage', 'sid-cx-nosalvage');
+        mod.persistJob('codex-nosalvage');
+        const digest = digestPath('codex-nosalvage');
+        writeFileSync(digest, _cxDeadBridgeDigest('codex-nosalvage', 'MARKER-NO-SALVAGE'));
+        jobs.delete('codex-nosalvage');
+        mod._resetForTest();
 
-      mod.hydrateJobsFromLedger();
-      assert.ok(await _cxUntil(() => jobs.get('codex-nosalvage')?.terminalAt), 'the resumed job settles');
-      assert.equal(jobs.get('codex-nosalvage').status, 'unreachable');
-      // W1.4\u2032's hard constraint: an empty result must never render a
-      // header-only stub over content that is the only record of the work.
-      assert.match(readFileSync(digest, 'utf8'), /LIVE PARTIAL WORK FROM THE DEAD BRIDGE/);
-      // The outcome is still recorded on disk \u2014 in the sibling note, never in
-      // the body.
-      const note = digest.replace('agent-digest-', 'agent-retired-');
-      assert.equal(existsSync(note), true);
-      assert.match(readFileSync(note, 'utf8'), /codex_server_gone/);
-      assert.match(readFileSync(note, 'utf8'), /lost turn, not a lost thread/);
+        mod.hydrateJobsFromLedger();
+        assert.ok(await _cxUntil(() => jobs.get('codex-nosalvage')?.terminalAt), 'the resumed job settles');
+        assert.equal(jobs.get('codex-nosalvage').status, 'unreachable');
+        // W1.4\u2032's hard constraint: an empty result must never render a
+        // header-only stub over content that is the only record of the work.
+        assert.match(readFileSync(digest, 'utf8'), /MARKER-NO-SALVAGE/);
+        // The outcome is still recorded on disk \u2014 in the sibling note, never in
+        // the body.
+        const note = digest.replace('agent-digest-', 'agent-retired-');
+        assert.equal(existsSync(note), true);
+        assert.match(readFileSync(note, 'utf8'), /codex_server_gone/);
+        assert.match(readFileSync(note, 'utf8'), /lost turn, not a lost thread/);
+        // \u2026and the terminal reaches the completion queue on THIS branch too. A
+        // parent that drains instead of blocking would otherwise never hear
+        // that the job settled, purely because the rollout happened to be empty.
+        assert.ok(await _cxUntil(() => existsSync(queueFile) && readQueue(queueFile).some((r) => r.jobId === 'codex-nosalvage' && r.kind === 'terminal')),
+          'the no-salvage resume enqueued its terminal');
+      });
     });
   } finally {
     for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-nosalvage') { try { state.deleteJob(id); } catch {} jobs.delete(id); }

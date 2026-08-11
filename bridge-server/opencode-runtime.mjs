@@ -162,7 +162,12 @@ export function cancelOpenCodeRun(jobId, pid = null) {
   return { ok: false, reason: 'no running OpenCode process found', pid: null };
 }
 
-export function writeOpenCodeDigest(job, result = null) {
+// `carriedForward` is the body a PREVIOUS bridge process left in this digest.
+// Every render is a full replacement, so without it a fresh bridge re-rendering
+// from an empty accumulator destroys the only record of what the dead bridge
+// streamed (W1.4′, measured 11,754 B → 228 B). The caller decides when to carry
+// (see writeJobDigest in server.mjs); this writer only has to keep it.
+export function writeOpenCodeDigest(job, result = null, { carriedForward = null } = {}) {
   const path = digestPath(job?.jobId);
   if (!path) return null;
   const stdout = result?.stdout ? truncateChars(result.stdout.trim(), 12_000) : '';
@@ -192,6 +197,13 @@ export function writeOpenCodeDigest(job, result = null) {
   }
   if (stderr) {
     lines.push('## Raw stderr', '', '```text', stderr, '```', '');
+  }
+  if (carriedForward) {
+    // Last, and demoted a level, so the live render stays the first thing an
+    // operator reads while the salvaged body is still in the same file — the
+    // one the `agent-digest://` resource points at.
+    lines.push('## Carried forward from the previous bridge', '',
+      truncateChars(String(carriedForward).replace(/^## /gm, '### '), 12_000), '');
   }
   try {
     // Atomic (temp + rename), not truncate-then-write: this digest is rewritten
