@@ -133,9 +133,13 @@ Notes:
   wins over any extra writable roots); jobs that must write git internals need
   `danger-full-access` or `bypass`. Every delegated job persists a full rollout
   transcript under `$CODEX_HOME/sessions` (default `~/.codex/sessions`) with no
-  auto-cleanup in v1 — deliberate groundwork for a future `codex exec resume`
-  thread-continuity lever. Codex inherits the user's own `~/.codex/config.toml`
-  by default (no `--ignore-user-config` for real jobs): every enabled MCP server
+  auto-cleanup in v1 — that rollout is what `appserver` recovery reads back
+  (`thread/resume` re-loads a thread from it even after the broker dies). The
+  `codex exec resume <thread_id>` lever this once anticipated was dropped when
+  the app-server transport landed; see
+  [docs/RELIABILITY_REMEDIATION.md](docs/RELIABILITY_REMEDIATION.md) "Wave 3".
+  Codex inherits the user's own `~/.codex/config.toml` by default (no
+  `--ignore-user-config` for real jobs): every enabled MCP server
   boots on each spawn and can stall the first turn up to its configured
   `startup_timeout_sec`, and shell env is inherited into the child minus
   `*KEY*`/`*SECRET*`/`*TOKEN*` names. Optional model pin:

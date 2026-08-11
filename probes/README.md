@@ -20,7 +20,7 @@ real Codex jobs. The repo root is derived from the script location; override wit
 |---|---|
 | `smoke.mjs` | 12 checks: the five `agent_*` tools are the whole surface; an unconfigured `strength` hard-fails with `STRENGTH_UNCONFIGURED` and no silent fallback; an empty `candidates` list is withheld rather than shipped; a real Codex job completes end to end and actually does the work; **W1.1** — the thread id is persisted to the ledger *while the job is still running*; the digest carries content; the rollout is deterministically correlatable from the captured thread id. |
 | `orphan.mjs` | 8 checks reproducing the original incident on the **exec** transport: bridge A starts a job, is SIGKILLed mid-run, bridge B hydrates on the same host session. Asserts hydrate does **not** clobber the digest, the detail is `target_child_orphaned_by_bridge_restart` rather than `target_adapter_non_resumable_after_restart`, the message never mentions `CODEX_BIN`, it names the salvage pointers, and the retirement note is a sibling file. |
-| `appserver.mjs` | 15 checks running that same incident on the **app-server** transport (`CODEX_RUNTIME_ADAPTER=appserver`), where it should not be an incident at all. Bridge A dispatches a job whose turn is three sequential shell sleeps, banks the thread id (**W1.1**) and streams sub-turn text into the digest (**F7** — the exec stream emits no deltas), then is SIGKILLed mid-turn. Asserts the broker and its `codex app-server` outlive it, the thread stays in `thread/loaded/list`, and a shell descendant of the app-server is **still running the turn with zero bridges alive**. Bridge B then hydrates on the same host session, resumes the *same* thread, and the job reaches `completed` with the expected answer ~70 s after the kill — zero work lost, no re-prompting. Also asserts the verdict is **not** the exec transport's `target_child_orphaned_by_bridge_restart`, that B's hydrate did not clobber A's streamed digest (**W1.4′** — A's text survives under "Carried forward from the previous bridge"), and that `reply_available`/`resume_available` are truthful both mid-turn and at terminal. |
+| `appserver.mjs` | 15 checks running that same incident on the **app-server** transport (`CODEX_RUNTIME_ADAPTER=appserver`), where it should not be an incident at all. Bridge A dispatches a job whose turn is three sequential shell sleeps, banks the thread id (**W1.1**) and streams sub-turn text into the digest (**F7** — the exec stream emits no deltas; the task *asks* for a one-line opening message, because a preamble is the model's choice and a terse turn would fail F7 and W1.4′ on chattiness rather than on transport), then is SIGKILLed mid-turn. Asserts the broker and its `codex app-server` outlive it, the thread stays in `thread/loaded/list`, and a shell descendant of the app-server is **still running the turn with zero bridges alive**. Bridge B then hydrates on the same host session, resumes the *same* thread, and the job reaches `completed` with the expected answer ~70 s after the kill — zero work lost, no re-prompting. Also asserts the verdict is **not** the exec transport's `target_child_orphaned_by_bridge_restart`, that B's hydrate did not clobber A's streamed digest (**W1.4′** — A's text survives under "Carried forward from the previous bridge"), and that `reply_available`/`resume_available` are truthful both mid-turn and at terminal. |
 
 ```sh
 node probes/smoke/smoke.mjs      # expect 12/12
@@ -33,8 +33,20 @@ that is the condition under test. It dies at its next stdout write.
 
 `appserver.mjs` reaps the broker it used with **SIGTERM** on the way out (never SIGKILL, which
 skips the unlink handler and leaves the stale socket every later start has to probe around).
-It skips the reap if another session's thread is loaded on the same broker. The bridge-side
-idle reaper cannot do this job for it: `disposeBroker` refuses while any thread is loaded.
+It skips the reap if anyone else is on that broker — a thread loaded from another session, or a
+client that is connected but has not started one yet. Those are the broker's own two idle gates
+(`_cheapGatesHold`), and the second one matters because `thread/start` is a round trip: a bridge
+inside it holds a connection and owns nothing yet. `probeCodexBrokerHealth` counts its own
+connection, so "somebody else" is `clients - 1`, never `clients`. The bridge-side idle reaper
+cannot do this job for it: `disposeBroker` refuses while any thread is loaded.
+
+Each bridge logs into the run's temp dir (`AGENT_BRIDGE_LOG_FILE`): the restart-resume check is
+asserted against B's *own* log line (`codex-appserver resume: <job> thread=<id>`, emitted by
+nothing but the resume path) rather than by re-reading the thread id off the ledger, which only
+bridge A ever writes. The answer check is likewise anchored and must differ from what A streamed
+before the kill — the task string names the expected word, so a preamble that restates the
+instruction would satisfy a substring test.
+
 The probe also never calls `thread/resume` itself — resume is the status read on this
 protocol, and subscribing *drains* the broker's pre-subscription ring, which would swallow the
 events bridge B is about to hydrate on.

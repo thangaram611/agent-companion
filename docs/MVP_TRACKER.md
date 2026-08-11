@@ -207,12 +207,21 @@ primary companion:
      model: send→completed, reply re-steer, and cancel→cancelled all pass.
 
 4. Additional companion adapters:
-   - Codex CLI — DONE (this pass, send-only v1): `codex exec --json` adapter;
-     see the Done section above for the full breakdown. Deferred to a later
-     pass: reply/resume via the experimental app-server/exec-server surfaces,
-     thread continuity via `codex exec resume <thread_id>` (groundwork already
-     laid — the thread_id persists into the existing `companionSessionId`
-     slot), fleet/parallel, and shared opencode+codex spawn-core extraction.
+   - Codex CLI — DONE (send-only v1): `codex exec --json` adapter; see the Done
+     section above for the full breakdown.
+   - Codex app-server — DONE (2026-08-11), and it closes what this entry used to
+     defer. `CODEX_RUNTIME_ADAPTER=appserver` puts reply (`turn/steer`), restart
+     resume (`thread/resume`) and streamed sub-turn digests on a detached shared
+     broker owning one `codex app-server`; proved end to end by
+     `probes/smoke/appserver.mjs` (bridge SIGKILLed mid-turn, the job still
+     completes with no work lost).
+   - Thread continuity via `codex exec resume <thread_id>` is **deleted, not
+     deferred** — the transport gate fired, and
+     [docs/RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION.md) "Wave 3"
+     records what replaced each piece. The rollout under `$CODEX_HOME/sessions`
+     is still what recovery reads, now via `thread/resume` / `thread/read`.
+   - Still deferred for codex: fleet/parallel, and the shared opencode+codex
+     spawn-core extraction.
    - Goose first candidate for desktop/CLI/API plus MCP/ACP fit.
    - Aider second candidate for git-native terminal workflows.
    - Keep adapters capability-driven; do not assume reply/resume/parallel support.

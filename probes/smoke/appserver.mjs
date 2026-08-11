@@ -66,6 +66,11 @@ function startBridge(tag) {
       // THE flip under test. Everything else about this probe is orphan.mjs.
       CODEX_RUNTIME_ADAPTER: 'appserver',
       AGENT_COMPANION_LOG_LEVEL: 'INFO',
+      // One log file per bridge, inside this run's temp dir. The restart-resume
+      // assertion reads B's log, so it must not have to pick B's lines out of
+      // A's; and a token-spending probe has no business interleaving itself
+      // into the operator's real `runtime/agent-bridge.log`.
+      AGENT_BRIDGE_LOG_FILE: bridgeLogPath(tag),
     },
   });
   p.stderr.on('data', (c) => { const s = c.toString().trim(); if (s) log(`${tag}-stderr:`, s.slice(0, 220)); });
@@ -118,6 +123,8 @@ function descendantsOf(rootPid) {
 
 const work = mkdtempSync(join(tmpdir(), 'agentco-appserver-'));
 writeFileSync(join(work, 'README.md'), '# appserver smoke\n');
+const bridgeLogPath = (tag) => join(work, `bridge-${tag}.log`);
+const readBridgeLog = (tag) => (existsSync(bridgeLogPath(tag)) ? readFileSync(bridgeLogPath(tag), 'utf8') : '');
 
 let A = null, B = null;
 let brokerPid = null;
@@ -126,13 +133,24 @@ try {
   A = startBridge('A'); await A.init();
   log('bridge A pid', A.proc.pid);
 
-  // Three short sequential shell sleeps, then a fixed word. Sixty seconds of
-  // shell is long enough that the turn is provably still running after A dies —
-  // and the sleeps are where the wall time goes, so the token cost is one
-  // preamble plus one word.
+  // One short opening message, three short sequential shell sleeps, then a fixed
+  // word. Sixty seconds of shell is long enough that the turn is provably still
+  // running after A dies — and the sleeps are where the wall time goes, so the
+  // token cost is two short messages.
+  //
+  // The opening message is ASKED FOR, not hoped for. F7 and W1.4′ both need
+  // assistant text to exist mid-turn, and codex's preamble is the model's
+  // choice: a measured run went straight to the first tool call and left the
+  // digest with no assistant section at all, so both checks failed on the
+  // model's terseness rather than on anything the transport did. Requesting the
+  // message makes those two assertions measure the transport, which is what
+  // they claim to measure.
   const send = await A.tool('agent_send', {
-    task: `Run these three shell commands one after another, each as its own command: \`sleep 20 && echo STEP1\`, then \`sleep 20 && echo STEP2\`, then \`sleep 20 && echo STEP3\`. `
-      + `When all three have finished, reply with ONLY the word ${ANSWER}. No preamble, no punctuation.`,
+    task: 'Before you run anything, send a short one-line message saying you are starting. '
+      + 'That is a message to me, not a tool call. '
+      + 'Then run these three shell commands one after another, each as its own command: '
+      + '`sleep 20 && echo STEP1`, then `sleep 20 && echo STEP2`, then `sleep 20 && echo STEP3`. '
+      + `When all three have finished, reply with ONLY the word ${ANSWER} — that final message must contain nothing else.`,
     cwd: work, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
   });
   const jobId = send.job_id || send.jobId;
@@ -200,9 +218,14 @@ try {
 
   // The turn is not merely resumable — it is still doing work. Poll briefly,
   // because there is a model-thinking gap between the three commands.
+  // Matched on OUR marker, never on `sleep`: the broker is machine-wide by
+  // design and every loaded thread's shell children hang off the same
+  // `codex app-server` pid, so a bare `\bsleep\b` would happily report another
+  // session's turn as evidence that ours survived. `STEP1|2|3` comes from this
+  // probe's own task string, so it can only be this run.
   let running = null;
   for (let i = 0; i < 20 && !running; i++) {
-    running = descendantsOf(brokerAfter.appServerPid).find((d) => /\bsleep\b/.test(d.command)) || null;
+    running = descendantsOf(brokerAfter.appServerPid).find((d) => /STEP[123]/.test(d.command)) || null;
     if (!running) await sleep(1000);
   }
   check('the turn is STILL RUNNING with zero bridges alive (exec cannot do this)',
@@ -232,13 +255,36 @@ try {
   // task string names the expected word, so `content` contains it whether or
   // not the model ever answered. The first section is B's live render; the
   // carried body below it is demoted to `###`.
+  //
+  // Two clauses, because the assistant section can hold the ECHO rather than
+  // the answer by two measured routes, and both reproduce A's pre-kill text:
+  //   1. `resolvedMessage()` (codex-app-server-runtime.mjs) falls back to the
+  //      LAST assistant message when nothing carries `phase: 'final_answer'`,
+  //      so a lost final item renders the preamble into this exact section;
+  //   2. an empty summary drops the `## ` section entirely
+  //      (writeOpenCodeDigest), so the regex's first hit becomes the carried
+  //      `### ` body — A's preamble, verbatim.
+  // `answered !== streamed` closes both, since A's pre-kill section is by
+  // construction not the post-restart answer. The anchor closes the third:
+  // "I'll run the sleeps, then reply with PERSIMMON" is a preamble that a
+  // substring test cannot tell from an answer.
   const answered = assistantSection(readDigest(jobId));
   check(`the answer survived the bridge restart (${ANSWER})`,
-    new RegExp(ANSWER, 'i').test(answered), answered.slice(0, 160) || '(no assistant message)');
+    answered !== streamed && new RegExp(`^\\W*${ANSWER}\\W*$`, 'i').test(answered.trim()),
+    answered.slice(0, 160) || '(no assistant message)');
 
   const after = readLedger(jobId);
+  // Evidence bridge B produced, not a value this probe already held.
+  // `companionSessionId` is written exactly once — by A, from `thread/start` —
+  // and nothing on the resume side writes it, so re-reading it proves only that
+  // A wrote it. `codex-appserver resume: <jobId> thread=<id>` is logged by
+  // `resumeCodexAppServerJob` and by nothing else in the tree, so B's own log
+  // naming OUR thread id is what makes this a measurement.
+  const resumeLine = readBridgeLog('B').split('\n')
+    .find((l) => l.includes(`codex-appserver resume: ${jobId}`)) || '';
   check('B resumed the SAME thread rather than starting a new one',
-    after?.companionSessionId === ourThreadId, `${ourThreadId} -> ${after?.companionSessionId}`);
+    resumeLine.includes(`thread=${ourThreadId}`) && after?.companionSessionId === ourThreadId,
+    resumeLine.slice(-140) || 'bridge B never logged a codex-appserver resume');
   // The exec transport's honest verdict is the wrong verdict here: nothing was
   // orphaned, because nothing the bridge owned was running the work.
   check('the verdict is NOT the exec transport\'s orphan detail',
@@ -287,15 +333,32 @@ try {
   // socket file it leaves is exactly what a later run has to connect-probe
   // around (measured — see probes/README.md).
   //
-  // Only ever OUR broker, and only when nothing else is loaded on it: another
-  // session's live codex job would be on the same socket. A run that dies before
-  // it learns the broker pid reaps nothing — there is no way to tell that broker
-  // apart from someone else's — and falls back to the broker's own idle timer.
+  // Only ever OUR broker, and only when nobody else is on it: another session's
+  // live codex job would be on the same socket. A run that dies before it learns
+  // the broker pid reaps nothing — there is no way to tell that broker apart
+  // from someone else's — and falls back to the broker's own idle timer.
+  //
+  // Both of the broker's own idle gates, not just the strong one. `clients` is
+  // the gate `_cheapGatesHold` checks first, precisely because a bridge can be
+  // connected and inside `thread/start` with nothing loaded yet: SIGTERM there
+  // kills a turn that is one round-trip from existing. `probeCodexBrokerHealth`
+  // connects, so ITS OWN connection is inside the count it reports — "somebody
+  // else" is `clients - 1`, never `clients`, and gating on `clients > 0` would
+  // skip the reap on every run. Our two bridges were killed just above and the
+  // broker drops a client when the socket closes, so this waits briefly for
+  // that to land rather than reading a count that is stale by milliseconds.
   if (brokerPid) {
     try {
-      const health = await probeCodexBrokerHealth();
+      let health = await probeCodexBrokerHealth();
+      for (let i = 0; i < 8 && health.alive && (health.clients ?? 1) > 1; i++) {
+        await sleep(500);
+        health = await probeCodexBrokerHealth();
+      }
+      const others = health.alive ? (health.clients ?? 1) - 1 : 0;
       if (!health.alive || health.brokerPid !== brokerPid) {
         log('broker reap skipped: it is no longer the one this run used');
+      } else if (others > 0) {
+        log(`broker reap skipped: ${others} other client(s) still connected`);
       } else {
         const conn = await connectCodexBroker({ socketPath: health.socketPath });
         let loaded = [];
