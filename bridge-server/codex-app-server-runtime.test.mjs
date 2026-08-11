@@ -39,6 +39,8 @@ import {
   interruptCodexTurn,
   listLoadedCodexThreads,
   getCodexThreadStatus,
+  resolveCodexTurnId,
+  resolveSteerConfirmMs,
   openCodexTurnWatcher,
   LEASE_STALE_MS,
   _setForTest,
@@ -171,6 +173,39 @@ test('the accumulator prefers the final answer over the commentary preamble', ()
   acc.push(note('item/completed', { threadId: TID, item: { id: 'm3', type: 'agentMessage', text: 'Anything else?', phase: 'commentary' } }));
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
   assert.equal(acc.snapshot().message, 'THE ANSWER');
+});
+
+test('a SECOND turn on the same thread replaces the tracked turn id', () => {
+  // The live source of the id `turn/interrupt` and `turn/steer` require. Keeping
+  // the first turn's id after a second one starts is the stale-`expectedTurnId`
+  // failure — `no active turn to steer` on a thread that has one.
+  const acc = createCodexTurnAccumulator(TID);
+  acc.push(note('turn/started', { threadId: TID, turn: { id: 'TURN1' } }));
+  assert.equal(acc.turnId, 'TURN1');
+  acc.push(note('turn/completed', { threadId: TID, turn: { id: 'TURN1', status: 'completed', items: [] } }));
+  acc.push(note('turn/started', { threadId: TID, turn: { id: 'TURN2' } }));
+  assert.equal(acc.turnId, 'TURN2');
+  // Another thread's turn is not this thread's turn, however loud it is.
+  acc.push(note('turn/started', { threadId: 'T-OTHER', turn: { id: 'TURN_ELSEWHERE' } }));
+  assert.equal(acc.turnId, 'TURN2');
+});
+
+test('the watcher hands the live turn id to its observer, beside the snapshot', async () => {
+  // Beside, not inside: the snapshot is digest content, and the turn id is
+  // transport bookkeeping the JOB needs. The bridge persists it from here, which
+  // is what gives a cancel or a reply an id to send.
+  const { conn, sock } = await connectFake();
+  const seen = [];
+  const watcher = await openCodexTurnWatcher({
+    conn, threadId: TID, timeoutMs: 5_000,
+    onEvent: (snapshot, meta) => seen.push([meta?.turnId, 'turnId' in snapshot]),
+  });
+  sock.notify('turn/started', { turn: { id: 'TURN1' } });
+  sock.notify('item/agentMessage/delta', { itemId: 'm1', delta: 'working' });
+  sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+  await watcher.done;
+  conn.close();
+  assert.deepEqual(seen, [['TURN1', false], ['TURN1', false], ['TURN1', false]]);
 });
 
 test('an interrupted turn settles cancelled, with no answer', () => {
@@ -374,7 +409,7 @@ test('interrupting a thread this connection did not start resumes it first', asy
   // the same thread resuming fine straight afterwards. The guard is structural,
   // so the order is what is asserted.
   const { conn, sock } = await connectFake();
-  await interruptCodexTurn({ conn, threadId: 'FOREIGN' });
+  await interruptCodexTurn({ conn, threadId: 'FOREIGN', turnId: 'TURN9' });
   conn.close();
   assert.deepEqual(sock.wire(), ['thread/resume', 'turn/interrupt']);
   assert.equal(sock.paramsFor('thread/resume')[0].threadId, 'FOREIGN');
@@ -383,8 +418,8 @@ test('interrupting a thread this connection did not start resumes it first', asy
 
 test('steering a foreign thread resumes once, and only once', async () => {
   const { conn, sock } = await connectFake();
-  await steerCodexTurn({ conn, threadId: 'FOREIGN', prompt: 'change of plan' });
-  await steerCodexTurn({ conn, threadId: 'FOREIGN', prompt: 'again' });
+  await steerCodexTurn({ conn, threadId: 'FOREIGN', prompt: 'change of plan', expectedTurnId: 'TURN9' });
+  await steerCodexTurn({ conn, threadId: 'FOREIGN', prompt: 'again', expectedTurnId: 'TURN9' });
   conn.close();
   assert.deepEqual(sock.wire(), ['thread/resume', 'turn/steer', 'turn/steer']);
 });
@@ -392,17 +427,169 @@ test('steering a foreign thread resumes once, and only once', async () => {
 test('a thread this connection started needs no resume before acting on it', async () => {
   const { conn, sock } = await connectFake();
   const { threadId } = await startCodexThread({ conn, cwd: '/w', env: {} });
-  await interruptCodexTurn({ conn, threadId });
-  await steerCodexTurn({ conn, threadId, prompt: 'more' });
+  await interruptCodexTurn({ conn, threadId, turnId: 'TURN9' });
+  await steerCodexTurn({ conn, threadId, prompt: 'more', expectedTurnId: 'TURN9' });
   conn.close();
   assert.deepEqual(sock.wire(), ['thread/start', 'turn/interrupt', 'turn/steer']);
 });
 
 test('the resume guard cannot be bypassed by calling the connection directly', async () => {
   const { conn, sock } = await connectFake();
-  await conn.call('turn/interrupt', { threadId: 'FOREIGN' });
+  await conn.call('turn/interrupt', { threadId: 'FOREIGN', turnId: 'TURN9' });
   conn.close();
   assert.deepEqual(sock.wire(), ['thread/resume', 'turn/interrupt']);
+});
+
+// --- the required turn ids ---------------------------------------------------
+
+test('turn/interrupt and turn/steer put their REQUIRED ids on the wire', async () => {
+  // The defect this suite missed for three rounds: both fields are `required`
+  // in the pinned contract, the adapter dropped them when null, and both fakes
+  // answered anyway. Measured against the real 0.147.0 server, the omission is
+  // an unconditional `-32600 Invalid request: missing field \`x\``, so
+  // agent_cancel and agent_reply failed on EVERY app-server job. The fakes
+  // enforce the contract now, so this test cannot pass without the ids.
+  const { conn, sock } = await connectFake();
+  const { threadId } = await startCodexThread({ conn, cwd: '/w', env: {} });
+  const interrupted = await interruptCodexTurn({ conn, threadId, turnId: 'TURN7' });
+  const steered = await steerCodexTurn({ conn, threadId, prompt: 'use ripgrep', expectedTurnId: 'TURN7' });
+  conn.close();
+  assert.deepEqual(sock.paramsFor('turn/interrupt')[0], { threadId, turnId: 'TURN7' });
+  assert.deepEqual(sock.paramsFor('turn/steer')[0], {
+    threadId, expectedTurnId: 'TURN7', input: [{ type: 'text', text: 'use ripgrep' }],
+  });
+  assert.equal(interrupted.turnId, 'TURN7');
+  assert.equal(steered.turnId, 'TURN7');
+  assert.equal(steered.accepted, true);
+});
+
+test('a turn id nobody can supply is a LOUD failure, never an omitted field', async () => {
+  // The alternative — send it without the field — is a -32600 from a server the
+  // operator never sees, on a call they were told succeeded. Neither is a
+  // placeholder id acceptable: the server would answer `no active turn`, which
+  // reads as "the turn is over" rather than "the bridge lost track of it".
+  const { conn, sock } = await connectFake({ turns: { LOST: [{ id: 'TURN1', status: 'completed' }] } });
+  await assert.rejects(
+    () => interruptCodexTurn({ conn, threadId: 'LOST' }),
+    /turn\/interrupt needs the running turn's id on thread LOST .*last turn TURN1 as completed/s,
+  );
+  await assert.rejects(
+    () => steerCodexTurn({ conn, threadId: 'NOTURNS', prompt: 'x' }),
+    /turn\/steer needs the running turn's id on thread NOTURNS .*no turns at all/s,
+  );
+  conn.close();
+  // Nothing reached the wire beyond the two lookups — no interrupt, no steer.
+  assert.deepEqual(sock.wire(), ['thread/read', 'thread/read']);
+});
+
+test('a bridge that never saw turn/started reads the running turn off thread/read', async () => {
+  // The restart case, measured: the turn began before this bridge existed, so
+  // `turn/started` is gone for good. `thread/read{includeTurns:true}` reports
+  // the thread's last turn as `{id, status}` and the running one reads
+  // `inProgress` with the id `turn/start` returned.
+  const { conn, sock } = await connectFake({
+    turns: { RESUMED: [{ id: 'TURN_OLD', status: 'completed' }, { id: 'TURN_LIVE', status: 'inProgress' }] },
+  });
+  const interrupted = await interruptCodexTurn({ conn, threadId: 'RESUMED' });
+  conn.close();
+  assert.equal(interrupted.turnId, 'TURN_LIVE');
+  assert.deepEqual(sock.wire(), ['thread/read', 'thread/resume', 'turn/interrupt']);
+  assert.equal(sock.paramsFor('thread/read')[0].includeTurns, true);
+  assert.equal(sock.paramsFor('turn/interrupt')[0].turnId, 'TURN_LIVE');
+});
+
+test('a live id is used as given — the transport is only asked when there is none', async () => {
+  const { conn, sock } = await connectFake({
+    turns: { LIVE: [{ id: 'TURN_FROM_READ', status: 'inProgress' }] },
+  });
+  const interrupted = await interruptCodexTurn({ conn, threadId: 'LIVE', turnId: 'TURN_FROM_STARTED' });
+  conn.close();
+  assert.equal(interrupted.turnId, 'TURN_FROM_STARTED');
+  assert.deepEqual(sock.wire(), ['thread/resume', 'turn/interrupt'], 'no thread/read when the id is known');
+});
+
+test('attaching to a turn already in flight reports THAT turn\'s id, not the previous one', async () => {
+  // `turn/start` on a busy thread SUCCEEDS and returns a second turn id, so the
+  // adapter attaches instead — and the caller records the id it reports. Before
+  // this, `attached` reported null and the job kept whatever id it had from the
+  // turn BEFORE, which is the stale-`expectedTurnId` failure mode.
+  const { conn } = await connectFake({
+    statuses: { BUSY: 'active' },
+    turns: { BUSY: [{ id: 'TURN_RUNNING', status: 'inProgress' }] },
+  });
+  const started = await startCodexTurn({ conn, threadId: 'BUSY', prompt: 'do the thing' });
+  conn.close();
+  assert.deepEqual(started, { threadId: 'BUSY', turnId: 'TURN_RUNNING', attached: true, status: 'active' });
+});
+
+// --- the steer landed, or it did not ------------------------------------------
+
+test('a steer is confirmed by the injected message coming back, not by the RPC returning', async () => {
+  // Measured: the injection arrives as an `item/completed` whose item type is
+  // `userMessage`. The turn's OPENING prompt produces one too, so counting
+  // would confirm a steer that never landed — the injected one is identified by
+  // the text this bridge chose.
+  const { conn, sock } = await connectFake();
+  const { threadId } = await startCodexThread({ conn, cwd: '/w', env: {} });
+  const steer = await steerCodexTurn({ conn, threadId, prompt: 'switch to ripgrep', expectedTurnId: 'TURN1' });
+  conn.close();
+  assert.equal(steer.accepted, true);
+  assert.equal(steer.confirmed, true);
+  assert.match(steer.confirmation, /item\/completed userMessage/);
+  assert.equal(sock.paramsFor('turn/steer')[0].input[0].text, 'switch to ripgrep');
+});
+
+test('the steer confirmation window is a bounded, env-overridable number', () => {
+  // A probe steering a turn that is sitting inside a 20 s shell command wants to
+  // wait past it; `agent_reply` blocks for this, so it is also capped.
+  assert.equal(resolveSteerConfirmMs({}), 5_000);
+  assert.equal(resolveSteerConfirmMs({ AGENT_COMPANION_CODEX_STEER_CONFIRM_MS: '25000' }), 25_000);
+  assert.equal(resolveSteerConfirmMs({ AGENT_COMPANION_CODEX_STEER_CONFIRM_MS: '0' }), 0);
+  assert.equal(resolveSteerConfirmMs({ AGENT_COMPANION_CODEX_STEER_CONFIRM_MS: '999999' }), 120_000);
+  // Garbage is the default, not a zero window that reports every steer as
+  // unconfirmed.
+  assert.equal(resolveSteerConfirmMs({ AGENT_COMPANION_CODEX_STEER_CONFIRM_MS: 'soon' }), 5_000);
+  assert.equal(resolveSteerConfirmMs({ AGENT_COMPANION_CODEX_STEER_CONFIRM_MS: '-1' }), 5_000);
+  assert.equal(codexAppServerRuntimeInfo({}).steer_confirm_ms, 5_000);
+});
+
+test('an unconfirmed steer says so — it is not reported as delivered, nor as failed', async () => {
+  // Codex applies a steer at the NEXT MODEL BOUNDARY: measured 0.14 s against
+  // an in-flight apply_patch and 130 s against a model mid-reasoning. So a short
+  // window that sees nothing is the normal case, and the honest answer is
+  // "accepted, not yet confirmed".
+  const { conn } = await connectFake({
+    handlers: { 'turn/steer': (p) => ({ turn: { id: p.expectedTurnId } }) },  // no injection ever announced
+  });
+  const steer = await steerCodexTurn({
+    conn, threadId: 'T9', prompt: 'switch to ripgrep', expectedTurnId: 'TURN1', confirmMs: 20,
+  });
+  conn.close();
+  assert.equal(steer.accepted, true);
+  assert.equal(steer.confirmed, false);
+  assert.match(steer.confirmation, /next model boundary/);
+});
+
+test('the turn\'s own opening message never counts as a steer confirmation', async () => {
+  const { conn, sock } = await connectFake({
+    handlers: {
+      'turn/steer': (p) => {
+        // The opening prompt's userMessage, replayed while the steer is in
+        // flight. Same item type, different text — and it must not confirm.
+        setTimeout(() => sock.deliver({
+          jsonrpc: '2.0',
+          method: 'item/completed',
+          params: { threadId: 'T9', item: { id: 'item_0', type: 'userMessage', content: [{ type: 'text', text: 'the original task' }] } },
+        }), 0);
+        return { turn: { id: p.expectedTurnId } };
+      },
+    },
+  });
+  const steer = await steerCodexTurn({
+    conn, threadId: 'T9', prompt: 'switch to ripgrep', expectedTurnId: 'TURN1', confirmMs: 40,
+  });
+  conn.close();
+  assert.equal(steer.confirmed, false);
 });
 
 // --- the single turn/start path ----------------------------------------------
@@ -1180,12 +1367,23 @@ test('end to end: a turn streams through the real broker to a terminal summary',
   assert.equal(start.params.ephemeral, false);
   assert.equal('model' in start.params, false, 'config.toml stays the single source of truth');
 
-  // A LATER bridge — a fresh connection that did not start this thread — must
-  // resume before it may interrupt. Asserted on the app-server's own trace.
+  // A LATER bridge — a fresh connection that did not start this thread, i.e. the
+  // restart case — must resume before it may interrupt, and it has no `turnId`
+  // of its own because it never saw `turn/started`. Both are asserted on the
+  // app-server's own trace: it reads the running turn off `thread/read` and
+  // sends it, because the field is REQUIRED and the real server refuses the
+  // call without it.
+  await conn.call('fake/setTurns', { threadId, turns: [
+    { id: 'TURN0', status: 'completed', items: [] },
+    { id: 'TURN1', status: 'inProgress', items: [] },
+  ] });
   const later = await connectCodexBroker({ socketPath, env });
-  await interruptCodexTurn({ conn: later, threadId });
+  const interrupted = await interruptCodexTurn({ conn: later, threadId });
   later.close();
-  const tail = readFileSync(tracePath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
-    .map((m) => m.method).filter((m) => m === 'thread/resume' || m === 'turn/interrupt');
-  assert.deepEqual(tail, ['thread/resume', 'turn/interrupt']);
+  assert.equal(interrupted.turnId, 'TURN1');
+  const trace = readFileSync(tracePath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const tail = trace.map((m) => m.method)
+    .filter((m) => m === 'thread/read' || m === 'thread/resume' || m === 'turn/interrupt');
+  assert.deepEqual(tail, ['thread/read', 'thread/resume', 'turn/interrupt']);
+  assert.deepEqual(trace.find((m) => m.method === 'turn/interrupt').params, { threadId, turnId: 'TURN1' });
 });

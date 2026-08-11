@@ -124,7 +124,14 @@ positively (an unset variable never opens a broker connection), and re-verified 
 `smoke.mjs` 12/12 and `orphan.mjs` 8/8, which still exercise the exec transport including its
 orphan verdict.
 
-The app-server side is proven against the real bridge by `probes/smoke/appserver.mjs`
+The app-server side is proven against the real bridge by two probes. The control surface is
+`probes/smoke/appserver-control.mjs` (17/17, 2026-08-11): a running turn steered mid-flight
+and obeying the injected instruction, and a running turn interrupted with the job settling
+`cancelled` and the thread surviving, resumable. It exists because the restart proof below
+went 15/15 while `turn/steer` and `turn/interrupt` were both unconditionally broken — see the
+D1 correction under W3.3′.
+
+The survival property is `probes/smoke/appserver.mjs`
 (15/15, 2026-08-11): bridge A SIGKILLed mid-turn; the broker, its app-server and a live shell
 descendant still running the turn with **zero bridges alive**; bridge B hydrating, resuming the
 same thread, and the job reaching `completed` 72.6 s after the kill with the answer intact and
@@ -556,6 +563,52 @@ spawn's own `cwd` (verified: thread created under `-C dirA`, resumed from proces
 **W3.3′ — `agent_reply` for Codex** *(medium; deps W3.2′ or the app-server adapter)*
 > **BUILT 2026-08-11, app-server branch only.** The `exec` bullet below is deleted with W3.2′ —
 > codex under `exec` still reports `reply_available: false`, truthfully, per job.
+>
+> **⚠️ Both control paths shipped BROKEN and were fixed 2026-08-11 (D1).** Measured against the
+> real `codex app-server` (codex-cli 0.147.0):
+>
+> ```
+> turn/steer     WITHOUT expectedTurnId -> -32600 "Invalid request: missing field `expectedTurnId`"
+> turn/interrupt WITHOUT turnId         -> -32600 "Invalid request: missing field `turnId`"
+> ```
+>
+> Both fields are `required` in the vendored contract; the adapter omitted them when null and
+> the bridge never supplied one, so **`agent_cancel` and `agent_reply` failed on every
+> app-server job**. The reasoning that left them out — "a stale `expectedTurnId` is a measured
+> error class, so the calls stay thread-scoped" — was wrong in the safe-looking direction: a
+> stale id is a *conditional* failure (`no active turn to steer`), omitting the field is an
+> *unconditional* one. The fix carries the id from two measured sources, in one shared
+> resolver: `job.turnId` (live, from `turn/started` and `turn/start`'s own answer) and, for a
+> bridge that restarted and never saw `turn/started`, `thread/read{includeTurns:true}` →
+> `thread.turns[last]`, whose running turn reads `{id, status:"inProgress"}`. When neither has
+> one the call **throws** naming the thread; it never sends a placeholder and never omits.
+>
+> **Why three rounds of review missed it, and what changed.** `test/fake-codex-app-server.mjs`
+> and `test/fake-codex-broker-socket.mjs` answered whatever they were asked, so every unit test
+> passed against a call the real server rejects — *a fake that accepts what the real server
+> rejects converts a protocol violation into a green test*. Both fakes now validate every
+> inbound call against the pinned contract first and answer the server's own
+> `-32600 Invalid request: missing field \`x\`` (the required-params table is generated from
+> the schema, like the routing table beside it). Re-running the suite with the fakes fixed and
+> the adapter untouched turned 8 tests red — the four adapter guard tests, the broker
+> end-to-end, and three bridge cancel/reply tests.
+>
+> And `probes/smoke/appserver.mjs` went **15/15 with both paths broken**, because it never
+> exercised either. `probes/smoke/appserver-control.mjs` (17/17, 2026-08-11) now does, on the
+> real transport: a running turn steered mid-flight and obeying the new instruction
+> (`PINEAPPLE`, not the `BANANA` it was started with), and a running turn interrupted with the
+> job settling `cancelled` while **the thread survives** — still in `thread/loaded/list`,
+> `thread/resume` → `idle` with its last turn recorded `interrupted`, and `thread/read` still
+> returning the history.
+>
+> **A steer is confirmed, not assumed.** The RPC returning means the server accepted the steer,
+> not that the model got it. The injected input comes back as an `item/completed` whose item is
+> a `userMessage` — but so does every turn's OPENING prompt, so counting them confirms a steer
+> that never landed; the injected one is matched by the text this bridge chose. `agent_reply`
+> reports `steered` (accepted) and `steer_confirmed` (observed) separately, with the window in
+> `AGENT_COMPANION_CODEX_STEER_CONFIRM_MS` (default 5 s, reported in `agent_status`). An
+> unconfirmed steer is not a failed one: codex injects at the next model boundary, measured
+> 0.14 s against an in-flight `apply_patch` and 130 s against a model mid-reasoning.
 - ~~**Under `exec`** — terminal → new turn on the same thread; running → queued steer applied at
   turn end; running + `interrupt:true` → cancel-then-resume.~~ Deleted with W3.2′. The
   labelling point survives and was acted on: these are **transport** limitations of

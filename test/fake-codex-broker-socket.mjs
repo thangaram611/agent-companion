@@ -16,8 +16,18 @@
 //
 // It never spawns anything and never spends a token. Tests that want the REAL
 // broker process use test/fake-codex-app-server.mjs through `CODEX_BIN` instead.
+//
+// EVERY INBOUND CALL IS VALIDATED AGAINST THE PINNED CONTRACT before a handler
+// sees it. A fake that answers what the real server rejects is worse than no
+// fake — it converts a protocol violation into a green test, which is exactly
+// how `turn/steer` without `expectedTurnId` and `turn/interrupt` without
+// `turnId` passed three rounds of review and failed on every real job. A
+// handler override cannot opt out: the check runs first, and a test that wants
+// to model an error answers with `__error` instead.
 
 import { EventEmitter } from 'node:events';
+
+import { contractViolation } from '../lib/codex-app-server-contract.mjs';
 
 // The pid the fake broker claims as its own. `disposeBroker` only signals a pid
 // the LIVE broker claims, so a registry entry that expects to be disposed has
@@ -28,6 +38,13 @@ export const FAKE_APP_SERVER_PID = 4243;
 export function fakeBrokerSocket({
   handlers = {},
   statuses = {},
+  // threadId -> the turns `thread/resume` and `thread/read` report, newest
+  // last. The real `Thread` carries them on BOTH responses (the schema: "Only
+  // populated on `thread/resume`, `thread/rollback`, `thread/fork`, and
+  // `thread/read` (when `includeTurns` is true)"), and the running turn reads
+  // `{id, status:'inProgress'}` — which is where a bridge that never saw
+  // `turn/started` gets the id `turn/interrupt` and `turn/steer` require.
+  turns = {},
   brokerPid = FAKE_BROKER_PID,
   threadId = 'T1',
 } = {}) {
@@ -49,6 +66,7 @@ export function fakeBrokerSocket({
   // one after routing it. Sugar over `deliver` because bridge tests write many.
   sock.notify = (method, params = {}) => sock.deliver({ jsonrpc: '2.0', method, params: { threadId, ...params } });
 
+  let steerSeq = 0;
   const defaults = {
     initialize: () => ({
       brokered: true,
@@ -62,12 +80,37 @@ export function fakeBrokerSocket({
     'broker/status': () => ({ ok: true, protocol: 1, brokerPid, appServerPid: FAKE_APP_SERVER_PID, uptimeMs: 1, clients: 1, subscriptions: 0 }),
     'broker/subscribe': (p) => ({ ok: true, threadId: p.threadId, flushed: 0 }),
     'broker/unsubscribe': (p) => ({ ok: true, threadId: p.threadId }),
-    'thread/start': () => ({ thread: { id: threadId, path: `/fake/rollout-${threadId}.jsonl` } }),
-    'thread/resume': (p) => ({ thread: { id: p.threadId, status: { type: statuses[p.threadId] || 'idle' } } }),
-    'thread/read': (p) => ({ thread: { id: p.threadId }, turns: [{ items: [] }] }),
+    'thread/start': () => ({ thread: { id: threadId, path: `/fake/rollout-${threadId}.jsonl`, turns: [] } }),
+    'thread/resume': (p) => ({
+      thread: { id: p.threadId, status: { type: statuses[p.threadId] || 'idle' }, turns: turns[p.threadId] || [] },
+    }),
+    // `turns` hangs off the THREAD, not off the response — the shape the real
+    // ThreadReadResponse declares (`{thread: {…, turns: […]}}`).
+    'thread/read': (p) => ({ thread: { id: p.threadId, turns: turns[p.threadId] || [] } }),
     'thread/loaded/list': () => ({ data: [] }),
     'turn/start': () => ({ turn: { id: 'TURN1' } }),
-    'turn/steer': () => ({}),
+    // The real server echoes the turn it steered; `{}` would let a caller that
+    // reads the echo pass against a fake and read undefined against codex.
+    //
+    // And it ANNOUNCES the injection: the steered input arrives in the turn as
+    // an `item/completed` whose item is a `userMessage` (measured 0.14 s after
+    // the RPC against an in-flight apply_patch). A fake that only answered the
+    // call would let "the RPC returned" stand in for "the model got it" — the
+    // conflation the confirmation exists to break. `setTimeout(0)`, not a
+    // microtask, so it lands AFTER the response, which is the order the broker
+    // writes them in. A test that wants the other measured case — a model
+    // mid-reasoning, injection minutes away — overrides this handler.
+    'turn/steer': (p) => {
+      setTimeout(() => sock.deliver({
+        jsonrpc: '2.0',
+        method: 'item/completed',
+        params: {
+          threadId: p.threadId,
+          item: { id: `steer-${++steerSeq}`, type: 'userMessage', content: p.input || [] },
+        },
+      }), 0);
+      return { turn: { id: p.expectedTurnId } };
+    },
     'turn/interrupt': () => ({}),
   };
 
@@ -78,6 +121,13 @@ export function fakeBrokerSocket({
       sock.frames.push(msg);
       if (typeof msg.method === 'string') sock.calls.push(msg);
       if (msg.id === undefined || typeof msg.method !== 'string') continue;
+      // The contract check runs BEFORE the handler, and ahead of any override,
+      // because that is the order the real server applies it: deserialization
+      // refuses a call that omits a required field before it looks at the
+      // thread, the turn or anything else. `broker/*` methods are the broker's
+      // own and carry no client-request contract, so they pass through.
+      const violation = contractViolation(msg.method, msg.params);
+      if (violation) { sock.deliver({ jsonrpc: '2.0', id: msg.id, error: violation }); continue; }
       const handler = handlers[msg.method] || defaults[msg.method] || (() => ({ echo: msg.method }));
       queueMicrotask(async () => {
         let result;
