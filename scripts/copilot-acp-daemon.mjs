@@ -10,7 +10,7 @@
 
 import { spawn, execSync } from 'node:child_process';
 import { createServer, connect as connectSocket } from 'node:net';
-import { appendFileSync, statSync, lstatSync, unlinkSync, renameSync, writeFileSync, existsSync, readFileSync, chmodSync, readdirSync, realpathSync } from 'node:fs';
+import { appendFileSync, statSync, lstatSync, unlinkSync, renameSync, writeFileSync, existsSync, readFileSync, chmodSync, realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isAbsolute } from 'node:path';
@@ -27,7 +27,7 @@ import {
   coalesceTextChunks,
   buildPromptInspection,
 } from '../lib/prompt-inspect.mjs';
-import { selectLiveHeartbeat } from '../lib/heartbeat.mjs';
+import { scanLiveHeartbeat } from '../lib/heartbeat.mjs';
 import { DEFAULT_MODEL, readDefaultModel } from '../lib/state.mjs';
 
 // --- Constants ---------------------------------------------------------------
@@ -1491,34 +1491,14 @@ class SessionManager {
 
   // Scan HEARTBEAT_DIR for the freshest per-host-sid heartbeat. Returns the
   // sid (basename minus extension) if any heartbeat is within HOST_LIVENESS_TTL_MS,
-  // else null. Sweeps heartbeats older than HEARTBEAT_STALE_AFTER_MS as a side
-  // effect — keeps the dir from growing unbounded across orphaned sessions
-  // (parent process crash, OS reboot, etc).
-  //
-  // I/O lives here; classification (TTL boundary, freshest-of-many,
-  // stale-unlink predicate) is in lib/heartbeat.mjs so it can be unit-tested.
+  // else null. The walk itself (and the stale sweep) lives in lib/heartbeat.mjs
+  // because the codex broker asks the same question of the same directory.
   _findLiveHeartbeat(now = Date.now()) {
-    let names;
-    const dir = heartbeatDir();
-    try { names = readdirSync(dir); }
-    catch { return null; } // dir doesn't exist → no hosts yet
-    const entries = [];
-    for (const name of names) {
-      if (!name.endsWith('.heartbeat')) continue;
-      try {
-        const stat = statSync(`${dir}/${name}`);
-        entries.push({ name, mtimeMs: stat.mtimeMs });
-      } catch { /* file vanished between readdir and stat — skip */ }
-    }
-    const { liveSid, staleToUnlink } = selectLiveHeartbeat({
-      entries, nowMs: now,
+    return scanLiveHeartbeat(heartbeatDir(), {
+      nowMs: now,
       liveTtlMs: HOST_LIVENESS_TTL_MS,
       staleAfterMs: HEARTBEAT_STALE_AFTER_MS,
     });
-    for (const name of staleToUnlink) {
-      try { unlinkSync(`${dir}/${name}`); } catch {}
-    }
-    return liveSid;
   }
 }
 
