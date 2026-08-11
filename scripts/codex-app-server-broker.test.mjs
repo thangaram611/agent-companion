@@ -38,6 +38,14 @@ import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
 const RUNTIME_SANDBOX = mkdtempSync(join(tmpdir(), 'cxb-'));
 process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
 process.env.AGENT_HEARTBEAT_DIR = join(RUNTIME_SANDBOX, 'hb');
+// Pinned explicitly rather than left to resolve through runtimeDir(). The log
+// path is read at every `log()` call, and the broker has work that outlives the
+// test that started it — `_probeVersion`'s `codex --version` is fired and not
+// awaited, so its WARN can land after the suite is over. Resolving through the
+// env at that moment is how a unit test came to append a real stack trace to the
+// operator's live ~/.claude/agent-companion/runtime log (measured: +957 bytes
+// per run). One env var that is never unset closes it for every straggler.
+process.env.CODEX_BROKER_LOG_FILE = join(RUNTIME_SANDBOX, 'broker.log');
 mkdirSync(process.env.AGENT_HEARTBEAT_DIR, { recursive: true });
 
 const {
@@ -57,8 +65,10 @@ const BROKER_PATH = fileURLToPath(new URL('./codex-app-server-broker.mjs', impor
 
 test.after(() => {
   rmSync(RUNTIME_SANDBOX, { recursive: true, force: true });
-  delete process.env.AGENT_RUNTIME_DIR;
-  delete process.env.AGENT_HEARTBEAT_DIR;
+  // The redirect env vars are deliberately NOT unset. Clearing them re-points
+  // every straggler at the real runtime dir, which is the one outcome this
+  // teardown exists to prevent; the runner process exits moments later, so
+  // there is nothing to leak them to.
 });
 
 test('module import does not require a codex binary on PATH', async () => {
@@ -886,6 +896,11 @@ async function startRealBroker(t, extraEnv = {}) {
     env: {
       ...process.env,
       AGENT_RUNTIME_DIR: dir,
+      // Explicit, because the suite-level CODEX_BROKER_LOG_FILE we inherit
+      // through `...process.env` outranks AGENT_RUNTIME_DIR — every spawned
+      // broker would otherwise write into the shared suite log instead of the
+      // per-test one `logPath` reads back.
+      CODEX_BROKER_LOG_FILE: join(dir, 'codex-app-server-broker.log'),
       CODEX_BROKER_SOCKET_PATH: socketPath,
       CODEX_BROKER_LOG_LEVEL: 'DEBUG',
       CODEX_BIN: fakeCodexBin(dir),
