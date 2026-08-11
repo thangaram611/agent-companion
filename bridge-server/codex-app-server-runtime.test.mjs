@@ -49,6 +49,10 @@ import { CODEX_PINNED_VERSION } from '../lib/codex-app-server-contract.mjs';
 import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
 
 const TID = 'T1';
+// The pid the fake broker reports as its own. The reaper only signals a pid the
+// LIVE broker claims, so a registry entry that expects to be disposed has to
+// carry this one.
+const BROKER_PID = 4242;
 
 let regDir;
 beforeEach(() => {
@@ -75,7 +79,7 @@ function brokerSocketPath() { return process.env.CODEX_BROKER_SOCKET_PATH; }
 // push notifications back. `_impl.connect` hands this to the real
 // createConnection, so the framing, the id map, the ownership tracking and the
 // guards are all the shipped code.
-function fakeBrokerSocket({ handlers = {}, statuses = {} } = {}) {
+function fakeBrokerSocket({ handlers = {}, statuses = {}, brokerPid = BROKER_PID } = {}) {
   const sock = new EventEmitter();
   sock.frames = [];  // everything the adapter wrote
   sock.calls = [];   // …of which the method-carrying ones
@@ -95,13 +99,13 @@ function fakeBrokerSocket({ handlers = {}, statuses = {} } = {}) {
     initialize: () => ({
       brokered: true,
       protocol: 1,
-      brokerPid: 4242,
+      brokerPid,
       appServerPid: 4243,
       appServerInitialized: true,
       codexVersion: '0.147.0',
       codexVersionProbed: true,
     }),
-    'broker/status': () => ({ ok: true, protocol: 1, brokerPid: 4242, appServerPid: 4243, uptimeMs: 1, clients: 1, subscriptions: 0 }),
+    'broker/status': () => ({ ok: true, protocol: 1, brokerPid, appServerPid: 4243, uptimeMs: 1, clients: 1, subscriptions: 0 }),
     'broker/subscribe': (p) => ({ ok: true, threadId: p.threadId, flushed: 0 }),
     'broker/unsubscribe': (p) => ({ ok: true, threadId: p.threadId }),
     'thread/start': () => ({ thread: { id: TID, path: `/fake/rollout-${TID}.jsonl` } }),
@@ -511,6 +515,46 @@ test('no call site can send a raw turn/start', async () => {
   assert.deepEqual(sock.wire(), []);
 });
 
+test('the guarded methods cannot slip out through notify() either', async () => {
+  // A notification carries no id, and the broker forwards "any other {method}
+  // with no id" upstream verbatim — so this is the one door that never touches
+  // `call()`'s guards. A fire-and-forget `turn/start` would reach the app-server
+  // with no status check at all.
+  const { conn, sock } = await connectFake();
+  assert.throws(() => conn.notify('turn/start', { threadId: TID, input: [] }), /cannot be sent as a notification/);
+  assert.throws(() => conn.notify('turn/interrupt', { threadId: 'FOREIGN' }), /cannot be sent as a notification/);
+  assert.throws(() => conn.notify('turn/steer', { threadId: 'FOREIGN' }), /cannot be sent as a notification/);
+  // Everything else still goes: this is a refusal of two families, not a lock.
+  assert.equal(conn.notify('initialized'), true);
+  conn.close();
+  assert.deepEqual(sock.wire(), ['initialized']);
+});
+
+test('a turn/start whose answer never lands still forces the retry through the status check', async () => {
+  // The response frame is the only thing the retry has, and it can be lost while
+  // the turn is very much RUNNING: this call's timeout, or a frame past the
+  // LineReader's 8 MB cap. Clearing `fresh` when turn/start is SENT rather than
+  // when it settles is what keeps the retry on the asking path — asking is
+  // recoverable, a second turn is two bills and two sets of edits.
+  let starts = 0;
+  const { conn, sock } = await connectFake({
+    handlers: {
+      'turn/start': () => {
+        starts += 1;
+        return starts === 1 ? new Promise(() => {}) : { turn: { id: 'TURN2' } };
+      },
+    },
+  });
+  const { threadId } = await startCodexThread({ conn, cwd: '/w', env: {} });
+  await assert.rejects(() => startCodexTurn({ conn, threadId, prompt: 'go', timeoutMs: 20 }), /timed out/);
+
+  const retry = await startCodexTurn({ conn, threadId, prompt: 'go' });
+  conn.close();
+  assert.equal(retry.turnId, 'TURN2');
+  assert.deepEqual(sock.wire(), ['thread/start', 'turn/start', 'thread/resume', 'turn/start'],
+    'the retry must ASK before it starts a second turn');
+});
+
 // --- the connection ----------------------------------------------------------
 
 test('a protocol mismatch is an explicit failure, not a degraded connection', async () => {
@@ -657,6 +701,19 @@ test('the level check settles a turn that finished while this bridge was down', 
   assert.equal(result.summary.message, 'finished without us');
 });
 
+test('the level check carries a pinned model into the resume it performs', async () => {
+  // The level check's status read IS a thread/resume, exactly like the one
+  // startCodexTurn forwards the pin to. Two status reads that disagree about
+  // whether the pin travels is how a restart-resume silently hands the rest of a
+  // pinned job to whatever ~/.codex/config.toml says.
+  const { conn, sock } = await connectFake({ statuses: { [TID]: 'active' } });
+  const watcher = await openCodexTurnWatcher({ conn, threadId: TID, initialLevelCheck: true, model: 'gpt-5.6-codex', timeoutMs: 20 });
+  await watcher.done;
+  conn.close();
+  assert.equal(sock.paramsFor('thread/resume')[0].model, 'gpt-5.6-codex');
+  assert.equal(sock.paramsFor('thread/resume')[0].approvalPolicy, 'never');
+});
+
 test('the level check keeps watching an active thread', async () => {
   const { conn, sock } = await connectFake({ statuses: { [TID]: 'active' } });
   const watcher = await openCodexTurnWatcher({ conn, threadId: TID, initialLevelCheck: true, timeoutMs: 5_000 });
@@ -719,21 +776,25 @@ test('adopting the SAME broker over a live disposal claim keeps its leases and s
     leases: { [`${other}:codex-live`]: { pid: other, jobId: 'codex-live', renewedAt: claimedAt } },
   });
   const logs = [];
-  _setForTest({ connect: async () => fakeBrokerSocket(), logEvent: (level, event) => logs.push(event) });
+  // The claimed broker survives its claimer here, so the re-probe below finds it
+  // and hands it over; `delay` is stubbed only to keep the test instant.
+  _setForTest({ connect: async () => fakeBrokerSocket(), delay: async () => {}, logEvent: (level, event) => logs.push(event) });
 
   const adopted = await ensureCodexBroker({ env: {} });
   assert.equal(adopted.disposalClaimed, true);
   assert.ok(logs.includes('codex_appserver_adopted_over_disposal_claim'));
   assert.ok(readReg().leases[`${other}:codex-live`], 'the same broker keeps the leases held on it');
-  // Recording the adoption refreshes lastUsedAt, which is what makes the
-  // claiming reaper stand down at its own confirm step.
+  // Recording the adoption refreshes lastUsedAt, which is what makes a claimer
+  // that has not confirmed yet stand down. A claim we can already SEE is past
+  // that point, which is why ensureCodexBroker re-probes rather than trusting
+  // the bump (see the test below).
   assert.ok(Date.now() - readReg().lastUsedAt < 60_000);
 });
 
-test('concurrent callers share ONE spawn', async () => {
+test('concurrent callers IN ONE PROCESS share ONE spawn', async () => {
   // Without the mutex two parallel dispatches each spawn a broker and race on
-  // the socket file; the loser's start-lock refusal is a dispatch failure for
-  // no reason at all.
+  // the socket file. This covers the in-process half only — the mutex cannot
+  // span processes, and the cross-process half is the test after next.
   let spawns = 0;
   let up = false;
   _setForTest({
@@ -755,7 +816,10 @@ test('concurrent callers share ONE spawn', async () => {
   assert.equal(a.pid, b.pid);
 });
 
-test('a broker that dies during boot fails fast and says so', async () => {
+test('a broker that dies during boot with nothing replacing it says so', async () => {
+  // Our child died AND the socket stayed unreachable for the whole grace: a
+  // missing codex binary, not a lost start race. The exit is reported as the
+  // cause rather than a bare boot timeout.
   const err = new Error('connect ECONNREFUSED');
   err.code = 'ECONNREFUSED';
   _setForTest({
@@ -767,6 +831,84 @@ test('a broker that dies during boot fails fast and says so', async () => {
     },
   });
   await assert.rejects(() => ensureCodexBroker({ env: {} }), /exited before it was ready \(code=1/);
+});
+
+test('losing the CROSS-PROCESS spawn race adopts the winner instead of failing the dispatch', async () => {
+  // The spawn mutex is per PROCESS while the bridge is spawned per subagent, so
+  // two bridges cold-starting together is the ordinary case, not the exotic one.
+  // B1's start lock resolves that race by making the loser exit
+  // BROKER_START_CONTENDED within milliseconds and delegating recovery to the
+  // caller ("refuse and let the caller re-probe"). Our child's exit is therefore
+  // not a verdict on the socket — the winner is still inside its critical
+  // section and has not bound yet.
+  let winnerUp = false;
+  let spawns = 0;
+  _setForTest({
+    connect: async () => {
+      if (!winnerUp) { const err = new Error('connect ECONNREFUSED'); err.code = 'ECONNREFUSED'; throw err; }
+      return fakeBrokerSocket({ brokerPid: 5150 });
+    },
+    spawnBroker: () => {
+      spawns += 1;
+      const child = new EventEmitter();
+      setTimeout(() => child.emit('exit', 1, null), 10);   // we lost the lock
+      setTimeout(() => { winnerUp = true; }, 120);         // the winner finished its handshake
+      return child;
+    },
+  });
+
+  const broker = await ensureCodexBroker({ env: {} });
+  assert.equal(broker.pid, 5150, 'the winner is adopted, not reported as a dispatch failure');
+  assert.equal(spawns, 1, 'and no rival is spawned onto the winner\'s socket');
+  assert.equal(codexBrokerSnapshot().pid, 5150);
+});
+
+test('a connect that times out is never read as "nobody is home"', async () => {
+  // A unix-socket connect that neither succeeds nor is refused is a listener
+  // whose backlog is wedged — the loudest possible "a broker owns this path".
+  // The broker's own probeSocket has no timeout, so a rival spawned on that
+  // evidence would block inside start() rather than fail.
+  let spawns = 0;
+  const err = new Error('timed out connecting to the codex broker');
+  err.code = 'ETIMEDOUT';
+  _setForTest({ connect: async () => { throw err; }, spawnBroker: () => { spawns += 1; return new EventEmitter(); } });
+  await assert.rejects(() => ensureCodexBroker({ env: {} }), /could not reach the codex broker/);
+  assert.equal(spawns, 0);
+});
+
+test('a broker under a CONFIRMED disposal claim is re-probed, not handed over mid-kill', async () => {
+  // claimDisposal publishes and confirms in one breath, so by the time a claim is
+  // visible here the claimer is already past its stand-down check: our
+  // lastUsedAt bump cannot save this broker, and `thread/loaded/list` is empty
+  // because we have not started a thread on it yet. Waiting the dispose out and
+  // looking again is what turns the window into the one redundant spawn it was
+  // always supposed to cost, instead of a raw ECONNREFUSED at the next dispatch.
+  const other = foreignLivePid();
+  const claimedAt = Date.now();
+  seedRegistry({
+    socketPath: brokerSocketPath(),
+    pid: BROKER_PID,
+    lastUsedAt: claimedAt - 60 * 60_000,
+    disposing: { pid: other, at: claimedAt },
+  });
+
+  let killed = false;
+  let spawns = 0;
+  _setForTest({
+    // The claimer's SIGTERM lands while we wait.
+    delay: async () => { killed = true; },
+    connect: async () => {
+      if (killed && spawns === 0) { const err = new Error('connect ECONNREFUSED'); err.code = 'ECONNREFUSED'; throw err; }
+      return fakeBrokerSocket({ brokerPid: killed ? 6060 : BROKER_PID });
+    },
+    spawnBroker: () => { spawns += 1; return new EventEmitter(); },
+  });
+
+  const broker = await ensureCodexBroker({ env: {} });
+  assert.equal(spawns, 1, 'the claimed broker was killed, so a replacement is spawned');
+  assert.equal(broker.pid, 6060);
+  assert.equal(broker.reused, false);
+  assert.equal(broker.disposalClaimed, false, 'the replacement inherits nothing from the disposed entry');
 });
 
 test('a probe that could not tell is never read as "nobody is home"', async () => {
@@ -831,12 +973,72 @@ async function deadPid() {
   await new Promise((r) => child.on('close', r));
   return pid;
 }
+// The kill is the one destructive action in the module, so every reaper test
+// that reaches it routes it through the seam and asserts on the signal actually
+// sent. Exactly one test below lets the real `process.kill` through, against a
+// process it spawned itself to receive it.
+function captureKills() {
+  const kills = [];
+  _setForTest({ kill: (pid, signal) => kills.push({ pid, signal }) });
+  return kills;
+}
+// A pid that is unquestionably alive, so the dispose path reaches its kill at
+// all. Every test using it stubs the kill first (captureKills), so nothing is
+// ever signalled — and picking THIS process rather than a bystander means a
+// stub that ever stopped working would fail loudly here instead of quietly
+// somewhere else on the machine.
+const LIVE_BROKER_PID = process.pid;
 
 test('the idle reaper stops a broker with nothing loaded and nobody holding it', async () => {
-  const gone = await deadPid();
-  _setForTest({ connect: async () => fakeBrokerSocket({ handlers: { 'thread/loaded/list': () => ({ data: [] }) } }) });
-  seedRegistry({ socketPath: brokerSocketPath(), pid: gone, lastUsedAt: Date.now() - 60 * 60_000 });
+  _setForTest({ connect: async () => fakeBrokerSocket({ brokerPid: LIVE_BROKER_PID, handlers: { 'thread/loaded/list': () => ({ data: [] }) } }) });
+  const kills = captureKills();
+  seedRegistry({ socketPath: brokerSocketPath(), pid: LIVE_BROKER_PID, lastUsedAt: Date.now() - 60 * 60_000 });
   assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), true);
+  assert.equal(readReg(), undefined);
+  // "Reaped" has to mean a signal was sent, or the reaper could stop reaping and
+  // keep reporting true.
+  assert.deepEqual(kills, [{ pid: LIVE_BROKER_PID, signal: 'SIGTERM' }]);
+});
+
+test('the reaper really does SIGTERM the broker process', async (t) => {
+  // The only test that lets the real kill through — and it supplies its own
+  // victim, so a recycled pid can never make this signal a bystander.
+  const victim = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  t.after(() => { try { victim.kill('SIGKILL'); } catch { /* already gone */ } });
+  const exited = new Promise((resolve) => victim.on('exit', (code, signal) => resolve({ code, signal })));
+
+  // The live broker claims the victim's pid as its own, which is the ONLY
+  // evidence that authorises the signal.
+  _setForTest({ connect: async () => fakeBrokerSocket({ brokerPid: victim.pid, handlers: { 'thread/loaded/list': () => ({ data: [] }) } }) });
+  seedRegistry({ socketPath: brokerSocketPath(), pid: victim.pid, lastUsedAt: Date.now() - 60 * 60_000 });
+
+  assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), true);
+  assert.deepEqual(await exited, { code: null, signal: 'SIGTERM' });
+});
+
+test('the reaper refuses to signal a pid the live broker does not claim', async () => {
+  // The registry entry is a RECORD and a record outlives its process: pid 4242
+  // may be an editor by now. `thread/loaded/list` proves the SOCKET is a broker,
+  // never that the recorded pid still is — only the broker's own brokerPid does.
+  const stale = await deadPid();
+  _setForTest({ connect: async () => fakeBrokerSocket({ brokerPid: 777777, handlers: { 'thread/loaded/list': () => ({ data: [] }) } }) });
+  const kills = captureKills();
+  seedRegistry({ socketPath: brokerSocketPath(), pid: stale, lastUsedAt: Date.now() - 60 * 60_000 });
+  assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), false, 'a mismatch is a refusal, not a reap');
+  assert.deepEqual(kills, []);
+});
+
+test('the reaper signals nothing when the socket says nobody is listening', async () => {
+  // No broker is there to stop, and the recorded pid is exactly the pid-reuse
+  // hazard: nothing on this path says it is still a broker.
+  const gone = await deadPid();
+  const err = new Error('connect ECONNREFUSED');
+  err.code = 'ECONNREFUSED';
+  _setForTest({ connect: async () => { throw err; } });
+  const kills = captureKills();
+  seedRegistry({ socketPath: brokerSocketPath(), pid: gone, lastUsedAt: Date.now() - 60 * 60_000 });
+  assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), true, 'the entry is still cleaned up');
+  assert.deepEqual(kills, [], 'but nothing is signalled');
   assert.equal(readReg(), undefined);
 });
 
@@ -875,27 +1077,30 @@ test('the idle reaper leaves a broker another live bridge holds a lease on', asy
 
 test('a lease whose owning bridge died stops pinning the broker', async () => {
   const gone = await deadPid();
-  _setForTest({ connect: async () => fakeBrokerSocket() });
+  _setForTest({ connect: async () => fakeBrokerSocket({ brokerPid: LIVE_BROKER_PID }) });
+  const kills = captureKills();
   seedRegistry({
     socketPath: brokerSocketPath(),
-    pid: gone,
+    pid: LIVE_BROKER_PID,
     lastUsedAt: Date.now() - 60 * 60_000,
     leases: { [`${gone}:codex-job-a`]: { pid: gone, jobId: 'codex-job-a', renewedAt: Date.now() } },
   });
   assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), true);
+  assert.deepEqual(kills, [{ pid: LIVE_BROKER_PID, signal: 'SIGTERM' }]);
 });
 
 test('a lease that stopped being renewed is reclaimed', async () => {
   const other = foreignLivePid();
-  const gone = await deadPid();
-  _setForTest({ connect: async () => fakeBrokerSocket() });
+  _setForTest({ connect: async () => fakeBrokerSocket({ brokerPid: LIVE_BROKER_PID }) });
+  const kills = captureKills();
   seedRegistry({
     socketPath: brokerSocketPath(),
-    pid: gone,
+    pid: LIVE_BROKER_PID,
     lastUsedAt: Date.now() - 60 * 60_000,
     leases: { [`${other}:codex-job-a`]: { pid: other, jobId: 'codex-job-a', renewedAt: Date.now() - (LEASE_STALE_MS + 60_000) } },
   });
   assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), true);
+  assert.deepEqual(kills, [{ pid: LIVE_BROKER_PID, signal: 'SIGTERM' }]);
 });
 
 test('lease sync drops our finished jobs, keeps another bridge\'s, and refreshes lastUsedAt', async () => {

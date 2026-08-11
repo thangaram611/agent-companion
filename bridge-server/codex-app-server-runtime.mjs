@@ -27,7 +27,8 @@
 //      sandbox is the hard boundary.
 //   2. `turn/start` on a thread that already has a running turn SUCCEEDS and
 //      returns a second turn id. `startCodexTurn` is the only path that may send
-//      it (the connection refuses a raw one), and it checks thread status first.
+//      it — the connection refuses a raw one through EITHER door, `call()` and
+//      `notify()` — and it checks thread status first.
 //   3. `thread not found` from `turn/interrupt`/`turn/steer` means "not loaded
 //      into this process", NOT "gone" — the same thread `thread/resume`s fine.
 //      The guard is structural: the connection resumes any thread it did not
@@ -88,7 +89,28 @@ const SHARED_BROKER_KEY = 'shared';
 // Only these mean "nobody is listening, so spawn one". Anything else (EACCES on
 // the runtime dir, EMFILE under a wide subagent fan-out) is a failure to ASK,
 // not an answer — spawning on it would race a live broker.
-const CONNECT_CLASS_CODES = new Set(['ECONNREFUSED', 'ENOENT', 'ENOTSOCK', 'ETIMEDOUT']);
+//
+// ETIMEDOUT is deliberately NOT here, unlike daemon-client.mjs's equivalent
+// list. A connect that neither succeeds nor is refused on a unix socket is a
+// listener whose accept backlog is wedged, which is the loudest possible "a
+// broker owns this path" — and the broker's own `probeSocket` has no timeout, so
+// a rival spawned on that evidence would block inside `start()` instead of
+// failing. Refusing is the recoverable direction: the moment the wedged holder
+// dies the path answers ECONNREFUSED and the normal spawn resumes.
+const CONNECT_CLASS_CODES = new Set(['ECONNREFUSED', 'ENOENT', 'ENOTSOCK']);
+
+// After our own spawned broker exits, how long the socket may stay unreachable
+// before we conclude nobody else is coming. The cross-process loser of the start
+// race exits BROKER_START_CONTENDED while the WINNER is still inside its
+// critical section (probe → unlink → listen, milliseconds), so this only has to
+// cover the winner's bind — readiness after that is covered by the full boot
+// budget.
+const SPAWN_RACE_GRACE_MS = 2_000;
+
+// How long to let another bridge's confirmed disposal claim resolve before
+// re-probing the broker it claimed. A dispose is one connect, one
+// `thread/loaded/list` and a SIGTERM, so this is generous.
+const DISPOSAL_RECHECK_MS = 250;
 
 // A single `aggregated_output` can be a whole build log; the toolCalls entry is
 // a digest-facing artifact, not a transcript. Same cap as codex-runtime.mjs.
@@ -229,19 +251,31 @@ function realSpawnBroker({ env }) {
   return child;
 }
 
-let _impl = {
+function realDelay(ms) {
+  return new Promise((resolve) => { const t = setTimeout(resolve, ms); if (t.unref) t.unref(); });
+}
+
+// `kill` is a seam because it is the ONE destructive action in this module: a
+// test that cannot observe the signal cannot prove the reaper still sends it,
+// and the alternative (asserting on a recycled pid) is a test that signals
+// unrelated processes.
+const realImpl = () => ({
   now: () => Date.now(),
   connect: realConnect,
   spawnBroker: realSpawnBroker,
+  kill: (pid, signal) => process.kill(pid, signal),
+  delay: realDelay,
   logEvent,
-};
+});
+
+let _impl = realImpl();
 
 export function _setForTest(overrides = {}) {
   _impl = { ..._impl, ...overrides };
 }
 
 export function _resetForTest() {
-  _impl = { now: () => Date.now(), connect: realConnect, spawnBroker: realSpawnBroker, logEvent };
+  _impl = realImpl();
   brokerRegistry.clearCache();
   _spawnPromise = null;
   _reapPromise = null;
@@ -732,17 +766,30 @@ function createConnection(sock, { socketPath, env }) {
             + 'running turn SUCCEEDS and returns a second turn id, so the status check is not optional.',
           );
         }
-        const result = await raw(method, params, opts);
-        // The thread has had a turn now, so its status is no longer knowable
-        // without asking — every later turn on it goes through a real resume.
+        // Cleared BEFORE the send, not after it settles. A `turn/start` that
+        // REJECTS may still have started the turn — a response frame lost to
+        // this call's timeout, or dropped by the LineReader cap — and leaving
+        // the thread `fresh` would let the retry skip the status check and put a
+        // second turn on the wire. Asking (a resume on a thread that may have no
+        // rollout) is the recoverable direction; double-dispatching is not.
         if (params?.threadId) fresh.delete(params.threadId);
-        return result;
+        return raw(method, params, opts);
       }
       if (ATTACH_BEFORE_METHODS.has(method)) await attach(method, params, opts);
       return raw(method, params, opts);
     },
 
+    // Notifications carry no id, so the broker forwards them upstream verbatim —
+    // which makes this the one door that bypasses `call()`'s guards. The two
+    // guarded families are refused here too, or the double-dispatch and the
+    // resume-before-act constraints would hold for `call()` only.
     notify(method, params = {}) {
+      if (method === 'turn/start' || ATTACH_BEFORE_METHODS.has(method)) {
+        throw new Error(
+          `${method} cannot be sent as a notification: it must go through the guarded path `
+          + '(startCodexTurn / interruptCodexTurn / steerCodexTurn), which checks thread status and resumes first.',
+        );
+      }
       return write({ jsonrpc: '2.0', method, params });
     },
 
@@ -869,41 +916,69 @@ export async function probeCodexBrokerHealth(socketPath = null) {
 }
 
 // Resolve the shared broker, reusing a live one and spawning a detached one
-// otherwise. Concurrent callers share ONE spawn — without the mutex two parallel
-// dispatches each spawn a broker and race on the socket file, and the loser's
-// start-lock refusal is a dispatch failure for no reason.
+// otherwise. Concurrent callers IN THIS PROCESS share ONE spawn — without the
+// mutex two parallel dispatches each spawn a broker and race on the socket file.
+// The mutex cannot span processes, and the bridge is spawned per subagent, so
+// the cross-process half of that race is handled where it actually lands:
+// `waitForReady` re-probes instead of treating our own child's exit as a verdict
+// on the socket.
 export async function ensureCodexBroker({ env = process.env } = {}) {
   const socketPath = codexBrokerSocketPath();
 
-  const health = await probeCodexBrokerHealth(socketPath);
-  if (health.alive) {
-    const ready = health.ready ? health : await waitForReady(socketPath, BROKER_BOOT_TIMEOUT_MS);
-    return adopt(ready, { reused: true });
-  }
-  // Only a connect-class failure means "nobody is home". Anything else is a
-  // failure to ask, and spawning on it would race a broker that is very much
-  // alive — so it surfaces instead of degrading silently.
-  if (!CONNECT_CLASS_CODES.has(health.code)) {
-    throw new Error(`could not reach the codex broker at ${socketPath}: ${health.error}`);
-  }
+  // Two passes at most, and the second one exists solely for the disposal-claim
+  // window below: everything else either returns or throws on the first.
+  for (let pass = 0; ; pass += 1) {
+    const health = await probeCodexBrokerHealth(socketPath);
+    if (health.alive) {
+      const ready = health.ready ? health : await waitForReady(socketPath, BROKER_BOOT_TIMEOUT_MS);
+      const adopted = adopt(ready, { reused: true });
+      // The claimer published its intent AND confirmed it before we got here, so
+      // our `lastUsedAt` bump cannot make it stand down any more (see adopt()).
+      // Handing this broker back would hand the caller a runtime under a live
+      // kill order. Wait out the dispose — one connect, one `thread/loaded/list`
+      // and a SIGTERM — then look again: if it survived, it is ours; if it did
+      // not, the next pass spawns a replacement, which is exactly the "one
+      // redundant spawn, no lost work" this window is supposed to cost.
+      if (adopted.disposalClaimed && pass === 0) {
+        _impl.logEvent('warn', 'codex_appserver_awaiting_disposal_claim', { pid: adopted.pid });
+        await _impl.delay(DISPOSAL_RECHECK_MS);
+        continue;
+      }
+      return adopted;
+    }
+    // Only a connect-class failure means "nobody is home". Anything else is a
+    // failure to ask, and spawning on it would race a broker that is very much
+    // alive — so it surfaces instead of degrading silently.
+    if (!CONNECT_CLASS_CODES.has(health.code)) {
+      throw new Error(`could not reach the codex broker at ${socketPath}: ${health.error}`);
+    }
 
-  if (_spawnPromise) return _spawnPromise;
-  _spawnPromise = spawnAndAdoptBroker(env, socketPath);
-  try { return await _spawnPromise; }
-  finally { _spawnPromise = null; }
+    if (_spawnPromise) return _spawnPromise;
+    _spawnPromise = spawnAndAdoptBroker(env, socketPath);
+    try { return await _spawnPromise; }
+    finally { _spawnPromise = null; }
+  }
 }
 
-// Adopting a broker another bridge has CLAIMED for disposal is safe here, and it
-// is worth saying why, because the opencode adapter refuses the equivalent.
-// There, a claimed server was about to be disposed and adopting it handed a job
-// a runtime that died mid-turn — so it spawned its own instead. It could: its
-// address is an ephemeral port. This broker's address is a fixed socket path, so
-// "spawn my own" is not available, and it is not needed: recording our adoption
-// bumps `lastUsedAt`, which makes the claimer stand down at its own confirm
-// step, and `disposeBroker` re-asks `thread/loaded/list` immediately before the
-// kill. The residual window is an adopted broker with no thread on it yet, whose
-// worst case is one redundant spawn and no lost work. It is reported rather than
-// hidden.
+// Adopting a broker another bridge has CLAIMED for disposal needs care, and it
+// is worth being precise about what protects it, because the opencode adapter
+// refuses the equivalent. There, a claimed server was about to be disposed and
+// adopting it handed a job a runtime that died mid-turn — so it spawned its own
+// instead. It could: its address is an ephemeral port. This broker's address is
+// a fixed socket path, so "spawn my own instead" is not available.
+//
+// Two protections are real and one is NOT:
+//   - recording our adoption bumps `lastUsedAt`, and claimDisposal re-reads it
+//     at its confirm step — but that only saves an adoption that lands BEFORE
+//     the claim is published. By the time we can SEE a claim here, the confirm
+//     has already passed and there is no later one;
+//   - `disposeBroker` re-asks `thread/loaded/list` immediately before the kill —
+//     but a broker we just adopted has no thread on it yet, so that answer is
+//     empty and permits the kill;
+//   - what actually closes the window is the caller: `ensureCodexBroker` waits
+//     the dispose out and re-probes, so a broker that is killed underneath us
+//     costs one redundant spawn rather than a failed dispatch.
+// The claim is reported either way rather than hidden.
 function adopt(health, { reused }) {
   if (health.codexVersion) _lastKnownCodexVersion = health.codexVersion;
   const entry = { socketPath: health.socketPath, pid: health.brokerPid, appServerPid: health.appServerPid };
@@ -937,33 +1012,75 @@ async function spawnAndAdoptBroker(env, socketPath) {
   return adopt(health, { reused: false });
 }
 
-// Exponential backoff, fastest case ~50 ms. `exitedProbe` lets the spawn path
-// fail fast and say WHY instead of waiting out the whole boot budget on a broker
-// that already died (a stolen socket, a missing codex binary).
+// Exponential backoff, fastest case ~50 ms.
+//
+// OUR CHILD EXITING IS NOT A VERDICT ON THE SOCKET. The spawn mutex is
+// per-process while the bridge is spawned per subagent, so two bridges
+// cold-starting together is the normal case, not the exotic one — and B1's start
+// lock resolves that race by making the LOSER exit BROKER_START_CONTENDED and
+// telling the caller to re-probe ("refuse and let the caller re-probe, rather
+// than wait", codex-app-server-broker.mjs). This is that re-probe: the loser's
+// child dies within milliseconds while the winner is still inside its critical
+// section, so treating the exit as terminal would fail a dispatch with a healthy
+// broker coming up at the very path we are watching.
+//
+// The exit still shortens the wait, it just does not end it: once the socket is
+// unreachable for SPAWN_RACE_GRACE_MS after our child died, nobody is coming
+// (a missing codex binary, a stolen socket) and the exit is reported as the
+// cause. A socket that is ALIVE but not yet ready keeps the full boot budget —
+// that is a winner in the middle of its app-server handshake.
 async function waitForReady(socketPath, budgetMs, exitedProbe = null) {
   const delays = [50, 100, 200, 400, 800];
   const start = _impl.now();
   let attempt = 0;
+  let exited = null;
+  let exitedAt = 0;
+  let aliveSinceExit = false;
   for (;;) {
-    const exited = exitedProbe?.();
-    if (exited) {
-      throw new Error(`the codex broker exited before it was ready (code=${exited.code}, signal=${exited.signal}); see the broker log`);
+    if (!exited) {
+      const seen = exitedProbe?.();
+      if (seen) { exited = seen; exitedAt = _impl.now(); }
     }
     const health = await probeCodexBrokerHealth(socketPath);
     if (health.alive && health.ready) return health;
-    if (_impl.now() - start >= budgetMs) {
+    if (exited && health.alive) aliveSinceExit = true;
+
+    const now = _impl.now();
+    const budgetSpent = now - start >= budgetMs;
+    const abandoned = exited && !aliveSinceExit && now - exitedAt >= SPAWN_RACE_GRACE_MS;
+    if (budgetSpent || abandoned) {
+      if (exited && !aliveSinceExit) {
+        throw new Error(
+          `the codex broker exited before it was ready (code=${exited.code}, signal=${exited.signal}) `
+          + `and nothing else came up at ${socketPath}; see the broker log`,
+        );
+      }
+      if (exited) {
+        // Someone DID take the socket — our child most likely lost the start
+        // race — but that broker never finished its handshake either. Saying so
+        // sends the reader to the right log.
+        throw new Error(
+          `our codex broker exited (code=${exited.code}, signal=${exited.signal}) and the broker holding `
+          + `${socketPath} did not become ready within ${budgetMs} ms; see the broker log`,
+        );
+      }
       throw new Error(`the codex broker at ${socketPath} did not become ready within ${budgetMs} ms (${health.error || 'app-server handshake incomplete'})`);
     }
-    await new Promise((r) => { const t = setTimeout(r, delays[Math.min(attempt, delays.length - 1)]); if (t.unref) t.unref(); });
+    await _impl.delay(delays[Math.min(attempt, delays.length - 1)]);
     attempt += 1;
   }
 }
 
-// Stop a broker the reaper has claimed — but only after ASKING it. The registry
-// cannot know what the broker is holding: a bridge that died mid-turn leaves no
-// lease after LEASE_STALE_MS, and the turn it started is exactly the work this
-// transport exists to protect. `thread/loaded/list` is the authoritative answer
-// (immune to PID reuse, unlike any pid probe).
+// Stop a broker the reaper has claimed — but only after ASKING it TWO questions,
+// because the kill needs two different facts and one answer cannot carry both:
+//   - "is it holding work?" — `thread/loaded/list`. The registry cannot know: a
+//     bridge that died mid-turn leaves no lease after LEASE_STALE_MS, and the
+//     turn it started is exactly the work this transport exists to protect.
+//   - "is the recorded pid still that broker?" — the live broker's own
+//     `brokerPid` from `initialize`. A registry entry is a RECORD, and the OS
+//     recycles pids, so `thread/loaded/list` succeeding proves something at the
+//     SOCKET is a broker, never that `entry.pid` still is. Signalling on the
+//     first answer alone is the pid-reuse bug wearing a reassuring comment.
 //
 // A refusal here still lets the registry forget the entry. That is harmless
 // precisely because the broker's address is a fixed path, not an ephemeral port:
@@ -971,6 +1088,7 @@ async function waitForReady(socketPath, budgetMs, exitedProbe = null) {
 async function disposeBroker(entry) {
   _lastDisposal = null;
   let conn = null;
+  let brokerPid = null;
   try {
     conn = await connectCodexBroker({ socketPath: entry.socketPath, connectTimeoutMs: HEALTH_PROBE_TIMEOUT_MS, timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
     const loaded = await listLoadedCodexThreads({ conn, timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
@@ -978,23 +1096,42 @@ async function disposeBroker(entry) {
       _lastDisposal = 'refused';
       return;
     }
+    // The live broker's own account of who it is. The registry entry is a
+    // RECORD, and a record can outlive its process; this is the only thing here
+    // that says the pid we are about to signal is still the broker.
+    brokerPid = conn.broker?.brokerPid ?? null;
   } catch (err) {
-    // ECONNREFUSED/ENOENT: the broker is already gone, nothing to stop. Anything
-    // else is a probe that FAILED, which says nothing about liveness — refuse
-    // rather than SIGTERM a broker we could not interrogate.
     if (probeSocketVerdictForError(err) !== 'absent') {
+      // A probe that FAILED says nothing about liveness — refuse rather than
+      // SIGTERM a broker we could not interrogate.
       _lastDisposal = 'refused';
       return;
     }
+    // ECONNREFUSED/ENOENT: nothing is listening, so the broker this entry
+    // describes is already gone and there is nothing to stop. Signalling the
+    // recorded pid HERE would be a pure pid-reuse hazard — no evidence on this
+    // path says that pid is still a broker, and the OS recycles pids. The entry
+    // is cleaned up; that is the whole reap.
+    _lastDisposal = 'stopped';
+    return;
   } finally {
     try { conn?.close(); } catch { /* best effort */ }
+  }
+
+  // Only signal a pid the LIVE broker just claimed as its own. A mismatch means
+  // the entry describes a broker that was already replaced — its claim was taken
+  // against a process that no longer exists, and the pid may now be anyone's.
+  if (brokerPid == null || brokerPid !== entry.pid) {
+    _impl.logEvent('warn', 'codex_appserver_dispose_pid_mismatch', { entryPid: entry.pid ?? null, brokerPid });
+    _lastDisposal = 'refused';
+    return;
   }
 
   // SIGTERM, not SIGKILL: the broker's handler stops its app-server child and
   // unlinks its own socket, and SIGKILL is what leaves the stale socket file
   // behind that every later start has to connect-probe around.
   if (pidAlive(entry.pid)) {
-    try { process.kill(entry.pid, 'SIGTERM'); } catch { /* already gone */ }
+    try { _impl.kill(entry.pid, 'SIGTERM'); } catch { /* already gone */ }
   }
   _lastDisposal = 'stopped';
 }
@@ -1010,9 +1147,12 @@ export function syncCodexBrokerLeases(jobIds = [], opts = {}) {
   return brokerRegistry.syncLeases(jobIds, opts);
 }
 
-// Best-effort idle reaper. Returns true only when the broker was actually
-// stopped — `dispose` refuses a broker with threads loaded, and reporting that
-// as a reap would tell an operator work was cleaned up when it is still running.
+// Best-effort idle reaper. Returns true only when the broker is genuinely off
+// the machine afterwards — either we signalled it, or the socket already said
+// nobody is listening. It returns FALSE whenever `dispose` refused (threads
+// loaded, an uninterrogable broker, a pid the live broker does not claim),
+// because reporting a refusal as a reap would tell an operator work was cleaned
+// up while it is still running.
 export async function reapIdleCodexBroker({ idleMs, hasLiveJobs = false, now = Date.now() } = {}) {
   // Serialised for the same reason the spawn is: `_lastDisposal` is how the
   // dispose action reports back, and two overlapping reaps in one process would
@@ -1208,6 +1348,12 @@ export async function openCodexTurnWatcher({
   onEvent = null,
   timeoutMs = null,
   initialLevelCheck = false,
+  // Forwarded for the same reason startCodexTurn forwards it: the level check's
+  // status read IS a `thread/resume`, and whether app-server resume re-derives
+  // the model from config the way it re-derives the sandbox was never measured.
+  // A watcher opened on a pinned job must not be the call that silently hands
+  // the rest of that thread to ~/.codex/config.toml's model.
+  model = null,
   env = process.env,
 }) {
   if (!conn) throw new Error('openCodexTurnWatcher requires a broker connection');
@@ -1234,7 +1380,7 @@ export async function openCodexTurnWatcher({
   }
 
   let preTerminal = null;
-  if (initialLevelCheck) preTerminal = await levelTerminal({ conn, threadId, env });
+  if (initialLevelCheck) preTerminal = await levelTerminal({ conn, threadId, env, model });
 
   let timer = null;
   let timedOut = false;
@@ -1272,9 +1418,9 @@ export async function openCodexTurnWatcher({
 
 // The turn may already be over — check level state before committing to the
 // stream. `active` means keep watching; anything else means ask the transcript.
-async function levelTerminal({ conn, threadId, env }) {
+async function levelTerminal({ conn, threadId, env, model = null }) {
   let status;
-  try { status = await getCodexThreadStatus({ conn, threadId, env }); }
+  try { status = await getCodexThreadStatus({ conn, threadId, env, model }); }
   catch { return null; }
   if (status === 'active') return null;
   try {
