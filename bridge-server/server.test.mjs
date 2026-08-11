@@ -1105,13 +1105,16 @@ test('Codex companion adapter runs a fake CLI and surfaces terminal job state', 
     assert.equal(status.ok, true);
     assert.equal(status.target, 'codex');
     assert.equal(status.inspect_available, false);
-    // v1 codex is send-only (D1): neither flag is ever true for a codex job.
+    // Send-only is a property of the EXEC transport, which is what this job ran
+    // on (CODEX_RUNTIME_ADAPTER unset). Both flags are per-job, not per-target:
+    // the same assertions are made the other way round for an appserver job,
+    // where turn/steer and thread/resume make them true.
     assert.equal(status.reply_available, false);
     assert.equal(status.resume_available, false);
 
     // The codex thread_id lands in the existing target-neutral
-    // companionSessionId slot (v2 exec-resume continuity groundwork; no v1
-    // consumer reads it back).
+    // companionSessionId slot. On exec it is still write-only groundwork;
+    // the appserver adapter is the consumer that reads it back to resume.
     const state = await import('../lib/state.mjs');
     const persisted = state.readJob(send.job_id);
     assert.equal(persisted.companionSessionId, 'th-fake-codex');
