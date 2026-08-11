@@ -1574,6 +1574,672 @@ test('OpenCode server mode: hydrate resumes a persisted job from its transcript'
   }
 });
 
+// --- Codex app-server adapter (CODEX_RUNTIME_ADAPTER=appserver) -------------
+//
+// Same technique as withOpenCodeServer above, one layer lower: the bridge calls
+// the adapter's module wrappers, the wrappers call `_impl.connect`, so handing
+// them the shared fake broker socket rewires the whole app-server path with no
+// broker process, no unix socket and no codex binary. The socket fake is the
+// one test/fake-codex-broker-socket.mjs hands the adapter's own suite, so these
+// tests cannot pass against a broker that suite never saw.
+
+import { fakeBrokerSocket as _cxSocket } from '../test/fake-codex-broker-socket.mjs';
+
+async function _cxUntil(predicate, tries = 400) {
+  for (let i = 0; i < tries; i++) {
+    if (predicate()) return true;
+    await new Promise((r) => setImmediate(r));
+  }
+  return false;
+}
+
+// Wall-clock variant, for the one test that waits on a real process booting
+// rather than on this process's own microtasks.
+async function _cxUntilMs(predicate, budgetMs = 8000, stepMs = 20) {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+  return predicate();
+}
+
+async function withCodexAppServer({ handlers = {}, statuses = {}, connect = null, spawnBroker = null } = {}, body) {
+  const cx = await import('./codex-app-server-runtime.mjs');
+  const regDir = mkdtempSync(join(tmpdir(), 'cx-srv-reg-'));
+  const prior = {
+    reg: process.env.AGENT_CODEX_BROKER_REGISTRY,
+    sock: process.env.CODEX_BROKER_SOCKET_PATH,
+    adapter: process.env.CODEX_RUNTIME_ADAPTER,
+  };
+  process.env.AGENT_CODEX_BROKER_REGISTRY = join(regDir, 'broker.json');
+  process.env.CODEX_BROKER_SOCKET_PATH = join(regDir, 'b.sock');
+  process.env.CODEX_RUNTIME_ADAPTER = 'appserver';
+  cx._resetForTest();
+  const sockets = [];
+  const newSocket = () => { const s = _cxSocket({ handlers, statuses }); sockets.push(s); return s; };
+  cx._setForTest({
+    connect: connect ? async (path, ms) => connect({ path, ms, newSocket, sockets }) : async () => newSocket(),
+    // A live broker answers the health probe, so nothing here may spawn one;
+    // a test that wants the spawn path asks for it explicitly.
+    spawnBroker: spawnBroker || (() => { throw new Error('the bridge spawned a broker instead of reusing the live one'); }),
+  });
+  try { return await body({ cx, sockets, live: () => sockets[sockets.length - 1] }); }
+  finally {
+    cx._resetForTest();
+    if (prior.reg === undefined) delete process.env.AGENT_CODEX_BROKER_REGISTRY; else process.env.AGENT_CODEX_BROKER_REGISTRY = prior.reg;
+    if (prior.sock === undefined) delete process.env.CODEX_BROKER_SOCKET_PATH; else process.env.CODEX_BROKER_SOCKET_PATH = prior.sock;
+    if (prior.adapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER; else process.env.CODEX_RUNTIME_ADAPTER = prior.adapter;
+    rmSync(regDir, { recursive: true, force: true });
+  }
+}
+
+// Seed a live app-server job the way runCodexAppServerWorker would have.
+function _cxLiveJob(jobs, jobId, sid, extra = {}) {
+  jobs.set(jobId, {
+    jobId, target: 'codex', codexAdapter: 'appserver',
+    claudeSessionId: sid, status: 'running', promptId: `codex-${jobId}`,
+    sessionId: 'T1', brokerSocket: process.env.CODEX_BROKER_SOCKET_PATH,
+    task: 't', mode: 'EXECUTE', cwd: TEST_CWD, startedAt: Date.now(),
+    ...extra,
+  });
+  return jobs.get(jobId);
+}
+
+test('Codex dispatch stays on the exec adapter when CODEX_RUNTIME_ADAPTER is unset', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const cx = await import('./codex-app-server-runtime.mjs');
+  _resetForTest();
+
+  const tmp = mkdtempSync(join(tmpdir(), 'codex-exec-default-'));
+  const fakeBin = join(tmp, 'codex-fake.mjs');
+  writeFileSync(fakeBin, [
+    '#!/usr/bin/env node',
+    'if (process.argv[2] !== "exec") { console.error("not exec"); process.exit(2); }',
+    'process.stdin.on("data", () => {});',
+    'process.stdin.on("end", () => {',
+    '  console.log(JSON.stringify({ type: "thread.started", thread_id: "th-exec-default" }));',
+    '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "exec path ran" } }));',
+    '  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));',
+    '});',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  chmodSync(fakeBin, 0o700);
+
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldBin = process.env.CODEX_BIN;
+  const oldAdapter = process.env.CODEX_RUNTIME_ADAPTER;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-exec';
+  process.env.CODEX_BIN = fakeBin;
+  delete process.env.CODEX_RUNTIME_ADAPTER;
+
+  // Positively: the app-server transport is not merely unused, it is never even
+  // asked for a connection.
+  let brokerTouches = 0;
+  cx._resetForTest();
+  cx._setForTest({
+    connect: async () => { brokerTouches++; throw new Error('exec dispatch must not open a broker connection'); },
+    spawnBroker: () => { brokerTouches++; throw new Error('exec dispatch must not spawn a broker'); },
+  });
+  try {
+    const send = parse(await dispatch({
+      action: 'send', target: 'codex', task: 'default adapter', mode: 'EXECUTE',
+      template: 'general', cwd: TEST_CWD, host_session_id: 'sid-cx-exec', parallel: 'never', max_wait_sec: 5,
+    }));
+    const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-exec', max_wait_sec: 5 }));
+    assert.equal(terminal.status, 'completed');
+    assert.match(terminal.content, /exec path ran/);
+    assert.equal(brokerTouches, 0, 'the codex broker must never be contacted on the exec path');
+
+    const job = jobs.get(send.job_id);
+    // The exec worker records a child pid and no adapter marker; the app-server
+    // worker records the opposite. That asymmetry is the positive evidence.
+    assert.equal(job.codexAdapter, undefined);
+    assert.ok(job.pid > 0, 'the exec path spawns a child and records its pid');
+    assert.equal(job.sessionId, 'th-exec-default');
+
+    const status = parse(await dispatch({ action: 'status', job_id: send.job_id, host_session_id: 'sid-cx-exec' }));
+    assert.equal(status.reply_available, false);
+    assert.equal(status.resume_available, false);
+
+    // The global status payload keeps its exec shape: no broker block leaks in.
+    const global = parse(await dispatch({ action: 'status', host_session_id: 'sid-cx-exec' }));
+    assert.deepEqual(Object.keys(global.codex_runtime).sort(), ['bin', 'sandbox', 'timeout_ms']);
+    assert.equal(global.targets.find((t) => t.id === 'codex').capabilities.reply, false);
+  } finally {
+    cx._resetForTest();
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-exec') jobs.delete(id);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldBin === undefined) delete process.env.CODEX_BIN; else process.env.CODEX_BIN = oldBin;
+    if (oldAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER; else process.env.CODEX_RUNTIME_ADAPTER = oldAdapter;
+    rmSync(tmp, { recursive: true, force: true });
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: the thread id is persisted while the job is still running, and deltas stream into the digest', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-send';
+  try {
+    await withCodexAppServer({}, async ({ live }) => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'codex', task: 'stream me', mode: 'EXECUTE',
+        template: 'general', cwd: TEST_CWD, host_session_id: 'sid-cx-send', parallel: 'never', max_wait_sec: 5,
+      }));
+      assert.equal(send.ok, true);
+      assert.match(send.job_id, /^codex-/);
+
+      // W1.1's guarantee on this transport: `thread/start` answers before the
+      // model does anything, so the resumable id is in the ledger while the job
+      // is still running — not after it ends.
+      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.sessionId === 'T1'), 'thread id captured');
+      const running = jobs.get(send.job_id);
+      assert.equal(running.status, 'running');
+      assert.equal(running.terminalAt, undefined);
+      assert.equal(running.codexAdapter, 'appserver');
+      assert.equal(running.promptId, `codex-${send.job_id}`);
+      const persisted = state.readJob(send.job_id);
+      assert.equal(persisted.companionSessionId, 'T1');
+      assert.equal(persisted.terminalAt, undefined, 'persisted while still in flight');
+
+      const st = parse(await dispatch({ action: 'status', job_id: send.job_id, host_session_id: 'sid-cx-send' }));
+      assert.equal(st.session_id, 'T1');
+      assert.equal(st.reply_available, true);
+      assert.equal(st.resume_available, true);
+
+      const sock = live();
+      assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'turn started');
+      // The turn is guarded: the status check runs before turn/start, and a
+      // thread this connection created is known-idle so it costs no resume.
+      assert.deepEqual(sock.wire(), ['thread/start', 'broker/subscribe', 'turn/start']);
+      const startParams = sock.paramsFor('thread/start')[0];
+      assert.equal(startParams.approvalPolicy, 'never');
+      assert.equal(startParams.ephemeral, false);
+      assert.equal('model' in startParams, false, 'no pin, so config.toml stays authoritative');
+
+      // Sub-turn streaming (F7): a delta mid-turn is visible in the digest
+      // before anything terminal has happened.
+      sock.notify('item/agentMessage/delta', { itemId: 'm1', delta: 'partway through the work' });
+      assert.ok(await _cxUntil(() => /partway through the work/.test(readFileSync(digestPath(send.job_id), 'utf8'))),
+        'the live digest carries the streamed delta');
+      assert.equal(jobs.get(send.job_id).terminalAt, undefined, 'still running while streaming');
+
+      sock.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text: 'ALL DONE', phase: 'final_answer' } });
+      sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+
+      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-send', max_wait_sec: 5 }));
+      assert.equal(terminal.status, 'completed');
+      assert.equal(terminal.target, 'codex');
+      assert.match(terminal.content, /ALL DONE/);
+      // Shared digest writer, target-neutral header — no third writer.
+      assert.match(readFileSync(digestPath(send.job_id), 'utf8'), /^# codex job /);
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-send') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: end to end through the REAL broker and the shared fake app-server', async (t) => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const cx = await import('./codex-app-server-runtime.mjs');
+  const { fakeCodexBin } = await import('../test/fake-codex-app-server.mjs');
+  _resetForTest();
+
+  // Unix socket paths are truncated at SUN_LEN (~104 bytes), so the root stays
+  // short. Everything the bridge writes is redirected into it.
+  const dir = mkdtempSync(join(tmpdir(), 'cxb-'));
+  const prior = {
+    sock: process.env.CODEX_BROKER_SOCKET_PATH,
+    reg: process.env.AGENT_CODEX_BROKER_REGISTRY,
+    runtime: process.env.AGENT_RUNTIME_DIR,
+    hb: process.env.AGENT_HEARTBEAT_DIR,
+    adapter: process.env.CODEX_RUNTIME_ADAPTER,
+    bin: process.env.CODEX_BIN,
+    sid: process.env.CLAUDE_CODE_SESSION_ID,
+    logLevel: process.env.CODEX_BROKER_LOG_LEVEL,
+  };
+  process.env.CODEX_BROKER_SOCKET_PATH = join(dir, 'b.sock');
+  process.env.AGENT_CODEX_BROKER_REGISTRY = join(dir, 'broker.json');
+  process.env.AGENT_RUNTIME_DIR = dir;
+  process.env.AGENT_HEARTBEAT_DIR = join(dir, 'hb');
+  process.env.CODEX_RUNTIME_ADAPTER = 'appserver';
+  process.env.CODEX_BIN = fakeCodexBin(dir);
+  process.env.CODEX_BROKER_LOG_LEVEL = 'ERROR';
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-e2e';
+  cx._resetForTest();
+  t.after(() => {
+    const pid = cx.codexBrokerSnapshot()?.pid;
+    if (pid) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    cx._resetForTest();
+    for (const [k, v] of Object.entries({
+      CODEX_BROKER_SOCKET_PATH: prior.sock, AGENT_CODEX_BROKER_REGISTRY: prior.reg,
+      AGENT_RUNTIME_DIR: prior.runtime, AGENT_HEARTBEAT_DIR: prior.hb,
+      CODEX_RUNTIME_ADAPTER: prior.adapter, CODEX_BIN: prior.bin,
+      CLAUDE_CODE_SESSION_ID: prior.sid, CODEX_BROKER_LOG_LEVEL: prior.logLevel,
+    })) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-e2e') jobs.delete(id);
+    rmSync(dir, { recursive: true, force: true });
+    _resetForTest();
+  });
+
+  const send = parse(await dispatch({
+    action: 'send', target: 'codex', task: 'real broker', mode: 'EXECUTE',
+    template: 'general', cwd: dir, host_session_id: 'sid-cx-e2e', parallel: 'never', max_wait_sec: 5,
+  }));
+  assert.equal(send.ok, true);
+  // The bridge spawned a real detached broker, which spawned the fake
+  // app-server over stdio and handshook with it.
+  assert.ok(
+    await _cxUntilMs(() => jobs.get(send.job_id)?.sessionId === 'T1'),
+    `thread opened through the real broker (job=${JSON.stringify(jobs.get(send.job_id)?.error || jobs.get(send.job_id)?.status)})`,
+  );
+  assert.equal(jobs.get(send.job_id).codexAdapter, 'appserver');
+  assert.ok(cx.codexBrokerSnapshot()?.pid > 0, 'the broker is recorded in the shared registry');
+
+  // Drive the turn from a SECOND client, so every frame below travels
+  // app-server stdout -> broker -> threadId routing -> the bridge's own
+  // connection. Nothing is injected into the bridge locally.
+  const driver = await cx.connectCodexBroker({ socketPath: process.env.CODEX_BROKER_SOCKET_PATH });
+  await driver.call('fake/emit', { frames: [
+    { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'T1', itemId: 'm1', delta: 'through the real broker' } },
+    { jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'T1', item: { id: 'm1', type: 'agentMessage', text: 'through the real broker', phase: 'final_answer' } } },
+    { jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'T1', turn: { id: 'TURN1', status: 'completed', items: [] } } },
+  ] });
+  driver.close();
+
+  const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-e2e', max_wait_sec: 10 }));
+  assert.equal(terminal.status, 'completed');
+  assert.match(terminal.content, /through the real broker/);
+});
+
+test('Codex app-server mode: cancel maps to turn/interrupt and settles cancelled although the stream says interrupted', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-cancel';
+  let workerSock = null;
+  try {
+    await withCodexAppServer({
+      handlers: {
+        // The interrupt is what ends the turn, so the stream answers it — with
+        // `interrupted`, which carries NO assistant answer.
+        'turn/interrupt': () => {
+          workerSock?.notify('turn/completed', { turn: { id: 'TURN1', status: 'interrupted', items: [] } });
+          return {};
+        },
+      },
+    }, async ({ live, sockets }) => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'codex', task: 'long codex turn', mode: 'EXECUTE',
+        template: 'general', cwd: TEST_CWD, host_session_id: 'sid-cx-cancel', parallel: 'never', max_wait_sec: 5,
+      }));
+      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.status === 'running'), 'job running');
+      workerSock = live();
+      assert.ok(await _cxUntil(() => workerSock.wire().includes('turn/start')), 'turn started');
+      workerSock.notify('item/agentMessage/delta', { itemId: 'm1', delta: 'half an answer' });
+
+      const cancel = parse(await dispatch({ action: 'cancel', job_id: send.job_id, host_session_id: 'sid-cx-cancel' }));
+      const cancelSock = sockets[sockets.length - 1];
+      assert.notEqual(cancelSock, workerSock, 'cancel opens its own connection');
+      // Resume-before-act: a connection that did not start the thread would
+      // otherwise meet `thread not found`, which means "not loaded here".
+      assert.deepEqual(cancelSock.wire(), ['thread/resume', 'turn/interrupt']);
+
+      let term = cancel;
+      for (let i = 0; i < 10 && (term.status === 'cancelling' || term.status === 'still_running'); i++) {
+        term = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-cancel', max_wait_sec: 5 }));
+      }
+      assert.equal(term.status, 'cancelled');
+      const job = jobs.get(send.job_id);
+      assert.equal(job.detail, 'cancelled');
+      assert.equal(job.error, null);
+      // The thread outlives the interrupt — that is the whole difference from
+      // the exec adapter's SIGTERM — and the response says so.
+      assert.equal(job.sessionId, 'T1');
+      assert.match(String(cancel.note || term.content || ''), /stays live|resumable|cancelled/i);
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-cancel') jobs.delete(id);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: the bridge owns the cancel verdict when the turn races the interrupt to completed', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-race';
+  let workerSock = null;
+  try {
+    await withCodexAppServer({
+      handlers: {
+        // The turn had already finished when the interrupt landed, so the
+        // stream reports `completed`. Only the intent recorded before the
+        // interrupt tells the operator their cancel was honoured.
+        'turn/interrupt': () => {
+          workerSock?.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text: 'raced to the end', phase: 'final_answer' } });
+          workerSock?.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+          return {};
+        },
+      },
+    }, async ({ live }) => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'codex', task: 'racing turn', mode: 'EXECUTE',
+        template: 'general', cwd: TEST_CWD, host_session_id: 'sid-cx-race', parallel: 'never', max_wait_sec: 5,
+      }));
+      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.status === 'running'), 'job running');
+      workerSock = live();
+      assert.ok(await _cxUntil(() => workerSock.wire().includes('turn/start')), 'turn started');
+      let term = parse(await dispatch({ action: 'cancel', job_id: send.job_id, host_session_id: 'sid-cx-race' }));
+      for (let i = 0; i < 10 && (term.status === 'cancelling' || term.status === 'still_running'); i++) {
+        term = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-race', max_wait_sec: 5 }));
+      }
+      assert.equal(term.status, 'cancelled');
+      assert.equal(jobs.get(send.job_id).detail, 'cancelled');
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-race') jobs.delete(id);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: reply on a running turn steers it — no cancel, no restart, no generation bump', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  try {
+    // `active` is what `thread/resume` reports for a thread with a turn in
+    // flight — and resume IS the status read on this protocol.
+    await withCodexAppServer({ statuses: { T1: 'active' } }, async ({ sockets }) => {
+      const job = _cxLiveJob(jobs, 'codex-steer', 'sid-cx-steer');
+      const reply = parse(await dispatch({ action: 'reply', job_id: 'codex-steer', message: 'actually, use ripgrep', host_session_id: 'sid-cx-steer' }));
+      assert.equal(reply.ok, true);
+      assert.equal(reply.target, 'codex');
+      assert.equal(reply.steered, true);
+      assert.equal(reply.thread_id, 'T1');
+      // The watcher already driving the turn is the one that answers, so the
+      // generation must NOT move — bumping it would make that watcher discard
+      // its own terminal and the job would never settle.
+      assert.equal(reply.new_prompt_id, job.promptId);
+      assert.equal(jobs.get('codex-steer').promptId, 'codex-codex-steer');
+      assert.equal(jobs.get('codex-steer').replyTurn, 1);
+      assert.equal(jobs.get('codex-steer').terminalAt, undefined);
+
+      const sock = sockets[sockets.length - 1];
+      assert.deepEqual(sock.wire(), ['thread/resume', 'turn/steer'], 'steer only: no interrupt, no second turn/start');
+      assert.equal(sock.paramsFor('turn/steer')[0].input[0].text, 'actually, use ripgrep');
+    });
+  } finally {
+    jobs.delete('codex-steer');
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: reply on an idle thread starts a fresh guarded turn under a bumped generation', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  try {
+    await withCodexAppServer({ statuses: { T1: 'idle' } }, async ({ sockets }) => {
+      _cxLiveJob(jobs, 'codex-idle-reply', 'sid-cx-idle');
+      const reply = parse(await dispatch({ action: 'reply', job_id: 'codex-idle-reply', message: 'follow up', host_session_id: 'sid-cx-idle' }));
+      assert.equal(reply.ok, true);
+      assert.equal(reply.steered, false);
+      assert.match(reply.new_prompt_id, /-r1$/);
+      assert.equal(jobs.get('codex-idle-reply').promptId, reply.new_prompt_id);
+      const sock = sockets[sockets.length - 1];
+      assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'a new turn was started');
+      // An idle thread has no turn to steer, so this path re-prompts — but it
+      // still never interrupts, because there is nothing running to interrupt.
+      assert.equal(sock.wire().includes('turn/interrupt'), false);
+      sock.notify('turn/completed', { turn: { id: 'TURN2', status: 'completed', items: [{ id: 'm9', type: 'agentMessage', text: 'second turn done', phase: 'final_answer' }] } });
+      assert.ok(await _cxUntil(() => jobs.get('codex-idle-reply')?.terminalAt), 'the replacement watch settles the job');
+      assert.equal(jobs.get('codex-idle-reply').status, 'completed');
+    });
+  } finally {
+    jobs.delete('codex-idle-reply');
+    _resetForTest();
+  }
+});
+
+test('Codex reply/resume availability is per job, not per target', async () => {
+  const mod = await bridge();
+  const { buildJobResponse, _resetForTest } = mod;
+  _resetForTest();
+  await withCodexAppServer({}, async () => {
+    const live = buildJobResponse({
+      jobId: 'cx-live', target: 'codex', codexAdapter: 'appserver',
+      status: 'running', sessionId: 'T1', promptId: 'codex-cx-live', startedAt: Date.now(),
+    });
+    assert.equal(live.reply_available, true);
+    assert.equal(live.resume_available, true);
+    // An exec-adapter codex job advertises neither, even while the env says
+    // appserver — it started on a transport that has no control channel.
+    const exec = buildJobResponse({
+      jobId: 'cx-exec', target: 'codex', status: 'running',
+      sessionId: 'th-exec', promptId: 'codex-cx-exec', pid: 999, startedAt: Date.now(),
+    });
+    assert.equal(exec.reply_available, false);
+    assert.equal(exec.resume_available, false);
+    // …and neither does an app-server job that has not opened its thread yet.
+    const starting = buildJobResponse({ jobId: 'cx-pre', target: 'codex', codexAdapter: 'appserver', status: 'starting', startedAt: Date.now() });
+    assert.equal(starting.reply_available, false);
+    assert.equal(starting.resume_available, false);
+  });
+  _resetForTest();
+});
+
+test('Codex app-server mode: hydrate resumes the job instead of retiring it, and does not clobber its digest', async () => {
+  const mod = await bridge();
+  const { jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-hydrate';
+  try {
+    await withCodexAppServer({
+      handlers: {
+        // The turn finished while this bridge was down; `thread/read` serves it
+        // back from the rollout.
+        'thread/read': (p) => ({ thread: { id: p.threadId }, turns: [{ items: [
+          { id: 'm1', type: 'agentMessage', text: 'finished while the bridge was down', phase: 'final_answer' },
+        ] }] }),
+      },
+    }, async () => {
+      _cxLiveJob(jobs, 'codex-hydrate', 'sid-cx-hydrate');
+      mod.persistJob('codex-hydrate');
+      // A digest with live content, exactly what the previous bridge left.
+      const digest = digestPath('codex-hydrate');
+      writeFileSync(digest, '# codex job codex-hydrate - digest\n\n## Final / partial assistant message\n\nLIVE PARTIAL WORK\n');
+      const before = readFileSync(digest, 'utf8').length;
+      jobs.delete('codex-hydrate');
+      mod._resetForTest();
+
+      mod.hydrateJobsFromLedger();
+      assert.ok(await _cxUntil(() => jobs.get('codex-hydrate')?.terminalAt), 'the resumed job settles');
+      const job = jobs.get('codex-hydrate');
+      // NOT retired: this is the case that destroyed ~4 minutes of paid work
+      // twice in the field report.
+      assert.equal(job.status, 'completed');
+      assert.notEqual(job.detail, 'target_child_orphaned_by_bridge_restart');
+      assert.notEqual(job.detail, 'bridge_transport_closed');
+      assert.equal(existsSync(digest.replace('agent-digest-', 'agent-retired-')), false, 'no retirement note was written');
+      // And the digest gained the salvaged answer rather than being overwritten
+      // with a header-only stub (the W1.4′ invariant orphan.mjs guards).
+      const after = readFileSync(digest, 'utf8');
+      assert.match(after, /finished while the bridge was down/);
+      assert.match(after, /## Final \/ partial assistant message/);
+      assert.ok(after.length > before / 2, 'the digest did not collapse to a stub');
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-hydrate') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: hydrate with a DEAD broker resumes from the rollout and reports a lost turn, not a lost thread', async () => {
+  const mod = await bridge();
+  const { jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-dead';
+  // The first two connects are the resume probe and ensureCodexBroker's own
+  // probe — both find nothing listening. The spawn then brings a broker up and
+  // every later connect succeeds, which is the measured tier-2 shape: the
+  // rollout survives the broker.
+  let refusals = 2;
+  try {
+    await withCodexAppServer({
+      connect: async ({ newSocket }) => {
+        if (refusals-- > 0) { const err = new Error('connect ECONNREFUSED'); err.code = 'ECONNREFUSED'; throw err; }
+        return newSocket();
+      },
+      spawnBroker: () => ({ on: () => {}, unref: () => {} }),
+      handlers: {
+        'thread/read': (p) => ({ thread: { id: p.threadId }, turns: [{ items: [
+          { id: 'm1', type: 'agentMessage', text: 'partial work before the broker died', phase: 'commentary' },
+        ] }] }),
+      },
+    }, async () => {
+      _cxLiveJob(jobs, 'codex-dead-broker', 'sid-cx-dead');
+      mod.persistJob('codex-dead-broker');
+      jobs.delete('codex-dead-broker');
+      mod._resetForTest();
+
+      mod.hydrateJobsFromLedger();
+      assert.ok(await _cxUntil(() => jobs.get('codex-dead-broker')?.terminalAt), 'the resumed job settles');
+      const job = jobs.get('codex-dead-broker');
+      assert.equal(job.status, 'unreachable');
+      assert.equal(job.detail, 'codex_server_gone');
+      // The salvage is real and the message must not claim the thread is gone —
+      // `thread_not_resumable` here would report the very case this transport
+      // was chosen for as lost work.
+      assert.match(job.summary.message, /partial work before the broker died/);
+      assert.match(job.error, /in-flight turn was lost/);
+      assert.match(job.error, /lost turn, not a lost thread/);
+      assert.equal(/thread_not_resumable/.test(job.error), false);
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-dead') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: a resume that salvages nothing leaves the dead bridge\'s digest alone', async () => {
+  const mod = await bridge();
+  const { jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-nosalvage';
+  let refusals = 2;
+  try {
+    await withCodexAppServer({
+      connect: async ({ newSocket }) => {
+        if (refusals-- > 0) { const err = new Error('connect ECONNREFUSED'); err.code = 'ECONNREFUSED'; throw err; }
+        return newSocket();
+      },
+      spawnBroker: () => ({ on: () => {}, unref: () => {} }),
+      // The rollout has no assistant message yet — the turn died in reasoning.
+    }, async () => {
+      _cxLiveJob(jobs, 'codex-nosalvage', 'sid-cx-nosalvage');
+      mod.persistJob('codex-nosalvage');
+      const digest = digestPath('codex-nosalvage');
+      writeFileSync(digest, '# codex job codex-nosalvage - digest\n\n## Final / partial assistant message\n\nLIVE PARTIAL WORK FROM THE DEAD BRIDGE\n');
+      jobs.delete('codex-nosalvage');
+      mod._resetForTest();
+
+      mod.hydrateJobsFromLedger();
+      assert.ok(await _cxUntil(() => jobs.get('codex-nosalvage')?.terminalAt), 'the resumed job settles');
+      assert.equal(jobs.get('codex-nosalvage').status, 'unreachable');
+      // W1.4\u2032's hard constraint: an empty result must never render a
+      // header-only stub over content that is the only record of the work.
+      assert.match(readFileSync(digest, 'utf8'), /LIVE PARTIAL WORK FROM THE DEAD BRIDGE/);
+      // The outcome is still recorded on disk \u2014 in the sibling note, never in
+      // the body.
+      const note = digest.replace('agent-digest-', 'agent-retired-');
+      assert.equal(existsSync(note), true);
+      assert.match(readFileSync(note, 'utf8'), /codex_server_gone/);
+      assert.match(readFileSync(note, 'utf8'), /lost turn, not a lost thread/);
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-nosalvage') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('applyAdapterCapabilities flips codex only under the app-server adapter', async () => {
+  const registry = await import('../lib/target-registry.mjs');
+  const cx = await import('./codex-app-server-runtime.mjs');
+  const exec = registry.getTargetById('codex', { CODEX_RUNTIME_ADAPTER: 'exec' });
+  assert.equal(exec.capabilities.reply, false);
+  assert.equal(exec.capabilities.resume, false);
+  assert.equal(exec.capabilities.serverMode, false);
+  assert.equal(exec.adapter, undefined);
+  const appserver = registry.getTargetById('codex', { CODEX_RUNTIME_ADAPTER: 'appserver' });
+  assert.equal(appserver.capabilities.reply, true);
+  assert.equal(appserver.capabilities.resume, true);
+  assert.equal(appserver.capabilities.serverMode, true);
+  assert.equal(appserver.adapter, 'appserver');
+  // Unset and unrecognised both stay on the shipped default.
+  assert.equal(registry.getTargetById('codex', {}).capabilities.reply, false);
+  assert.equal(registry.getTargetById('codex', { CODEX_RUNTIME_ADAPTER: 'server' }).capabilities.reply, false);
+  // Selecting codex must not touch opencode, and vice versa.
+  assert.equal(registry.getTargetById('opencode', { CODEX_RUNTIME_ADAPTER: 'appserver' }).capabilities.reply, false);
+  assert.equal(registry.getTargetById('codex', { OPENCODE_RUNTIME_ADAPTER: 'server' }).capabilities.reply, false);
+  // The descriptor's local predicate and the adapter's own resolver must agree
+  // about the spelling — two parsers that disagree would advertise a capability
+  // the transport does not have.
+  for (const env of [{}, { CODEX_RUNTIME_ADAPTER: 'appserver' }, { CODEX_RUNTIME_ADAPTER: 'APPSERVER' }, { CODEX_RUNTIME_ADAPTER: 'exec' }, { CODEX_RUNTIME_ADAPTER: 'nonsense' }]) {
+    assert.equal(registry.codexAppServerAdapterSelected(env), cx.codexAppServerActive(env), JSON.stringify(env));
+  }
+});
+
+test('agent_status merges the codex app-server block, with pinned-vs-installed version skew', async () => {
+  const mod = await bridge();
+  const { dispatch, _resetForTest } = mod;
+  _resetForTest();
+  await withCodexAppServer({}, async () => {
+    const status = parse(await dispatch({ action: 'status', host_session_id: 'sid-cx-status' }));
+    const rt = status.codex_runtime;
+    assert.equal(rt.adapter, 'appserver');
+    assert.equal(rt.approvalPolicy, 'never');
+    assert.ok(rt.socket.endsWith('.sock'));
+    assert.ok(rt.pinned_version);
+    assert.ok(rt.broker_registry !== undefined, 'the shared-broker registry entry is reported');
+    // No broker has spoken to this process yet, so skew is unknown — which is
+    // not the same as "no skew". There is no protocol version field on this
+    // transport, so this is the only drift warning there is.
+    assert.equal(rt.version_skew, null);
+    // The exec knobs are still there: the app-server block merges onto them.
+    assert.ok(rt.timeout_ms > 0);
+    assert.ok(rt.bin);
+    const codex = status.targets.find((t) => t.id === 'codex');
+    assert.equal(codex.capabilities.reply, true);
+    assert.equal(codex.capabilities.resume, true);
+  });
+  _resetForTest();
+});
+
 test('runWorker retires persisted thread sid on prompt timeout and empty completion', async () => {
   const mod = await bridge();
   const state = await import('../lib/state.mjs');

@@ -47,12 +47,10 @@ import {
 import { resolveCodexTimeoutMs } from './codex-runtime.mjs';
 import { CODEX_PINNED_VERSION } from '../lib/codex-app-server-contract.mjs';
 import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
+import { fakeBrokerSocket, FAKE_BROKER_PID } from '../test/fake-codex-broker-socket.mjs';
 
 const TID = 'T1';
-// The pid the fake broker reports as its own. The reaper only signals a pid the
-// LIVE broker claims, so a registry entry that expects to be disposed has to
-// carry this one.
-const BROKER_PID = 4242;
+const BROKER_PID = FAKE_BROKER_PID;
 
 let regDir;
 beforeEach(() => {
@@ -74,70 +72,9 @@ function brokerSocketPath() { return process.env.CODEX_BROKER_SOCKET_PATH; }
 
 // --- fixtures ----------------------------------------------------------------
 
-// A stand-in for the broker's end of the socket: it speaks the same
-// newline-delimited JSON, records every frame the adapter sent, and lets a test
-// push notifications back. `_impl.connect` hands this to the real
-// createConnection, so the framing, the id map, the ownership tracking and the
-// guards are all the shipped code.
-function fakeBrokerSocket({ handlers = {}, statuses = {}, brokerPid = BROKER_PID } = {}) {
-  const sock = new EventEmitter();
-  sock.frames = [];  // everything the adapter wrote
-  sock.calls = [];   // …of which the method-carrying ones
-  sock.setEncoding = () => {};
-  sock.off = sock.removeListener.bind(sock);
-  sock.destroyed = false;
-  sock.end = () => { sock.ended = true; };
-  sock.destroy = () => { sock.destroyed = true; };
-  sock.methods = () => sock.calls.map((c) => c.method);
-  // Everything after the local `initialize` handshake, which every test would
-  // otherwise have to skip past.
-  sock.wire = () => sock.methods().filter((m) => m !== 'initialize');
-  sock.paramsFor = (method) => sock.calls.filter((c) => c.method === method).map((c) => c.params);
-  sock.deliver = (frame) => sock.emit('data', `${JSON.stringify(frame)}\n`);
-
-  const defaults = {
-    initialize: () => ({
-      brokered: true,
-      protocol: 1,
-      brokerPid,
-      appServerPid: 4243,
-      appServerInitialized: true,
-      codexVersion: '0.147.0',
-      codexVersionProbed: true,
-    }),
-    'broker/status': () => ({ ok: true, protocol: 1, brokerPid, appServerPid: 4243, uptimeMs: 1, clients: 1, subscriptions: 0 }),
-    'broker/subscribe': (p) => ({ ok: true, threadId: p.threadId, flushed: 0 }),
-    'broker/unsubscribe': (p) => ({ ok: true, threadId: p.threadId }),
-    'thread/start': () => ({ thread: { id: TID, path: `/fake/rollout-${TID}.jsonl` } }),
-    'thread/resume': (p) => ({ thread: { id: p.threadId, status: { type: statuses[p.threadId] || 'idle' } } }),
-    'thread/read': (p) => ({ thread: { id: p.threadId }, turns: [{ items: [] }] }),
-    'thread/loaded/list': () => ({ data: [] }),
-    'turn/start': () => ({ turn: { id: 'TURN1' } }),
-    'turn/steer': () => ({}),
-    'turn/interrupt': () => ({}),
-  };
-
-  sock.write = (text) => {
-    for (const line of String(text).split('\n')) {
-      if (!line.trim()) continue;
-      const msg = JSON.parse(line);
-      sock.frames.push(msg);
-      if (typeof msg.method === 'string') sock.calls.push(msg);
-      if (msg.id === undefined || typeof msg.method !== 'string') continue;
-      const handler = handlers[msg.method] || defaults[msg.method] || (() => ({ echo: msg.method }));
-      queueMicrotask(async () => {
-        let result;
-        // Awaited, so a handler can model a broker that simply never answers.
-        try { result = await handler(msg.params || {}, msg); }
-        catch (err) { sock.deliver({ jsonrpc: '2.0', id: msg.id, error: { code: -32600, message: err.message } }); return; }
-        if (result && result.__error) { sock.deliver({ jsonrpc: '2.0', id: msg.id, error: result.__error }); return; }
-        sock.deliver({ jsonrpc: '2.0', id: msg.id, result });
-      });
-    }
-    return true;
-  };
-  return sock;
-}
+// The broker's end of the socket lives in test/fake-codex-broker-socket.mjs,
+// shared with bridge-server/server.test.mjs so the bridge's wiring tests and
+// this suite cannot disagree about what a broker does.
 
 async function connectFake(opts = {}, { env = {} } = {}) {
   const sock = fakeBrokerSocket(opts);

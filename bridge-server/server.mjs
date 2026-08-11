@@ -121,6 +121,25 @@ import {
   syncOpenCodeServerLeases,
   openCodeServerIdleTtlMs,
 } from './opencode-server-runtime.mjs';
+import {
+  codexAppServerActive,
+  codexAppServerRuntimeInfo,
+  codexAppServerPromptId,
+  ensureCodexBroker,
+  connectCodexBroker,
+  probeCodexBrokerHealth,
+  startCodexThread,
+  resumeCodexThread,
+  readCodexThread,
+  startCodexTurn,
+  steerCodexTurn,
+  interruptCodexTurn,
+  openCodexTurnWatcher,
+  codexBrokerSnapshot,
+  syncCodexBrokerLeases,
+  reapIdleCodexBroker,
+  codexBrokerIdleTtlMs,
+} from './codex-app-server-runtime.mjs';
 import { pidAlive } from '../lib/shared-runtime-registry.mjs';
 import {
   defaultTargetInfo,
@@ -294,19 +313,36 @@ const JOB_GC_INTERVAL_MS = 60 * 1000;
 // openCodeServerIdleTtlMs. Leases are the primary guard; this is the backstop.
 const OPENCODE_SERVER_IDLE_TTL_MS = openCodeServerIdleTtlMs();
 
+// Same contract for the shared codex broker: it is detached and outlives every
+// bridge on purpose (that is what makes a subagent's return cost a socket
+// client instead of a job), so nothing would ever stop it without a reaper.
+const CODEX_BROKER_IDLE_TTL_MS = codexBrokerIdleTtlMs();
+
 const jobsGcTimer = setInterval(() => {
   gcExpiredJobs();
   const liveOpenCodeServerJobs = [...jobs.entries()]
     .filter(([, j]) => j.target === 'opencode' && j.opencodeAdapter === 'server' && !j.terminalAt)
     .map(([jobId]) => jobId);
+  // The adapter a job STARTED under, never the live env: an operator flipping
+  // CODEX_RUNTIME_ADAPTER mid-flight must not make this tick stop renewing an
+  // in-flight job's lease on the broker that is running it.
+  const liveCodexAppServerJobs = [...jobs.entries()]
+    .filter(([, j]) => j.target === 'codex' && j.codexAdapter === 'appserver' && !j.terminalAt)
+    .map(([jobId]) => jobId);
   // Renew our leases before reaping so this tick's view of machine-wide
   // liveness includes our own jobs, and so other bridges see them too.
   try { syncOpenCodeServerLeases(liveOpenCodeServerJobs); }
   catch (err) { log('WARN', 'opencode server lease sync failed:', err.message); }
+  try { syncCodexBrokerLeases(liveCodexAppServerJobs); }
+  catch (err) { log('WARN', 'codex broker lease sync failed:', err.message); }
   // Fire-and-forget; never let a dispose HTTP call disrupt the GC tick.
   Promise.resolve(reapIdleOpenCodeServer({
     idleMs: OPENCODE_SERVER_IDLE_TTL_MS,
     hasLiveJobs: liveOpenCodeServerJobs.length > 0,
+  })).catch(() => {});
+  Promise.resolve(reapIdleCodexBroker({
+    idleMs: CODEX_BROKER_IDLE_TTL_MS,
+    hasLiveJobs: liveCodexAppServerJobs.length > 0,
   })).catch(() => {});
 }, JOB_GC_INTERVAL_MS);
 if (jobsGcTimer.unref) jobsGcTimer.unref();
@@ -758,23 +794,34 @@ function digestResourceLinkForResult(obj) {
 }
 
 // Per-job re-steer availability. Copilot can reply on any live (non-terminal)
-// prompt; OpenCode can reply only in server mode with a live session.
+// prompt; OpenCode can reply only in server mode with a live session; codex can
+// reply only on the app-server transport, where `turn/steer` injects into the
+// RUNNING turn (the `codex exec` pipe has no control channel at all).
+//
+// Every branch keys on the adapter the JOB recorded, never on the live env, so
+// flipping CODEX_RUNTIME_ADAPTER/OPENCODE_RUNTIME_ADAPTER mid-flight cannot
+// make a running job advertise a capability its own transport does not have.
 function jobReplyAvailable(job) {
   if (!job || job.terminalAt) return false;
   const target = job.target;
   if (target === 'copilot') return Boolean(job.promptId);
   if (target === 'opencode') return Boolean(job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId);
+  if (target === 'codex') return Boolean(job.codexAdapter === 'appserver' && job.sessionId);
   return false;
 }
 
 // Per-job restart-resume availability — whether a respawned bridge could
 // reattach to this job. Copilot resumes via the detached daemon; OpenCode server
-// jobs resume via the surviving server + persisted session id.
+// jobs resume via the surviving server + persisted session id; codex app-server
+// jobs resume via `thread/resume`, which rejoins a RUNNING thread on the shared
+// broker and still reads the transcript back from the rollout when the broker
+// itself died.
 function jobResumeAvailable(job) {
   if (!job) return false;
   const target = job.target;
   if (target === 'copilot') return Boolean(job.promptId && runtimeSupportsDetachedPromptResume());
   if (target === 'opencode') return Boolean(job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId);
+  if (target === 'codex') return Boolean(job.codexAdapter === 'appserver' && job.sessionId);
   return false;
 }
 
@@ -2004,7 +2051,343 @@ function runOpenCodeCliWorker(args) {
 }
 
 function runCodexWorker(args) {
+  // Broker-backed `codex app-server` vs single-shot `codex exec`, exactly as
+  // runOpenCodeWorker branches. The app-server adapter
+  // (CODEX_RUNTIME_ADAPTER=appserver) unlocks reply/resume/streaming; exec stays
+  // the default, so an unset variable leaves this path untouched.
+  if (codexAppServerActive()) return runCodexAppServerWorker(args);
   return runSingleShotCliWorker({ ...args, startRun: startCodexRun });
+}
+
+// App-server worker: ensure the shared broker, open ONE connection for this
+// job, start a thread, persist its id before any model work begins, then drive
+// the turn through the reusable watch helper.
+//
+// The connection is per-job and lives from `thread/start` through the terminal:
+// `startCodexTurn` skips its status probe only for a thread THIS connection
+// created (a brand-new thread has no rollout, so asking would be both wasteful
+// and a `no rollout found` away from a false `thread_not_resumable`).
+async function runCodexAppServerWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, model = null, parallel, target }) {
+  const startedAt = Date.now();
+  const rlog = withReq(reqId, { job_id: jobId, target });
+  rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target, adapter: 'appserver', model: model || null });
+  log('INFO', 'codex-appserver worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} model=${model || '-'}`);
+  let conn = null;
+  try {
+    const broker = await ensureCodexBroker();
+    conn = await connectCodexBroker({ socketPath: broker.socketPath });
+    const { threadId, rolloutPath } = await startCodexThread({ conn, cwd, model });
+    const promptId = codexAppServerPromptId(jobId);
+    // W1.1's guarantee, and the reason this write happens HERE rather than
+    // after the turn: `thread/start` answers with the thread id before the
+    // model does anything, so a bridge that dies mid-run still leaves a
+    // resumable id in the ledger. `sessionId` is the target-neutral slot the
+    // ledger already persists as `companionSessionId`.
+    //
+    // `codexAdapter` marks the transport this job STARTED under. Cancel, reply
+    // and hydrate all gate on it rather than on the live env, so an operator
+    // flipping CODEX_RUNTIME_ADAPTER mid-flight cannot re-route a running job.
+    updateJob(jobId, {
+      promptId,
+      sessionId: threadId,
+      codexAdapter: 'appserver',
+      brokerSocket: broker.socketPath,
+      rolloutPath: rolloutPath || null,
+      pid: null,
+      status: 'running',
+      inspectAvailable: false,
+    });
+    writeOpenCodeDigest(jobs.get(jobId), null);
+    rlog.info('worker.thread_started', { thread_id: threadId, rollout_path: rolloutPath || null, broker_pid: broker.pid, broker_reused: broker.reused });
+    log('INFO', 'codex-appserver thread:', jobId, `thread=${threadId} rollout=${rolloutPath || '-'} broker=${broker.pid} reused=${broker.reused}`);
+
+    const formatted = formatPrompt({ template, task, mode, template_args, parallel: 'never' });
+    await runCodexAppServerWatch({
+      jobId, reqId, conn, threadId, promptId,
+      prompt: formatted, model, task, mode, cwd, thread, startedAt, fresh: true,
+    });
+  } catch (err) {
+    const duration = Date.now() - startedAt;
+    retainTerminalJob(jobId, {
+      status: 'failed', summary: null, error: err.message,
+      stuckReason: null, detail: 'codex_server_worker_error',
+      failedTools: [], durationMs: duration, terminalAt: Date.now(),
+    });
+    writeCodexAppServerDigest(jobs.get(jobId), { stdout: '', stderr: err.message, summary: null });
+    emitNotification({
+      jobId, status: 'failed', summary: null, error: err.message,
+      stuckReason: null, detail: 'codex_server_worker_error',
+      duration, task, mode, cwd, thread,
+      promptId: jobs.get(jobId)?.promptId || null, sessionId: jobs.get(jobId)?.sessionId || null,
+      failedTools: [], reqId, target, fleet: false,
+    });
+    rlog.warn('worker.catch', { error: err.message });
+    log('WARN', 'codex-appserver worker catch:', jobId, `err="${err.message}"`);
+  } finally {
+    // The connection is this function's to close: the watch only borrows it, so
+    // a reply that hands a connection to a background watch closes its own.
+    try { conn?.close(); } catch {}
+    rlog.info('worker.end', { duration_ms: Date.now() - startedAt });
+  }
+}
+
+// Drive one codex app-server turn to terminal. Reused by the fresh worker, by
+// reply's idle path, and by restart resume — the same three callers the
+// OpenCode server watch has. `fresh`/`reply` start a guarded turn after the
+// watcher subscribes; resume omits the prompt and level-checks instead.
+//
+// A per-job watch generation guard (job.promptId === promptId) ensures a
+// superseded turn never writes a terminal/notification over the live one.
+async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, prompt = null, model = null, task, mode, cwd, thread, startedAt, fresh = false, reply = false }) {
+  const rlog = withReq(reqId, { job_id: jobId });
+  const timeoutMs = resolveCodexAppServerTimeoutMs();
+  let watcher;
+  try {
+    // Subscribe BEFORE the turn starts so the first `item/*Delta` cannot be
+    // missed. Resume asks for the level check instead — that is what harvests a
+    // turn which finished while this bridge was down.
+    watcher = await openCodexTurnWatcher({
+      conn, threadId, timeoutMs, model,
+      initialLevelCheck: !fresh && !reply,
+      onEvent: (snapshot) => {
+        const job = jobs.get(jobId);
+        if (!job || job.promptId !== promptId) return;
+        // Real sub-turn streaming — this is what closes F7 on this transport:
+        // `codex exec --json` emits no deltas at all, so a reasoning-only turn
+        // produced no progress signal whatsoever. Same shared digest writer as
+        // every other non-copilot job; there is no third one.
+        job.adapterResult = { stdout: snapshot.message || '', stderr: '', summary: snapshot };
+        refreshDigestForJob(job);
+      },
+    });
+    if (fresh || reply) {
+      const started = await startCodexTurn({ conn, threadId, prompt, model });
+      if (started.turnId) updateJob(jobId, { turnId: started.turnId });
+      // `turn/start` on a thread that already has a running turn SUCCEEDS and
+      // returns a SECOND turn id, so the adapter attaches to the live one
+      // instead. Say so out loud: a job silently riding another turn looks
+      // exactly like one that started its own.
+      if (started.attached) {
+        rlog.warn('worker.turn_already_active', { thread_id: threadId });
+        log('WARN', 'codex-appserver turn already active:', jobId, `thread=${threadId} — attached instead of double-dispatching`);
+      }
+    }
+    const result = await watcher.done;
+
+    // Supersede guard: if a reply bumped job.promptId while we waited, this turn
+    // is obsolete — drop its terminal so the replacement watch owns the job.
+    const currentJob = jobs.get(jobId);
+    if (currentJob && currentJob.promptId !== promptId) {
+      rlog.info('worker.prompt_obsolete', { prompt_id: promptId, current_prompt_id: currentJob.promptId });
+      log('INFO', 'codex-appserver obsolete turn ignored:', jobId, `old=${promptId} current=${currentJob.promptId}`);
+      return;
+    }
+
+    // Cancel verdict: the bridge owns it. An interrupted turn settles
+    // `status:"interrupted"` with NO answer, and a turn that raced the
+    // interrupt to its own completion reports whatever it reached — so the
+    // stream cannot be trusted to report the cancellation, only the intent
+    // recorded before the interrupt was sent can.
+    if (currentJob?.cancelRequested && result.status !== 'unreachable') {
+      result.status = 'cancelled';
+      result.error = null;
+      result.detail = 'cancelled';
+    }
+
+    // Empty-completed remap, matching emitNotification's own remap so the
+    // retained/persisted status stays in sync with the notification + digest.
+    if (result.status === 'completed' && isEmptyCompletedSummary(result.summary)) {
+      result.status = 'failed';
+      result.error = 'Codex returned completed without any assistant message or tool calls.';
+      result.detail = 'empty_completed';
+    }
+
+    const duration = Date.now() - startedAt;
+    // `codex_server_*` reuses the classifier's transport vocabulary on purpose:
+    // classifyUnreachable strips the target prefix, so `server_gone` /
+    // `server_unreachable` land in `runtime_transport` — which is exactly what
+    // a dead broker or a dropped socket is — without a second detail dialect.
+    const detail = result.detail
+      || (result.status === 'completed' ? null
+      : result.status === 'cancelled' ? 'cancelled'
+      : result.status === 'timeout' ? 'codex_server_timeout'
+      : result.status === 'unreachable'
+        ? (result.summary?.stopReason === 'broker-gone' ? 'codex_server_gone' : 'codex_server_unreachable')
+        : 'codex_server_failed');
+    const job = jobs.get(jobId);
+    if (job) job.adapterResult = result;
+    retainTerminalJob(jobId, {
+      status: result.status, summary: result.summary, error: result.error,
+      stuckReason: null, detail, failedTools: [],
+      durationMs: duration, terminalAt: Date.now(), adapterResult: result,
+    });
+    writeCodexAppServerDigest(jobs.get(jobId), result);
+    emitNotification({
+      jobId, status: result.status, summary: result.summary, error: result.error,
+      stuckReason: null, detail, duration, task, mode, cwd, thread,
+      promptId, sessionId: threadId, failedTools: [], reqId, target: 'codex', fleet: false,
+    });
+    rlog.info('worker.terminal', { status: result.status, duration_ms: duration, turn_id: result.turnId || null });
+    log('INFO', 'codex-appserver worker terminal:', jobId, `status=${result.status} duration_ms=${duration}`);
+  } catch (err) {
+    try { watcher?.close(); } catch {}
+    const currentJob = jobs.get(jobId);
+    if (currentJob && currentJob.promptId !== promptId) return;
+    const duration = Date.now() - startedAt;
+    retainTerminalJob(jobId, {
+      status: 'failed', summary: null, error: err.message,
+      stuckReason: null, detail: 'codex_server_watch_error',
+      failedTools: [], durationMs: duration, terminalAt: Date.now(),
+    });
+    // Keep what streamed before the watch broke; the error joins it on stderr
+    // rather than replacing it.
+    const partial = jobs.get(jobId)?.adapterResult || null;
+    writeCodexAppServerDigest(jobs.get(jobId), { stdout: partial?.stdout || '', stderr: err.message, summary: partial?.summary || null });
+    emitNotification({
+      jobId, status: 'failed', summary: null, error: err.message,
+      stuckReason: null, detail: 'codex_server_watch_error',
+      duration, task, mode, cwd, thread, promptId, sessionId: threadId,
+      failedTools: [], reqId, target: 'codex', fleet: false,
+    });
+    rlog.warn('worker.watch_catch', { error: err.message });
+    log('WARN', 'codex-appserver watch catch:', jobId, `err="${err.message}"`);
+  }
+}
+
+// The shared digest writer, with the one guard the resume paths need: a result
+// that carries nothing must never REPLACE a digest that already holds content.
+// On the resume paths that content came from the bridge that died and is the
+// only record of the work (W1.4′, measured 11,754 B → 228 B), and on the fresh
+// path the seed header is already there, so skipping costs nothing either way.
+// Still writeOpenCodeDigest underneath — there is no second digest writer.
+function writeCodexAppServerDigest(job, result) {
+  const hasContent = Boolean(
+    result?.summary?.message || result?.stdout || result?.stderr
+    || result?.summary?.thoughts || result?.summary?.toolCalls?.length,
+  );
+  if (!hasContent && job?.jobId && existsSync(digestPath(job.jobId))) return null;
+  return writeOpenCodeDigest(job, result);
+}
+
+function resolveCodexAppServerTimeoutMs() {
+  // Same knob as the exec adapter (AGENT_COMPANION_CODEX_TIMEOUT_MS): two
+  // independently chosen numbers drift, and a job that simply ran long then
+  // looks indistinguishable from a wedged one.
+  return codexAppServerRuntimeInfo().timeout_ms;
+}
+
+// Restart resume for a codex app-server job — THE incident fix. On this
+// transport a bridge that dies mid-run is not lost work: the broker owns the
+// turn, so there are two tiers and both were measured
+// (docs/RELIABILITY_REMEDIATION.md §2, "Two-tier durability").
+async function resumeCodexAppServerJob(job) {
+  const jobId = job.jobId;
+  const reqId = job.reqId || createReqId();
+  const startedAt = job.startedAt || Date.now();
+  const promptId = job.promptId || codexAppServerPromptId(jobId);
+  const threadId = job.sessionId;
+  const socketPath = job.brokerSocket || null;
+  log('INFO', 'codex-appserver resume:', jobId, `thread=${threadId} socket=${socketPath || '(default)'}`);
+
+  let conn = null;
+  try {
+    // Socket presence is not liveness, so this is a real connect + broker/status
+    // probe, never a stat of the path.
+    const health = await probeCodexBrokerHealth(socketPath);
+    if (health.alive) {
+      // Tier 1 — the broker outlived the bridge, so the turn is either still
+      // running or already finished. The watcher's level check harvests it
+      // either way: `active` rides the live stream to its terminal, anything
+      // else reads the transcript back over RPC.
+      conn = await connectCodexBroker({ socketPath });
+      await runCodexAppServerWatch({
+        jobId, reqId, conn, threadId, promptId, model: job.model ?? null,
+        task: job.task || '', mode: job.mode || 'EXECUTE', cwd: job.cwd || null,
+        thread: job.thread || null, startedAt,
+      });
+      return;
+    }
+    // Tier 2 — the broker is gone and took the in-flight turn with it. The
+    // rollout survives on disk, so a FRESH broker still resumes the thread and
+    // `thread/read` still returns the transcript. Only the turn is lost, and
+    // that is emphatically NOT `thread_not_resumable`: the thread resumes here
+    // to prove it.
+    const spawned = await ensureCodexBroker();
+    conn = await connectCodexBroker({ socketPath: spawned.socketPath });
+    const resumed = await resumeCodexThread({ conn, threadId, model: job.model ?? null });
+    const transcript = await readCodexThread({ conn, threadId });
+    finalizeResumedCodexThread(job, { transcript, threadStatus: resumed.status, reqId, startedAt, promptId });
+  } catch (err) {
+    // Leaving the job non-terminal would hang every agent_wait to its clamp —
+    // nothing else settles a resumed job.
+    log('WARN', 'codex-appserver resume failed:', jobId, err.message);
+    const error = `codex app-server resume failed for thread ${threadId}: ${err.message}`;
+    retainTerminalJob(jobId, {
+      status: 'unreachable', error, detail: 'codex_server_unreachable',
+      durationMs: Date.now() - startedAt, terminalAt: Date.now(),
+    });
+    writeCodexAppServerDigest(jobs.get(jobId), jobs.get(jobId)?.adapterResult || null);
+    emitNotification({
+      jobId, status: 'unreachable', summary: null, error, stuckReason: null,
+      detail: 'codex_server_unreachable', duration: Date.now() - startedAt,
+      task: job.task, mode: job.mode, cwd: job.cwd, thread: job.thread,
+      promptId, sessionId: threadId, failedTools: [], reqId, target: 'codex', fleet: false,
+    });
+  } finally {
+    try { conn?.close(); } catch {}
+  }
+}
+
+// The honest verdict for tier 2. The transcript is real salvage — `thread/read`
+// is a DISK reader, measured returning a full transcript from a fresh
+// app-server with no prior resume — but the turn that was in flight when the
+// broker died did not finish, and nothing in the protocol distinguishes "idle
+// because it finished" from "idle because it was killed". Calling that
+// `completed` is the silent-destruction failure this plan exists to kill, so
+// the job settles `unreachable` with the salvaged content attached and the
+// thread named as the live continuation point.
+function finalizeResumedCodexThread(job, { transcript, threadStatus, reqId, startedAt, promptId }) {
+  const jobId = job.jobId;
+  const summary = transcript.found ? transcript.summary : null;
+  const salvage = transcript.found
+    ? 'its transcript was read back from the rollout and is in the digest'
+    : 'its rollout held no assistant message yet';
+  const error = `the codex broker that ran this turn is gone; the in-flight turn was lost. `
+    + `Thread \`${job.sessionId}\` resumed cleanly on a fresh broker (status ${threadStatus}) and ${salvage}. `
+    + 'The thread itself is intact — this is a lost turn, not a lost thread.';
+  const result = { status: 'unreachable', summary, error, stdout: summary?.message || '', stderr: '' };
+  const duration = Date.now() - startedAt;
+
+  if (!transcript.found) {
+    // Nothing to add, so add nothing to the body. Whatever the dead bridge
+    // streamed into this digest is the only record of that turn, and a
+    // contentless render would replace it with a header-only stub — the
+    // measured 11,754 B → 228 B regression W1.4′ forbids outright. Record the
+    // outcome in the sibling note instead, exactly as the retire path does, and
+    // let the terminal envelope carry the explanation.
+    const retiredNote = writeRetirementNote(job, { detail: 'codex_server_gone', error, childPid: null, childAlive: false });
+    retainTerminalJob(jobId, {
+      status: 'unreachable', summary: null, error, detail: 'codex_server_gone',
+      retiredNote, durationMs: duration, terminalAt: Date.now(),
+    });
+    log('INFO', 'codex-appserver resume terminal:', jobId, `status=unreachable salvaged=false thread_status=${threadStatus}`);
+    return;
+  }
+
+  const live = jobs.get(jobId);
+  if (live) live.adapterResult = result;
+  retainTerminalJob(jobId, {
+    status: 'unreachable', summary, error, detail: 'codex_server_gone',
+    durationMs: duration, terminalAt: Date.now(), adapterResult: result,
+  });
+  writeCodexAppServerDigest(jobs.get(jobId), result);
+  emitNotification({
+    jobId, status: 'unreachable', summary, error, stuckReason: null,
+    detail: 'codex_server_gone', duration,
+    task: job.task, mode: job.mode, cwd: job.cwd, thread: job.thread,
+    promptId, sessionId: job.sessionId, failedTools: [], reqId, target: 'codex', fleet: false,
+  });
+  log('INFO', 'codex-appserver resume terminal:', jobId, `status=unreachable salvaged=${transcript.found} thread_status=${threadStatus}`);
 }
 
 // Watch-loop and terminal handling, factored out so a rehydrated bridge can
@@ -2508,6 +2891,38 @@ async function handleCancel({ job_id }) {
         error: resp.error || 'opencode session abort not confirmed',
       });
     }
+    // Codex app-server mode: `turn/interrupt` cancels the turn and LEAVES THE
+    // THREAD LIVE — unlike the exec adapter's SIGTERM, which takes the whole
+    // process with it. Record the intent BEFORE acting for the same reason
+    // OpenCode does: an interrupted turn settles `status:"interrupted"` with no
+    // answer, so the bridge's own record is what makes the verdict `cancelled`
+    // rather than a mystery terminal.
+    if (target === 'codex' && job.codexAdapter === 'appserver' && job.sessionId) {
+      updateJob(job_id, { cancelRequested: true });
+      let conn = null;
+      try {
+        conn = await connectCodexBroker({ socketPath: job.brokerSocket || null });
+        // The adapter resumes this thread first — a connection that did not
+        // start it would otherwise meet `thread not found`, which means "not
+        // loaded into this process", never "gone".
+        await interruptCodexTurn({ conn, threadId: job.sessionId });
+        return buildCancelFollowup(job_id, target, {
+          reason: 'interrupted the codex turn',
+          thread_id: job.sessionId,
+          thread_alive: true,
+          note: `codex thread ${job.sessionId} stays live and resumable after an interrupt; only the turn was cancelled.`,
+        });
+      } catch (err) {
+        return asJson({
+          ok: false, action: 'cancel', job_id, target,
+          status: 'cancel_failed', cancelled: false,
+          thread_id: job.sessionId,
+          reason: err.message, error: err.message,
+        });
+      } finally {
+        try { conn?.close(); } catch {}
+      }
+    }
     // CLI mode (opencode `run` or codex `exec`) signals the spawned child via
     // that target's own cancel — routing every non-copilot cancel through
     // cancelOpenCodeRun would cross-wire a codex job into OpenCode's
@@ -2602,6 +3017,100 @@ async function handleOpenCodeServerReply(job, message) {
   });
 }
 
+// Codex app-server re-steer. `turn/steer` is REAL mid-flight injection: the
+// running turn keeps its turn id and its work, and the message lands at the
+// next model boundary — measured fired against an in-flight `apply_patch`, the
+// patch completed atomically and the steer arrived 0.14 s later. So unlike
+// Copilot and OpenCode there is no cancel-then-reprompt here, and no watch
+// generation bump: the watcher already driving the turn is the one that
+// answers, and bumping the generation would make it discard its own terminal.
+//
+// An idle thread has no turn to steer, so THAT path takes a fresh guarded
+// `turn/start` under a bumped generation, exactly like the OpenCode reply.
+async function handleCodexAppServerReply(job, message) {
+  const job_id = job.jobId;
+  if (!job.sessionId) return asJson({ ok: false, action: 'reply', error: 'job has no codex thread yet — wait for status: running' });
+  if (job.terminalAt) return asJson({ ok: false, action: 'reply', error: `job is already ${job.status} — start a new send` });
+  if (job.replyInFlight) return asJson({ ok: false, action: 'reply', error: 'reply already in flight for this job' });
+
+  const threadId = job.sessionId;
+  let conn = null;
+  let handedOff = false;
+  try {
+    conn = await connectCodexBroker({ socketPath: job.brokerSocket || null });
+    // On this protocol `thread/resume` IS the status read, and it doubles as
+    // the resume-before-act attach `turn/steer` needs.
+    const resumed = await resumeCodexThread({ conn, threadId, model: job.model ?? null });
+    if (resumed.status === 'active') {
+      await steerCodexTurn({ conn, threadId, prompt: message });
+      const replyTurn = (job.replyTurn || 0) + 1;
+      updateJob(job_id, { replyTurn });
+      log('INFO', 'agent:reply codex-appserver steer', `job=${job_id} thread=${threadId} reply_turn=${replyTurn}`);
+      return asJson({
+        ok: true, action: 'reply', job_id, target: 'codex',
+        steered: true,
+        thread_id: threadId,
+        session_id: threadId,
+        original_prompt_id: job.promptId || null,
+        new_prompt_id: job.promptId || null,
+        reply_turn: replyTurn,
+        hint: 'reply injected into the RUNNING turn — nothing was cancelled and no work was discarded. '
+          + 'It applies at the next model boundary; keep waiting on the same job_id.',
+      });
+    }
+
+    // Idle thread: nothing to steer, so the follow-up is a new guarded turn on
+    // the same thread, under a bumped watch generation.
+    const replyTurn = (job.replyTurn || 0) + 1;
+    const replacementPromptId = codexAppServerPromptId(job_id, replyTurn);
+    const originalPromptId = job.promptId;
+    job.replyInFlight = true;
+    updateJob(job_id, {
+      promptId: replacementPromptId,
+      replyTurn,
+      status: 'running',
+      inspectAvailable: false,
+      terminalAt: null,
+      retentionExpiresAt: null,
+      error: null,
+      stuckReason: null,
+      detail: null,
+    });
+
+    const reqId = job.reqId || createReqId();
+    const replyConn = conn;
+    handedOff = true;
+    runCodexAppServerWatch({
+      jobId: job_id, reqId, conn: replyConn, threadId, promptId: replacementPromptId,
+      prompt: message, model: job.model ?? null, task: job.task || message, mode: job.mode || 'EXECUTE',
+      cwd: job.cwd || null, thread: job.thread || null,
+      startedAt: job.startedAt || Date.now(), reply: true,
+    })
+      .catch((err) => log('ERROR', 'codex-appserver reply watch error:', job_id, err.message))
+      .finally(() => {
+        try { replyConn.close(); } catch {}
+        const j = jobs.get(job_id);
+        if (j) { j.replyInFlight = false; persistJob(job_id); }
+      });
+
+    log('INFO', 'agent:reply codex-appserver turn', `job=${job_id} thread=${threadId} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
+    return asJson({
+      ok: true, action: 'reply', job_id, target: 'codex',
+      steered: false,
+      thread_id: threadId,
+      session_id: threadId,
+      original_prompt_id: originalPromptId,
+      new_prompt_id: replacementPromptId,
+      reply_turn: replyTurn,
+      hint: 'the codex thread was idle, so the reply runs as a new turn on the same thread; its transcript carries over.',
+    });
+  } catch (err) {
+    return asJson({ ok: false, action: 'reply', job_id, target: 'codex', error: err.message });
+  } finally {
+    if (!handedOff) { try { conn?.close(); } catch {} }
+  }
+}
+
 async function handleReply({ job_id, message }) {
   // Re-steer an in-flight job. Triple guard: validation rejects missing
   // message; this handler rejects unknown/terminal jobs locally (cheap fast
@@ -2617,6 +3126,19 @@ async function handleReply({ job_id, message }) {
     return asJson({
       ok: false, action: 'reply', job_id, target, code: 'TARGET_UNSUPPORTED',
       error: 'OpenCode reply requires server mode (OPENCODE_RUNTIME_ADAPTER=server) and a live session; the CLI adapter cannot re-steer — cancel or start a new send.',
+    });
+  }
+  if (target === 'codex') {
+    // Gated on the adapter THIS job started under, not the live env: a job that
+    // began on the exec pipe has no control channel even if the variable has
+    // since been flipped.
+    if (job.codexAdapter === 'appserver' && job.sessionId) {
+      return handleCodexAppServerReply(job, message);
+    }
+    return asJson({
+      ok: false, action: 'reply', job_id, target, code: 'TARGET_UNSUPPORTED',
+      error: 'Codex reply requires the app-server adapter (CODEX_RUNTIME_ADAPTER=appserver) and a live thread; '
+        + '`codex exec` is a one-shot pipe with no control channel — cancel or start a new send with the revised prompt.',
     });
   }
   if (target !== 'copilot') {
@@ -2703,6 +3225,30 @@ async function handleReply({ job_id, message }) {
   }
 }
 
+// `codex_runtime`, with the app-server block merged in the way `opencode_runtime`
+// merges its server block — but only when that adapter is actually selected: the
+// broker fields describe nothing that exists under `exec`, and the default
+// payload stays exactly what it was.
+function codexRuntimeStatus() {
+  const base = codexRuntimeInfo();
+  if (!codexAppServerActive()) return base;
+  const appserver = codexAppServerRuntimeInfo();
+  return {
+    ...base,
+    ...appserver,
+    // There is NO protocol version field on this transport, so a pinned-vs-
+    // installed mismatch is the only early warning that the vendored contract
+    // has drifted from the CLI that is actually running. `null` means no broker
+    // has told us its version yet — which is not the same as "no skew".
+    version_skew: appserver.installed_version
+      ? appserver.installed_version !== appserver.pinned_version
+      : null,
+    // The shared-runtime-registry entry for the one broker on this machine
+    // (`broker` above is the broker SCRIPT path, not its state).
+    broker_registry: codexBrokerSnapshot(),
+  };
+}
+
 async function handleStatus({ job_id, verbose, diagnostics }) {
   if (job_id) {
     const job = getJob(job_id);
@@ -2735,7 +3281,7 @@ async function handleStatus({ job_id, verbose, diagnostics }) {
     strengths: flatStrengths(registry),
     runtime_adapter: selectedRuntimeAdapter(),
     opencode_runtime: { ...openCodeRuntimeInfo(), ...openCodeServerRuntimeInfo(), server_pool: openCodeServerPoolSnapshot() },
-    codex_runtime: codexRuntimeInfo(),
+    codex_runtime: codexRuntimeStatus(),
     default_model: modelInfo,
     threads: listThreads(),
     jobs_in_memory: jobs.size,
@@ -2972,7 +3518,9 @@ const AGENT_TOOLS = [
         job_id: JOB_ID_FIELD,
         message: {
           type: 'string',
-          description: 'Follow-up text. The bridge cancels and restarts the current turn with this continuation.',
+          description: 'Follow-up text. On a transport with a live control channel (codex app-server) it is injected '
+            + 'into the running turn with nothing cancelled; otherwise the bridge cancels and restarts the current '
+            + 'turn with this continuation.',
         },
         ...HOST_SESSION_FIELDS,
       },
@@ -3215,14 +3763,18 @@ export function hydrateJobsFromLedger({ pidAlive: isPidAlive = pidAlive } = {}) 
       // Restart-resumability is a per-JOB property, not a per-target one, and
       // `jobResumeAvailable` is already the predicate that answers it on the
       // wire (`resume_available`) — so hydrate asks it rather than keeping a
-      // second copy of the same rule. Outside copilot only an OpenCode
-      // server-mode job with a live session + base URL can satisfy it (the
-      // detached `opencode serve` is still listening and the session is
-      // persisted on disk), which is why that resumer is the exhaustive
-      // dispatch here; a future restart-resumable target must add its branch to
-      // both the predicate and this call site.
+      // second copy of the same rule. Two non-copilot transports satisfy it
+      // today: an OpenCode server-mode job (the detached `opencode serve` is
+      // still listening and the session is persisted on disk), and a codex
+      // app-server job (the broker owns the turn, and the rollout survives even
+      // the broker). Both are dispatched here; a future restart-resumable
+      // target must add its branch to both the predicate and this call site.
       if (!isTerminal && jobResumeAvailable(job)) {
-        resumeOpenCodeServerJob(job).catch((err) => log('ERROR', 'opencode-server resume error:', job.jobId, err.message));
+        if (target === 'codex') {
+          resumeCodexAppServerJob(job).catch((err) => log('ERROR', 'codex-appserver resume error:', job.jobId, err.message));
+        } else {
+          resumeOpenCodeServerJob(job).catch((err) => log('ERROR', 'opencode-server resume error:', job.jobId, err.message));
+        }
         resumed++;
         continue;
       }

@@ -85,7 +85,8 @@ companion runtime boundary.
 | OpenCode (cli, default) | `opencode run --format json --dir <cwd>` | yes | yes | yes | yes | no | no |
 | OpenCode (server) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
 | GitHub Copilot CLI | ACP daemon path | yes | yes | yes | yes | yes | yes, with ACP |
-| Codex CLI | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
+| Codex CLI (exec, default) | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
+| Codex CLI (app-server) | `codex app-server` behind a shared broker | yes | yes | yes | yes | yes | yes |
 
 Notes:
 
@@ -103,9 +104,23 @@ Notes:
     flag applies to the cli adapter only).
 - Copilot keeps `/fleet` parallel orchestration. `parallel: "auto"` can prepend
   `/fleet` for broad Copilot tasks; OpenCode and Codex remain single-job.
-- Codex is send-only in v1 (no reply, no restart resume — `codex exec` is a
-  one-shot non-interactive subprocess with no live control channel and no
-  surviving daemon to reattach to after a bridge restart). Sandbox defaults to
+- Codex ships two adapters, selected by `CODEX_RUNTIME_ADAPTER`:
+  - `exec` (default) is the single-shot `codex exec --json` adapter, and it is
+    send-only: that pipe has no live control channel and leaves no daemon to
+    reattach to after a bridge restart. The limit is the **transport**, not codex.
+  - `appserver` talks JSON-RPC to a shared broker that owns one long-lived
+    `codex app-server`, and adds in-flight reply (`turn/steer` injects into the
+    running turn — nothing is cancelled and no work is discarded), restart
+    resume (`thread/resume` rejoins a *running* thread; if the broker itself
+    died, the rollout on disk still yields the transcript and only the in-flight
+    turn is lost) and real sub-turn streamed digests. Cancel becomes
+    `turn/interrupt`, which ends the turn and leaves the thread live.
+  - Under `appserver` the approval policy is pinned to `never` and is not
+    configurable: a client that accepts one approval escalates past the sandbox
+    (measured), so the sandbox stays the hard boundary. The broker is detached
+    and shared machine-wide, and is reaped once it has been idle with no live
+    job anywhere.
+- Sandbox behaviour is the same for both codex adapters. Sandbox defaults to
   `workspace-write` with network **ON** by default — the inverse of codex's own
   `codex exec` default (network OFF) — because a companion that can't `npm
   install` fails tasks confusingly; opt out per job with
