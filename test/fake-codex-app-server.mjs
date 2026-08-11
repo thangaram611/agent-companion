@@ -20,6 +20,10 @@
 // sibling were the only things standing between the adapter and a -32600 no
 // operator would ever see, and they answered whatever they were asked.
 //
+// A method it does not implement is REFUSED for the same reason
+// (`unhandledMethodError`) rather than answered `{echo: method}` — a fake that
+// says yes to everything cannot tell a working call from a misspelt one.
+//
 // `contractViolation` is IMPORTED, not reimplemented: the fake is materialised
 // into a temp dir, so `fakeCodexBin` bakes in a file:// import of the real
 // module. A second copy of the rule could disagree with the fixture, which is
@@ -35,7 +39,7 @@ const CONTRACT_MODULE_URL = pathToFileURL(
 
 export const FAKE_APP_SERVER = `
 import { appendFileSync } from 'node:fs';
-import { contractViolation } from ${JSON.stringify(CONTRACT_MODULE_URL)};
+import { contractViolation, unhandledMethodError } from ${JSON.stringify(CONTRACT_MODULE_URL)};
 
 const TRACE = process.env.CODEX_FAKE_TRACE || '';
 const VERSION = process.env.CODEX_FAKE_VERSION || '0.147.0';
@@ -137,7 +141,14 @@ function handle(msg) {
     // to exercise steer CONFIRMATION emits the \`item/completed\` itself.
     case 'turn/steer': reply({ turn: { id: p.expectedTurnId } }); return;
     case 'turn/interrupt': reply({}); return;
-    default: reply({ echo: msg.method }); return;
+    // Anything this fake does not implement is REFUSED rather than answered
+    // \`{echo}\`. The old success fallback covered a typo, a codex rename and any
+    // adapter call the fixture never modelled — all of which the real server
+    // either refuses outright or answers for real, and neither of those is a
+    // green test. Notifications get nothing, as they do from the real server.
+    default:
+      if (msg.id !== undefined) out({ jsonrpc: '2.0', id: msg.id, error: unhandledMethodError(msg.method) });
+      return;
   }
 }
 `;

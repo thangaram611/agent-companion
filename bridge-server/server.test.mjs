@@ -2233,6 +2233,44 @@ test('Codex app-server mode: a steer the model has not reached yet is reported u
   }
 });
 
+test('Codex app-server mode: a reply never steers with a turn resume reports as FINISHED', async () => {
+  // One rule for every read of `lastTurn`. `resolveCodexTurnId` and
+  // `startCodexTurn` both take it only when it says `inProgress`; the reply path
+  // used to pass `resumed.lastTurn?.id` ungated, so an `active` thread whose
+  // last RECORDED turn had completed (the window between one turn finishing and
+  // the next being recorded) would have steered a dead id — measured on the real
+  // server as `-32600 expected active turn id … but found …`. Gated, the adapter
+  // goes and reads the live turn instead.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  try {
+    await withCodexAppServer({
+      turns: { T1: [{ id: 'TURN_LIVE', status: 'inProgress' }] },
+      handlers: {
+        'thread/resume': (p) => ({
+          thread: { id: p.threadId, status: { type: 'active' }, turns: [{ id: 'TURN_DEAD', status: 'completed' }] },
+        }),
+      },
+    }, async ({ sockets }) => {
+      // No live id: this bridge restarted and never saw `turn/started`.
+      _cxLiveJob(jobs, 'codex-stale-steer', 'sid-cx-stale', { turnId: null });
+      const reply = parse(await dispatch({
+        action: 'reply', job_id: 'codex-stale-steer', message: 'actually, use ripgrep', host_session_id: 'sid-cx-stale',
+      }));
+      const sock = sockets[sockets.length - 1];
+      assert.equal(reply.ok, true);
+      assert.equal(reply.steered, true);
+      assert.equal(sock.paramsFor('turn/steer')[0].expectedTurnId, 'TURN_LIVE');
+      assert.ok(sock.wire().includes('thread/read'), 'the resolver asked the transport rather than trusting a finished turn');
+      assert.equal(jobs.get('codex-stale-steer').turnId, 'TURN_LIVE');
+    });
+  } finally {
+    jobs.delete('codex-stale-steer');
+    _resetForTest();
+  }
+});
+
 test('Codex app-server mode: a job that goes terminal DURING the reply RPCs is rejected, not resurrected', async () => {
   // The reply's two round trips (`thread/resume`, then steer or turn/start) are
   // a window the live watcher can settle the job inside. Clearing `terminalAt`
@@ -2303,15 +2341,29 @@ test('Codex app-server mode: reply on an idle thread starts a fresh guarded turn
   const { dispatch, jobs, _resetForTest } = mod;
   _resetForTest();
   try {
-    await withCodexAppServer({ statuses: { T1: 'idle' } }, async ({ sockets }) => {
+    await withCodexAppServer({
+      statuses: { T1: 'idle' },
+      // A DIFFERENT id for the replacement turn, so "the job's turn id moved on"
+      // is observable rather than coincidental.
+      handlers: { 'turn/start': () => ({ turn: { id: 'TURN2' } }) },
+    }, async ({ sockets }) => {
       _cxLiveJob(jobs, 'codex-idle-reply', 'sid-cx-idle');
       const reply = parse(await dispatch({ action: 'reply', job_id: 'codex-idle-reply', message: 'follow up', host_session_id: 'sid-cx-idle' }));
       assert.equal(reply.ok, true);
       assert.equal(reply.steered, false);
       assert.match(reply.new_prompt_id, /-r1$/);
       assert.equal(jobs.get('codex-idle-reply').promptId, reply.new_prompt_id);
+      // THE STALE-ID WINDOW. This branch was taken because TURN1 is over, and
+      // the replacement's id arrives a few round trips later — the watch below
+      // is deliberately not awaited. So the job must not still be advertising
+      // TURN1: an `agent_cancel` in here would send it, and the real server
+      // answers `-32600 expected active turn id … but found …` while the new
+      // turn keeps running. Null instead makes the resolver read the live turn
+      // off `thread/read`.
+      assert.notEqual(jobs.get('codex-idle-reply').turnId, 'TURN1', 'the finished turn\'s id is not carried forward');
       const sock = sockets[sockets.length - 1];
       assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'a new turn was started');
+      assert.ok(await _cxUntil(() => jobs.get('codex-idle-reply')?.turnId === 'TURN2'), 'the replacement turn\'s id lands on the job');
       // An idle thread has no turn to steer, so this path re-prompts — but it
       // still never interrupts, because there is nothing running to interrupt.
       assert.equal(sock.wire().includes('turn/interrupt'), false);

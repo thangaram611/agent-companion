@@ -24,10 +24,17 @@
 // `turnId` passed three rounds of review and failed on every real job. A
 // handler override cannot opt out: the check runs first, and a test that wants
 // to model an error answers with `__error` instead.
+//
+// AND NOTHING UNIMPLEMENTED IS ANSWERED WITH A SUCCESS. A method with no
+// override and no default is refused (`unhandledMethodError`), because the
+// blanket `{echo: method}` this used to fall back on made every typo, every
+// codex rename and every unmodelled adapter call return `ok` from a fake while
+// the real server refused or handled it — the same green-test trade, one field
+// over.
 
 import { EventEmitter } from 'node:events';
 
-import { contractViolation } from '../lib/codex-app-server-contract.mjs';
+import { contractViolation, unhandledMethodError } from '../lib/codex-app-server-contract.mjs';
 
 // The pid the fake broker claims as its own. `disposeBroker` only signals a pid
 // the LIVE broker claims, so a registry entry that expects to be disposed has
@@ -128,7 +135,14 @@ export function fakeBrokerSocket({
       // own and carry no client-request contract, so they pass through.
       const violation = contractViolation(msg.method, msg.params);
       if (violation) { sock.deliver({ jsonrpc: '2.0', id: msg.id, error: violation }); continue; }
-      const handler = handlers[msg.method] || defaults[msg.method] || (() => ({ echo: msg.method }));
+      // A method with neither an override nor a default is REFUSED, not echoed
+      // back as a success. The old `{echo: msg.method}` fallback answered
+      // anything — a typo, a method renamed by a codex bump, an adapter call
+      // this fake never modelled — which is the same "green test, red server"
+      // trade the contract check above exists to end. A test that means to model
+      // one passes it in `handlers`.
+      const handler = handlers[msg.method] || defaults[msg.method];
+      if (!handler) { sock.deliver({ jsonrpc: '2.0', id: msg.id, error: unhandledMethodError(msg.method) }); continue; }
       queueMicrotask(async () => {
         let result;
         // Awaited, so a handler can model a broker that simply never answers.

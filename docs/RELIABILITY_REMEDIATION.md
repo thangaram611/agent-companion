@@ -593,13 +593,35 @@ spawn's own `cwd` (verified: thread created under `-C dirA`, resumed from proces
 > the adapter untouched turned 8 tests red — the four adapter guard tests, the broker
 > end-to-end, and three bridge cancel/reply tests.
 >
+> Neither fake answers an **unimplemented** method any more either. Both used to reply
+> `{echo: method}` — a success — to anything they had no case for, so a typo (`turn/interupt`),
+> a codex rename, or an adapter call the fixture never modelled all went green. Measured, the
+> real server answers a method outside its union
+> `-32600 "Invalid request: unknown variant \`turn/interupt\`, expected one of …"`, with the
+> request id echoed so the caller rejects rather than hangs. The fakes refuse, and deliberately
+> do **not** recite the fixture as if it were that list: the binary accepts **136** client
+> methods while its own `generate-json-schema` publishes **95**, so `thread/turns/list`,
+> `getAuthStatus`, `process/spawn` and 38 more are real methods this contract has never heard
+> of. "Absent from the fixture" is not "the server would reject it".
+>
+> **How bad a stale id is, measured.** Every remaining staleness path fails *loudly*: against
+> the real server, a completed turn's id on a thread whose SECOND turn is running answers
+> `-32600 "expected active turn id A but found B"` for both `turn/interrupt` and `turn/steer`.
+> So a stale id can never mis-cancel the wrong turn — it can only fail and be retried. The two
+> windows that could produce one are closed anyway: the reply-to-an-idle-thread branch clears
+> `job.turnId` (the turn it named is over, and the replacement's id lands a few round trips
+> later, since the watch is not awaited), and every read of `lastTurn` — resolver, `turn/start`,
+> reply — goes through the same `status === 'inProgress'` gate.
+>
 > And `probes/smoke/appserver.mjs` went **15/15 with both paths broken**, because it never
-> exercised either. `probes/smoke/appserver-control.mjs` (17/17, 2026-08-11) now does, on the
+> exercised either. `probes/smoke/appserver-control.mjs` (18/18, 2026-08-11) now does, on the
 > real transport: a running turn steered mid-flight and obeying the new instruction
 > (`PINEAPPLE`, not the `BANANA` it was started with), and a running turn interrupted with the
 > job settling `cancelled` while **the thread survives** — still in `thread/loaded/list`,
 > `thread/resume` → `idle` with its last turn recorded `interrupted`, and `thread/read` still
-> returning the history.
+> returning the history. It exercises **both** turn-id sources: the banked one, and — with the
+> id withheld mid-turn — the restarted-bridge `thread/read` fallback, whose response shape
+> nothing but the fakes had ever asserted.
 >
 > **A steer is confirmed, not assumed.** The RPC returning means the server accepted the steer,
 > not that the model got it. The injected input comes back as an `item/completed` whose item is

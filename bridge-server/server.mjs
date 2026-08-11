@@ -3149,9 +3149,16 @@ async function handleCodexAppServerReply(job, message) {
       // second source for a bridge that never saw it, and the adapter falls
       // back to `thread/read` when neither has one. Recording what the steer
       // actually hit keeps the job's id in step with the turn it steered.
+      //
+      // `lastTurn` is read under the SAME `inProgress` gate `resolveCodexTurnId`
+      // and `startCodexTurn` apply to it, so one rule governs every read: a
+      // thread reported `active` whose last recorded turn is `completed` is a
+      // finished turn that happens to be last, and passing its id would send the
+      // steer a dead one where null makes the adapter go and find the live one.
+      const resumedTurnId = resumed.lastTurn?.status === 'inProgress' ? resumed.lastTurn.id : null;
       const steer = await steerCodexTurn({
         conn, threadId, prompt: message,
-        expectedTurnId: job.turnId || resumed.lastTurn?.id || null,
+        expectedTurnId: job.turnId || resumedTurnId,
       });
       const replyTurn = (job.replyTurn || 0) + 1;
       updateJob(job_id, { replyTurn, turnId: steer.turnId });
@@ -3193,6 +3200,16 @@ async function handleCodexAppServerReply(job, message) {
       error: null,
       stuckReason: null,
       detail: null,
+      // CLEARED, not carried. The turn this id names is finished — that is why
+      // this branch was taken — and the replacement's id lands a round trip or
+      // three later, because `runCodexAppServerWatch` below is deliberately not
+      // awaited. An `agent_cancel` inside that window would otherwise send the
+      // dead one: measured against the real server, a completed turn's id on a
+      // thread whose next turn is running answers `-32600 expected active turn
+      // id A but found B`, so the cancel fails while the turn keeps billing.
+      // Null instead makes the resolver read the running turn off `thread/read`
+      // — the same source a restarted bridge uses.
+      turnId: null,
     });
 
     const reqId = job.reqId || createReqId();

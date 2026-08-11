@@ -38,7 +38,7 @@ const REPO = process.env.AGENT_COMPANION_REPO
 // already terminal and nothing is watching.
 const {
   probeCodexBrokerHealth, connectCodexBroker, listLoadedCodexThreads,
-  resumeCodexThread, readCodexThread,
+  resumeCodexThread, readCodexThread, resolveCodexTurnId,
 } = await import(join(REPO, 'bridge-server/codex-app-server-runtime.mjs'));
 const { pidAlive } = await import(join(REPO, 'lib/shared-runtime-registry.mjs'));
 
@@ -144,6 +144,32 @@ try {
   steerThreadId = row1?.companionSessionId || null;
   check('the bridge banked the RUNNING turn id — the field turn/steer requires',
     !!row1?.turnId && !row1?.terminalAt, `thread=${steerThreadId} turn=${row1?.turnId}`);
+
+  // THE OTHER TURN-ID SOURCE, on the real transport. Everything below rides
+  // `job.turnId`, banked from `turn/started` — but a bridge that RESTARTED
+  // mid-turn never saw that notification, and `resolveCodexTurnId` then falls
+  // back to `thread/read {includeTurns:true}`. That branch rests on two response
+  // SHAPE facts (`turns` hangs off `thread`; a running turn reads `inProgress`)
+  // which, until this check, only the fakes asserted — and a fake is a copy of
+  // what someone believed, not of what codex sends. Asked here with the id
+  // withheld, against the live thread, mid-turn: it must find the same turn the
+  // bridge banked.
+  //
+  // A second connection, not the bridge's: `thread/read` is not one of the
+  // attach-first methods, so this neither resumes nor subscribes, and cannot
+  // drain the ring the live watcher is reading.
+  let resolvedFromRead = null;
+  try {
+    const readConn = await connectCodexBroker({ socketPath: row1?.brokerSocket || null });
+    try {
+      resolvedFromRead = await resolveCodexTurnId({
+        conn: readConn, threadId: steerThreadId, turnId: null, method: 'the restarted-bridge probe',
+      });
+    } finally { readConn.close(); }
+  } catch (err) { resolvedFromRead = `threw: ${err.message}`; }
+  check('a bridge that never saw turn/started resolves the SAME running turn off thread/read',
+    !!row1?.turnId && resolvedFromRead === row1.turnId,
+    `resolved=${resolvedFromRead} banked=${row1?.turnId}`);
 
   const reply = await A.tool('agent_reply', {
     job_id: steerJob,

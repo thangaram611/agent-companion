@@ -463,6 +463,28 @@ test('turn/interrupt and turn/steer put their REQUIRED ids on the wire', async (
   assert.equal(steered.accepted, true);
 });
 
+test('the fake refuses a method it does not implement, instead of echoing success', async () => {
+  // The other half of the same blind spot. The fake used to answer ANY method
+  // `{echo: method}` with a success result, so a misspelt call and a real method
+  // it had never modelled both went green — while the real server answers the
+  // first `-32600 unknown variant` (measured on 0.147.0 with `turn/interupt`)
+  // and the second for real. Neither is a passing test.
+  const { conn } = await connectFake();
+  // A typo — one letter, the shape of a bad refactor.
+  await assert.rejects(
+    () => conn.call('turn/interupt', { threadId: 'T1', turnId: 'TURN1' }),
+    /unknown variant `turn\/interupt`/,
+  );
+  // And a REAL method (the contract carries it) that this fake does not model:
+  // an adapter that grew a `thread/fork` call must not pass against a fixture
+  // that has never seen one.
+  await assert.rejects(
+    () => conn.call('thread/fork', { threadId: 'T1' }),
+    /unknown variant `thread\/fork`/,
+  );
+  conn.close();
+});
+
 test('a turn id nobody can supply is a LOUD failure, never an omitted field', async () => {
   // The alternative — send it without the field — is a -32600 from a server the
   // operator never sees, on a call they were told succeeded. Neither is a
