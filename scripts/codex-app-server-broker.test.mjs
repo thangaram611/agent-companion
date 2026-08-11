@@ -41,6 +41,7 @@ const {
   LineReader,
   SubscriptionTable,
   probeSocketAlive,
+  probeSocketVerdictForError,
   _resetForTest,
   _setForTest,
 } = await import('./codex-app-server-broker.mjs');
@@ -80,8 +81,15 @@ import { appendFileSync } from 'node:fs';
 
 const TRACE = process.env.CODEX_FAKE_TRACE || '';
 const VERSION = process.env.CODEX_FAKE_VERSION || '0.147.0';
+const INIT_DELAY_MS = Number(process.env.CODEX_FAKE_INIT_DELAY_MS || 0);
 
 if (process.argv[2] === '--version') {
+  // CODEX_FAKE_VERSION_FAIL reproduces the wrapper/timeout case: the probe
+  // finishes, but no version is ever learned.
+  if (process.env.CODEX_FAKE_VERSION_FAIL) {
+    process.stderr.write('codex: not today\\n');
+    process.exit(3);
+  }
   process.stdout.write('codex-cli ' + VERSION + '\\n');
   process.exit(0);
 }
@@ -115,7 +123,10 @@ function handle(msg) {
   if (typeof msg.method !== 'string') return; // a client answering a server request
   const reply = (result) => { if (msg.id !== undefined) out({ jsonrpc: '2.0', id: msg.id, result }); };
   switch (msg.method) {
-    case 'initialize': reply({ userAgent: 'fake-app-server' }); return;
+    case 'initialize':
+      if (INIT_DELAY_MS > 0) setTimeout(() => reply({ userAgent: 'fake-app-server' }), INIT_DELAY_MS);
+      else reply({ userAgent: 'fake-app-server' });
+      return;
     case 'initialized': return;
     case 'fake/emit': {
       const frames = msg.params && msg.params.frames ? msg.params.frames : [];
@@ -172,6 +183,7 @@ function fakeConnection({ initialized = true, loadedThreads = [] } = {}) {
     initialized,
     dead: false,
     codexVersion: '0.147.0',
+    versionProbed: true,
     killed: false,
     sent: [],
     _nextId: 1,
@@ -216,6 +228,13 @@ test('LineReader reassembles frames across chunk boundaries and discards over-ca
   const after = capped.push(`${'x'.repeat(40)}\n{"ok":1}\n`);
   assert.equal(after.dropped, 1);
   assert.deepEqual(after.lines, ['{"ok":1}']);
+
+  // The case that escapes a cap applied only to the residual buffer: an
+  // over-cap line that arrives COMPLETE inside one chunk, newline and all.
+  const whole = new LineReader({ maxLineBytes: 16 });
+  const single = whole.push(`${'x'.repeat(40)}\n{"ok":1}\n`);
+  assert.equal(single.dropped, 1, 'a complete over-cap line must be dropped, not delivered');
+  assert.deepEqual(single.lines, ['{"ok":1}']);
 });
 
 // --- SubscriptionTable -------------------------------------------------------
@@ -282,6 +301,7 @@ test('initialize is answered locally for every client and never forwarded upstre
       appServerPid: 4242,
       appServerInitialized: true,
       codexVersion: '0.147.0',
+      codexVersionProbed: true,
     });
   }
   // Not one initialize reached the app-server: the broker did that once, at boot.
@@ -630,6 +650,51 @@ test('the reaper refuses to exit while a client, a loaded thread, or a live host
   }
 });
 
+test('the reaper re-reads the cheap gates after the loaded-thread RPC, not before it', async () => {
+  const exits = [];
+  _setForTest({ exit: (code) => exits.push(code) });
+  try {
+    // `thread/loaded/list` is allowed 10 s. Hold it open and let a bridge
+    // connect inside that window — it connect-probed a LIVE socket, so no
+    // replacement broker was spawned, and exiting on the pre-await snapshot
+    // would kill the app-server under the turn it is about to start.
+    const connection = fakeConnection();
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    connection.request = async (method) => {
+      assert.equal(method, 'thread/loaded/list');
+      await held;
+      return { data: [] };
+    };
+    const broker = new Broker({ connection });
+    const tick = broker._onInactivityTick();
+    const late = attach(broker);
+    release();
+
+    assert.equal(await tick, false, 'a client that arrived during the RPC must veto the exit');
+    assert.deepEqual(exits, []);
+    assert.equal(connection.killed, false, 'the app-server must survive');
+    assert.equal(late.ended, false, 'the newly-connected client must not be hung up on');
+    broker.shutdown();
+
+    // Same window, same staleness, via the heartbeat gate.
+    const other = fakeConnection();
+    let releaseHb;
+    const heldHb = new Promise((resolve) => { releaseHb = resolve; });
+    other.request = async () => { await heldHb; return { data: [] }; };
+    const hbBroker = new Broker({ connection: other });
+    const hbTick = hbBroker._onInactivityTick();
+    writeFileSync(heartbeatFile('sid-late.heartbeat'), '');
+    releaseHb();
+    assert.equal(await hbTick, false, 'a host that checked in during the RPC must veto the exit too');
+    assert.deepEqual(exits, []);
+    hbBroker.shutdown();
+    rmSync(heartbeatFile('sid-late.heartbeat'));
+  } finally {
+    _resetForTest();
+  }
+});
+
 // --- socket hardening --------------------------------------------------------
 
 function shortSocketDir(t) {
@@ -681,18 +746,161 @@ test('a socket with a live broker makes the second broker refuse rather than ste
   assert.equal(await probeSocketAlive(socketPath), true);
 });
 
-test('a symlinked socket path is refused outright', async (t) => {
+test('a symlinked socket path is refused outright, dangling or not', async (t) => {
   const dir = shortSocketDir(t);
+  const { symlinkSync } = await import('node:fs');
+
   const socketPath = join(dir, 'link.sock');
   const target = join(dir, 'real');
   writeFileSync(target, '');
-  const { symlinkSync } = await import('node:fs');
   symlinkSync(target, socketPath);
 
   const { broker } = makeBroker();
   const server = new BrokerServer(broker, { socketPath });
   await assert.rejects(() => server.start(), (err) => err.code === 'BROKER_SOCKET_SYMLINK');
   broker.shutdown();
+
+  // The case a guard behind existsSync() cannot see: existsSync FOLLOWS the
+  // link, so a dangling one reports false and skips the check entirely — and
+  // listen() then creates the real socket at the link's target, outside the
+  // 0700 runtime dir, where cleanup unlinks the link and orphans the socket.
+  const danglingPath = join(dir, 'dangle.sock');
+  const missing = join(dir, 'nowhere.sock');
+  symlinkSync(missing, danglingPath);
+  assert.equal(existsSync(danglingPath), false, 'existsSync must not see a dangling link (that is the trap)');
+
+  const { broker: broker2 } = makeBroker();
+  const server2 = new BrokerServer(broker2, { socketPath: danglingPath });
+  await assert.rejects(() => server2.start(), (err) => err.code === 'BROKER_SOCKET_SYMLINK');
+  assert.equal(existsSync(missing), false, 'no socket may be created at the link target');
+  broker2.shutdown();
+});
+
+test('two brokers racing one stale socket: exactly one binds, and the loser refuses', async (t) => {
+  const dir = shortSocketDir(t);
+  const socketPath = join(dir, 'b.sock');
+
+  const holder = spawn(process.execPath, [
+    '-e',
+    `require('node:net').createServer().listen(${JSON.stringify(socketPath)}, () => console.log('up'))`,
+  ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  await new Promise((resolve) => holder.stdout.once('data', resolve));
+  holder.kill('SIGKILL');
+  await new Promise((resolve) => holder.once('exit', resolve));
+
+  // Both probe the stale file, both see ECONNREFUSED. Without the start lock
+  // both unlink and both bind, and the first one to exit deletes the other's
+  // socket — two app-servers, and then no reachable broker at all.
+  const { broker: brokerA } = makeBroker();
+  const { broker: brokerB } = makeBroker();
+  const servers = [new BrokerServer(brokerA, { socketPath }), new BrokerServer(brokerB, { socketPath })];
+  const results = await Promise.allSettled(servers.map((s) => s.start()));
+  t.after(() => { for (const s of servers) s.cleanup(); brokerA.shutdown(); brokerB.shutdown(); });
+
+  assert.equal(servers.filter((s) => s.bound).length, 1, 'exactly one broker may own the socket');
+  const rejected = results.find((r) => r.status === 'rejected');
+  assert.equal(rejected?.reason?.code, 'BROKER_START_CONTENDED');
+  assert.equal(await probeSocketAlive(socketPath), true);
+  assert.equal(existsSync(`${socketPath}.lock`), false, 'the start lock is released, win or lose');
+
+  // The loser going away must not take the winner's socket with it.
+  const loser = servers.find((s) => !s.bound);
+  loser.cleanup();
+  assert.equal(await probeSocketAlive(socketPath), true, 'the winner must still be reachable');
+});
+
+test('a stale start lock left by a dead holder is broken rather than obeyed forever', async (t) => {
+  const dir = shortSocketDir(t);
+  const socketPath = join(dir, 'b.sock');
+  const lockPath = `${socketPath}.lock`;
+
+  // A broker SIGKILLed inside probe→unlink→listen leaves this behind. Lock
+  // presence is no more proof of liveness than socket presence is.
+  const dead = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  dead.kill('SIGKILL');
+  await new Promise((resolve) => dead.once('exit', resolve));
+  writeFileSync(lockPath, JSON.stringify({ pid: dead.pid, at: Date.now() }));
+
+  const { broker } = makeBroker();
+  const server = new BrokerServer(broker, { socketPath });
+  await server.start();
+  t.after(() => { server.cleanup(); broker.shutdown(); });
+  assert.equal(await probeSocketAlive(socketPath), true);
+  assert.equal(existsSync(lockPath), false);
+});
+
+test('the exit-handler unlink only ever removes the socket THIS server bound', async (t) => {
+  const dir = shortSocketDir(t);
+  const socketPath = join(dir, 'b.sock');
+
+  const { broker } = makeBroker();
+  const server = new BrokerServer(broker, { socketPath });
+  await server.start();
+  // Both listeners have to be released even if an assertion below throws, or
+  // the runner never exits. Closing either one unlinks the path (libuv does it
+  // on close), which is why this runs after the assertions, not before them.
+  t.after(() => { try { server.server?.close(); } catch {} broker.shutdown(); });
+
+  // Whatever put it there, the file at the path is now somebody else's socket.
+  // `bound` is only "I bound A socket here once" — the inode is what says mine.
+  rmSync(socketPath);
+  const incumbent = createServer(() => {});
+  await new Promise((resolve) => incumbent.listen(socketPath, resolve));
+  t.after(() => { try { incumbent.close(); } catch {} });
+
+  server.unlinkOwnedSocket();
+  assert.equal(existsSync(socketPath), true, 'a socket we did not bind must survive our exit handler');
+  assert.equal(await probeSocketAlive(socketPath), true);
+});
+
+test('an indeterminate connect probe is not evidence that nobody is home', () => {
+  // ECONNREFUSED/ENOENT/ENOTSOCK really do mean the path is free. EMFILE under
+  // a wide subagent fan-out, EACCES, EAGAIN mean the probe failed — treating
+  // those as "absent" unlinks a LIVE broker's socket with no concurrency at all.
+  for (const code of ['ECONNREFUSED', 'ENOENT', 'ENOTSOCK']) {
+    assert.equal(probeSocketVerdictForError({ code }), 'absent', code);
+  }
+  for (const code of ['EMFILE', 'EACCES', 'EAGAIN', 'ENFILE']) {
+    assert.equal(probeSocketVerdictForError({ code }), code, code);
+  }
+  assert.equal(probeSocketVerdictForError(undefined), 'EUNKNOWN');
+});
+
+test('an indeterminate probe makes start() refuse rather than unlink a live socket', async (t) => {
+  const dir = shortSocketDir(t);
+  const socketPath = join(dir, 'b.sock');
+  const incumbent = createServer(() => {});
+  await new Promise((resolve) => incumbent.listen(socketPath, resolve));
+  t.after(() => { try { incumbent.close(); } catch {} });
+
+  // A long session with many subagents pushes the process past its fd limit,
+  // so the connect probe fails EMFILE instead of ECONNREFUSED. Reading that as
+  // "nobody is home" unlinks a live broker's socket — split brain with no
+  // concurrency involved at all.
+  _setForTest({ probeSocket: async () => 'EMFILE' });
+  try {
+    const { broker } = makeBroker();
+    const server = new BrokerServer(broker, { socketPath });
+    await assert.rejects(() => server.start(), (err) => err.code === 'BROKER_SOCKET_INDETERMINATE');
+    assert.equal(server.bound, false);
+    broker.shutdown();
+  } finally {
+    _resetForTest();
+  }
+  assert.equal(existsSync(socketPath), true, 'a live socket must survive a probe that could not tell');
+  assert.equal(await probeSocketAlive(socketPath), true);
+});
+
+test('a plain file left at the socket path is still safe to unlink and rebind', async (t) => {
+  const dir = shortSocketDir(t);
+  const socketPath = join(dir, 'b.sock');
+  writeFileSync(socketPath, 'not a socket');
+
+  const { broker } = makeBroker();
+  const server = new BrokerServer(broker, { socketPath });
+  await server.start();
+  t.after(() => { server.cleanup(); broker.shutdown(); });
+  assert.equal(await probeSocketAlive(socketPath), true);
 });
 
 // --- end to end over a real socket, against the fake app-server --------------
@@ -790,10 +998,11 @@ test('end to end: one upstream handshake, brokered initialize, implicit subscrip
 
   const initA = await waitFor(async () => {
     const r = await a.call('initialize', { clientInfo: { name: 'bridge-a', version: '1' } });
-    // Two independent boot steps land here: the upstream handshake and the
-    // async `codex --version` probe. Poll until both have, exactly as a client
-    // that wants a ready broker would.
-    return r.codexVersion && r.appServerInitialized ? r : false;
+    // THE readiness gate, polled exactly as a client should: both boot steps
+    // FINISHED — the upstream handshake, and the async `codex --version` probe.
+    // Never `r.codexVersion`: null is a legitimate terminal outcome of that
+    // probe, so gating on it would hang against a perfectly healthy broker.
+    return r.codexVersionProbed && r.appServerInitialized ? r : false;
   }, { label: 'the broker to finish booting' });
   const initB = await b.call('initialize', { clientInfo: { name: 'bridge-b', version: '1' } });
   for (const init of [initA, initB]) {
@@ -868,10 +1077,7 @@ test('a codex whose version differs from the pinned contract warns and still ser
 
   const init = await waitFor(async () => {
     const r = await a.call('initialize', { clientInfo: { name: 'bridge-a', version: '1' } });
-    // Two independent boot steps land here: the upstream handshake and the
-    // async `codex --version` probe. Poll until both have, exactly as a client
-    // that wants a ready broker would.
-    return r.codexVersion && r.appServerInitialized ? r : false;
+    return r.codexVersionProbed && r.appServerInitialized ? r : false;
   }, { label: 'the broker to finish booting' });
   assert.equal(init.codexVersion, '9.9.9');
   assert.equal(init.appServerInitialized, true, 'a version skew is advisory, never a hard fail');
@@ -881,6 +1087,58 @@ test('a codex whose version differs from the pinned contract warns and still ser
     return text.includes('[WARN]') && text.includes('9.9.9') ? text : false;
   }, { label: 'the version WARN' });
   assert.match(logged, /pinned to codex-cli/);
+});
+
+test('end to end: a request sent before the handshake lands is queued and answered, not lost', async (t) => {
+  // The socket starts listening BEFORE the child is spawned and handshook, so
+  // this window is real and is the one a bridge hits: ensureBroker connect-
+  // probes, finds a live socket, connects and immediately sends `thread/start`.
+  // The delay makes the window deterministic instead of a millisecond of luck —
+  // remove the flushPreInit() call site and this test hangs.
+  const broker = await startRealBroker(t, { CODEX_FAKE_INIT_DELAY_MS: '750' });
+  const a = new TestClient(broker.socketPath);
+  await a.ready;
+  t.after(() => a.close());
+
+  // No readiness poll, no broker/status: the very first frame is a forwarded
+  // request, sent while the upstream handshake is still in flight.
+  const started = await a.call('thread/start', { threadId: 'TQ', cwd: '/tmp', approvalPolicy: 'never' });
+  assert.equal(started.thread.id, 'TQ');
+  assert.equal(broker.upstream().filter((m) => m.method === 'initialize').length, 1);
+
+  // And it was queued rather than raced through: the handshake reached the
+  // app-server before the request it was holding.
+  const order = broker.upstream().map((m) => m.method);
+  assert.ok(order.indexOf('initialize') < order.indexOf('thread/start'),
+    `the handshake must precede the queued request, got ${JSON.stringify(order)}`);
+
+  // The implicit subscription still lands, so the queue is not a side channel.
+  await a.call('fake/emit', {
+    frames: [{ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'TQ', delta: 'queued-ok' } }],
+  });
+  await waitFor(() => a.notifications.some((n) => n.params?.delta === 'queued-ok'), { label: 'the queued thread\'s events' });
+});
+
+test('a codex whose --version probe fails still reports itself ready', async (t) => {
+  // The readiness gate B2 polls is `appServerInitialized && codexVersionProbed`.
+  // If it were `codexVersion` instead, a broker that is serving perfectly would
+  // look permanently un-ready — and the symptom (every delegation blocks until
+  // the client's own timeout) points nowhere near `codex --version`.
+  const broker = await startRealBroker(t, { CODEX_FAKE_VERSION_FAIL: '1' });
+  const a = new TestClient(broker.socketPath);
+  await a.ready;
+  t.after(() => a.close());
+
+  const init = await waitFor(async () => {
+    const r = await a.call('initialize', { clientInfo: { name: 'bridge-a', version: '1' } });
+    return r.codexVersionProbed && r.appServerInitialized ? r : false;
+  }, { label: 'the broker to finish booting without a version' });
+  assert.equal(init.codexVersion, null, 'unknown stays honestly unknown');
+  assert.equal(init.brokered, true);
+
+  // Ready means ready: it serves.
+  const started = await a.call('thread/start', { threadId: 'TV', cwd: '/tmp', approvalPolicy: 'never' });
+  assert.equal(started.thread.id, 'TV');
 });
 
 // AppServerConnection is exported so the spawn + handshake can be driven

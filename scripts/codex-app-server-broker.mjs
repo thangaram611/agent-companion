@@ -23,7 +23,18 @@
 
 import { spawn, execFile } from 'node:child_process';
 import { createServer, connect as connectSocket } from 'node:net';
-import { chmodSync, existsSync, lstatSync, realpathSync, statSync, unlinkSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { resolveCodexBin } from '../bridge-server/codex-runtime.mjs';
@@ -34,7 +45,7 @@ import {
   routeNotification,
   routeRequest,
 } from '../lib/codex-app-server-contract.mjs';
-import { scanLiveHeartbeat } from '../lib/heartbeat.mjs';
+import { HEARTBEAT_STALE_AFTER_MS, HOST_LIVENESS_TTL_MS, scanLiveHeartbeat } from '../lib/heartbeat.mjs';
 import {
   appendPrivateFile,
   codexBrokerLogFile,
@@ -75,11 +86,14 @@ const APP_SERVER_INIT_TIMEOUT_MS = 30_000;
 const LOADED_LIST_TIMEOUT_MS = 10_000;
 const VERSION_PROBE_TIMEOUT_MS = 10_000;
 
-// Idle reaper, mirroring the copilot daemon's shape and constants.
+// Idle reaper, mirroring the copilot daemon's shape and constants. The two
+// heartbeat TTLs are IMPORTED, not restated: both daemons sweep (and unlink
+// from) the same heartbeat directory, so a locally-tuned copy in one of them
+// would delete files the other still counts as live — and the broker would then
+// reap itself under an active host session. One owner for the walk and its
+// predicate: lib/heartbeat.mjs.
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 const INACTIVITY_RECHECK_MS = 60 * 1000;
-const HOST_LIVENESS_TTL_MS = 30 * 60 * 1000; // see hooks/drain-completions.sh
-const HEARTBEAT_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 // Responses whose `result.thread.id` implicitly subscribes the asking client to
 // that thread. This is what makes the common path work with no extra
@@ -102,14 +116,17 @@ const JSONRPC_INTERNAL_ERROR = -32603;
 const realNow = () => Date.now();
 const realExit = (code) => process.exit(code);
 
-let _impl = { now: realNow, exit: realExit };
+// `probeSocket` is in here because the interesting verdicts are the ones a test
+// cannot provoke on demand: fd exhaustion, EACCES, EAGAIN. Those are exactly the
+// verdicts on which the broker must refuse instead of unlinking.
+let _impl = { now: realNow, exit: realExit, probeSocket };
 
 export function _setForTest(overrides = {}) {
   _impl = { ..._impl, ...overrides };
 }
 
 export function _resetForTest() {
-  _impl = { now: realNow, exit: realExit };
+  _impl = { now: realNow, exit: realExit, probeSocket };
 }
 
 function now() {
@@ -124,7 +141,13 @@ function now() {
 // because a streaming turn emits hundreds of delta notifications a second.
 
 const LOG_LEVEL = (process.env.CODEX_BROKER_LOG_LEVEL || 'INFO').toUpperCase();
-const LOG_LEVEL_RANK = { DEBUG: 10, INFO: 20, WARN: 30, ERROR: 40, FATAL: 50 };
+// APP_SERVER_STDERR is a real level with a real rank, not a bare string. The
+// copilot daemon lets any unknown level bypass the gate, which means the child's
+// stderr keeps writing after an operator lowers the level to ERROR — and since
+// the log rotates by truncation at 1 MB, that traffic scrolls away the very
+// records they asked to keep. Ranking it at INFO keeps the default behaviour
+// (child stderr is captured) and makes `CODEX_BROKER_LOG_LEVEL=WARN` mean it.
+const LOG_LEVEL_RANK = { DEBUG: 10, INFO: 20, APP_SERVER_STDERR: 20, WARN: 30, ERROR: 40, FATAL: 50 };
 const LOG_THRESHOLD = LOG_LEVEL_RANK[LOG_LEVEL] ?? LOG_LEVEL_RANK.INFO;
 
 function log(level, ...args) {
@@ -171,6 +194,14 @@ export class LineReader {
       this.buf = this.buf.slice(nl + 1);
       if (this.overflow) {
         this.overflow = false;
+        dropped += 1;
+        continue;
+      }
+      // A complete over-cap line has to be dropped here too. Capping only the
+      // residual buffer below would let a frame that arrived whole inside one
+      // chunk through at any size — the guard would hold only for lines that
+      // happened to straddle a chunk boundary.
+      if (line.length > this.maxLineBytes) {
         dropped += 1;
         continue;
       }
@@ -323,6 +354,13 @@ export class AppServerConnection {
     this.initialized = false;
     this.dead = false;
     this.codexVersion = null;
+    // "the version probe has finished", which is NOT "the version is known".
+    // A wrapper binary that prints an unparseable banner, or a `--version` that
+    // times out, leaves codexVersion null forever — and a client gating
+    // readiness on a truthy codexVersion would then wait out its own timeout
+    // against a broker that is serving perfectly. Readiness gates on this flag;
+    // `codexVersion: null` stays the honest "unknown, already warned" value.
+    this.versionProbed = false;
     this.reader = new LineReader();
     this._nextId = 1;
     this._own = new Map(); // upstream id -> { resolve, reject, timer } for the broker's own calls
@@ -369,6 +407,10 @@ export class AppServerConnection {
   // refuses to start on a version bump takes every delegation down with it.
   _probeVersion(bin) {
     execFile(bin, ['--version'], { timeout: VERSION_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout) => {
+      // Set on BOTH paths: the probe is over either way, and a client waiting
+      // for the broker to finish booting must not wait on an answer that is
+      // never coming.
+      this.versionProbed = true;
       if (err) {
         log('WARN', 'could not read `codex --version`:', err.message);
         return;
@@ -554,7 +596,11 @@ export class Broker {
   //
   //   {id, method:'initialize'}          answered LOCALLY, never forwarded — the
   //                                      broker already handshook upstream for
-  //                                      everyone.
+  //                                      everyone. Its result carries the
+  //                                      readiness gate: poll until
+  //                                      `appServerInitialized &&
+  //                                      codexVersionProbed`, NOT until
+  //                                      `codexVersion` is truthy.
   //   {method:'initialized'}             swallowed.
   //   {id, method:'broker/status'}       local liveness probe.
   //   {id, method:'broker/subscribe'}    local; flushes the pre-subscription
@@ -596,6 +642,11 @@ export class Broker {
 
     switch (msg.method) {
       case 'initialize':
+        // THE READINESS GATE, for the client half: poll this until
+        // `appServerInitialized && codexVersionProbed`. Do NOT gate on
+        // `codexVersion` being truthy — null is a legitimate terminal value
+        // (unparseable or unavailable `codex --version`, already WARNed) and a
+        // client that waits for it would block forever on a healthy broker.
         this._reply(client, msg.id, {
           brokered: true,
           protocol: BROKER_PROTOCOL_VERSION,
@@ -603,6 +654,7 @@ export class Broker {
           appServerPid: this.connection?.pid ?? null,
           appServerInitialized: !!this.connection?.initialized,
           codexVersion: this.connection?.codexVersion ?? null,
+          codexVersionProbed: !!this.connection?.versionProbed,
         });
         return;
       case 'broker/status':
@@ -945,24 +997,8 @@ export class Broker {
   // is a readdir, and only then do we spend an RPC on the app-server.
   async _onInactivityTick() {
     if (this.shuttingDown) return false;
-    const nowMs = now();
 
-    if (this.clients.size > 0) {
-      log('DEBUG', 'idle tick: clients connected, reschedule');
-      this._resetIdleTimer(INACTIVITY_RECHECK_MS);
-      return false;
-    }
-
-    const liveSid = scanLiveHeartbeat(heartbeatDir(), {
-      nowMs,
-      liveTtlMs: HOST_LIVENESS_TTL_MS,
-      staleAfterMs: HEARTBEAT_STALE_AFTER_MS,
-    });
-    if (liveSid) {
-      log('INFO', `idle tick: host ${liveSid} still active (heartbeat fresh) — extending`);
-      this._resetIdleTimer(INACTIVITY_RECHECK_MS);
-      return false;
-    }
+    if (this._cheapGatesHold()) return false;
 
     let loaded;
     try {
@@ -979,10 +1015,41 @@ export class Broker {
       return false;
     }
 
+    // The two cheap gates were read BEFORE the RPC above. `thread/loaded/list`
+    // usually answers in about a millisecond but is allowed ten seconds, and a
+    // bridge that connect-probes the socket inside that window finds a live
+    // broker, connects, and sends `thread/start` — all invisible to a decision
+    // made on the pre-await snapshot. Re-read them: exiting on a stale "nobody
+    // is here" kills the app-server under a live turn, which is the one failure
+    // this whole transport exists to prevent.
+    if (this.shuttingDown) return false;
+    if (this._cheapGatesHold()) return false;
+
     log('INFO', 'idle: no clients, no live host, no loaded threads — shutting down');
     this.shutdown();
     _impl.exit(0);
     return true;
+  }
+
+  // The two in-memory/readdir gates. `true` means something says "not idle" and
+  // the timer has been rescheduled; the caller must not exit.
+  _cheapGatesHold() {
+    if (this.clients.size > 0) {
+      log('DEBUG', 'idle tick: clients connected, reschedule');
+      this._resetIdleTimer(INACTIVITY_RECHECK_MS);
+      return true;
+    }
+    const liveSid = scanLiveHeartbeat(heartbeatDir(), {
+      nowMs: now(),
+      liveTtlMs: HOST_LIVENESS_TTL_MS,
+      staleAfterMs: HEARTBEAT_STALE_AFTER_MS,
+    });
+    if (liveSid) {
+      log('INFO', `idle tick: host ${liveSid} still active (heartbeat fresh) — extending`);
+      this._resetIdleTimer(INACTIVITY_RECHECK_MS);
+      return true;
+    }
+    return false;
   }
 
   shutdown() {
@@ -1005,77 +1072,201 @@ export class Broker {
 // outlives its broker and SOCKET PRESENCE IS NOT LIVENESS. The only safe test is
 // a connect probe — ECONNREFUSED means safe to unlink, an accepted connection
 // means a live broker we must not steal from.
+//
+// Probe-then-unlink-then-listen is not by itself safe against a SECOND broker
+// running the same sequence: both see the same stale socket, both unlink, and
+// the second one deletes the file the first is already serving on. So the whole
+// sequence runs under an O_EXCL lock file beside the socket, and the bind is
+// remembered by inode — the two hardenings are independent, and both are needed
+// (the lock stops the double-bind, the inode stops one broker unlinking
+// another's socket if a lock is ever bypassed or broken).
 export class BrokerServer {
   constructor(broker, { socketPath = null } = {}) {
     this.broker = broker;
     this.socketPath = socketPath || codexBrokerSocketPath();
+    this.lockPath = `${this.socketPath}.lock`;
     this.server = null;
     // Set only once WE bound the socket. The copilot daemon's exit handler
     // unlinks unconditionally, which means a second daemon that correctly
     // refuses to steal the socket deletes the live one's socket on its way out.
-    // Ours only ever removes a file it owns.
     this.bound = false;
+    // …and `bound` alone is only "I bound A socket here once", which is not
+    // ownership of whatever file is at the path NOW. The inode is.
+    this.boundIno = null;
   }
 
   async start() {
     const socketPath = this.socketPath;
-    if (existsSync(socketPath)) {
-      let isSymlink = false;
-      try { isSymlink = lstatSync(socketPath).isSymbolicLink(); } catch {}
-      if (isSymlink) {
+    const lock = acquireStartLock(this.lockPath);
+    try {
+      // lstat, not existsSync: existsSync FOLLOWS a symlink, so a DANGLING one
+      // reports false and skips this entire block — and `listen()` then happily
+      // creates the real socket at the link's target, outside the 0700 runtime
+      // dir, where cleanup() would unlink the link and leave the socket behind.
+      let st = null;
+      try { st = lstatSync(socketPath); } catch { st = null; }
+
+      if (st?.isSymbolicLink()) {
         const err = new Error(`socket path is a symlink; refusing to use it: ${socketPath}`);
         err.code = 'BROKER_SOCKET_SYMLINK';
         log('ERROR', err.message);
         throw err;
       }
-      if (await probeSocketAlive(socketPath)) {
-        const err = new Error(`a broker is already listening at ${socketPath}`);
-        err.code = 'BROKER_ALREADY_RUNNING';
-        log('ERROR', err.message);
-        throw err;
-      }
-      log('INFO', 'unlinking stale socket (connect probe refused):', socketPath);
-      try { unlinkSync(socketPath); } catch {}
-    }
 
-    this.server = createServer((sock) => this.broker.attachClient(sock));
-    await new Promise((resolve, reject) => {
-      this.server.once('error', reject);
-      this.server.listen(socketPath, () => {
-        this.bound = true;
-        // Lock the socket to the owning user; the default umask leaves it 0666.
-        try { chmodSync(socketPath, 0o600); }
-        catch (err) { log('WARN', 'chmod socket failed:', err.message); }
-        log('INFO', 'listening on', socketPath);
-        resolve();
+      if (st) {
+        const verdict = await _impl.probeSocket(socketPath);
+        if (verdict === 'alive') {
+          const err = new Error(`a broker is already listening at ${socketPath}`);
+          err.code = 'BROKER_ALREADY_RUNNING';
+          log('ERROR', err.message);
+          throw err;
+        }
+        if (verdict !== 'absent') {
+          // "I could not tell" — EMFILE under a wide fan-out, EACCES, EAGAIN.
+          // Unlinking here would delete a LIVE broker's socket on evidence that
+          // says nothing about liveness. Refusing is always the recoverable
+          // direction: the caller re-probes and finds the incumbent.
+          const err = new Error(`could not determine whether a broker owns ${socketPath} (${verdict})`);
+          err.code = 'BROKER_SOCKET_INDETERMINATE';
+          log('ERROR', err.message);
+          throw err;
+        }
+        log('INFO', 'unlinking stale socket (connect probe refused):', socketPath);
+        try { unlinkSync(socketPath); } catch {}
+      }
+
+      this.server = createServer((sock) => this.broker.attachClient(sock));
+      await new Promise((resolve, reject) => {
+        this.server.once('error', reject);
+        this.server.listen(socketPath, () => {
+          this.bound = true;
+          try { this.boundIno = statSync(socketPath).ino; } catch { this.boundIno = null; }
+          // Lock the socket to the owning user; the default umask leaves it 0666.
+          try { chmodSync(socketPath, 0o600); }
+          catch (err) { log('WARN', 'chmod socket failed:', err.message); }
+          log('INFO', 'listening on', socketPath);
+          resolve();
+        });
       });
-    });
+    } finally {
+      lock.release();
+    }
   }
 
   cleanup() {
     if (this.server) {
+      // Note that libuv unlinks the pipe path itself on a graceful close, so
+      // this half is by-path regardless of what we do — which is precisely why
+      // the start lock, not the unlink, is what keeps two brokers off one path.
       try { this.server.close(); } catch {}
       this.server = null;
     }
     this.unlinkOwnedSocket();
   }
 
+  // The backstop for every path that calls process.exit() outright (the idle
+  // reaper, app-server death, the synchronous `process.on('exit')` handler),
+  // where no graceful close ever runs.
   unlinkOwnedSocket() {
     if (!this.bound) return;
     this.bound = false;
+    // Only the file we actually bound. If someone else's socket is at the path
+    // now, deleting it would take a live broker off the air and leave its
+    // clients connected to an inode nobody new can reach.
+    try {
+      if (this.boundIno !== null && statSync(this.socketPath).ino !== this.boundIno) {
+        log('WARN', 'socket at', this.socketPath, 'is no longer the one we bound — leaving it alone');
+        return;
+      }
+    } catch {
+      return; // already gone
+    }
     try { unlinkSync(this.socketPath); } catch {}
   }
 }
 
-// Connect-probe a socket path. `true` means something accepted a connection —
-// i.e. a live broker. Any error (ECONNREFUSED for a stale file, ENOTSOCK for a
-// regular file left behind) means nobody is home.
-export function probeSocketAlive(socketPath) {
+// Serialise probe→unlink→listen across brokers. O_EXCL create is the only
+// primitive that is atomic across processes on every filesystem we care about.
+// The critical section is milliseconds, so contention means "another broker is
+// booting right now" — refuse and let the caller re-probe, rather than wait.
+const START_LOCK_STALE_MS = 30_000;
+
+export function acquireStartLock(lockPath, { staleMs = START_LOCK_STALE_MS } = {}) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = openSync(lockPath, 'wx', 0o600);
+      try { writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() })); } catch {}
+      closeSync(fd);
+      return {
+        path: lockPath,
+        release() { try { unlinkSync(lockPath); } catch {} },
+      };
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      // A lock file is no more proof of liveness than a socket file is: a
+      // SIGKILL inside the critical section leaves one behind forever.
+      if (attempt === 0 && breakStaleStartLock(lockPath, staleMs)) continue;
+      const contended = new Error(`another broker is starting; lock held at ${lockPath}`);
+      contended.code = 'BROKER_START_CONTENDED';
+      log('ERROR', contended.message);
+      throw contended;
+    }
+  }
+  /* c8 ignore next */
+  throw new Error(`could not acquire the broker start lock at ${lockPath}`);
+}
+
+// Remove a start lock whose holder is demonstrably gone: a dead pid, or an age
+// past `staleMs` (which also covers pid reuse and an unreadable lock file).
+export function breakStaleStartLock(lockPath, staleMs = START_LOCK_STALE_MS) {
+  let holder = null;
+  let ageMs = Infinity;
+  try {
+    holder = JSON.parse(readFileSync(lockPath, 'utf8'));
+    if (typeof holder?.at === 'number') ageMs = Date.now() - holder.at;
+  } catch {
+    try { ageMs = Date.now() - statSync(lockPath).mtimeMs; } catch { ageMs = Infinity; }
+  }
+  const holderPid = Number.isInteger(holder?.pid) ? holder.pid : null;
+  const holderAlive = holderPid !== null && holderPid !== process.pid && processAlive(holderPid);
+  if (holderAlive && ageMs <= staleMs) return false;
+  if (holderPid === process.pid && ageMs <= staleMs) return false; // our own live critical section
+  log('WARN', 'breaking a stale broker start lock:', lockPath, JSON.stringify({ holderPid, ageMs }));
+  try { unlinkSync(lockPath); } catch {}
+  return true;
+}
+
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (err) { return err.code === 'EPERM'; }
+}
+
+// Connect-probe a socket path:
+//   'alive'   something accepted the connection — a live broker, do not touch.
+//   'absent'  ECONNREFUSED (stale socket file), ENOENT, ENOTSOCK (a plain file
+//             left at the path) — nobody is home, safe to unlink.
+//   otherwise the error code itself: EMFILE, EACCES, EAGAIN and friends mean
+//             "the probe failed", NOT "nobody is home", and the caller must
+//             refuse rather than unlink on that evidence.
+const PROBE_ABSENT_CODES = new Set(['ECONNREFUSED', 'ENOENT', 'ENOTSOCK', 'ECONNRESET']);
+
+export function probeSocketVerdictForError(err) {
+  return PROBE_ABSENT_CODES.has(err?.code) ? 'absent' : (err?.code || 'EUNKNOWN');
+}
+
+export function probeSocket(socketPath) {
   return new Promise((resolve) => {
     const probe = connectSocket(socketPath);
-    probe.on('connect', () => { probe.destroy(); resolve(true); });
-    probe.on('error', () => { probe.destroy(); resolve(false); });
+    probe.on('connect', () => { probe.destroy(); resolve('alive'); });
+    probe.on('error', (err) => { probe.destroy(); resolve(probeSocketVerdictForError(err)); });
   });
+}
+
+// Boolean convenience: `true` means a live broker answered. Anything else —
+// including an indeterminate probe — is false, so callers that must not unlink
+// on a maybe use `probeSocket` instead.
+export async function probeSocketAlive(socketPath) {
+  return (await probeSocket(socketPath)) === 'alive';
 }
 
 // --- Main --------------------------------------------------------------------

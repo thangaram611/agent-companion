@@ -27,7 +27,7 @@ import {
   coalesceTextChunks,
   buildPromptInspection,
 } from '../lib/prompt-inspect.mjs';
-import { scanLiveHeartbeat } from '../lib/heartbeat.mjs';
+import { HEARTBEAT_STALE_AFTER_MS, HOST_LIVENESS_TTL_MS, scanLiveHeartbeat } from '../lib/heartbeat.mjs';
 import { DEFAULT_MODEL, readDefaultModel } from '../lib/state.mjs';
 
 // --- Constants ---------------------------------------------------------------
@@ -75,8 +75,11 @@ const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 // context with it) for the full lifetime of an active host session. The 15-min
 // idle timer alone would terminate the Copilot child mid-session, forcing a
 // rebirth on the next prompt-bg and losing context.
-const HOST_LIVENESS_TTL_MS = 30 * 60 * 1000; // 30 min — see hooks/drain-completions.sh
-const HEARTBEAT_STALE_AFTER_MS = 24 * 60 * 60 * 1000; // 24h: unlink unused heartbeats
+//
+// Both TTLs are imported from lib/heartbeat.mjs, which also owns the walk: the
+// codex broker sweeps the same directory under the same predicate, and a local
+// copy tuned in one daemon would unlink heartbeats the other still reads as
+// live. See the note beside their definitions.
 const PROMPT_TIMEOUT_MS = 25 * 60 * 1000; // 25 min per prompt — must be >= MAX_LONG_POLL_WAIT_MS or legitimate long prompts are killed and surface as "prompt timeout" failures instead of real answers. Raised from 10 min to accommodate /fleet jobs that legitimately decompose into multiple long-running sub-agents (e.g. multi-file code reviews).
 const PROMPT_RETENTION_MS = 60 * 60 * 1000; // retain terminal prompts for inspection
 const SPAWN_INIT_TIMEOUT_MS = 30 * 1000; // 30s for handshake
