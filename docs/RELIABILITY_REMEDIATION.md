@@ -124,8 +124,18 @@ positively (an unset variable never opens a broker connection), and re-verified 
 `smoke.mjs` 12/12 and `orphan.mjs` 8/8, which still exercise the exec transport including its
 orphan verdict.
 
-The app-server side is proven against the real bridge by `probes/smoke/appserver.mjs`
-(15/15, 2026-08-11): bridge A SIGKILLed mid-turn; the broker, its app-server and a live shell
+The app-server side is proven against the real bridge by two probes. The control surface is
+`probes/smoke/appserver-control.mjs` (18/18, 2026-08-11 — re-run after the sandbox policy
+landed on `turn/start`, since steer and interrupt both ride the turn it opens): a running turn
+steered mid-flight
+and obeying the injected instruction, and a running turn interrupted with the job settling
+`cancelled` and the thread surviving, resumable. It exists because the restart proof below
+went 15/15 while `turn/steer` and `turn/interrupt` were both unconditionally broken — see the
+D1 correction under W3.3′.
+
+The survival property is `probes/smoke/appserver.mjs`
+(17/17, 2026-08-11 — 15 restart assertions plus the two that read the applied sandbox policy off
+the rollout): bridge A SIGKILLed mid-turn; the broker, its app-server and a live shell
 descendant still running the turn with **zero bridges alive**; bridge B hydrating, resuming the
 same thread, and the job reaching `completed` 72.6 s after the kill with the answer intact and
 A's streamed digest carried forward rather than clobbered. That is the F1 incident, run
@@ -556,6 +566,74 @@ spawn's own `cwd` (verified: thread created under `-C dirA`, resumed from proces
 **W3.3′ — `agent_reply` for Codex** *(medium; deps W3.2′ or the app-server adapter)*
 > **BUILT 2026-08-11, app-server branch only.** The `exec` bullet below is deleted with W3.2′ —
 > codex under `exec` still reports `reply_available: false`, truthfully, per job.
+>
+> **⚠️ Both control paths shipped BROKEN and were fixed 2026-08-11 (D1).** Measured against the
+> real `codex app-server` (codex-cli 0.147.0):
+>
+> ```
+> turn/steer     WITHOUT expectedTurnId -> -32600 "Invalid request: missing field `expectedTurnId`"
+> turn/interrupt WITHOUT turnId         -> -32600 "Invalid request: missing field `turnId`"
+> ```
+>
+> Both fields are `required` in the vendored contract; the adapter omitted them when null and
+> the bridge never supplied one, so **`agent_cancel` and `agent_reply` failed on every
+> app-server job**. The reasoning that left them out — "a stale `expectedTurnId` is a measured
+> error class, so the calls stay thread-scoped" — was wrong in the safe-looking direction: a
+> stale id is a *conditional* failure (`no active turn to steer`), omitting the field is an
+> *unconditional* one. The fix carries the id from two measured sources, in one shared
+> resolver: `job.turnId` (live, from `turn/started` and `turn/start`'s own answer) and, for a
+> bridge that restarted and never saw `turn/started`, `thread/read{includeTurns:true}` →
+> `thread.turns[last]`, whose running turn reads `{id, status:"inProgress"}`. When neither has
+> one the call **throws** naming the thread; it never sends a placeholder and never omits.
+>
+> **Why three rounds of review missed it, and what changed.** `test/fake-codex-app-server.mjs`
+> and `test/fake-codex-broker-socket.mjs` answered whatever they were asked, so every unit test
+> passed against a call the real server rejects — *a fake that accepts what the real server
+> rejects converts a protocol violation into a green test*. Both fakes now validate every
+> inbound call against the pinned contract first and answer the server's own
+> `-32600 Invalid request: missing field \`x\`` (the required-params table is generated from
+> the schema, like the routing table beside it). Re-running the suite with the fakes fixed and
+> the adapter untouched turned 8 tests red — the four adapter guard tests, the broker
+> end-to-end, and three bridge cancel/reply tests.
+>
+> Neither fake answers an **unimplemented** method any more either. Both used to reply
+> `{echo: method}` — a success — to anything they had no case for, so a typo (`turn/interupt`),
+> a codex rename, or an adapter call the fixture never modelled all went green. Measured, the
+> real server answers a method outside its union
+> `-32600 "Invalid request: unknown variant \`turn/interupt\`, expected one of …"`, with the
+> request id echoed so the caller rejects rather than hangs. The fakes refuse, and deliberately
+> do **not** recite the fixture as if it were that list: the binary accepts **136** client
+> methods while its own `generate-json-schema` publishes **95**, so `thread/turns/list`,
+> `getAuthStatus`, `process/spawn` and 38 more are real methods this contract has never heard
+> of. "Absent from the fixture" is not "the server would reject it".
+>
+> **How bad a stale id is, measured.** Every remaining staleness path fails *loudly*: against
+> the real server, a completed turn's id on a thread whose SECOND turn is running answers
+> `-32600 "expected active turn id A but found B"` for both `turn/interrupt` and `turn/steer`.
+> So a stale id can never mis-cancel the wrong turn — it can only fail and be retried. The two
+> windows that could produce one are closed anyway: the reply-to-an-idle-thread branch clears
+> `job.turnId` (the turn it named is over, and the replacement's id lands a few round trips
+> later, since the watch is not awaited), and every read of `lastTurn` — resolver, `turn/start`,
+> reply — goes through the same `status === 'inProgress'` gate.
+>
+> And `probes/smoke/appserver.mjs` went **15/15 with both paths broken**, because it never
+> exercised either. `probes/smoke/appserver-control.mjs` (18/18, 2026-08-11) now does, on the
+> real transport: a running turn steered mid-flight and obeying the new instruction
+> (`PINEAPPLE`, not the `BANANA` it was started with), and a running turn interrupted with the
+> job settling `cancelled` while **the thread survives** — still in `thread/loaded/list`,
+> `thread/resume` → `idle` with its last turn recorded `interrupted`, and `thread/read` still
+> returning the history. It exercises **both** turn-id sources: the banked one, and — with the
+> id withheld mid-turn — the restarted-bridge `thread/read` fallback, whose response shape
+> nothing but the fakes had ever asserted.
+>
+> **A steer is confirmed, not assumed.** The RPC returning means the server accepted the steer,
+> not that the model got it. The injected input comes back as an `item/completed` whose item is
+> a `userMessage` — but so does every turn's OPENING prompt, so counting them confirms a steer
+> that never landed; the injected one is matched by the text this bridge chose. `agent_reply`
+> reports `steered` (accepted) and `steer_confirmed` (observed) separately, with the window in
+> `AGENT_COMPANION_CODEX_STEER_CONFIRM_MS` (default 5 s, reported in `agent_status`). An
+> unconfirmed steer is not a failed one: codex injects at the next model boundary, measured
+> 0.14 s against an in-flight `apply_patch` and 130 s against a model mid-reasoning.
 - ~~**Under `exec`** — terminal → new turn on the same thread; running → queued steer applied at
   turn end; running + `interrupt:true` → cancel-then-resume.~~ Deleted with W3.2′. The
   labelling point survives and was acted on: these are **transport** limitations of
@@ -713,7 +791,7 @@ exec-specific work the daemon deletes rather than reuses.
    owning one `codex app-server` over stdio, a bridge-side adapter
    (`bridge-server/codex-app-server-runtime.mjs`), a vendored protocol contract, and per-call-site
    wiring in `server.mjs`. `exec` stays the default and is untouched. The end-to-end proof is
-   `probes/smoke/appserver.mjs` (15/15). See the cost correction in §2 — the estimate that
+   `probes/smoke/appserver.mjs` (17/17). See the cost correction in §2 — the estimate that
    informed this recommendation was ~5× low.
    ~~What remains is a scheduling call, not a technical
    one: build the adapter now, or land the Wave-0/Wave-1 minimum merge first and build it
@@ -742,9 +820,49 @@ exec-specific work the daemon deletes rather than reuses.
   completes atomically and the steer applies at the next model boundary.
 - ~~**app-server approval routing.**~~ **Resolved 2026-08-10** — full wire contract captured;
   the adapter must run `approvalPolicy: 'never'`, because auto-accept escalates past the
-  sandbox. Still open: the mapping of `AGENT_COMPANION_CODEX_SANDBOX_MODE` onto
-  `thread/start`'s `sandbox`, and whether the bridge should ever expose an approval policy
-  other than `never`.
+  sandbox. Still open: whether the bridge should ever expose an approval policy other than
+  `never`.
+- ~~**The sandbox/network mapping onto the app-server.**~~ **Measured and wired 2026-08-11.**
+  `thread/start`/`thread/resume`'s `sandbox` is the bare `SandboxMode` enum
+  (`read-only|workspace-write|danger-full-access`) and carries **no** network option — the
+  start response echoes `networkAccess: false` whatever the mode. The network lives on
+  **`turn/start`'s `sandboxPolicy`**, a tagged union
+  (`workspaceWrite{networkAccess,writableRoots,excludeSlashTmp,excludeTmpdirEnvVar}` /
+  `readOnly{networkAccess}` / `dangerFullAccess` /
+  `externalSandbox{networkAccess:'restricted'|'enabled'}`) whose every variant defaults
+  `networkAccess` to its **restrictive** value (`false` for the two booleans, `'restricted'`
+  for `externalSandbox`'s enum) — so on this transport silence is the *restrictive* direction,
+  the exact opposite of `codex exec`, where omitting `-c sandbox_workspace_write.network_access=`
+  defers to config.toml and fails open. Both adapters must therefore be explicit, for
+  opposite reasons. Verified applied, not merely accepted: a `turn/start` carrying
+  `sandboxPolicy:{type:'workspaceWrite',networkAccess:true}` recorded
+  `turn_context.sandbox_policy = {"type":"workspace-write","network_access":true,…}` in the
+  rollout, with `model: "gpt-5.6-sol"` / `effort: "xhigh"` still inherited from config.toml in
+  the same record (the no-pin rule is unaffected). The controlled comparison is on disk: every
+  rollout from `originator: agent-companion-broker` before this landed records
+  `network_access: false` while the exec adapter's record `true` on the same machine and the
+  same config — **the adapter a job ran on was changing what it could reach.** It no longer
+  does, and `network_applied` is `true`. One known cost, recorded rather than hidden: a
+  `sandboxPolicy` **replaces** the policy rather than patching it, and `writableRoots` defaults
+  to `[]`, so a config.toml `[sandbox_workspace_write] writable_roots` list reaches
+  `thread/start`'s mode-derived policy but not the per-turn override. Unmeasured on a machine
+  that configures none.
+  **The tags are camelCase while the mode enum on the same job is kebab-case**, which is the
+  live hazard the fakes cannot see: the pinned contract validates top-level field *presence*
+  only, so `{type:'workspace-write'}` would pass every fake in this repo. Measured against the
+  real 0.147.0 server for **zero tokens** — every call aimed at the all-zero thread id, so
+  anything surviving deserialization dies on `thread not found` before a model runs:
+  `workspaceWrite{networkAccess:true|false}`, `readOnly{networkAccess:false}` and
+  `dangerFullAccess` all reached `thread not found` (i.e. the shapes are accepted, not merely
+  plausible), while `{type:'workspace-write'}` answered
+  `-32600 "unknown variant \`workspace-write\`, expected one of \`dangerFullAccess\`,
+  \`readOnly\`, \`externalSandbox\`, \`workspaceWrite\`"`,
+  `{type:'workspaceWrite',networkAccess:'enabled'}` answered `invalid type: string`, and
+  `{networkAccess:true}` answered `missing field \`type\``. All four refusals are recorded in
+  `lib/codex-app-server-contract.mjs`'s list of nested checks it deliberately does not
+  reproduce; the tag itself is asserted against that measured vocabulary where it is built
+  (`codex-app-server-runtime.test.mjs`), which is cheaper and more honest than teaching the
+  contract to guess at nested shapes.
 - ~~**The broker.**~~ **Prototyped and measured 2026-08-10, shipped 2026-08-11** — see "Broker
   probe" below. The three open sub-questions were answered by the build, and the answers are
   worth stating because two of them were decided by constraint rather than by preference:

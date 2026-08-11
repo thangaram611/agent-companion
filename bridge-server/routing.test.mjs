@@ -246,6 +246,35 @@ test('opencode adapter:server profile inherits reply/resume capabilities', () =>
   assert.equal(r.resolved.capabilities.resume, true);
 });
 
+test('codex adapter:appserver profile inherits reply/resume through the same gate', () => {
+  // Capability resolution is adapter-level, so a codex app-server profile must
+  // arrive at reply/resume down the same path opencode's adapter:'server' takes
+  // — not a codex-shaped branch beside it. The env deliberately selects nothing:
+  // the profile's own declaration is what has to carry it.
+  reset();
+  setProfiles({
+    profiles: [
+      { id: 'cx-app', companion: 'codex', adapter: 'appserver', strengths: ['planner'] },
+      { id: 'cx-exec', companion: 'codex', strengths: ['reviewer'] },
+    ],
+  });
+  const app = resolveRouting({ profile: 'cx-app' }, {});
+  assert.equal(app.ok, true);
+  assert.equal(app.resolved.adapter, 'appserver');
+  assert.equal(app.resolved.capabilities.reply, true);
+  assert.equal(app.resolved.capabilities.resume, true);
+  // Its sibling on the default transport is untouched — the overlay is
+  // per-profile, and exec stays send-only.
+  const exec = resolveRouting({ profile: 'cx-exec' }, {});
+  assert.equal(exec.resolved.adapter, null);
+  assert.equal(exec.resolved.capabilities.reply, false);
+  assert.equal(exec.resolved.capabilities.resume, false);
+  // Routed by strength, not just by id — the capability gate runs on both paths.
+  const byStrength = resolveRouting({ strength: 'planner' }, {});
+  assert.equal(byStrength.ok, true);
+  assert.equal(byStrength.resolved.capabilities.reply, true);
+});
+
 // Codex's model gate is PERMISSIVE (isModelAllowedFor('codex', m) accepts any
 // non-blank id — codex ids are bare, no mandatory slash, and the catalog
 // churns too fast for a curated set). There is therefore no

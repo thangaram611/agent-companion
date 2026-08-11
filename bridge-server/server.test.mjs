@@ -1607,7 +1607,7 @@ async function _cxUntilMs(predicate, budgetMs = 8000, stepMs = 20) {
   return predicate();
 }
 
-async function withCodexAppServer({ handlers = {}, statuses = {}, connect = null, spawnBroker = null } = {}, body) {
+async function withCodexAppServer({ handlers = {}, statuses = {}, turns = {}, connect = null, spawnBroker = null } = {}, body) {
   const cx = await import('./codex-app-server-runtime.mjs');
   const regDir = mkdtempSync(join(tmpdir(), 'cx-srv-reg-'));
   const prior = {
@@ -1620,7 +1620,7 @@ async function withCodexAppServer({ handlers = {}, statuses = {}, connect = null
   process.env.CODEX_RUNTIME_ADAPTER = 'appserver';
   cx._resetForTest();
   const sockets = [];
-  const newSocket = () => { const s = _cxSocket({ handlers, statuses }); sockets.push(s); return s; };
+  const newSocket = () => { const s = _cxSocket({ handlers, statuses, turns }); sockets.push(s); return s; };
   cx._setForTest({
     connect: connect ? async (path, ms) => connect({ path, ms, newSocket, sockets }) : async () => newSocket(),
     // A live broker answers the health probe, so nothing here may spawn one;
@@ -1656,6 +1656,12 @@ function _cxLiveJob(jobs, jobId, sid, extra = {}) {
   jobs.set(jobId, {
     jobId, target: 'codex', codexAdapter: 'appserver',
     claudeSessionId: sid, status: 'running', promptId: `codex-${jobId}`,
+    // A running app-server job HAS a turn id: the worker records it from
+    // `turn/start`'s answer and refreshes it from every `turn/started`. It is
+    // what `turn/interrupt` and `turn/steer` require, so a fixture without one
+    // models a bridge that restarted mid-turn, not a normal live job — and that
+    // case has its own test (`extra: { turnId: null }`).
+    turnId: 'TURN1',
     sessionId: 'T1', brokerSocket: process.env.CODEX_BROKER_SOCKET_PATH,
     task: 't', mode: 'EXECUTE', cwd: TEST_CWD, startedAt: Date.now(),
     ...extra,
@@ -1932,6 +1938,91 @@ test('Codex app-server mode: cancel maps to turn/interrupt and settles cancelled
   }
 });
 
+test('Codex app-server mode: cancel sends the turn id the protocol REQUIRES, taken from the live turn', async () => {
+  // The shipped defect: `interruptCodexTurn` omitted `turnId` when null and the
+  // bridge never passed one, so every app-server cancel was
+  // `-32600 missing field \`turnId\`` on the real server. The fakes validate the
+  // contract now, so this cannot pass by omission — and the id asserted here is
+  // the one the worker banked from `turn/start`.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-turnid';
+  try {
+    await withCodexAppServer({}, async ({ sockets }) => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'codex', task: 'long codex turn', mode: 'EXECUTE',
+        template: 'general', cwd: TEST_CWD, host_session_id: 'sid-cx-turnid', parallel: 'never', max_wait_sec: 5,
+      }));
+      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.turnId), 'the worker banks the turn id');
+      assert.equal(jobs.get(send.job_id).turnId, 'TURN1');
+
+      const cancel = parse(await dispatch({ action: 'cancel', job_id: send.job_id, host_session_id: 'sid-cx-turnid' }));
+      const cancelSock = sockets[sockets.length - 1];
+      assert.deepEqual(cancelSock.paramsFor('turn/interrupt')[0], { threadId: 'T1', turnId: 'TURN1' });
+      assert.equal(cancel.turn_id, 'TURN1');
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-turnid') jobs.delete(id);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: a RESTARTED bridge cancels by reading the running turn off thread/read', async () => {
+  // The turn began before this bridge existed, so `turn/started` is gone for
+  // good and the ledger row carries no turn id. `thread/read{includeTurns:true}`
+  // reports the last turn as `{id, status}`, and the running one reads
+  // `inProgress` — the only other place this id exists.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  try {
+    await withCodexAppServer({
+      statuses: { T1: 'active' },
+      turns: { T1: [{ id: 'TURN_OLD', status: 'completed' }, { id: 'TURN_LIVE', status: 'inProgress' }] },
+    }, async ({ sockets }) => {
+      _cxLiveJob(jobs, 'codex-restarted', 'sid-cx-restart', { turnId: null });
+      const cancel = parse(await dispatch({ action: 'cancel', job_id: 'codex-restarted', host_session_id: 'sid-cx-restart' }));
+      const sock = sockets[sockets.length - 1];
+      assert.equal(cancel.ok, true);
+      assert.equal(cancel.turn_id, 'TURN_LIVE');
+      assert.deepEqual(sock.wire(), ['thread/read', 'thread/resume', 'turn/interrupt']);
+      assert.deepEqual(sock.paramsFor('turn/interrupt')[0], { threadId: 'T1', turnId: 'TURN_LIVE' });
+    });
+  } finally {
+    jobs.delete('codex-restarted');
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: a cancel with no resolvable turn id fails LOUDLY and leaves the job running', async () => {
+  // The alternative is what shipped: omit the field, get a -32600 the operator
+  // never sees, and tell them the cancel was accepted. A cancel that cannot be
+  // sent must also not leave `cancelRequested` behind — a stale flag relabels
+  // whatever the turn actually produced as `cancelled`.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  try {
+    await withCodexAppServer({ statuses: { T1: 'active' }, turns: { T1: [] } }, async ({ sockets }) => {
+      _cxLiveJob(jobs, 'codex-noturn', 'sid-cx-noturn', { turnId: null });
+      const cancel = parse(await dispatch({ action: 'cancel', job_id: 'codex-noturn', host_session_id: 'sid-cx-noturn' }));
+      assert.equal(cancel.ok, false);
+      assert.equal(cancel.status, 'cancel_failed');
+      assert.match(cancel.error, /needs the running turn's id on thread T1/);
+      assert.match(cancel.error, /no turns at all/);
+      assert.equal(jobs.get('codex-noturn').cancelRequested, false);
+      assert.equal(jobs.get('codex-noturn').terminalAt, undefined);
+      assert.equal(sockets[sockets.length - 1].wire().includes('turn/interrupt'), false);
+    });
+  } finally {
+    jobs.delete('codex-noturn');
+    _resetForTest();
+  }
+});
+
 test('Codex app-server mode: the bridge owns the cancel verdict when the turn races the interrupt to completed', async () => {
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
@@ -2085,10 +2176,97 @@ test('Codex app-server mode: reply on a running turn steers it — no cancel, no
 
       const sock = sockets[sockets.length - 1];
       assert.deepEqual(sock.wire(), ['thread/resume', 'turn/steer'], 'steer only: no interrupt, no second turn/start');
-      assert.equal(sock.paramsFor('turn/steer')[0].input[0].text, 'actually, use ripgrep');
+      // `expectedTurnId` is REQUIRED — omitting it was an unconditional -32600
+      // on the real server, i.e. every app-server reply failed. The fake
+      // enforces the contract, so the field being on the wire is what makes
+      // this test pass at all.
+      assert.deepEqual(sock.paramsFor('turn/steer')[0], {
+        threadId: 'T1', expectedTurnId: 'TURN1', input: [{ type: 'text', text: 'actually, use ripgrep' }],
+      });
+      assert.equal(reply.turn_id, 'TURN1');
+      // Two facts, kept apart: the server accepted it, and the injected message
+      // was seen landing in the turn.
+      assert.equal(reply.steer_confirmed, true);
+      assert.match(reply.steer_confirmation, /item\/completed userMessage/);
     });
   } finally {
     jobs.delete('codex-steer');
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: a steer the model has not reached yet is reported unconfirmed, not delivered', async () => {
+  // Codex injects a steer at the NEXT MODEL BOUNDARY — measured 0.14 s against
+  // an in-flight apply_patch and 130 s against a model mid-reasoning. Claiming
+  // delivery because the RPC returned is the thing being fixed; the honest
+  // answer is `steered: true, steer_confirmed: false` with the reason.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  const oldWindow = process.env.AGENT_COMPANION_CODEX_STEER_CONFIRM_MS;
+  // The default window is 5 s of real waiting; this test only needs the timeout
+  // to expire, so it buys the same assertion for 20 ms.
+  process.env.AGENT_COMPANION_CODEX_STEER_CONFIRM_MS = '20';
+  try {
+    await withCodexAppServer({
+      statuses: { T1: 'active' },
+      // Accepted, never announced — the model is still mid-reasoning.
+      handlers: { 'turn/steer': (p) => ({ turn: { id: p.expectedTurnId } }) },
+    }, async () => {
+      _cxLiveJob(jobs, 'codex-steer-slow', 'sid-cx-steer-slow');
+      const reply = parse(await dispatch({
+        action: 'reply', job_id: 'codex-steer-slow', message: 'actually, use ripgrep', host_session_id: 'sid-cx-steer-slow',
+      }));
+      assert.equal(reply.ok, true);
+      assert.equal(reply.steered, true);
+      assert.equal(reply.steer_confirmed, false);
+      assert.match(reply.steer_confirmation, /next model boundary/);
+      // Not a failure: the job is still running and still the same turn.
+      assert.equal(jobs.get('codex-steer-slow').terminalAt, undefined);
+      assert.equal(jobs.get('codex-steer-slow').turnId, 'TURN1');
+    });
+  } finally {
+    jobs.delete('codex-steer-slow');
+    if (oldWindow === undefined) delete process.env.AGENT_COMPANION_CODEX_STEER_CONFIRM_MS;
+    else process.env.AGENT_COMPANION_CODEX_STEER_CONFIRM_MS = oldWindow;
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: a reply never steers with a turn resume reports as FINISHED', async () => {
+  // One rule for every read of `lastTurn`. `resolveCodexTurnId` and
+  // `startCodexTurn` both take it only when it says `inProgress`; the reply path
+  // used to pass `resumed.lastTurn?.id` ungated, so an `active` thread whose
+  // last RECORDED turn had completed (the window between one turn finishing and
+  // the next being recorded) would have steered a dead id — measured on the real
+  // server as `-32600 expected active turn id … but found …`. Gated, the adapter
+  // goes and reads the live turn instead.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  _resetForTest();
+  try {
+    await withCodexAppServer({
+      turns: { T1: [{ id: 'TURN_LIVE', status: 'inProgress' }] },
+      handlers: {
+        'thread/resume': (p) => ({
+          thread: { id: p.threadId, status: { type: 'active' }, turns: [{ id: 'TURN_DEAD', status: 'completed' }] },
+        }),
+      },
+    }, async ({ sockets }) => {
+      // No live id: this bridge restarted and never saw `turn/started`.
+      _cxLiveJob(jobs, 'codex-stale-steer', 'sid-cx-stale', { turnId: null });
+      const reply = parse(await dispatch({
+        action: 'reply', job_id: 'codex-stale-steer', message: 'actually, use ripgrep', host_session_id: 'sid-cx-stale',
+      }));
+      const sock = sockets[sockets.length - 1];
+      assert.equal(reply.ok, true);
+      assert.equal(reply.steered, true);
+      assert.equal(sock.paramsFor('turn/steer')[0].expectedTurnId, 'TURN_LIVE');
+      assert.ok(sock.wire().includes('thread/read'), 'the resolver asked the transport rather than trusting a finished turn');
+      assert.equal(jobs.get('codex-stale-steer').turnId, 'TURN_LIVE');
+    });
+  } finally {
+    jobs.delete('codex-stale-steer');
     _resetForTest();
   }
 });
@@ -2163,15 +2341,29 @@ test('Codex app-server mode: reply on an idle thread starts a fresh guarded turn
   const { dispatch, jobs, _resetForTest } = mod;
   _resetForTest();
   try {
-    await withCodexAppServer({ statuses: { T1: 'idle' } }, async ({ sockets }) => {
+    await withCodexAppServer({
+      statuses: { T1: 'idle' },
+      // A DIFFERENT id for the replacement turn, so "the job's turn id moved on"
+      // is observable rather than coincidental.
+      handlers: { 'turn/start': () => ({ turn: { id: 'TURN2' } }) },
+    }, async ({ sockets }) => {
       _cxLiveJob(jobs, 'codex-idle-reply', 'sid-cx-idle');
       const reply = parse(await dispatch({ action: 'reply', job_id: 'codex-idle-reply', message: 'follow up', host_session_id: 'sid-cx-idle' }));
       assert.equal(reply.ok, true);
       assert.equal(reply.steered, false);
       assert.match(reply.new_prompt_id, /-r1$/);
       assert.equal(jobs.get('codex-idle-reply').promptId, reply.new_prompt_id);
+      // THE STALE-ID WINDOW. This branch was taken because TURN1 is over, and
+      // the replacement's id arrives a few round trips later — the watch below
+      // is deliberately not awaited. So the job must not still be advertising
+      // TURN1: an `agent_cancel` in here would send it, and the real server
+      // answers `-32600 expected active turn id … but found …` while the new
+      // turn keeps running. Null instead makes the resolver read the live turn
+      // off `thread/read`.
+      assert.notEqual(jobs.get('codex-idle-reply').turnId, 'TURN1', 'the finished turn\'s id is not carried forward');
       const sock = sockets[sockets.length - 1];
       assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'a new turn was started');
+      assert.ok(await _cxUntil(() => jobs.get('codex-idle-reply')?.turnId === 'TURN2'), 'the replacement turn\'s id lands on the job');
       // An idle thread has no turn to steer, so this path re-prompts — but it
       // still never interrupts, because there is nothing running to interrupt.
       assert.equal(sock.wire().includes('turn/interrupt'), false);

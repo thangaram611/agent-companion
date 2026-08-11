@@ -172,7 +172,8 @@ only by model reuse the same detached server. Multiple profiles may declare the
 same strength — the top-level `defaultProfile` breaks the tie **only if it itself
 declares that strength**, otherwise the send returns `STRENGTH_AMBIGUOUS`.
 Authoring is non-interactive: `node scripts/onboard.mjs --define-profile <id>
---companion <c> [--model <m>] [--adapter cli|server] [--strength <labels>]`,
+--companion <c> [--model <m>] [--adapter <that companion's transport: opencode
+cli|server, codex exec|appserver>] [--strength <labels>]`,
 `--assign-strength`, `--set-default-profile`, and `--list-profiles`. Only ids,
 model names, and strength labels are persisted — never secrets.
 

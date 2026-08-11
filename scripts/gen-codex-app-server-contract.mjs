@@ -75,7 +75,10 @@ writeFileSync(CONTRACT_PATH, serialized);
 
 const n = contract.serverNotifications;
 console.log(`Wrote ${CONTRACT_PATH} from codex-cli ${codexVersion}${current === serialized ? ' (unchanged)' : ''}`);
-console.log(`  ${contract.clientMethods.length} client methods`);
+const c = contract.clientRequests;
+console.log(`  ${c.length} client requests: `
+  + `${c.filter((e) => e.required.length).length} with required params, `
+  + `${c.filter((e) => !e.paramsRequired).length} that may be sent with no params at all`);
 console.log(`  ${n.length} server notifications: `
   + `${n.filter((e) => e.routing === 'threadId').length} threadId, `
   + `${n.filter((e) => e.routing === 'nested').length} nested, `

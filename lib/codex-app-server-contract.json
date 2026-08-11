@@ -1,101 +1,640 @@
 {
   "codexVersion": "0.147.0",
-  "clientMethods": [
-    "account/login/cancel",
-    "account/login/start",
-    "account/logout",
-    "account/rateLimitResetCredit/consume",
-    "account/rateLimits/read",
-    "account/read",
-    "account/sendAddCreditsNudgeEmail",
-    "account/usage/read",
-    "account/workspaceMessages/read",
-    "app/installed",
-    "app/list",
-    "app/read",
-    "command/exec",
-    "command/exec/resize",
-    "command/exec/terminate",
-    "command/exec/write",
-    "config/batchWrite",
-    "config/mcpServer/reload",
-    "config/read",
-    "config/value/write",
-    "configRequirements/read",
-    "experimentalFeature/enablement/set",
-    "experimentalFeature/list",
-    "externalAgentConfig/detect",
-    "externalAgentConfig/import",
-    "externalAgentConfig/import/readHistories",
-    "externalAgentConfig/import/recordHistory",
-    "feedback/upload",
-    "fs/copy",
-    "fs/createDirectory",
-    "fs/getMetadata",
-    "fs/readDirectory",
-    "fs/readFile",
-    "fs/remove",
-    "fs/unwatch",
-    "fs/watch",
-    "fs/writeFile",
-    "fuzzyFileSearch",
-    "hooks/list",
-    "initialize",
-    "marketplace/add",
-    "marketplace/remove",
-    "marketplace/upgrade",
-    "mcpServer/oauth/login",
-    "mcpServer/resource/read",
-    "mcpServer/tool/call",
-    "mcpServerStatus/list",
-    "model/list",
-    "modelProvider/capabilities/read",
-    "permissionProfile/list",
-    "plugin/install",
-    "plugin/installed",
-    "plugin/list",
-    "plugin/read",
-    "plugin/share/checkout",
-    "plugin/share/delete",
-    "plugin/share/list",
-    "plugin/share/save",
-    "plugin/share/updateTargets",
-    "plugin/skill/read",
-    "plugin/uninstall",
-    "review/start",
-    "skills/config/write",
-    "skills/extraRoots/set",
-    "skills/list",
-    "thread/approveGuardianDeniedAction",
-    "thread/archive",
-    "thread/compact/start",
-    "thread/delete",
-    "thread/fork",
-    "thread/goal/clear",
-    "thread/goal/get",
-    "thread/goal/set",
-    "thread/inject_items",
-    "thread/list",
-    "thread/loaded/list",
-    "thread/metadata/update",
-    "thread/name/set",
-    "thread/read",
-    "thread/resume",
-    "thread/rollback",
-    "thread/section/move",
-    "thread/shellCommand",
-    "thread/start",
-    "thread/unarchive",
-    "thread/unsubscribe",
-    "threadSection/create",
-    "threadSection/delete",
-    "threadSection/list",
-    "threadSection/update",
-    "turn/interrupt",
-    "turn/start",
-    "turn/steer",
-    "windowsSandbox/readiness",
-    "windowsSandbox/setupStart"
+  "clientRequests": [
+    {
+      "method": "account/login/cancel",
+      "paramsRequired": true,
+      "required": [
+        "loginId"
+      ]
+    },
+    {
+      "method": "account/login/start",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "account/logout",
+      "paramsRequired": false,
+      "required": []
+    },
+    {
+      "method": "account/rateLimitResetCredit/consume",
+      "paramsRequired": true,
+      "required": [
+        "idempotencyKey"
+      ]
+    },
+    {
+      "method": "account/rateLimits/read",
+      "paramsRequired": false,
+      "required": []
+    },
+    {
+      "method": "account/read",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "account/sendAddCreditsNudgeEmail",
+      "paramsRequired": true,
+      "required": [
+        "creditType"
+      ]
+    },
+    {
+      "method": "account/usage/read",
+      "paramsRequired": false,
+      "required": []
+    },
+    {
+      "method": "account/workspaceMessages/read",
+      "paramsRequired": false,
+      "required": []
+    },
+    {
+      "method": "app/installed",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "app/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "app/read",
+      "paramsRequired": true,
+      "required": [
+        "appIds"
+      ]
+    },
+    {
+      "method": "command/exec",
+      "paramsRequired": true,
+      "required": [
+        "command"
+      ]
+    },
+    {
+      "method": "command/exec/resize",
+      "paramsRequired": true,
+      "required": [
+        "processId",
+        "size"
+      ]
+    },
+    {
+      "method": "command/exec/terminate",
+      "paramsRequired": true,
+      "required": [
+        "processId"
+      ]
+    },
+    {
+      "method": "command/exec/write",
+      "paramsRequired": true,
+      "required": [
+        "processId"
+      ]
+    },
+    {
+      "method": "config/batchWrite",
+      "paramsRequired": true,
+      "required": [
+        "edits"
+      ]
+    },
+    {
+      "method": "config/mcpServer/reload",
+      "paramsRequired": false,
+      "required": []
+    },
+    {
+      "method": "config/read",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "config/value/write",
+      "paramsRequired": true,
+      "required": [
+        "keyPath",
+        "mergeStrategy",
+        "value"
+      ]
+    },
+    {
+      "method": "configRequirements/read",
+      "paramsRequired": false,
+      "required": []
+    },
+    {
+      "method": "experimentalFeature/enablement/set",
+      "paramsRequired": true,
+      "required": [
+        "enablement"
+      ]
+    },
+    {
+      "method": "experimentalFeature/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "externalAgentConfig/detect",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "externalAgentConfig/import",
+      "paramsRequired": true,
+      "required": [
+        "migrationItems"
+      ]
+    },
+    {
+      "method": "externalAgentConfig/import/readHistories",
+      "paramsRequired": false,
+      "required": []
+    },
+    {
+      "method": "externalAgentConfig/import/recordHistory",
+      "paramsRequired": true,
+      "required": [
+        "itemTypeResults",
+        "providerId"
+      ]
+    },
+    {
+      "method": "feedback/upload",
+      "paramsRequired": true,
+      "required": [
+        "classification"
+      ]
+    },
+    {
+      "method": "fs/copy",
+      "paramsRequired": true,
+      "required": [
+        "destinationPath",
+        "sourcePath"
+      ]
+    },
+    {
+      "method": "fs/createDirectory",
+      "paramsRequired": true,
+      "required": [
+        "path"
+      ]
+    },
+    {
+      "method": "fs/getMetadata",
+      "paramsRequired": true,
+      "required": [
+        "path"
+      ]
+    },
+    {
+      "method": "fs/readDirectory",
+      "paramsRequired": true,
+      "required": [
+        "path"
+      ]
+    },
+    {
+      "method": "fs/readFile",
+      "paramsRequired": true,
+      "required": [
+        "path"
+      ]
+    },
+    {
+      "method": "fs/remove",
+      "paramsRequired": true,
+      "required": [
+        "path"
+      ]
+    },
+    {
+      "method": "fs/unwatch",
+      "paramsRequired": true,
+      "required": [
+        "watchId"
+      ]
+    },
+    {
+      "method": "fs/watch",
+      "paramsRequired": true,
+      "required": [
+        "path",
+        "watchId"
+      ]
+    },
+    {
+      "method": "fs/writeFile",
+      "paramsRequired": true,
+      "required": [
+        "dataBase64",
+        "path"
+      ]
+    },
+    {
+      "method": "fuzzyFileSearch",
+      "paramsRequired": true,
+      "required": [
+        "query",
+        "roots"
+      ]
+    },
+    {
+      "method": "hooks/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "initialize",
+      "paramsRequired": true,
+      "required": [
+        "clientInfo"
+      ]
+    },
+    {
+      "method": "marketplace/add",
+      "paramsRequired": true,
+      "required": [
+        "source"
+      ]
+    },
+    {
+      "method": "marketplace/remove",
+      "paramsRequired": true,
+      "required": [
+        "marketplaceName"
+      ]
+    },
+    {
+      "method": "marketplace/upgrade",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "mcpServer/oauth/login",
+      "paramsRequired": true,
+      "required": [
+        "name"
+      ]
+    },
+    {
+      "method": "mcpServer/resource/read",
+      "paramsRequired": true,
+      "required": [
+        "server",
+        "uri"
+      ]
+    },
+    {
+      "method": "mcpServer/tool/call",
+      "paramsRequired": true,
+      "required": [
+        "server",
+        "threadId",
+        "tool"
+      ]
+    },
+    {
+      "method": "mcpServerStatus/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "model/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "modelProvider/capabilities/read",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "permissionProfile/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "plugin/install",
+      "paramsRequired": true,
+      "required": [
+        "pluginName"
+      ]
+    },
+    {
+      "method": "plugin/installed",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "plugin/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "plugin/read",
+      "paramsRequired": true,
+      "required": [
+        "pluginName"
+      ]
+    },
+    {
+      "method": "plugin/share/checkout",
+      "paramsRequired": true,
+      "required": [
+        "remotePluginId"
+      ]
+    },
+    {
+      "method": "plugin/share/delete",
+      "paramsRequired": true,
+      "required": [
+        "remotePluginId"
+      ]
+    },
+    {
+      "method": "plugin/share/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "plugin/share/save",
+      "paramsRequired": true,
+      "required": [
+        "pluginPath"
+      ]
+    },
+    {
+      "method": "plugin/share/updateTargets",
+      "paramsRequired": true,
+      "required": [
+        "discoverability",
+        "remotePluginId",
+        "shareTargets"
+      ]
+    },
+    {
+      "method": "plugin/skill/read",
+      "paramsRequired": true,
+      "required": [
+        "remoteMarketplaceName",
+        "remotePluginId",
+        "skillName"
+      ]
+    },
+    {
+      "method": "plugin/uninstall",
+      "paramsRequired": true,
+      "required": [
+        "pluginId"
+      ]
+    },
+    {
+      "method": "review/start",
+      "paramsRequired": true,
+      "required": [
+        "target",
+        "threadId"
+      ]
+    },
+    {
+      "method": "skills/config/write",
+      "paramsRequired": true,
+      "required": [
+        "enabled"
+      ]
+    },
+    {
+      "method": "skills/extraRoots/set",
+      "paramsRequired": true,
+      "required": [
+        "extraRoots"
+      ]
+    },
+    {
+      "method": "skills/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "thread/approveGuardianDeniedAction",
+      "paramsRequired": true,
+      "required": [
+        "event",
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/archive",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/compact/start",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/delete",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/fork",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/goal/clear",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/goal/get",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/goal/set",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/inject_items",
+      "paramsRequired": true,
+      "required": [
+        "items",
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "thread/loaded/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "thread/metadata/update",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/name/set",
+      "paramsRequired": true,
+      "required": [
+        "name",
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/read",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/resume",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/rollback",
+      "paramsRequired": true,
+      "required": [
+        "numTurns",
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/section/move",
+      "paramsRequired": true,
+      "required": [
+        "sectionId",
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/shellCommand",
+      "paramsRequired": true,
+      "required": [
+        "command",
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/start",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "thread/unarchive",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/unsubscribe",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "threadSection/create",
+      "paramsRequired": true,
+      "required": [
+        "name"
+      ]
+    },
+    {
+      "method": "threadSection/delete",
+      "paramsRequired": true,
+      "required": [
+        "sectionId"
+      ]
+    },
+    {
+      "method": "threadSection/list",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "threadSection/update",
+      "paramsRequired": true,
+      "required": [
+        "name",
+        "sectionId"
+      ]
+    },
+    {
+      "method": "turn/interrupt",
+      "paramsRequired": true,
+      "required": [
+        "threadId",
+        "turnId"
+      ]
+    },
+    {
+      "method": "turn/start",
+      "paramsRequired": true,
+      "required": [
+        "input",
+        "threadId"
+      ]
+    },
+    {
+      "method": "turn/steer",
+      "paramsRequired": true,
+      "required": [
+        "expectedTurnId",
+        "input",
+        "threadId"
+      ]
+    },
+    {
+      "method": "windowsSandbox/readiness",
+      "paramsRequired": false,
+      "required": []
+    },
+    {
+      "method": "windowsSandbox/setupStart",
+      "paramsRequired": true,
+      "required": [
+        "mode"
+      ]
+    }
   ],
   "serverNotifications": [
     {

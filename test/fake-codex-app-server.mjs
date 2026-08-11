@@ -12,12 +12,34 @@
 // Driven through `CODEX_BIN`, the idiom already in bridge-server/codex-runtime.test.mjs.
 // It never runs a model and never spends a token; a test orders it around with
 // three `fake/*` methods that the broker forwards like any other unknown method.
+//
+// IT VALIDATES EVERY CLIENT REQUEST AGAINST THE PINNED CONTRACT first, exactly
+// as the real app-server does — deserialization refuses a call that omits a
+// required field before any thread lookup happens. Answering anyway is how the
+// missing `expectedTurnId` / `turnId` survived three reviews: this fake and its
+// sibling were the only things standing between the adapter and a -32600 no
+// operator would ever see, and they answered whatever they were asked.
+//
+// A method it does not implement is REFUSED for the same reason
+// (`unhandledMethodError`) rather than answered `{echo: method}` — a fake that
+// says yes to everything cannot tell a working call from a misspelt one.
+//
+// `contractViolation` is IMPORTED, not reimplemented: the fake is materialised
+// into a temp dir, so `fakeCodexBin` bakes in a file:// import of the real
+// module. A second copy of the rule could disagree with the fixture, which is
+// the failure mode the fixture exists to prevent.
 
 import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const CONTRACT_MODULE_URL = pathToFileURL(
+  join(fileURLToPath(new URL('../lib/', import.meta.url)), 'codex-app-server-contract.mjs'),
+).href;
 
 export const FAKE_APP_SERVER = `
 import { appendFileSync } from 'node:fs';
+import { contractViolation, unhandledMethodError } from ${JSON.stringify(CONTRACT_MODULE_URL)};
 
 const TRACE = process.env.CODEX_FAKE_TRACE || '';
 const VERSION = process.env.CODEX_FAKE_VERSION || '0.147.0';
@@ -43,6 +65,7 @@ let threadSeq = 0;
 let turnSeq = 0;
 const statuses = new Map();     // threadId -> ThreadStatus, set by fake/setStatus
 const transcripts = new Map();  // threadId -> items[], set by fake/setTranscript
+const turns = new Map();        // threadId -> Turn[], set by fake/setTurns
 const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
 const trace = (obj) => { if (TRACE) { try { appendFileSync(TRACE, JSON.stringify(obj) + '\\n'); } catch {} } };
 
@@ -65,7 +88,11 @@ function handle(msg) {
   trace(msg);
   if (typeof msg.method !== 'string') return; // a client answering a server request
   const reply = (result) => { if (msg.id !== undefined) out({ jsonrpc: '2.0', id: msg.id, result }); };
-  const fail = (message) => { if (msg.id !== undefined) out({ jsonrpc: '2.0', id: msg.id, error: { code: -32600, message } }); };
+  // Deserialization first, like the real server: a missing required field is
+  // answered -32600 before the method's own logic runs. \`fake/*\` and anything
+  // else outside the client-request union carries no contract and passes.
+  const violation = contractViolation(msg.method, msg.params);
+  if (violation) { if (msg.id !== undefined) out({ jsonrpc: '2.0', id: msg.id, error: violation }); return; }
   const p = msg.params || {};
   switch (msg.method) {
     case 'initialize':
@@ -82,30 +109,46 @@ function handle(msg) {
     case 'fake/setLoaded': loaded = p.ids || []; reply({ ok: true }); return;
     case 'fake/setStatus': statuses.set(p.threadId, p.status); reply({ ok: true }); return;
     case 'fake/setTranscript': transcripts.set(p.threadId, p.items || []); reply({ ok: true }); return;
+    case 'fake/setTurns': turns.set(p.threadId, p.turns || []); reply({ ok: true }); return;
     case 'fake/die': process.exit(p.code || 7); return;
     case 'thread/loaded/list': reply({ data: loaded }); return;
     case 'thread/start': {
       const id = p.threadId || 'T' + (++threadSeq);
       loaded.push(id);
-      reply({ thread: { id, path: '/fake/rollout-' + id + '.jsonl' } });
+      reply({ thread: { id, path: '/fake/rollout-' + id + '.jsonl', turns: [] } });
       return;
     }
     case 'thread/resume': {
       const id = p.threadId;
-      if (!id) { fail('thread/resume requires a threadId'); return; }
       if (!loaded.includes(id)) loaded.push(id);
-      reply({ thread: { id, status: statuses.get(id) || { type: 'idle' } } });
+      reply({ thread: { id, status: statuses.get(id) || { type: 'idle' }, turns: turns.get(id) || [] } });
       return;
     }
+    // \`turns\` lives on the THREAD, as the real ThreadReadResponse declares.
+    // A test that sets no turns still gets its transcript, in one turn.
     case 'thread/read':
-      reply({ thread: { id: p.threadId }, turns: [{ items: transcripts.get(p.threadId) || [] }] });
+      reply({ thread: {
+        id: p.threadId,
+        turns: turns.get(p.threadId) || [{ id: 'TURN' + turnSeq, status: 'completed', items: transcripts.get(p.threadId) || [] }],
+      } });
       return;
     case 'turn/start':
       reply({ turn: { id: 'TURN' + (++turnSeq) } });
       return;
-    case 'turn/steer': reply({ turn: { id: p.expectedTurnId || null } }); return;
+    // Echoes the steered turn, and stops there: unlike the socket fake, this
+    // one's event stream is script-driven through \`fake/emit\`, so announcing
+    // the injected userMessage here would fight the scripts. A test that wants
+    // to exercise steer CONFIRMATION emits the \`item/completed\` itself.
+    case 'turn/steer': reply({ turn: { id: p.expectedTurnId } }); return;
     case 'turn/interrupt': reply({}); return;
-    default: reply({ echo: msg.method }); return;
+    // Anything this fake does not implement is REFUSED rather than answered
+    // \`{echo}\`. The old success fallback covered a typo, a codex rename and any
+    // adapter call the fixture never modelled — all of which the real server
+    // either refuses outright or answers for real, and neither of those is a
+    // green test. Notifications get nothing, as they do from the real server.
+    default:
+      if (msg.id !== undefined) out({ jsonrpc: '2.0', id: msg.id, error: unhandledMethodError(msg.method) });
+      return;
   }
 }
 `;

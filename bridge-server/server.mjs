@@ -146,6 +146,7 @@ import {
   defaultTargetId,
   getTarget,
   listTargets,
+  daemonAdapterFor,
 } from '../lib/target-registry.mjs';
 
 // Per-target dispatch table for the non-copilot (single-shot CLI-shaped)
@@ -524,8 +525,16 @@ function capabilityGate(prof, env) {
       return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `companion "${prof.companion}" model "${model}" is not a valid provider/model pin (expected provider/model)` };
     }
   }
-  if (prof.companion === 'opencode' && prof.adapter === 'server' && !caps.serverMode) {
-    return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: 'opencode adapter:"server" requested but server mode is unavailable in this environment' };
+  // Coherence, not selection: a profile that named its companion's DAEMON adapter
+  // must actually have the daemon capabilities, whichever companion it is. Keyed
+  // off the target registry's own upgrade table rather than the literal 'server',
+  // so codex's `appserver` is covered by the rule that already covered opencode's
+  // `server` instead of by a second line beside it — the wording is unchanged for
+  // opencode, which is the point. A profile naming the single-shot adapter never
+  // trips this: it is asking for fewer capabilities, not more.
+  const daemonAdapter = daemonAdapterFor(prof.companion);
+  if (daemonAdapter && prof.adapter === daemonAdapter && !caps.serverMode) {
+    return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `${prof.companion} adapter:"${prof.adapter}" requested but server mode is unavailable in this environment` };
   }
   // STRENGTH_CAPABILITY_REQUIREMENTS — no-op under the v1 empty map; populating
   // it later enforces a requirement pre-spawn here with zero other changes.
@@ -2207,9 +2216,15 @@ async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, 
     watcher = await openCodexTurnWatcher({
       conn, threadId, timeoutMs, model,
       initialLevelCheck: !fresh && !reply,
-      onEvent: (snapshot) => {
+      onEvent: (snapshot, { turnId } = {}) => {
         const job = jobs.get(jobId);
         if (!job || job.promptId !== promptId) return;
+        // `turn/started` is the live source of the id `turn/interrupt` and
+        // `turn/steer` require, and it is the one that keeps up when a SECOND
+        // turn starts on this thread. Persisted only when it CHANGES: this
+        // fires on every streamed delta, and a ledger write per token is a
+        // write storm, while a turn id per turn is two.
+        if (turnId && turnId !== job.turnId) updateJob(jobId, { turnId });
         // Real sub-turn streaming — this is what closes F7 on this transport:
         // `codex exec --json` emits no deltas at all, so a reasoning-only turn
         // produced no progress signal whatsoever. Same shared digest writer as
@@ -2220,7 +2235,13 @@ async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, 
     });
     if (fresh || reply) {
       const started = await startCodexTurn({ conn, threadId, prompt, model });
-      if (started.turnId) updateJob(jobId, { turnId: started.turnId });
+      // Assigned unconditionally, including to null. A turn id is only valid
+      // for THE turn it names, so carrying a previous turn's id forward is how
+      // a later `turn/steer` earns `no active turn to steer` — the conditional
+      // failure the resolver's transport lookup exists to avoid. `attached`
+      // supplies the running turn's own id when the status read could read it,
+      // and null otherwise, which the resolver answers with `thread/read`.
+      updateJob(jobId, { turnId: started.turnId ?? null });
       // `turn/start` on a thread that already has a running turn SUCCEEDS and
       // returns a SECOND turn id, so the adapter attaches to the live one
       // instead. Say so out loud: a job silently riding another turn looks
@@ -2960,10 +2981,24 @@ async function handleCancel({ job_id }) {
         // The adapter resumes this thread first — a connection that did not
         // start it would otherwise meet `thread not found`, which means "not
         // loaded into this process", never "gone".
-        await interruptCodexTurn({ conn, threadId: job.sessionId });
+        //
+        // `turnId` is REQUIRED by the protocol, so it is passed, not omitted:
+        // the live one when this bridge saw the turn start, and the adapter's
+        // `thread/read` lookup when it did not (a bridge that restarted mid-turn
+        // never saw `turn/started`). A cancel that cannot resolve one throws
+        // here and lands in the catch below as an honest `cancel_failed`.
+        const interrupted = await interruptCodexTurn({ conn, threadId: job.sessionId, turnId: job.turnId || null });
+        // Logged because the follow-up envelope may not carry it: an interrupt
+        // that settles the job inside the 5 s follow-up window returns the
+        // terminal wait response instead, and then the log is the only record
+        // of WHICH turn was cancelled — which is the whole field that used to
+        // be missing.
+        log('INFO', 'agent:cancel codex-appserver interrupt',
+          `job=${job_id} thread=${job.sessionId} turn=${interrupted.turnId}`);
         return buildCancelFollowup(job_id, target, {
           reason: 'interrupted the codex turn',
           thread_id: job.sessionId,
+          turn_id: interrupted.turnId,
           thread_alive: true,
           note: `codex thread ${job.sessionId} stays live and resumable after an interrupt; only the turn was cancelled.`,
         });
@@ -3118,14 +3153,38 @@ async function handleCodexAppServerReply(job, message) {
       return asJson({ ok: false, action: 'reply', job_id, target: 'codex', error: `job is already ${current.status} — start a new send` });
     }
     if (resumed.status === 'active') {
-      await steerCodexTurn({ conn, threadId, prompt: message });
+      // `expectedTurnId` is REQUIRED. The live id comes from `turn/started`;
+      // the resume that just read the status carries the running turn as a
+      // second source for a bridge that never saw it, and the adapter falls
+      // back to `thread/read` when neither has one. Recording what the steer
+      // actually hit keeps the job's id in step with the turn it steered.
+      //
+      // `lastTurn` is read under the SAME `inProgress` gate `resolveCodexTurnId`
+      // and `startCodexTurn` apply to it, so one rule governs every read: a
+      // thread reported `active` whose last recorded turn is `completed` is a
+      // finished turn that happens to be last, and passing its id would send the
+      // steer a dead one where null makes the adapter go and find the live one.
+      const resumedTurnId = resumed.lastTurn?.status === 'inProgress' ? resumed.lastTurn.id : null;
+      const steer = await steerCodexTurn({
+        conn, threadId, prompt: message,
+        expectedTurnId: job.turnId || resumedTurnId,
+      });
       const replyTurn = (job.replyTurn || 0) + 1;
-      updateJob(job_id, { replyTurn });
-      log('INFO', 'agent:reply codex-appserver steer', `job=${job_id} thread=${threadId} reply_turn=${replyTurn}`);
+      updateJob(job_id, { replyTurn, turnId: steer.turnId });
+      log('INFO', 'agent:reply codex-appserver steer',
+        `job=${job_id} thread=${threadId} turn=${steer.turnId} reply_turn=${replyTurn} confirmed=${steer.confirmed}`);
       return asJson({
         ok: true, action: 'reply', job_id, target: 'codex',
         steered: true,
+        // Two facts, not one: the server ACCEPTED the steer, and the injected
+        // message was (or was not yet) seen landing in the turn. An unconfirmed
+        // steer is not a failed one — codex injects at the next model boundary —
+        // so the reason says so instead of the envelope claiming success it
+        // cannot see.
+        steer_confirmed: steer.confirmed,
+        steer_confirmation: steer.confirmation,
         thread_id: threadId,
+        turn_id: steer.turnId,
         session_id: threadId,
         original_prompt_id: job.promptId || null,
         new_prompt_id: job.promptId || null,
@@ -3150,6 +3209,16 @@ async function handleCodexAppServerReply(job, message) {
       error: null,
       stuckReason: null,
       detail: null,
+      // CLEARED, not carried. The turn this id names is finished — that is why
+      // this branch was taken — and the replacement's id lands a round trip or
+      // three later, because `runCodexAppServerWatch` below is deliberately not
+      // awaited. An `agent_cancel` inside that window would otherwise send the
+      // dead one: measured against the real server, a completed turn's id on a
+      // thread whose next turn is running answers `-32600 expected active turn
+      // id A but found B`, so the cancel fails while the turn keeps billing.
+      // Null instead makes the resolver read the running turn off `thread/read`
+      // — the same source a restarted bridge uses.
+      turnId: null,
     });
 
     const reqId = job.reqId || createReqId();

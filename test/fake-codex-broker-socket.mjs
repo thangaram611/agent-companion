@@ -16,8 +16,25 @@
 //
 // It never spawns anything and never spends a token. Tests that want the REAL
 // broker process use test/fake-codex-app-server.mjs through `CODEX_BIN` instead.
+//
+// EVERY INBOUND CALL IS VALIDATED AGAINST THE PINNED CONTRACT before a handler
+// sees it. A fake that answers what the real server rejects is worse than no
+// fake — it converts a protocol violation into a green test, which is exactly
+// how `turn/steer` without `expectedTurnId` and `turn/interrupt` without
+// `turnId` passed three rounds of review and failed on every real job. A
+// handler override cannot opt out: the check runs first, and a test that wants
+// to model an error answers with `__error` instead.
+//
+// AND NOTHING UNIMPLEMENTED IS ANSWERED WITH A SUCCESS. A method with no
+// override and no default is refused (`unhandledMethodError`), because the
+// blanket `{echo: method}` this used to fall back on made every typo, every
+// codex rename and every unmodelled adapter call return `ok` from a fake while
+// the real server refused or handled it — the same green-test trade, one field
+// over.
 
 import { EventEmitter } from 'node:events';
+
+import { contractViolation, unhandledMethodError } from '../lib/codex-app-server-contract.mjs';
 
 // The pid the fake broker claims as its own. `disposeBroker` only signals a pid
 // the LIVE broker claims, so a registry entry that expects to be disposed has
@@ -28,6 +45,13 @@ export const FAKE_APP_SERVER_PID = 4243;
 export function fakeBrokerSocket({
   handlers = {},
   statuses = {},
+  // threadId -> the turns `thread/resume` and `thread/read` report, newest
+  // last. The real `Thread` carries them on BOTH responses (the schema: "Only
+  // populated on `thread/resume`, `thread/rollback`, `thread/fork`, and
+  // `thread/read` (when `includeTurns` is true)"), and the running turn reads
+  // `{id, status:'inProgress'}` — which is where a bridge that never saw
+  // `turn/started` gets the id `turn/interrupt` and `turn/steer` require.
+  turns = {},
   brokerPid = FAKE_BROKER_PID,
   threadId = 'T1',
 } = {}) {
@@ -49,6 +73,7 @@ export function fakeBrokerSocket({
   // one after routing it. Sugar over `deliver` because bridge tests write many.
   sock.notify = (method, params = {}) => sock.deliver({ jsonrpc: '2.0', method, params: { threadId, ...params } });
 
+  let steerSeq = 0;
   const defaults = {
     initialize: () => ({
       brokered: true,
@@ -62,12 +87,37 @@ export function fakeBrokerSocket({
     'broker/status': () => ({ ok: true, protocol: 1, brokerPid, appServerPid: FAKE_APP_SERVER_PID, uptimeMs: 1, clients: 1, subscriptions: 0 }),
     'broker/subscribe': (p) => ({ ok: true, threadId: p.threadId, flushed: 0 }),
     'broker/unsubscribe': (p) => ({ ok: true, threadId: p.threadId }),
-    'thread/start': () => ({ thread: { id: threadId, path: `/fake/rollout-${threadId}.jsonl` } }),
-    'thread/resume': (p) => ({ thread: { id: p.threadId, status: { type: statuses[p.threadId] || 'idle' } } }),
-    'thread/read': (p) => ({ thread: { id: p.threadId }, turns: [{ items: [] }] }),
+    'thread/start': () => ({ thread: { id: threadId, path: `/fake/rollout-${threadId}.jsonl`, turns: [] } }),
+    'thread/resume': (p) => ({
+      thread: { id: p.threadId, status: { type: statuses[p.threadId] || 'idle' }, turns: turns[p.threadId] || [] },
+    }),
+    // `turns` hangs off the THREAD, not off the response — the shape the real
+    // ThreadReadResponse declares (`{thread: {…, turns: […]}}`).
+    'thread/read': (p) => ({ thread: { id: p.threadId, turns: turns[p.threadId] || [] } }),
     'thread/loaded/list': () => ({ data: [] }),
     'turn/start': () => ({ turn: { id: 'TURN1' } }),
-    'turn/steer': () => ({}),
+    // The real server echoes the turn it steered; `{}` would let a caller that
+    // reads the echo pass against a fake and read undefined against codex.
+    //
+    // And it ANNOUNCES the injection: the steered input arrives in the turn as
+    // an `item/completed` whose item is a `userMessage` (measured 0.14 s after
+    // the RPC against an in-flight apply_patch). A fake that only answered the
+    // call would let "the RPC returned" stand in for "the model got it" — the
+    // conflation the confirmation exists to break. `setTimeout(0)`, not a
+    // microtask, so it lands AFTER the response, which is the order the broker
+    // writes them in. A test that wants the other measured case — a model
+    // mid-reasoning, injection minutes away — overrides this handler.
+    'turn/steer': (p) => {
+      setTimeout(() => sock.deliver({
+        jsonrpc: '2.0',
+        method: 'item/completed',
+        params: {
+          threadId: p.threadId,
+          item: { id: `steer-${++steerSeq}`, type: 'userMessage', content: p.input || [] },
+        },
+      }), 0);
+      return { turn: { id: p.expectedTurnId } };
+    },
     'turn/interrupt': () => ({}),
   };
 
@@ -78,7 +128,21 @@ export function fakeBrokerSocket({
       sock.frames.push(msg);
       if (typeof msg.method === 'string') sock.calls.push(msg);
       if (msg.id === undefined || typeof msg.method !== 'string') continue;
-      const handler = handlers[msg.method] || defaults[msg.method] || (() => ({ echo: msg.method }));
+      // The contract check runs BEFORE the handler, and ahead of any override,
+      // because that is the order the real server applies it: deserialization
+      // refuses a call that omits a required field before it looks at the
+      // thread, the turn or anything else. `broker/*` methods are the broker's
+      // own and carry no client-request contract, so they pass through.
+      const violation = contractViolation(msg.method, msg.params);
+      if (violation) { sock.deliver({ jsonrpc: '2.0', id: msg.id, error: violation }); continue; }
+      // A method with neither an override nor a default is REFUSED, not echoed
+      // back as a success. The old `{echo: msg.method}` fallback answered
+      // anything — a typo, a method renamed by a codex bump, an adapter call
+      // this fake never modelled — which is the same "green test, red server"
+      // trade the contract check above exists to end. A test that means to model
+      // one passes it in `handlers`.
+      const handler = handlers[msg.method] || defaults[msg.method];
+      if (!handler) { sock.deliver({ jsonrpc: '2.0', id: msg.id, error: unhandledMethodError(msg.method) }); continue; }
       queueMicrotask(async () => {
         let result;
         // Awaited, so a handler can model a broker that simply never answers.

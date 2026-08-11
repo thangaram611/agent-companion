@@ -19,7 +19,7 @@
 // embedded here rather than split into a client module for the same reason it is
 // there: this is one adapter, not a new layer.
 //
-// THREE CONSTRAINTS ARE STRUCTURAL, NOT COMMENTS (docs/RELIABILITY_REMEDIATION.md §2):
+// FOUR CONSTRAINTS ARE STRUCTURAL, NOT COMMENTS (docs/RELIABILITY_REMEDIATION.md §2):
 //   1. `approvalPolicy: 'never'` is built by `threadParams` and cannot be
 //      overridden by a caller or by any env var. A measured `read-only` thread
 //      that accepted ONE approval WROTE A FILE — auto-accept escalates past the
@@ -33,6 +33,12 @@
 //      into this process", NOT "gone" — the same thread `thread/resume`s fine.
 //      The guard is structural: the connection resumes any thread it did not
 //      itself start before either method reaches the wire.
+//   4. `turn/interrupt` REQUIRES `turnId` and `turn/steer` REQUIRES
+//      `expectedTurnId`. Measured: omitting either is an unconditional
+//      `-32600 Invalid request: missing field`, so both went out broken and
+//      every cancel and every reply failed. Neither function can be called
+//      without one now — they resolve it through `resolveCodexTurnId` and THROW
+//      when no source has it, rather than sending a call the server refuses.
 
 import { spawn } from 'node:child_process';
 import { connect as connectSocket } from 'node:net';
@@ -165,17 +171,105 @@ const APP_SERVER_SANDBOX_BY_EXEC_MODE = {
   bypass: 'danger-full-access',
 };
 
+// Where the network decision actually lives on this transport — measured
+// 2026-08-11 against codex-cli 0.147.0's own schema, after shipping with it
+// unmeasured and `network_applied: false`.
+//
+// `thread/start`/`thread/resume` carry `sandbox`, which is the bare `SandboxMode`
+// enum (`read-only | workspace-write | danger-full-access`) and has NO network
+// option at all; the start response echoes `networkAccess: false` whatever the
+// mode. The network lives one level down, on `turn/start`'s `sandboxPolicy` — a
+// tagged union whose variants are:
+//   {type:'workspaceWrite',  networkAccess, writableRoots, excludeSlashTmp, excludeTmpdirEnvVar}
+//   {type:'readOnly',        networkAccess}
+//   {type:'dangerFullAccess'}
+//   {type:'externalSandbox', networkAccess:'restricted'|'enabled'}
+//
+// EVERY VARIANT'S `networkAccess` DEFAULTS TO ITS RESTRICTIVE VALUE — `false` for
+// the two booleans, `'restricted'` for `externalSandbox`'s enum (the schema
+// declares both defaults). So silence here is the RESTRICTIVE direction, the
+// exact opposite of the exec transport, where omitting
+// `-c sandbox_workspace_write.network_access=` defers to the user's config.toml
+// and fails OPEN. Both adapters must therefore be explicit, for opposite
+// reasons, and this builds an explicit variant for every mode:
+//
+//   workspace-write     → `networkAccess` = the exec resolver's answer, i.e. ON
+//                         by default (so a delegated job can `npm install`) and
+//                         OFF only on AGENT_COMPANION_CODEX_NETWORK=off. Silence
+//                         would fall OFF and quietly diverge from exec.
+//   read-only           → `networkAccess: false`. The exec resolver reports
+//                         `network: null` here — its toggle is the
+//                         workspace-write-scoped config key, so the bridge has
+//                         no opinion in this mode — and false is both the
+//                         union's own default and what `--sandbox read-only`
+//                         gives on exec. Stated rather than left to silence, so
+//                         the two transports agree by construction.
+//   danger-full-access  → no `networkAccess` field exists on the variant: the
+//                         sandbox is gone, so nothing is restricted. Falls open,
+//                         which is what the mode asks for on both transports.
+//   bypass              → collapses onto `dangerFullAccess`, exactly as the mode
+//                         mapping above already does. NOT `externalSandbox`,
+//                         even though "the bridge is already sandboxed" is
+//                         literally what bypass means here: that variant's
+//                         network vocabulary is a different one
+//                         (`restricted|enabled`, not a boolean), its semantics
+//                         were never measured, and the exec flag it translates
+//                         (`--dangerously-bypass-approvals-and-sandbox`) has one
+//                         sandbox effect — removing it. A second, unmeasured
+//                         spelling of the same intent could only disagree with
+//                         the mode already sent on `thread/start`.
+//
+// THE TAGS ARE camelCase WHILE `thread/start`'s MODE ENUM IS kebab-case, and the
+// same job sends both on the same transport — so mis-spelling one as the other is
+// the live hazard here, not a hypothetical. Measured against the real 0.147.0
+// server for zero tokens (every call aimed at the all-zero thread id, so anything
+// that survives deserialization dies on `thread not found` before a model runs):
+//   {type:'workspaceWrite', networkAccess:true|false}  → thread not found
+//   {type:'readOnly', networkAccess:false}             → thread not found
+//   {type:'dangerFullAccess'}                          → thread not found
+//     …i.e. all three literals below are ACCEPTED shapes, not merely plausible.
+//   {type:'workspace-write', …}  → -32600 "unknown variant `workspace-write`,
+//                                  expected one of `dangerFullAccess`, `readOnly`,
+//                                  `externalSandbox`, `workspaceWrite`"
+//   {type:'workspaceWrite', networkAccess:'enabled'} → invalid type: string
+//   {networkAccess:true}                             → missing field `type`
+// The fakes cannot catch that first refusal — the pinned contract validates
+// top-level field PRESENCE only, by design (lib/codex-app-server-contract.mjs) —
+// so the adapter's own test asserts the tag against that measured vocabulary.
+//
+// ⚠️ A sandboxPolicy REPLACES the policy, it does not patch it, and
+// `writableRoots` defaults to `[]`. The job's own working root is NOT at risk —
+// measured, the rollout records it under `turn_context.workspace_roots`, derived
+// from the `cwd` this adapter sends, separately from `sandbox_policy`. What is
+// at risk is an EXTRA `[sandbox_workspace_write] writable_roots` list in the
+// user's config.toml: it reaches `thread/start`'s mode-derived policy and not
+// the per-turn override. The bridge has no source for that list (it deliberately
+// parses no config.toml), and the only alternative — omitting `sandboxPolicy` —
+// reinstates the network divergence this exists to close. Recorded as the known
+// cost of applying the network at all; unmeasured, since this machine configures
+// no extra roots.
+function sandboxPolicyFor(mode, network) {
+  if (mode === 'danger-full-access') return { type: 'dangerFullAccess' };
+  if (mode === 'read-only') return { type: 'readOnly', networkAccess: false };
+  return { type: 'workspaceWrite', networkAccess: network === true };
+}
+
 export function codexAppServerSandbox(env = process.env) {
   const exec = resolveCodexSandbox(env);
+  const mode = APP_SERVER_SANDBOX_BY_EXEC_MODE[exec.mode] || 'workspace-write';
   return {
-    mode: APP_SERVER_SANDBOX_BY_EXEC_MODE[exec.mode] || 'workspace-write',
-    // Reported, deliberately NOT sent. On `codex exec` the network toggle is
-    // `-c sandbox_workspace_write.network_access=…`; the app-server's param name
-    // for it was never measured (docs/RELIABILITY_REMEDIATION.md §6 lists the
-    // sandbox mapping as open), and inventing one would either fail open or fail
-    // closed silently. `network_applied: false` says so out loud instead.
+    mode,
     network: exec.network,
-    network_applied: false,
+    // The union that goes on `turn/start`. Reported here too, because the
+    // sandbox an operator reads in `agent_status` should be the object that
+    // reached the wire and not a paraphrase of it.
+    policy: sandboxPolicyFor(mode, exec.network),
+    // True since the param was measured: the policy above is sent on every
+    // `turn/start`, and the rollout's `turn_context.sandbox_policy` records it
+    // applied (`{"type":"workspace-write","network_access":true,…}`) rather than
+    // merely accepted. It read `false` while the param name was unknown, which
+    // was honest then and is a lie now.
+    network_applied: true,
     source: exec.source,
   };
 }
@@ -189,6 +283,11 @@ export function codexAppServerRuntimeInfo(env = process.env) {
     sandbox: codexAppServerSandbox(env),
     approvalPolicy: APPROVAL_POLICY,
     timeout_ms: resolveCodexTimeoutMs(env),
+    // How long a reply waits to SEE its steer land before saying it could not
+    // confirm it. Reported because the answer `agent_reply` gives depends on
+    // it, and an operator reading `steer_confirmed: false` deserves to know
+    // what window that verdict was reached in.
+    steer_confirm_ms: resolveSteerConfirmMs(env),
     pinned_version: CODEX_PINNED_VERSION,
   };
   // Only present once a broker has actually told us. The protocol carries no
@@ -290,6 +389,11 @@ export function _resetForTest() {
 // Built once, for `thread/start` AND `thread/resume`. `extra` is spread FIRST so
 // a caller cannot overwrite `sandbox` or `approvalPolicy`; nothing here reads an
 // env var for the policy, so no env var can relax it either.
+//
+// `sandbox` here is the MODE only — that is all these two methods accept. The
+// network half of the same decision rides `turn/start`'s `sandboxPolicy`; see
+// `sandboxPolicyFor`. The split is the protocol's, not this module's, and the
+// two halves come from one resolver so they cannot disagree.
 //
 // `model` is ABSENT unless a job pins one. `~/.codex/config.toml` (gpt-5.6-sol /
 // xhigh here) is the single source of truth and inheritance is measured to work;
@@ -1195,6 +1299,21 @@ export async function startCodexThread({ conn, cwd, env = process.env, model = n
   return { threadId, rolloutPath: result.thread.path ?? null, thread: result.thread };
 }
 
+// The turn a `Thread` payload ends on, or null. `turns` is carried by the
+// thread itself — the schema's words: "Only populated on `thread/resume`,
+// `thread/rollback`, `thread/fork`, and `thread/read` (when `includeTurns` is
+// true)" — so ONE reader serves both responses and neither call site can grow
+// its own idea of where the running turn is recorded.
+//
+// `status` is `TurnStatus`: completed | interrupted | failed | inProgress.
+// Only `inProgress` names a turn that can still be interrupted or steered.
+function lastTurnOf(thread) {
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  const last = turns[turns.length - 1];
+  if (!last || typeof last.id !== 'string' || !last.id) return null;
+  return { id: last.id, status: last.status == null ? null : String(last.status) };
+}
+
 // Resume is BOTH the reattach and the authoritative status read: it rejoins a
 // running thread, and its `thread.status` is the only place this protocol
 // reports whether a turn is in flight.
@@ -1217,6 +1336,10 @@ export async function resumeCodexThread({ conn, threadId, env = process.env, mod
     threadId: thread.id || threadId,
     status: String(thread.status?.type || thread.status || 'unknown'),
     flags: thread.status?.flags || [],
+    // Free with the answer we already asked for: resume carries the thread's
+    // turns, so the caller that just learned "this thread is active" also
+    // learns WHICH turn is active, without a second round trip.
+    lastTurn: lastTurnOf(thread),
     thread,
   };
 }
@@ -1245,6 +1368,9 @@ export async function readCodexThread({ conn, threadId, includeTurns = true, tim
   return {
     found: messages.length > 0,
     threadId,
+    // The turn-id channel for a bridge that never saw `turn/started` — see
+    // resolveCodexTurnId. Read from the same place resume reads it.
+    lastTurn: lastTurnOf(result?.thread),
     summary: {
       message: truncateChars(chosen?.text || '', MAX_SUMMARY_CHARS),
       thoughts: '',
@@ -1294,37 +1420,198 @@ export async function startCodexTurn({ conn, threadId, prompt, env = process.env
   //
   // `model` is forwarded because the status read is a real `thread/resume`: a
   // job's pin has to survive it, exactly as its sandbox does.
-  const status = conn.threadState(threadId) === 'fresh'
-    ? 'idle'
-    : await getCodexThreadStatus({ conn, threadId, env, model, timeoutMs });
+  const state = conn.threadState(threadId) === 'fresh'
+    ? { status: 'idle', lastTurn: null }
+    : await resumeCodexThread({ conn, threadId, env, model, timeoutMs });
 
-  if (status === 'active') {
-    return { threadId, turnId: null, attached: true, status };
+  if (state.status === 'active') {
+    // Report the RUNNING turn's id, not null. The caller records this as the
+    // job's turn id, and `turn/interrupt`/`turn/steer` require it — a null here
+    // used to leave the job holding whatever turn id it had from BEFORE, which
+    // is the stale-`expectedTurnId` failure the earlier design was right to
+    // worry about. Only an `inProgress` turn qualifies; anything else is a
+    // finished turn that happens to be last, so the answer is "unknown" and the
+    // resolver asks the transport when it is needed.
+    const running = state.lastTurn?.status === 'inProgress' ? state.lastTurn.id : null;
+    return { threadId, turnId: running, attached: true, status: state.status };
   }
   const result = await conn.call(
     'turn/start',
-    { threadId, input: [{ type: 'text', text: prompt == null ? '' : String(prompt) }] },
+    {
+      threadId,
+      input: [{ type: 'text', text: prompt == null ? '' : String(prompt) }],
+      // The ONE call that carries the network decision — `thread/start`'s
+      // `sandbox` is the mode enum and has nowhere to put it. Sent on every
+      // turn, not just the first, for the same reason `sandbox` rides both
+      // `thread/start` and `thread/resume`: the schema calls it an override "for
+      // this turn and subsequent turns", so a turn that omitted it would inherit
+      // whatever the last one set, and a resumed thread would inherit from a
+      // process this bridge never spoke to.
+      //
+      // `turn/steer` has no sandbox parameter at all, so a steered turn keeps
+      // the policy the `turn/start` beneath it established — which is why this
+      // must be right on the way in rather than corrigible later.
+      sandboxPolicy: codexAppServerSandbox(env).policy,
+    },
     { timeoutMs, [INTERNAL]: true },
   );
-  return { threadId, turnId: result?.turn?.id ?? null, attached: false, status };
+  return { threadId, turnId: result?.turn?.id ?? null, attached: false, status: state.status };
+}
+
+// THE turn-id resolver — the one rule, shared by the cancel and the reply path.
+//
+// `turn/interrupt` REQUIRES `turnId` and `turn/steer` REQUIRES `expectedTurnId`:
+// both are `required` in the pinned contract, and measured against the real
+// 0.147.0 server, omitting either is an unconditional
+// `-32600 Invalid request: missing field \`x\`` that never reaches the thread.
+// A stale id, by contrast, is a CONDITIONAL failure (`no active turn to steer`)
+// — so sending the best id known is strictly better than sending none, and
+// sending none is never an option.
+//
+// Two sources, in order:
+//   1. the live one — `job.turnId`, recorded from `turn/started` and from
+//      `turn/start`'s own answer, passed in by the caller;
+//   2. the transport — a bridge that RESTARTED never saw `turn/started`,
+//      because the turn began before it existed. `thread/read{includeTurns}`
+//      reports the thread's last turn as `{id, status}`, and the running one
+//      reads `inProgress` with the id `turn/start` returned.
+// There is deliberately no third: no placeholder, no all-zero id, no silent
+// omission. When neither source has one this throws, naming the thread and what
+// it found — a loud failure at the call site beats a -32600 from a server the
+// operator cannot see.
+export async function resolveCodexTurnId({
+  conn, threadId, turnId = null, method = 'this call', timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
+}) {
+  if (!threadId) throw new Error(`${method} requires a threadId`);
+  if (turnId) return String(turnId);
+
+  let lastTurn;
+  try {
+    ({ lastTurn } = await readCodexThread({ conn, threadId, includeTurns: true, timeoutMs }));
+  } catch (err) {
+    throw new Error(
+      `${method} needs the running turn's id on thread ${threadId}, this bridge never recorded one `
+      + `(it did not start the turn), and thread/read could not supply it: ${err.message}`,
+    );
+  }
+  if (lastTurn?.status === 'inProgress') return lastTurn.id;
+  throw new Error(
+    `${method} needs the running turn's id on thread ${threadId} and there is none: this bridge recorded `
+    + `no turn id, and thread/read reports ${lastTurn ? `its last turn ${lastTurn.id} as ${lastTurn.status}` : 'no turns at all'}.`,
+  );
+}
+
+// How long a steer's arrival is waited for before the answer says it could not
+// be confirmed. Codex injects a steer AT THE NEXT MODEL BOUNDARY, which is why
+// this cannot be "wait for it": measured, the same call landed 0.14 s later
+// against an in-flight apply_patch and 130 s later against a model that was
+// mid-reasoning. So the window is short on purpose — `agent_reply` blocks for
+// it — and an unconfirmed steer is reported as unconfirmed, never as failed and
+// never as delivered.
+//
+// Env-overridable because the right value depends on what the turn is doing: a
+// probe that steers a turn sitting in a 20 s `sleep` wants to wait past it, and
+// an operator who does not care can set it to 0.
+const STEER_CONFIRM_MS = 5_000;
+const MAX_STEER_CONFIRM_MS = 120_000;
+
+export function resolveSteerConfirmMs(env = process.env) {
+  const raw = env.AGENT_COMPANION_CODEX_STEER_CONFIRM_MS;
+  if (raw === undefined || raw === '') return STEER_CONFIRM_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return STEER_CONFIRM_MS;
+  return Math.min(parsed, MAX_STEER_CONFIRM_MS);
+}
+
+// The text of an injected user message. `UserMessageThreadItem` carries
+// `content: UserInput[]`, and a `text` UserInput carries `text` — that is the
+// whole schema, so this reads exactly it rather than guessing at spellings.
+function userMessageText(item) {
+  const content = Array.isArray(item?.content) ? item.content : [];
+  return content.filter((part) => part?.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text).join('');
+}
+
+// Watch for the steer coming back as an `item/completed` userMessage.
+//
+// COUNTING IS NOT ENOUGH: every turn's OPENING prompt is a userMessage item
+// too, so "a userMessage arrived" would confirm a steer that never landed on a
+// turn that simply started. The injected one is identified by its TEXT, which
+// this bridge chose, and by arriving after the observer attached.
+function watchForSteer({ conn, threadId, text, confirmMs }) {
+  const needle = text.trim();
+  let resolveSeen;
+  const seen = new Promise((resolve) => { resolveSeen = resolve; });
+  const detach = conn.on((msg) => {
+    if (msg?.method !== 'item/completed') return;
+    const { threadId: id } = routeNotification(msg.method, msg.params);
+    if (id !== threadId) return;
+    const item = msg.params?.item;
+    if (String(item?.type || '') !== 'userMessage') return;
+    const injected = userMessageText(item);
+    if (!injected.includes(needle)) return;
+    resolveSeen(true);
+  });
+  return {
+    detach,
+    // Started AFTER the RPC is sent, so the window measures the wait for the
+    // injection rather than the wait for the acknowledgement.
+    async settled() {
+      if (!needle) {
+        return { confirmed: false, confirmation: 'an empty steer cannot be told apart from the turn\'s opening message' };
+      }
+      const timeout = _impl.delay(confirmMs).then(() => false);
+      if (await Promise.race([seen, timeout])) {
+        return { confirmed: true, confirmation: 'the injected message came back as an item/completed userMessage' };
+      }
+      return {
+        confirmed: false,
+        confirmation: `the injected message had not arrived ${confirmMs} ms after the steer was accepted; `
+          + 'codex applies a steer at the next model boundary (measured 0.14 s to 130 s), so this is not a failure — keep waiting on the job',
+      };
+    },
+  };
 }
 
 // Mid-flight injection. Applied at the next model boundary, never mid-write:
 // measured against an in-flight apply_patch, the patch completed atomically and
 // the steer landed 0.14 s later as a userMessage.
-export async function steerCodexTurn({ conn, threadId, prompt, expectedTurnId = null, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
-  const params = { threadId, input: [{ type: 'text', text: prompt == null ? '' : String(prompt) }] };
-  if (expectedTurnId) params.expectedTurnId = expectedTurnId;
-  return conn.call('turn/steer', params, { timeoutMs });
+//
+// Returns what is KNOWN, in two separate facts: `accepted` (the server took the
+// steer) and `confirmed` (the injected message was observed landing in the
+// turn). Reporting only the first is what let "the RPC returned" pass for "the
+// model got it".
+export async function steerCodexTurn({
+  conn, threadId, prompt, expectedTurnId = null, env = process.env,
+  timeoutMs = DEFAULT_CALL_TIMEOUT_MS, confirmMs = resolveSteerConfirmMs(env),
+}) {
+  const text = prompt == null ? '' : String(prompt);
+  const turnId = await resolveCodexTurnId({ conn, threadId, turnId: expectedTurnId, method: 'turn/steer', timeoutMs });
+  // Attached BEFORE the send: the injection can land 0.14 s after the RPC, and
+  // an observer registered on the response would miss exactly the fast case.
+  const watch = watchForSteer({ conn, threadId, text, confirmMs });
+  try {
+    const result = await conn.call(
+      'turn/steer',
+      { threadId, expectedTurnId: turnId, input: [{ type: 'text', text }] },
+      { timeoutMs },
+    );
+    return { threadId, turnId: result?.turn?.id ?? turnId, accepted: true, ...(await watch.settled()) };
+  } finally {
+    watch.detach();
+  }
 }
 
 // Cancels the turn; the THREAD stays live and resumable. The turn settles
 // `status:"interrupted"` with no answer, which the accumulator reports as
 // cancelled rather than failed.
+// Returns the turn it actually interrupted — `turn/interrupt`'s own result is
+// `{}`, and the id is the one thing a caller needs to report, especially when
+// the resolver is the one that found it.
 export async function interruptCodexTurn({ conn, threadId, turnId = null, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
-  const params = { threadId };
-  if (turnId) params.turnId = turnId;
-  return conn.call('turn/interrupt', params, { timeoutMs });
+  const resolved = await resolveCodexTurnId({ conn, threadId, turnId, method: 'turn/interrupt', timeoutMs });
+  const result = await conn.call('turn/interrupt', { threadId, turnId: resolved }, { timeoutMs });
+  return { threadId, turnId: resolved, result };
 }
 
 // ---------------------------------------------------------------------------
@@ -1345,6 +1632,13 @@ export async function interruptCodexTurn({ conn, threadId, turnId = null, timeou
 export async function openCodexTurnWatcher({
   conn,
   threadId,
+  // (snapshot, { turnId }) => void. The turn id travels BESIDE the snapshot,
+  // not inside it: the snapshot is digest content (it becomes the notification
+  // payload and the digest body), while the turn id is transport bookkeeping the
+  // job needs so `agent_cancel` and `agent_reply` have an id to send. The
+  // accumulator is the live source of truth for it — `turn/started` is what
+  // makes a SECOND turn on the same thread replace the first one's id rather
+  // than leaving a stale one behind.
   onEvent = null,
   timeoutMs = null,
   initialLevelCheck = false,
@@ -1365,7 +1659,7 @@ export async function openCodexTurnWatcher({
 
   const detach = conn.on((msg) => {
     if (!acc.push(msg)) return;
-    if (onEvent) { try { onEvent(acc.snapshot()); } catch { /* observer's problem */ } }
+    if (onEvent) { try { onEvent(acc.snapshot(), { turnId: acc.turnId }); } catch { /* observer's problem */ } }
     if (acc.terminal) settle();
   });
 

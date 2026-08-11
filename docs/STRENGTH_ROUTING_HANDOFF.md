@@ -75,15 +75,34 @@ harnesses, and the restraint that legacy synthesis lives only in the resolve pat
   `{ profiles, byId:Map, byStrength:Map<strength,[profileId]>, defaultProfile:{value,source}|null, loadErrors, synthesized:boolean }`.
   Every consumer (`resolveRouting`, doctor, status, onboard, diagnostics)
   **projects** from this object; nothing else opens the file.
-- A **profile** is `{ id, companion (∈ TARGET_IDS), model?, strengths[], adapter? (opencode-only) }`.
+- A **profile** is `{ id, companion (∈ TARGET_IDS), model?, strengths[], adapter? }`.
   Profiles **inherit** capabilities via `getTarget(profile.companion)` +
   `applyAdapterCapabilities` (`lib/target-registry.mjs:143-151`) — they never
   re-declare capability booleans. **Capability is companion/adapter-level; model
   is profile-level and does not change capabilities.**
-- For an opencode profile with `adapter:'server'`, `loadProfiles` overlays
-  `{OPENCODE_RUNTIME_ADAPTER:'server'}` *synthetically* into the env passed to
-  `applyAdapterCapabilities` for that profile's capability resolution only —
-  never mutating `process.env`.
+- `adapter` is validated against **that companion's** set
+  (`COMPANION_ADAPTERS` in `lib/profile-registry.mjs`): opencode `cli|server`,
+  codex `exec|appserver`, copilot none. A profile naming that companion's
+  **daemon** adapter (`server` / `appserver`, per `daemonAdapterFor` in
+  `lib/target-registry.mjs` — the one table both modules read) has the matching
+  runtime-adapter env var (`OPENCODE_RUNTIME_ADAPTER` / `CODEX_RUNTIME_ADAPTER`)
+  overlaid *synthetically* into the env passed to `applyAdapterCapabilities`, for
+  that profile's capability resolution only — never mutating `process.env`, never
+  leaking to a sibling profile.
+- **`adapter` is a capability declaration, not transport selection — and that is
+  the standing gap here.** The send path projects
+  `companion`/`model`/`profileId`/`strength` off the routing result and reads
+  `resolved.adapter` nowhere; the transport a job starts on comes from the env at
+  spawn and is then frozen per job (`codexAdapter` in the ledger). So the
+  single-shot values (`cli`/`exec`) deliberately do **not** overlay: on a host
+  running the daemon those jobs *can* reply, and reporting `reply:false` for them
+  would be a promise the runtime does not keep. The daemon values overlay because
+  that direction is checked — `adapter_unavailable` blocks a profile whose
+  companion has no daemon available — so it reports a capability the machine has.
+  **Open question:** honour the declaration at spawn (thread `resolved.adapter`
+  into worker dispatch, cancel, reply and hydrate, all of which currently gate on
+  the recorded per-job adapter), after which both directions overlay and the
+  asymmetry goes away.
 
 ### The chokepoint
 
@@ -136,9 +155,13 @@ error → synthesis path):
   the worker model-plumbing (below) is verified** — never validated-then-ignored.
 - `strengths`: optional array, each ∈ `VALID_STRENGTHS`, lowercased + de-duped.
   Unknown label dropped with `loadError`.
-- `adapter`: optional, opencode-only, `'cli'|'server'`. Copilot must be
-  null/absent (else `loadError`). `'server'` overlays `OPENCODE_RUNTIME_ADAPTER`
-  for this profile's capability resolution only.
+- `adapter`: optional, companion-scoped — opencode `'cli'|'server'`, codex
+  `'exec'|'appserver'`. Copilot must be null/absent (else `loadError`), and so
+  must a value from the other companion's set: `server` on codex and `appserver`
+  on opencode are both rejected, naming that companion's valid pair. The **daemon**
+  value overlays that companion's runtime-adapter env var for this profile's
+  capability resolution only; the single-shot value is recorded and shown but
+  overlays nothing (see the capability-declaration note above).
 - `defaultProfile`: optional top-level id; the no-arg send winner **and** the
   authored tiebreak for an ambiguous strength. **Edge rules:** if it names a
   profile that does **not** claim an ambiguous strength, the tiebreak is *inert*
@@ -227,8 +250,9 @@ newly fail) and emit a doctor **advisory** to add a `defaultProfile`. Only when
 `caps = getTarget(resolved.companion, envWithAdapterOverlay).capabilities`.
 Validate: copilot `model` → `isModelAllowedFor('copilot', model)` → model-not-allowed
 envelope; opencode `model` → provider/model shape; `modelSelection:false`
-companion pinning a model → `CAPABILITY_UNAVAILABLE`; `adapter:'server'` requested
-but the server adapter is unavailable in env → `CAPABILITY_UNAVAILABLE`; any
+companion pinning a model → `CAPABILITY_UNAVAILABLE`; a companion's **daemon**
+adapter (`server`/`appserver`) requested but unavailable in env →
+`CAPABILITY_UNAVAILABLE`; any
 non-empty `STRENGTH_CAPABILITY_REQUIREMENTS[strength]` missing from `caps` →
 `CAPABILITY_UNAVAILABLE` naming the missing capability (no-op under the v1 empty
 map). With v1, only model/adapter actually gate.
@@ -331,9 +355,9 @@ in P1.)
   capability present when `profile.model` set; (b) model validity via
   `isModelAllowedFor` — opencode reuses the existing `opencode models` auth-probe
   output (already lists provider/model pairs) to verify the pair cheaply; copilot
-  model-validity stays honest `'unknown'`; (c) adapter coherence (an opencode
-  `adapter:'server'` profile with the server adapter unavailable → blocker, matches
-  STEP C); (d) `STRENGTH_CAPABILITY_REQUIREMENTS` check (no-op under v1 but wired so
+  model-validity stays honest `'unknown'`; (c) adapter coherence (a profile naming
+  its companion's daemon adapter — opencode `server`, codex `appserver` — with that
+  daemon unavailable → blocker, matches STEP C); (d) `STRENGTH_CAPABILITY_REQUIREMENTS` check (no-op under v1 but wired so
   a future requirement surfaces identically in doctor and send).
   `profileReady = companion.ready && model-valid!==false && adapter-coherent && strength-caps-satisfied`.
   The synthesized legacy profile is **not** inspected/listed.
