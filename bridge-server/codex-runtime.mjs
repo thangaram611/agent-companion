@@ -525,7 +525,11 @@ export function createCodexCollector({ onSession = () => {} } = {}) {
 // `{files:[…]}` vs `{path,kind}` is unvalidated and "Files touched" depends on
 // it. Normalizing both shapes to one toolCalls entry per file at least keeps
 // downstream extraction from having to branch.
-function fileChangeToolCalls(item) {
+//
+// Exported because the app-server adapter's `fileChange` item is the same
+// unvalidated guess about the same payload. One copy means one place to fix when
+// a workspace-write run finally produces one, instead of two that drift.
+export function fileChangeToolCalls(item) {
   const files = Array.isArray(item.files) && item.files.length ? item.files : [item];
   return files
     .filter((f) => f && (f.path || f.file))

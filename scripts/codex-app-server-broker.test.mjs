@@ -14,7 +14,6 @@ import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { createServer, connect as connectSocket } from 'node:net';
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -25,6 +24,14 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// The fake `codex app-server` is shared with the bridge-side adapter's suite —
+// see test/fake-codex-app-server.mjs for why it is not a local copy. It answers
+// the methods the broker itself calls and takes orders through `fake/*` methods
+// the broker forwards like any other unknown method; every inbound frame is
+// appended to $CODEX_FAKE_TRACE, so a test can assert exactly how many upstream
+// `initialize` frames the broker ever sent.
+import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
 
 // Socket paths are truncated at SUN_LEN (~104 bytes). Keep every temp root
 // short — the runtime dir plus `codex-app-server.sock` has to fit.
@@ -67,94 +74,6 @@ test('module import does not require a codex binary on PATH', async () => {
 });
 
 // --- fixtures ----------------------------------------------------------------
-
-// A fake `codex app-server`. Answers the handful of methods the broker itself
-// calls, and takes orders from the test through three `fake/*` methods that the
-// broker forwards like any other unknown method:
-//   fake/emit      write these raw frames to stdout (notifications, server→client requests)
-//   fake/setLoaded set what `thread/loaded/list` reports
-//   fake/die       exit, to exercise the app-server-death path
-// Every inbound frame is appended to $CODEX_FAKE_TRACE so a test can assert
-// exactly how many upstream `initialize` frames the broker ever sent.
-const FAKE_APP_SERVER = `
-import { appendFileSync } from 'node:fs';
-
-const TRACE = process.env.CODEX_FAKE_TRACE || '';
-const VERSION = process.env.CODEX_FAKE_VERSION || '0.147.0';
-const INIT_DELAY_MS = Number(process.env.CODEX_FAKE_INIT_DELAY_MS || 0);
-
-if (process.argv[2] === '--version') {
-  // CODEX_FAKE_VERSION_FAIL reproduces the wrapper/timeout case: the probe
-  // finishes, but no version is ever learned.
-  if (process.env.CODEX_FAKE_VERSION_FAIL) {
-    process.stderr.write('codex: not today\\n');
-    process.exit(3);
-  }
-  process.stdout.write('codex-cli ' + VERSION + '\\n');
-  process.exit(0);
-}
-if (process.argv[2] !== 'app-server') {
-  process.stderr.write('fake codex: unsupported argv\\n');
-  process.exit(2);
-}
-
-let loaded = [];
-let threadSeq = 0;
-const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
-const trace = (obj) => { if (TRACE) { try { appendFileSync(TRACE, JSON.stringify(obj) + '\\n'); } catch {} } };
-
-let buf = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => {
-  buf += chunk;
-  let nl;
-  while ((nl = buf.indexOf('\\n')) >= 0) {
-    const line = buf.slice(0, nl);
-    buf = buf.slice(nl + 1);
-    if (!line.trim()) continue;
-    let msg;
-    try { msg = JSON.parse(line); } catch { continue; }
-    handle(msg);
-  }
-});
-
-function handle(msg) {
-  trace(msg);
-  if (typeof msg.method !== 'string') return; // a client answering a server request
-  const reply = (result) => { if (msg.id !== undefined) out({ jsonrpc: '2.0', id: msg.id, result }); };
-  switch (msg.method) {
-    case 'initialize':
-      if (INIT_DELAY_MS > 0) setTimeout(() => reply({ userAgent: 'fake-app-server' }), INIT_DELAY_MS);
-      else reply({ userAgent: 'fake-app-server' });
-      return;
-    case 'initialized': return;
-    case 'fake/emit': {
-      const frames = msg.params && msg.params.frames ? msg.params.frames : [];
-      for (const frame of frames) out(frame);
-      reply({ ok: true, emitted: frames.length });
-      return;
-    }
-    case 'fake/setLoaded': loaded = (msg.params && msg.params.ids) || []; reply({ ok: true }); return;
-    case 'fake/die': process.exit((msg.params && msg.params.code) || 7); return;
-    case 'thread/loaded/list': reply({ data: loaded }); return;
-    case 'thread/start': {
-      const id = (msg.params && msg.params.threadId) || 'T' + (++threadSeq);
-      loaded.push(id);
-      reply({ thread: { id } });
-      return;
-    }
-    case 'thread/resume': reply({ thread: { id: msg.params && msg.params.threadId } }); return;
-    default: reply({ echo: msg.method }); return;
-  }
-}
-`;
-
-function fakeCodexBin(dir) {
-  const bin = join(dir, 'codex-fake.mjs');
-  writeFileSync(bin, `#!/usr/bin/env node\n${FAKE_APP_SERVER}`, { mode: 0o700 });
-  chmodSync(bin, 0o700);
-  return bin;
-}
 
 // Stand-in for a client socket: collects the frames the broker writes, and
 // `feed()` plays a client frame back in.
