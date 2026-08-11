@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-07-24
+Last updated: 2026-08-11
 
 ## Goal
 
@@ -40,13 +40,20 @@ flowchart LR
   MCP --> Registry["companion registry (target-registry.mjs)"]
   Registry --> OpenCode["opencode-runtime.mjs"]
   Registry --> Copilot["copilot-runtime.mjs + ACP daemon"]
-  Registry --> CodexRuntime["codex-runtime.mjs"]
+  Registry --> CodexRuntime["codex-runtime.mjs (exec, default)"]
+  Registry --> CodexAppServer["codex-app-server-runtime.mjs (appserver)"]
+  CodexAppServer -.->|"UDS, JSON-RPC"| Broker["codex-app-server-broker.mjs (detached, shared)"]
+  Broker -.->|"stdio"| AppServer["codex app-server"]
   OpenCode --> Job["job ledger + queue + digest"]
   Copilot --> Job
   CodexRuntime --> Job
+  CodexAppServer --> Job
   Job --> Subagent
   Subagent --> Main
 ```
+
+The dotted edges are the ones that survive a bridge replacement. Everything else in this
+diagram dies with the bridge process, which is the whole reason the broker exists.
 
 ## Public MCP Surface
 
@@ -73,7 +80,8 @@ identity is complete.
 | OpenCode (cli) | Implemented CLI adapter (default) | yes | yes | yes | yes | no | no |
 | OpenCode (server) | Implemented HTTP server adapter | yes | yes | yes | yes | yes | yes |
 | Copilot CLI | Implemented ACP adapter | yes | yes | yes | yes | yes | yes with ACP |
-| Codex CLI | Implemented `codex exec` adapter (send-only) | yes | yes | yes | yes | no | no |
+| Codex CLI (exec) | Implemented `codex exec` adapter (default, send-only) | yes | yes | yes | yes | no | no |
+| Codex CLI (app-server) | Implemented broker + JSON-RPC adapter | yes | yes | yes | yes | yes | yes |
 | Goose | Planned | no | no | no | no | no | no |
 | Aider | Planned | no | no | no | no | no | no |
 
@@ -86,6 +94,27 @@ scoped `/event` SSE stream (`session.idle` is the per-turn terminal marker) with
 job records the adapter it started with (`opencodeAdapter`), and per-job
 `reply_available` / `resume_available` flags on the status response report what
 that specific job can do — independent of the current env.
+
+The Codex adapter is selected the same way, by `CODEX_RUNTIME_ADAPTER` (`exec`
+default, `appserver` opt-in), and records `codexAdapter` on the job for the same
+reason. `appserver` mode talks JSON-RPC over a unix socket to a **detached,
+machine-wide broker** that owns one `codex app-server` over stdio. The broker
+exists because `codex app-server` dies with its stdio parent (measured): the
+transport buys nothing on its own, so the survival property comes from the broker
+being long-lived and detached from every bridge. Reply is `turn/steer` (real
+mid-flight injection, no restart), cancel is `turn/interrupt` (the thread stays
+live), restart resume is `thread/resume` (which rejoins a *running* thread), and
+salvage is `thread/read` over RPC. `approvalPolicy` is pinned to `never` and is
+not configurable — a client that accepts one approval escalates past the sandbox
+(measured) — so the sandbox is the hard boundary. Two reapers stop the broker
+when nothing is using it: its own inactivity timer and the bridge-side lease
+reaper in `lib/shared-runtime-registry.mjs`, both gated on `thread/loaded/list`
+rather than on a pid.
+
+The one capability the transport does **not** change is the sandbox: both codex
+adapters resolve it from the same `AGENT_COMPANION_CODEX_SANDBOX_MODE`, and the
+app-server sends it on `thread/resume` as well as `thread/start` (omitting it
+there silently de-escalates a resumed turn — measured on the exec transport).
 
 ## Routing Contract
 
@@ -177,6 +206,97 @@ State lives under the host-routed companion home `~/.{claude,codex}/agent-compan
 - `runtime/opencode-servers.json`: registry of the shared detached
   `opencode serve` process so a respawned bridge reattaches instead of
   re-spawning.
+- `runtime/codex-app-server.sock`: the codex broker's unix socket. Its path is
+  fixed and short on purpose — unix paths truncate silently at `SUN_LEN`
+  (~104 bytes on darwin). **Socket presence is not liveness:** SIGKILL skips the
+  broker's unlink handler, so every start connect-probes the path and treats
+  `ECONNREFUSED` as the only safe-to-unlink verdict.
+- `runtime/codex-broker.json`: leases, `lastUsedAt` and the two-phase disposal
+  claim for that broker. Unlike the OpenCode registry — which holds the only
+  record of an ephemeral `--port 0` address — this file is bookkeeping, not an
+  address book: the socket path above is a constant, so a bridge that loses it
+  simply re-adopts the broker by probing.
+
+## Negative Results
+
+Things that are **not** true, that a reader of this repo would reasonably assume are.
+Each was believed here at some point and overturned by measurement; the plan that
+records the experiments is [`RELIABILITY_REMEDIATION.md`](RELIABILITY_REMEDIATION.md)
+and the harnesses are in [`probes/`](../probes/README.md). They are listed as negatives
+because the cost of re-deriving them is a day each.
+
+**Transport and process lifetime**
+
+- **"`codex exec resume` cannot reattach to an in-flight turn"** — true of the **exec
+  CLI**, and false of **codex**. `codex app-server`'s `thread/resume` explicitly rejoins
+  a *running* thread: a turn was driven to completion across a client that was SIGKILLed
+  mid-turn, same `turnId` throughout, zero re-prompting. The limits the exec adapter
+  reports are transport limits, and `lib/target-registry.mjs` says so.
+- **`detached: true` is not what makes a child survive.** File-backed stdout is
+  (2×2 matrix against the real binary). The orphan risk belongs to *"the child's stdout is
+  no longer a live bridge pipe"* — so any change that hands codex a file or `'ignore'`, or
+  stops draining the pipe, ships an orphan with nobody deciding to.
+- **No signal reaches a codex child when its bridge dies.** Disposing a stdio MCP server
+  sends SIGINT **to that process only**; a non-detached grandchild is never signalled and
+  dies of EPIPE at its next stdout write (measured 1 ms for a 1 Hz writer, 56 s for a turn
+  that writes rarely). "Alive" from a pid probe therefore describes a window of seconds,
+  which is why the app-server path uses `thread/loaded/list` instead.
+- **`codex app-server` over stdio buys no survival by itself.** Spawned as a bridge child
+  it dies with its stdio parent and the turn ends `turn_aborted`. The **broker** buys the
+  survival, not the protocol.
+- **A present socket is not a live broker.** SIGKILL skips the unlink handler. Connect-probe;
+  `ECONNREFUSED` is the safe-to-unlink verdict.
+- **`thread not found` does not mean the thread is gone.** It means "not loaded into this
+  process", and `thread/resume` fixes it. Classifying it as unrecoverable would report a
+  broker restart — the exact case this transport was chosen for — as lost work. The guard is
+  structural: resume before interrupting or steering a thread this connection did not start.
+- **`turn/start` on a busy thread does not reject.** It succeeds and returns a *second*
+  turn id: two turns, two bills, two sets of edits. Status must be checked first.
+
+**Host budgets and observability**
+
+- **"The 600 s figure appears nowhere in this repo"** — it did, in `server.mjs`'s own header,
+  and it was wrong. The budget that bounds a wait is the MCP **tool idle** timeout: the
+  stdio default is **1,800,000 ms** (30 min) polled on a 30 s tick, satisfied by each
+  `agent_wait` *returning*, not by any mid-call emission. So `clampWaitSec`'s 1200 s ceiling
+  has 600 s of headroom — never raise it past 1500 s without a per-server `timeout`.
+- **`env: { MCP_TOOL_TIMEOUT }` in agent frontmatter is inert.** The variable reaches the
+  bridge child; the host ignores it. The fields that work are a sibling `timeout` (Claude,
+  milliseconds) and `tool_timeout_sec` (Codex, seconds).
+- **MCP progress notifications are not a model channel.** They *do* reset the idle watchdog
+  (a 70 s silent call aborts; the same call with progress completes), but on this host the
+  payload lands in the TUI spinner and the model never sees it.
+- **A digest is not a salvage artefact on the exec transport.** Codex emits its substance as
+  one atomic message at turn end; an aborted job's digest holds ~0.2 % of the work product.
+  On the app-server transport `thread/read` is the salvage channel — and it returns
+  **messages only**, no tool activity, though the rollout for the same thread has both.
+- **`--output-last-message` is not a salvage channel.** It is never written on SIGTERM or
+  `turn.failed`. The ThreadEvent stream likewise emits **no abort marker** on SIGTERM, and
+  `codex exec --json` silently omits some `command_execution` items the rollout records.
+- **`setTimeout` is already a correct wall deadline across suspend on macOS** — libuv uses
+  `mach_continuous_time()`, which counts sleep. Linux's `CLOCK_MONOTONIC` does not, so the
+  two platforms have *opposite* semantics and ubuntu CI cannot exercise production behaviour
+  even in principle. That, not flakiness, is why durations go through an injectable clock.
+
+**Blast radius**
+
+- **The bridge runs no git and writes nothing inside a job's cwd.** A repo index that moved
+  during a delegated job was moved by something else. (Note for future fingerprinting: a bare
+  `git status` rewrites `.git/index` to refresh the stat cache.)
+- **`handleStatus` performs no lifecycle mutation.** Both hydrate and host-sid adoption are
+  latched, so a status call on an already-adopted bridge re-runs nothing. Status was blamed
+  for killing jobs; what kills them is a *companion subagent returning*, because overlapping
+  subagents share one bridge process that is SIGINT'd when the first of them finishes.
+  Status is only special because it is the fastest thing that can finish.
+- **Auto-accepting an approval defeats the sandbox.** A `read-only` thread that accepted one
+  approval **wrote a file**. Under `approvalPolicy: 'never'` no approval request is ever sent
+  and the sandbox is authoritative — which is why the app-server adapter pins it structurally
+  rather than exposing it as a setting.
+- **The agent file must be materialized into `~/.claude/agents/`.** Plugin subagents silently
+  lose `mcpServers` / `hooks` / `permissionMode`.
+- **Config inheritance works — do not pin the model.** With no `model`, `turn_context` records
+  exactly `~/.codex/config.toml`'s model and effort. Passing `model: null` is *not* the same
+  as omitting the key.
 
 ## Naming
 

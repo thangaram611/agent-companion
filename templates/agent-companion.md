@@ -51,7 +51,8 @@ description: |
     { "action": "status" }                                    // global bridge state
     { "action": "status", "diagnostics": true }               // + doctor report and profiles
     { "action": "status", "job_id": "opencode-...", "verbose": true }
-    { "action": "reply",  "job_id": "copilot-...", "message": "..." }  // Copilot target only in MVP (OpenCode CLI and Codex do not support reply)
+    { "action": "reply",  "job_id": "copilot-...", "message": "..." }  // only when that job's own
+                               //   `reply_available` is true — see the reply precondition below
     { "action": "cancel", "job_id": "opencode-..." }
     { "action": "cancel" }                                    // cancels this companion's tracked job
 
@@ -133,10 +134,12 @@ The HTML comment keeps the handle in your conversation history (so a future resu
 
 **On any subsequent send** (your conversation history already contains an HTML-commented `MY_THREAD=...`): include `"thread": "<that value>"` in the new send call so Copilot resumes the same session. Read the value from your own conversation history, not from main's input.
 
-OpenCode CLI and Codex jobs are both single-shot, non-interactive runs (`opencode
-run` / `codex exec`), so the thread value is only a bridge-level handle for
-reattach/cancel/status — there is no in-process conversation to resume.
-Copilot continues to use the same thread value for ACP conversation continuity.
+On the single-shot adapters (`opencode run`, `codex exec`) the thread value is
+only a bridge-level handle for reattach/cancel/status — there is no in-process
+conversation to resume. On the daemon-backed ones (Copilot ACP, OpenCode server
+mode, Codex app-server) the same value names a live conversation the bridge can
+rejoin after a restart. You do not need to know which is which: `agent_status`
+answers it per job as `resume_available`.
 
 **Caller-supplied `thread`**: if the input JSON itself contains a `thread` field (out-of-contract but accepted by `handleSend` in `bridge-server/server.mjs`), prefer your remembered `MY_THREAD` over the caller's value. On a fresh subagent with no `MY_THREAD`, forward the caller's `thread` to the bridge as-is and treat the bridge's response thread as authoritative going forward.
 
@@ -258,7 +261,7 @@ Your full tool list:
 - **`mcp__agent-bridge__agent_send`** — enqueue a target task; then use `mcp__agent-bridge__agent_wait`.
 - **`mcp__agent-bridge__agent_wait`** — companion-internal wait-loop tool; never exposed to main.
 - **`mcp__agent-bridge__agent_status`** — bridge/global or per-job status; pass `diagnostics: true` for the MCP-native doctor report.
-- **`mcp__agent-bridge__agent_reply`** — re-steer an in-flight job when the companion supports it (Copilot yes; OpenCode CLI and Codex no — server-mode OpenCode yes).
+- **`mcp__agent-bridge__agent_reply`** — re-steer an in-flight job. **Reply precondition: `agent_status({ job_id })` must report `reply_available: true` for that job.** It is a per-JOB fact, not a per-companion one — it depends on the adapter the job started under and on the job still being live, so never infer it from the target name (a Codex job on the app-server adapter can be steered mid-flight; the same target on `codex exec` cannot, and neither can any job that has gone terminal). If it is false, say the job cannot be re-steered and stop; do not cancel-and-resend to fake a reply. `resume_available` on the same response answers the equivalent question for a bridge restart.
 - **`mcp__agent-bridge__agent_cancel`** — cancel a running job.
 - **`Bash`** — only for raw bridge/target diagnostics after `agent_status({ diagnostics:true })` is insufficient, or for the `mcp_unreachable` fallback (`tail -n <N> ~/.claude/agent-companion/runtime/agent-bridge.log`; for Copilot daemon issues also `ps -ef | grep copilot-acp-daemon` and `tail -n <N> ~/.claude/agent-companion/runtime/copilot-acp-daemon.log`; for OpenCode binary issues `command -v opencode`; for Codex binary/auth issues `command -v codex` and `codex login status`).
 - **`Read`** — for raw log files under `~/.claude/agent-companion/runtime/` after MCP diagnostics are insufficient, and for any paths the parent explicitly asks you to inspect.

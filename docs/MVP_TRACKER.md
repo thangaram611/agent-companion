@@ -143,12 +143,20 @@ primary companion:
   permission config (the bridge does not auto-approve).
 - OpenCode `acp` stdio mode is not implemented; server mode covers reply, resume,
   and streamed digests.
-- Codex is send-only (no reply, no restart resume — `codex exec` is a one-shot
-  non-interactive subprocess); no `/fleet`-equivalent parallel orchestration;
-  every delegated job persists a rollout transcript under `$CODEX_HOME/sessions`
-  with no auto-cleanup in v1; nested Seatbelt sandboxing is documented, not
-  worked around (use `AGENT_COMPANION_CODEX_SANDBOX_MODE=bypass` in an
-  externally-sandboxed bridge).
+- Codex has two adapters selected by `CODEX_RUNTIME_ADAPTER`: `exec` (default,
+  single-shot `codex exec`) and `appserver` (a detached shared broker owning one
+  `codex app-server`, over JSON-RPC).
+- Codex reply/re-steer and restart resume work in `appserver` mode only; in
+  `exec` mode they are unsupported and persisted nonterminal exec jobs are
+  retired `unreachable` after bridge restart. The limit is the **transport**, not
+  codex — `turn/steer` is real mid-flight injection and `thread/resume` rejoins a
+  running thread.
+- Codex `appserver` pins `approvalPolicy: 'never'` and does not expose it: a
+  client that accepts one approval escalates past the sandbox (measured).
+- Codex has no `/fleet`-equivalent parallel orchestration; every delegated job
+  persists a rollout transcript under `$CODEX_HOME/sessions` with no auto-cleanup
+  in v1; nested Seatbelt sandboxing is documented, not worked around (use
+  `AGENT_COMPANION_CODEX_SANDBOX_MODE=bypass` in an externally-sandboxed bridge).
 - Goose and Aider are not implemented yet.
 - `assets/readme/target-matrix.png` / `.svg` predate the codex companion and do
   not yet depict its row; regeneration is deferred (tracked here, not
