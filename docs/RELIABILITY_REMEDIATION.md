@@ -89,19 +89,27 @@ W1.2′ and W1.4′ to protocol calls. It is also the pattern this repo already 
 existing `OPENCODE_RUNTIME_ADAPTER=server|cli` switch), keeping `exec` as the fallback so
 every existing test survives.
 
-> **⚠️ BUILT 2026-08-11 — the 150–300 line estimate was wrong by ~5×, and wrong in shape.**
-> Measured on the shipped tree, so the next estimate starts from a number rather than an
-> analogy:
+> **⚠️ BUILT 2026-08-11 — the 150–300 line estimate was wrong by ~6×, and wrong in shape.**
+> Re-measured 2026-08-12, after the review sweep: the first version of this table was taken at
+> `d8645b6`, mid-wave, and five of its seven rows had already grown past it — all upward, so the
+> multiplier it reported was the conservative one. `wc -l` at the tip of the sweep, with the
+> exact file set named so the next measurement is the same measurement:
 >
 > | piece | lines | what the estimate got wrong |
 > |---|---|---|
-> | `bridge-server/codex-app-server-runtime.mjs` | **1,480** | The adapter itself, ~5× the top of the range. |
-> | `scripts/codex-app-server-broker.mjs` | **1,328** | Not in the estimate at all. |
-> | `lib/codex-app-server-contract.mjs` (+648-line generated `.json`) | **385** | Not in the estimate at all. |
-> | `lib/shared-runtime-registry.mjs` | **291** | Not new work — *extracted* from `opencode-server-runtime.mjs`, which shrank 938 → 669. |
-> | wiring in `bridge-server/server.mjs` | **+746 / −24** | "Keep `exec` as the fallback" is a branch at every call site, not one. |
-> | `scripts/gen-codex-app-server-contract.mjs` | 86 | The drift fixture's generator. |
-> | tests + fakes (5 suites, 2 shared fakes) | **3,200** (+961 in `server.test.mjs`) | Unestimated, and larger than the adapter. |
+> | `bridge-server/codex-app-server-runtime.mjs` | **1,862** | The adapter itself, ~6× the top of the range. |
+> | `scripts/codex-app-server-broker.mjs` | **1,332** | Not in the estimate at all. |
+> | `lib/codex-app-server-contract.mjs` (+1,982-line generated `.json`) | **918** | Not in the estimate at all. |
+> | `lib/shared-runtime-registry.mjs` | **337** | Not new work — *extracted* from `opencode-server-runtime.mjs`, which shrank 938 → 669. |
+> | wiring in `bridge-server/server.mjs` | **+813 / −36** (vs `84d25c4`) | "Keep `exec` as the fallback" is a branch at every call site, not one. |
+> | `scripts/gen-codex-app-server-contract.mjs` | 92 | The drift fixture's generator. |
+> | tests + fakes | **4,145** (+1,257 in `server.test.mjs`) | Unestimated, and larger than the adapter. |
+>
+> The test row is the three app-server suites (`codex-app-server-runtime.test.mjs`,
+> `codex-app-server-broker.test.mjs`, `codex-app-server-contract.test.mjs`) plus the three shared
+> fakes (`test/fake-codex-app-server.mjs`, `test/fake-codex-broker-socket.mjs`,
+> `test/codex-wire-frames.mjs`); `server.test.mjs` is counted as a diff because it predates the
+> wave.
 >
 > **Why the analogy misled.** "Codex ships the daemon" is true and still did not make this
 > `opencode serve`-shaped. Three costs the comparison hid:
@@ -792,7 +800,7 @@ exec-specific work the daemon deletes rather than reuses.
    (`bridge-server/codex-app-server-runtime.mjs`), a vendored protocol contract, and per-call-site
    wiring in `server.mjs`. `exec` stays the default and is untouched. The end-to-end proof is
    `probes/smoke/appserver.mjs` (17/17). See the cost correction in §2 — the estimate that
-   informed this recommendation was ~5× low.
+   informed this recommendation was ~6× low.
    ~~What remains is a scheduling call, not a technical
    one: build the adapter now, or land the Wave-0/Wave-1 minimum merge first and build it
    next. Recommendation: **minimum merge first** (it is small, transport-neutral and fixes the
@@ -887,11 +895,21 @@ exec-specific work the daemon deletes rather than reuses.
 - **Whether `-c sandbox_mode="workspace-write"` on resume actually grants writes.** Only the
   read-only direction was proven, and read-only is also the no-flag default — so it is a
   confounded control. Needs one write-mode resume.
-- **`turn/steer` mid-`apply_patch`.** Only exercised mid-`command_execution`. This is the risky
-  case for exposing `agent_reply` on running write-mode jobs.
-- **The `file_change` item shape.** Requires workspace-write, which every probe was forbidden.
-  `fileChangeToolCalls`'s `{files:[…]}` vs `{path,kind}` guess (`codex-runtime.mjs:376-383`)
-  remains untested, and "Files touched" depends on it.
+- ~~**`turn/steer` mid-`apply_patch`.**~~ **Resolved 2026-08-10** — a duplicate of the entry
+  struck above, filed twice at birth from two different prior probes. `probes/codex-app-server/probe.mjs`'s
+  `steerpatch` role (workspace-write, steering on the first `item/started` matching a patch)
+  settled it: §2's "Follow-up probes" records the patch completing atomically with the steer
+  applying at the next model boundary. Nothing narrower is left open.
+- **The `file_change` item shape — the EXEC half only.** The app-server half is settled and no
+  longer a guess: `codex app-server generate-json-schema` declares the `fileChange` ThreadItem as
+  `{changes: FileUpdateChange[], id, status, type}` with `FileUpdateChange` = `{diff, kind, path}`
+  and `kind` a tagged `PatchChangeKind` object, and `fileChangeToolCalls`
+  (`bridge-server/codex-runtime.mjs`, called from both accumulators) reads exactly that.
+  The exec stream's own shape is still unrecorded: no `file_change` item appeared in the ~24-run
+  exec census, because those runs were read-only, so `{files:[…]}` vs `{path,kind}` remains a
+  guess there and "Files touched" on the DEFAULT transport depends on it. The two must not be
+  assumed identical — the same items were measured camelCase on one transport and snake_case on
+  the other. Settling it needs one exec run under workspace-write whose stream carries the item.
 - **Why the stream omits some `command_execution` items.** Reproduced 2/2 for sandbox-denied
   writes; the general rule is unknown.
 - **`codex mcp-server` and `codex exec-server`.** Enumerated from `--help`, never spoken.

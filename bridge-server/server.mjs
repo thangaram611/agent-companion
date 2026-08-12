@@ -316,7 +316,11 @@ const OPENCODE_SERVER_IDLE_TTL_MS = openCodeServerIdleTtlMs();
 
 // Same contract for the shared codex broker: it is detached and outlives every
 // bridge on purpose (that is what makes a subagent's return cost a socket
-// client instead of a job), so nothing would ever stop it without a reaper.
+// client instead of a job). This is the SECOND reaper on it, not the only one —
+// the broker runs its own idle reaper (no client, no beating host session, no
+// loaded thread) and exits on its own. This one is the bridge-side backstop:
+// it disposes a broker whose leases have all gone, which is the case the
+// broker's own three gates do not cover on their own.
 const CODEX_BROKER_IDLE_TTL_MS = codexBrokerIdleTtlMs();
 
 const jobsGcTimer = setInterval(() => {
@@ -676,41 +680,53 @@ async function fetchPromptInspect(job, { includeTimeline = false, limit = 40 } =
 // shrinking a live 11,754-byte digest to 228 bytes, the W1.4′ regression.
 //
 // The rule is ownership, not length: the first write by THIS process for a job
-// whose digest it did not create carries the existing body forward into the new
-// render; after that this process owns the body and re-renders it freely, which
-// is what keeps live sub-turn streaming honest. Nothing is ever compared by
-// size, so a genuinely shorter follow-up turn still updates the file.
-const digestCarry = new Map(); // jobId -> body inherited from a previous bridge ('' once owned)
+// whose digest it did not create reads the existing body ONCE and carries it
+// into every render this process makes, until a render's own text already
+// contains it. Nothing is ever compared by size, so a genuinely shorter
+// follow-up turn still updates the file.
+//
+// What is memoized is the salvaged TEXT, not the decision about it. Latching the
+// decision instead was measured to lose the salvage outright: hydrate restores
+// `job.adapterResult` from the ledger, so a resumed job's FIRST render can be
+// the previous bridge's own completed answer — containment holds, the carry
+// latches empty, and the next render (the resumed watcher's first delta, whose
+// accumulator is empty) rebuilds the digest from nothing. Measured on a job
+// hydrated with its predecessor's result: 7,507 bytes to 351, the dead bridge's
+// text gone — the same W1.4′ regression, reached from the other side.
+const digestCarry = new Map(); // jobId -> {body, prior} read from a previous bridge's digest
 
-function priorDigestBody(jobId, result) {
+function priorDigestBody(jobId) {
   const path = digestPath(jobId);
-  if (!path || !existsSync(path)) return '';
+  if (!path || !existsSync(path)) return { body: '', prior: '' };
   let text;
-  try { text = readFileSync(path, 'utf8'); } catch { return ''; }
+  try { text = readFileSync(path, 'utf8'); } catch { return { body: '', prior: '' }; }
   const idx = text.indexOf('\n## ');
-  if (idx < 0) return '';
+  if (idx < 0) return { body: '', prior: '' };
   // The Task section is re-rendered verbatim from the job record, so carrying
   // it would just duplicate it.
   const body = text.slice(idx + 1).replace(/^## Task\n[\s\S]*?(?=\n## |$)/, '').trim();
-  if (!body) return '';
-  // Tier-1 resume replays the whole item list on `turn/completed`, so the
-  // incoming render often already contains everything the dead bridge wrote.
-  // Carrying it then would only duplicate the answer.
-  const prior = /^#{2,3} Final \/ partial assistant message\n+([\s\S]*?)(?=\n#{2,3} |$)/m.exec(body)?.[1]?.trim();
-  const incoming = result?.summary?.message || result?.stdout || '';
-  if (prior && incoming.includes(prior)) return '';
-  return body;
+  if (!body) return { body: '', prior: '' };
+  // The salvaged answer, kept beside the body so every render can ask whether it
+  // is about to duplicate it: tier-1 resume replays the whole item list on
+  // `turn/completed`, so a completed render often already contains everything
+  // the dead bridge wrote — while the delta renders on either side of it do not.
+  const prior = /^#{2,3} Final \/ partial assistant message\n+([\s\S]*?)(?=\n#{2,3} |$)/m.exec(body)?.[1]?.trim() || '';
+  return { body, prior };
 }
 
 function writeJobDigest(job, result = null) {
   const jobId = job?.jobId;
   if (!jobId) return null;
-  let carried = digestCarry.get(jobId);
-  if (carried === undefined) {
-    carried = priorDigestBody(jobId, result);
-    digestCarry.set(jobId, carried);
+  let salvaged = digestCarry.get(jobId);
+  if (salvaged === undefined) {
+    // One file read per job per process — the same as when this memoized the
+    // verdict. Only the containment test moved.
+    salvaged = priorDigestBody(jobId);
+    digestCarry.set(jobId, salvaged);
   }
-  return writeOpenCodeDigest(job, result, { carriedForward: carried || null });
+  const incoming = result?.summary?.message || result?.stdout || '';
+  const duplicate = salvaged.prior && incoming.includes(salvaged.prior);
+  return writeOpenCodeDigest(job, result, { carriedForward: duplicate ? null : (salvaged.body || null) });
 }
 
 // Refresh the on-disk digest from the prompt jsonl. Called from
@@ -1839,8 +1855,6 @@ async function runOpenCodeServerWatch({ jobId, reqId, baseUrl, sessionId, prompt
       : result.status === 'timeout' ? 'opencode_server_timeout'
       : result.status === 'unreachable' ? 'opencode_server_unreachable'
       : 'opencode_server_failed');
-    const job = jobs.get(jobId);
-    if (job) job.adapterResult = result;
     retainTerminalJob(jobId, {
       status: result.status, summary: result.summary, error: result.error,
       stuckReason: null, detail, failedTools: [],
@@ -1859,12 +1873,20 @@ async function runOpenCodeServerWatch({ jobId, reqId, baseUrl, sessionId, prompt
     const currentJob = jobs.get(jobId);
     if (currentJob && currentJob.promptId !== promptId) return;
     const duration = Date.now() - startedAt;
+    // Same rule as the codex twin below: keep what streamed before the watch
+    // broke, and store the failure on `adapterResult` so it is what the next
+    // render reads. Writing a digest from a value the job does not hold left
+    // `job.adapterResult` on the last pre-error snapshot, and emitNotification's
+    // re-render then rebuilt the body from it — with the error text gone.
+    const partial = jobs.get(jobId)?.adapterResult || null;
+    const failure = { stdout: partial?.stdout || '', stderr: err.message, summary: partial?.summary || null };
     retainTerminalJob(jobId, {
       status: 'failed', summary: null, error: err.message,
       stuckReason: null, detail: 'opencode_server_watch_error',
       failedTools: [], durationMs: duration, terminalAt: Date.now(),
+      adapterResult: failure,
     });
-    writeJobDigest(jobs.get(jobId), { stdout: '', stderr: err.message, summary: null });
+    writeJobDigest(jobs.get(jobId), failure);
     emitNotification({
       jobId, status: 'failed', summary: null, error: err.message,
       stuckReason: null, detail: 'opencode_server_watch_error',
@@ -1955,7 +1977,6 @@ function finalizeResumedOpenCodeTranscript(job, transcript, reqId, startedAt) {
   const duration = Date.now() - startedAt;
   const detail = status === 'completed' ? 'resumed_completed'
     : status === 'cancelled' ? 'cancelled' : 'opencode_server_failed';
-  job.adapterResult = result;
   retainTerminalJob(jobId, {
     status, summary: transcript.summary, error: transcript.error,
     detail, durationMs: duration, terminalAt: Date.now(), adapterResult: result,
@@ -2027,8 +2048,10 @@ async function runSingleShotCliWorker({ jobId, reqId, task, mode, template, temp
     // CLI, whose result carries none) BEFORE the terminal patch, so
     // retainTerminalJob's persistJob write and the terminal emitNotification
     // both see it. It lands on disk under the target-neutral
-    // `companionSessionId` key — v2 groundwork for
-    // `codex exec resume <thread_id>` thread continuity; no v1 consumer.
+    // `companionSessionId` key, which the app-server adapter's recovery reads
+    // back after a restart (`resumeCodexAppServerJob` resumes exactly this id).
+    // The exec transport still has no consumer for it — `codex exec resume` was
+    // deleted, not deferred — so on this path it is a record, not a lever.
     // The already-captured id is the fallback, never the loser: the
     // `child.on('error')` path resolves `sessionId: null` by construction, and
     // a plain `result.sessionId ?? null` there would clobber a good id back to
@@ -2293,8 +2316,6 @@ async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, 
       : result.status === 'unreachable'
         ? (result.summary?.stopReason === 'broker-gone' ? 'codex_server_gone' : 'codex_server_unreachable')
         : 'codex_server_failed');
-    const job = jobs.get(jobId);
-    if (job) job.adapterResult = result;
     retainTerminalJob(jobId, {
       status: result.status, summary: result.summary, error: result.error,
       stuckReason: null, detail, failedTools: [],
@@ -2438,8 +2459,6 @@ function finalizeResumedCodexThread(job, { transcript, threadStatus, reqId, star
   const retiredNote = transcript.found
     ? null
     : writeRetirementNote(job, { detail: 'codex_server_gone', error, childPid: null, childAlive: false });
-  const live = jobs.get(jobId);
-  if (live) live.adapterResult = result;
   retainTerminalJob(jobId, {
     status: 'unreachable', summary, error, detail: 'codex_server_gone',
     retiredNote, durationMs: duration, terminalAt: Date.now(), adapterResult: result,
@@ -4014,9 +4033,10 @@ export function _resetForTest() {
   _bridgeHostSid = null;
   _hydrated = false;
   _swept = false;
-  // Digest ownership is per bridge PROCESS, and a test that resets the module
-  // is simulating a new one — keeping the map would let a test "own" a digest
-  // its simulated predecessor wrote and silently skip the carry-forward.
+  // The salvaged digest text is per bridge PROCESS, and a test that resets the
+  // module is simulating a new one — keeping the map would let a test read a
+  // digest its simulated predecessor wrote as already salvaged, and silently
+  // skip the carry-forward.
   digestCarry.clear();
 }
 

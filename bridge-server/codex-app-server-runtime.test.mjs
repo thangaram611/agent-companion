@@ -38,7 +38,6 @@ import {
   steerCodexTurn,
   interruptCodexTurn,
   listLoadedCodexThreads,
-  getCodexThreadStatus,
   resolveCodexTurnId,
   resolveSteerConfirmMs,
   openCodexTurnWatcher,
@@ -1597,10 +1596,21 @@ test('the idle reaper refuses a broker that still has a thread loaded', async ()
   // lease is long gone — and the turn it started is exactly the work this whole
   // transport exists to protect. `thread/loaded/list` is the authoritative
   // answer, immune to the PID reuse a pid probe would suffer.
-  const gone = await deadPid();
-  _setForTest({ connect: async () => fakeBrokerSocket({ handlers: { 'thread/loaded/list': () => ({ data: ['T-live'] }) } }) });
-  seedRegistry({ socketPath: brokerSocketPath(), pid: gone, lastUsedAt: Date.now() - 60 * 60_000 });
+  //
+  // The recorded pid is the one the live broker claims, deliberately: seeded
+  // with any other pid the reaper refuses on the identity mismatch instead, and
+  // the loaded thread stops being the thing under test — deleting the guard
+  // entirely still passed. Here it is the only refusal available.
+  _setForTest({
+    connect: async () => fakeBrokerSocket({
+      brokerPid: LIVE_BROKER_PID,
+      handlers: { 'thread/loaded/list': () => ({ data: ['T-live'] }) },
+    }),
+  });
+  const kills = captureKills();
+  seedRegistry({ socketPath: brokerSocketPath(), pid: LIVE_BROKER_PID, lastUsedAt: Date.now() - 60 * 60_000 });
   assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), false);
+  assert.deepEqual(kills, [], 'a broker holding a thread must not be signalled');
 });
 
 test('the idle reaper refuses when it could not interrogate the broker at all', async () => {

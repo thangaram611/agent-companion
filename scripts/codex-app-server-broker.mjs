@@ -44,8 +44,18 @@ import {
   parseCodexVersion,
   routeNotification,
   routeRequest,
+  // The methods whose response implicitly subscribes the asking client. Imported,
+  // not restated: the adapter reads the same set to decide when a connection may
+  // interrupt or steer, and the two must not drift apart.
+  THREAD_OWNERSHIP_METHODS as IMPLICIT_SUBSCRIBE_METHODS,
 } from '../lib/codex-app-server-contract.mjs';
 import { HEARTBEAT_STALE_AFTER_MS, HOST_LIVENESS_TTL_MS, scanLiveHeartbeat } from '../lib/heartbeat.mjs';
+// `pidAlive`, not a local `process.kill(pid, 0)` wrapper: it is the repo's one
+// definition of the predicate (EPERM means alive, and a pid <= 0 is not a pid —
+// `kill(0, 0)` signals our own process GROUP and would read a torn lock file's
+// `{"pid":0}` as a live holder). Imported bare rather than through the
+// registry's `_impl`, so another suite's stub cannot reach this daemon.
+import { pidAlive } from '../lib/shared-runtime-registry.mjs';
 import {
   appendPrivateFile,
   codexBrokerLogFile,
@@ -94,12 +104,6 @@ const VERSION_PROBE_TIMEOUT_MS = 10_000;
 // predicate: lib/heartbeat.mjs.
 const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 const INACTIVITY_RECHECK_MS = 60 * 1000;
-
-// Responses whose `result.thread.id` implicitly subscribes the asking client to
-// that thread. This is what makes the common path work with no extra
-// round-trip: a bridge that starts or resumes a thread is, by construction, the
-// bridge that wants its events.
-const IMPLICIT_SUBSCRIBE_METHODS = new Set(['thread/start', 'thread/resume', 'thread/fork']);
 
 const JSONRPC_METHOD_NOT_FOUND = -32601;
 const JSONRPC_INVALID_PARAMS = -32602;
@@ -509,9 +513,14 @@ export class AppServerConnection {
 // --- Broker ------------------------------------------------------------------
 
 export class Broker {
-  constructor({ connection, subscriptions = new SubscriptionTable() } = {}) {
+  // No `subscriptions` injection point: this module's one test seam is the
+  // `_impl` record above, and a second, parallel one that no caller ever
+  // supplied is the layering that idiom exists to avoid. A test wanting a
+  // tiny ring assigns `broker.subscriptions` after construction; the ring cap
+  // and TTL are exercised on `SubscriptionTable` directly.
+  constructor({ connection }) {
     this.connection = connection;
-    this.subscriptions = subscriptions;
+    this.subscriptions = new SubscriptionTable();
     this.startedAt = now();
     this.clients = new Map(); // clientId -> client record
     this._nextClientId = 1;
@@ -1228,17 +1237,12 @@ export function breakStaleStartLock(lockPath, staleMs = START_LOCK_STALE_MS) {
     try { ageMs = Date.now() - statSync(lockPath).mtimeMs; } catch { ageMs = Infinity; }
   }
   const holderPid = Number.isInteger(holder?.pid) ? holder.pid : null;
-  const holderAlive = holderPid !== null && holderPid !== process.pid && processAlive(holderPid);
+  const holderAlive = holderPid !== null && holderPid !== process.pid && pidAlive(holderPid);
   if (holderAlive && ageMs <= staleMs) return false;
   if (holderPid === process.pid && ageMs <= staleMs) return false; // our own live critical section
   log('WARN', 'breaking a stale broker start lock:', lockPath, JSON.stringify({ holderPid, ageMs }));
   try { unlinkSync(lockPath); } catch {}
   return true;
-}
-
-function processAlive(pid) {
-  try { process.kill(pid, 0); return true; }
-  catch (err) { return err.code === 'EPERM'; }
 }
 
 // Connect-probe a socket path:
@@ -1248,7 +1252,7 @@ function processAlive(pid) {
 //   otherwise the error code itself: EMFILE, EACCES, EAGAIN and friends mean
 //             "the probe failed", NOT "nobody is home", and the caller must
 //             refuse rather than unlink on that evidence.
-const PROBE_ABSENT_CODES = new Set(['ECONNREFUSED', 'ENOENT', 'ENOTSOCK', 'ECONNRESET']);
+const PROBE_ABSENT_CODES = new Set(['ECONNREFUSED', 'ENOENT', 'ENOTSOCK']);
 
 export function probeSocketVerdictForError(err) {
   return PROBE_ABSENT_CODES.has(err?.code) ? 'absent' : (err?.code || 'EUNKNOWN');

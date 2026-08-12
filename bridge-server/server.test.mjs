@@ -9,6 +9,13 @@ import { join } from 'node:path';
 
 const STATE_SANDBOX = mkdtempSync(join(tmpdir(), 'copilot-state-server-'));
 process.env.AGENT_COMPANION_HOME = STATE_SANDBOX;
+// Pinned into the sandbox rather than left to resolve through runtimeDir():
+// AGENT_COMPANION_HOME does not reach it (lib/host.mjs derives the companion
+// home from the HOST, not from that var), so every `log()` this suite provokes
+// appended to the operator's live ~/.claude/agent-companion/runtime log —
+// measured 31,396 bytes for one run of this file. Never unset it in teardown:
+// clearing it is exactly what re-points a straggler at the real path.
+process.env.AGENT_BRIDGE_LOG_FILE = join(STATE_SANDBOX, 'agent-bridge.log');
 process.env.AGENT_COMPANION_DEFAULT_TARGET = 'copilot';
 const TEST_CWD = tmpdir();
 
@@ -1353,6 +1360,47 @@ test('OpenCode server mode: send routes through the HTTP server and completes', 
   }
 });
 
+test('OpenCode server mode: a watch that breaks after the session opened records WHY in the digest', async () => {
+  // The twin of the codex app-server test below. Both watch catches must store
+  // the failure on `adapterResult`, not only write it: once the session is open
+  // the job HAS a promptId, so emitNotification re-renders the digest body from
+  // `adapterResult` a moment later — and this branch used to leave the previous
+  // snapshot there, which rebuilt the file with the error text gone.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-oc-watchfail';
+  try {
+    await withOpenCodeServer({
+      fetchJson: async (url) => {
+        if (url.includes('/global/health')) return { ok: true, data: { healthy: true } };
+        if (url.includes('/session?directory=')) return { ok: true, data: { id: 'ses_watchfail' } };
+        return { ok: true, data: {} };
+      },
+      // The session exists; the event stream the watcher needs does not.
+      openEventStream: async () => { throw new Error('event stream refused the connection'); },
+    }, async () => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'opencode', task: 'watch breaks', mode: 'EXECUTE',
+        template: 'general', cwd: TEST_CWD, host_session_id: 'sid-oc-watchfail', parallel: 'never', max_wait_sec: 5,
+      }));
+      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-oc-watchfail', max_wait_sec: 5 }));
+      assert.equal(terminal.status, 'failed');
+      const job = jobs.get(send.job_id);
+      assert.equal(job.detail, 'opencode_server_watch_error');
+      assert.ok(job.promptId, 'the session opened, so the digest refresh on notify is live');
+      assert.match(readFileSync(digestPath(send.job_id), 'utf8'), /event stream refused the connection/,
+        'the digest names the failure, not just the header');
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-oc-watchfail') jobs.delete(id);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
 test('REGRESSION OpenCode server model: a profile model reaches startOpenCodeServerPrompt body', async () => {
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
@@ -2457,6 +2505,51 @@ test('Codex app-server mode: hydrate resumes the job instead of retiring it, and
   } finally {
     for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-hydrate') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
     if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('a hydrated adapterResult does not latch the carry-forward off for the renders after it', async () => {
+  // The other side of W1.4'. Hydrate restores `job.adapterResult` from the
+  // ledger, so the FIRST render a new bridge makes can be the previous bridge's
+  // own completed answer — which the digest on disk already contains. When the
+  // carry memoized that verdict, it latched "nothing to carry" for the whole
+  // process, and the next render (the resumed watcher's first delta, whose
+  // accumulator is empty) rebuilt the digest from nothing: measured 7,507 bytes
+  // to 351, the dead bridge's work gone. The salvaged text is memoized now and
+  // the containment test runs per render, so the section comes back the moment
+  // the incoming render stops containing it.
+  const mod = await bridge();
+  const { jobs, _resetForTest } = mod;
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  try {
+    const jobId = 'codex-carry-latch';
+    // The hydrated result IS the dead bridge's answer, byte for byte — that is
+    // what makes containment hold on the first render.
+    const answer = Array.from({ length: 60 }, (_, i) => `MARKER-CARRY streamed line ${i} — work the dead bridge already paid for.`).join('\n');
+    const digest = digestPath(jobId);
+    writeFileSync(digest, _cxDeadBridgeDigest(jobId, 'MARKER-CARRY'));
+    const priorBytes = readFileSync(digest, 'utf8').length;
+
+    // A new process that hydrated this job: same digest on disk, and the dead
+    // bridge's own result restored onto the record.
+    _cxLiveJob(jobs, jobId, 'sid-cx-carry');
+    const job = jobs.get(jobId);
+    job.adapterResult = { stdout: answer, stderr: '', summary: { message: answer } };
+
+    mod.refreshDigestForJob(job);
+    // Nothing carried on this render: the render already says it.
+    assert.doesNotMatch(readFileSync(digest, 'utf8'), /Carried forward from the previous bridge/);
+
+    // The resumed watcher's first progress render, accumulator still empty.
+    job.adapterResult = { stdout: '', stderr: '', summary: { message: '' } };
+    mod.refreshDigestForJob(job);
+    const after = readFileSync(digest, 'utf8');
+    assert.match(after, /MARKER-CARRY/, "the dead bridge's streamed work survived a render that no longer contains it");
+    assert.ok(after.length > priorBytes / 2, `digest collapsed to ${after.length} bytes from ${priorBytes}`);
+  } finally {
+    jobs.delete('codex-carry-latch');
     _resetForTest();
   }
 });

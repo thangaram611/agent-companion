@@ -26,6 +26,15 @@ import {
 
 const TEST_CWD = tmpdir();
 
+// `formatPrompt`'s plan_path=latest resolution logs, and the log path resolves
+// through runtimeDir() at every call — so this pure-function suite appended to
+// the operator's live ~/.claude/agent-companion/runtime log (measured 145 bytes
+// per run). Pinned into a sandbox, and never unset: clearing the redirect is
+// what re-points a straggler at the real path.
+const LOG_SANDBOX = mkdtempSync(join(tmpdir(), 'copilot-validation-log-'));
+process.env.AGENT_BRIDGE_LOG_FILE = join(LOG_SANDBOX, 'agent-bridge.log');
+test.after(() => rmSync(LOG_SANDBOX, { recursive: true, force: true }));
+
 function withPlansDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'copilot-plans-'));
   const prev = process.env.AGENT_PLANS_DIR;

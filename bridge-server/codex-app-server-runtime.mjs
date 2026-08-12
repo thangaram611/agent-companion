@@ -57,7 +57,14 @@ import {
   LineReader,
   probeSocketVerdictForError,
 } from '../scripts/codex-app-server-broker.mjs';
-import { CODEX_PINNED_VERSION, routeNotification } from '../lib/codex-app-server-contract.mjs';
+import {
+  CODEX_PINNED_VERSION,
+  routeNotification,
+  // Responses whose `result.thread.id` means "this connection now owns that
+  // thread". Imported, not restated: it is the same set the broker subscribes
+  // on, and one copy of it is the point.
+  THREAD_OWNERSHIP_METHODS as OWNERSHIP_METHODS,
+} from '../lib/codex-app-server-contract.mjs';
 import { logEvent } from '../lib/log.mjs';
 import { codexBrokerRegistryPath, codexBrokerSocketPath } from '../lib/runtime-paths.mjs';
 import {
@@ -130,10 +137,6 @@ const INTERNAL = Symbol('codex app-server internal call');
 // Methods that must not reach the wire for a thread this connection did not
 // itself start or resume. See constraint 3 and probes/codex-app-server/unloaded.mjs.
 const ATTACH_BEFORE_METHODS = new Set(['turn/interrupt', 'turn/steer']);
-
-// Responses whose `result.thread.id` means "this connection now owns that
-// thread" — the same trigger the broker uses for its implicit subscription.
-const OWNERSHIP_METHODS = new Set(['thread/start', 'thread/resume', 'thread/fork']);
 
 const JSONRPC_METHOD_NOT_FOUND = -32601;
 
@@ -370,7 +373,6 @@ export function _setForTest(overrides = {}) {
 
 export function _resetForTest() {
   _impl = realImpl();
-  brokerRegistry.clearCache();
   _spawnPromise = null;
   _reapPromise = null;
   _lastKnownCodexVersion = null;
@@ -957,12 +959,12 @@ function createConnection(sock, { socketPath, env }) {
       return () => handlers.delete(handler);
     },
 
+    // No `unsubscribe` twin: the broker publishes `broker/unsubscribe`, but every
+    // connection here is per-job and per-action and closes in a `finally`, and
+    // the broker's `dropClient` releases the whole subscription set on close. A
+    // wrapper for a call this bridge never makes is a promise nothing keeps.
     subscribe(threadId, opts = {}) {
       return raw('broker/subscribe', { threadId }, opts);
-    },
-
-    unsubscribe(threadId, opts = {}) {
-      return raw('broker/unsubscribe', { threadId }, opts);
     },
 
     // 'fresh'    started here, no turn yet — status is idle by construction.
@@ -1162,7 +1164,11 @@ function adopt(health, { reused }) {
   if (claim) {
     _impl.logEvent('warn', 'codex_appserver_adopted_over_disposal_claim', { pid: health.brokerPid, claimedBy: claim.pid });
   }
-  brokerRegistry.setCached(entry);
+  // No `setCached` twin to opencode's: that memo exists to recall an ephemeral
+  // `--port 0` address, and this broker's address is `codexBrokerSocketPath()` —
+  // a pure function of env that every path re-derives anyway. A memo here could
+  // only ever hold a pid that outlived its broker, which is the identity trap
+  // the comment above this registry was written to close.
   brokerRegistry.record(same ? { ...recorded, ...entry } : entry);
   return { socketPath: health.socketPath, pid: health.brokerPid, reused, disposalClaimed: !!claim };
 }
@@ -1356,13 +1362,6 @@ export async function reapIdleCodexBroker({ idleMs, hasLiveJobs = false, now = D
   finally { _reapPromise = null; }
 }
 
-// A broker another bridge has claimed for disposal is about to stop answering
-// even though it is healthy right now; adopting it would hand this job a runtime
-// that dies underneath it.
-export function codexBrokerDisposalClaim(now = Date.now()) {
-  return disposalClaimedBy(brokerRegistry.read(), now);
-}
-
 // Re-exported because the adapter's own tests reason in lease-staleness terms
 // and should not have to know where the machinery lives.
 export { LEASE_STALE_MS } from '../lib/shared-runtime-registry.mjs';
@@ -1380,7 +1379,7 @@ export async function startCodexThread({ conn, cwd, env = process.env, model = n
   const threadId = result?.thread?.id;
   if (!threadId) throw new Error('codex thread/start returned no thread id');
   conn._noteFreshThread(threadId);
-  return { threadId, rolloutPath: result.thread.path ?? null, thread: result.thread };
+  return { threadId, rolloutPath: result.thread.path ?? null };
 }
 
 // The turn a `Thread` payload ends on, or null. `turns` is carried by the
@@ -1400,7 +1399,12 @@ function lastTurnOf(thread) {
 
 // Resume is BOTH the reattach and the authoritative status read: it rejoins a
 // running thread, and its `thread.status` is the only place this protocol
-// reports whether a turn is in flight.
+// reports whether a turn is in flight — 'active' | 'idle' | 'notLoaded' |
+// 'systemError' | 'unknown'. So it is NOT a pure read: asking the question loads
+// the thread into the app-server and attaches this connection to it. That is
+// what every caller here wants (it is also the resume-before-act guard), but it
+// means a status surface must not call it speculatively for threads it does not
+// intend to touch.
 //
 // `sandbox` and `approvalPolicy` are sent explicitly here, not just on start.
 // Resume re-derives its context from config when they are omitted, which on the
@@ -1416,36 +1420,31 @@ function lastTurnOf(thread) {
 export async function resumeCodexThread({ conn, threadId, env = process.env, model = null, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
   const result = await conn.call('thread/resume', threadParams(env, { threadId, model }), { timeoutMs });
   const thread = result?.thread || {};
+  // `status.flags` and the raw `thread` are deliberately NOT passed through. The
+  // flag vocabulary (`waitingOnApproval`, `waitingOnUserInput`) already has a
+  // tested home in the pinned contract, and neither flag can be observed from
+  // here anyway: every server-to-client request is declined -32601 the moment it
+  // arrives, so a wait state cannot outlive the tick that created it.
   return {
     threadId: thread.id || threadId,
     status: String(thread.status?.type || thread.status || 'unknown'),
-    flags: thread.status?.flags || [],
     // Free with the answer we already asked for: resume carries the thread's
     // turns, so the caller that just learned "this thread is active" also
     // learns WHICH turn is active, without a second round trip.
     lastTurn: lastTurnOf(thread),
-    thread,
   };
-}
-
-// 'active' | 'idle' | 'notLoaded' | 'systemError' | 'unknown'.
-//
-// NOT a pure read: on this protocol `thread/resume` IS the status read, so
-// asking the question loads the thread into the app-server and attaches this
-// connection to it. That is exactly what the callers here want (it is also the
-// resume-before-act guard), but it means a status surface must not call this
-// speculatively for threads it does not intend to touch.
-export async function getCodexThreadStatus({ conn, threadId, env = process.env, model = null, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
-  const resumed = await resumeCodexThread({ conn, threadId, env, model, timeoutMs });
-  return resumed.status;
 }
 
 // The salvage channel. Measured caveat: `thread/read` returns MESSAGES ONLY —
 // no commandExecution, no reasoning — even though the rollout for the same
 // thread has all three. So this is a complete ANSWER salvage and not a
 // tool-activity record, and its summary says so by carrying no toolCalls.
-export async function readCodexThread({ conn, threadId, includeTurns = true, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
-  const result = await conn.call('thread/read', { threadId, includeTurns }, { timeoutMs });
+export async function readCodexThread({ conn, threadId, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
+  // `includeTurns` is pinned true rather than exposed: `turns` is the ONLY
+  // source of the `lastTurn` below (the schema populates it on `thread/read`
+  // only when this is true), so a caller that passed false would get a silent
+  // `lastTurn: null` — a knob whose one non-default value breaks the answer.
+  const result = await conn.call('thread/read', { threadId, includeTurns: true }, { timeoutMs });
   const messages = collectAgentMessages(result);
   const finals = messages.filter((m) => m.phase === 'final_answer');
   const chosen = (finals.length ? finals : messages).at(-1);
@@ -1571,7 +1570,7 @@ export async function resolveCodexTurnId({
 
   let lastTurn;
   try {
-    ({ lastTurn } = await readCodexThread({ conn, threadId, includeTurns: true, timeoutMs }));
+    ({ lastTurn } = await readCodexThread({ conn, threadId, timeoutMs }));
   } catch (err) {
     throw new Error(
       `${method} needs the running turn's id on thread ${threadId}, this bridge never recorded one `
@@ -1802,10 +1801,10 @@ export async function openCodexTurnWatcher({
 // The turn may already be over — check level state before committing to the
 // stream. `active` means keep watching; anything else means ask the transcript.
 async function levelTerminal({ conn, threadId, env, model = null }) {
-  let status;
-  try { status = await getCodexThreadStatus({ conn, threadId, env, model }); }
+  let resumed;
+  try { resumed = await resumeCodexThread({ conn, threadId, env, model }); }
   catch { return null; }
-  if (status === 'active') return null;
+  if (resumed.status === 'active') return null;
   try {
     const transcript = await readCodexThread({ conn, threadId });
     if (!transcript.found) return null;
