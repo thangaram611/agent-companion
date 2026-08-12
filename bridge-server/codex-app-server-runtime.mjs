@@ -113,11 +113,6 @@ const CONNECT_CLASS_CODES = new Set(['ECONNREFUSED', 'ENOENT', 'ENOTSOCK']);
 // budget.
 const SPAWN_RACE_GRACE_MS = 2_000;
 
-// How long to let another bridge's confirmed disposal claim resolve before
-// re-probing the broker it claimed. A dispose is one connect, one
-// `thread/loaded/list` and a SIGTERM, so this is generous.
-const DISPOSAL_RECHECK_MS = 250;
-
 // A single `aggregated_output` can be a whole build log; the toolCalls entry is
 // a digest-facing artifact, not a transcript. Same cap as codex-runtime.mjs.
 const MAX_COMMAND_OUTPUT_CHARS = 4_000;
@@ -1016,7 +1011,7 @@ const brokerRegistry = createSharedRuntimeRegistry({
   registryPath: codexBrokerRegistryPath,
   key: SHARED_BROKER_KEY,
   identity: (entry) => (entry?.socketPath && entry?.pid ? `${entry.socketPath}#${entry.pid}` : null),
-  dispose: (entry) => disposeBroker(entry),
+  dispose: (entry, ctx) => disposeBroker(entry, ctx),
 });
 
 let _spawnPromise = null;
@@ -1088,39 +1083,24 @@ export async function probeCodexBrokerHealth(socketPath = null) {
 export async function ensureCodexBroker({ env = process.env } = {}) {
   const socketPath = codexBrokerSocketPath();
 
-  // Two passes at most, and the second one exists solely for the disposal-claim
-  // window below: everything else either returns or throws on the first.
-  for (let pass = 0; ; pass += 1) {
-    const health = await probeCodexBrokerHealth(socketPath);
-    if (health.alive) {
-      const ready = health.ready ? health : await waitForReady(socketPath, BROKER_BOOT_TIMEOUT_MS);
-      const adopted = adopt(ready, { reused: true });
-      // The claimer published its intent AND confirmed it before we got here, so
-      // our `lastUsedAt` bump cannot make it stand down any more (see adopt()).
-      // Handing this broker back would hand the caller a runtime under a live
-      // kill order. Wait out the dispose — one connect, one `thread/loaded/list`
-      // and a SIGTERM — then look again: if it survived, it is ours; if it did
-      // not, the next pass spawns a replacement, which is exactly the "one
-      // redundant spawn, no lost work" this window is supposed to cost.
-      if (adopted.disposalClaimed && pass === 0) {
-        _impl.logEvent('warn', 'codex_appserver_awaiting_disposal_claim', { pid: adopted.pid });
-        await _impl.delay(DISPOSAL_RECHECK_MS);
-        continue;
-      }
-      return adopted;
-    }
-    // Only a connect-class failure means "nobody is home". Anything else is a
-    // failure to ask, and spawning on it would race a broker that is very much
-    // alive — so it surfaces instead of degrading silently.
-    if (!CONNECT_CLASS_CODES.has(health.code)) {
-      throw new Error(`could not reach the codex broker at ${socketPath}: ${health.error}`);
-    }
-
-    if (_spawnPromise) return _spawnPromise;
-    _spawnPromise = spawnAndAdoptBroker(env, socketPath);
-    try { return await _spawnPromise; }
-    finally { _spawnPromise = null; }
+  const health = await probeCodexBrokerHealth(socketPath);
+  if (health.alive) {
+    const ready = health.ready ? health : await waitForReady(socketPath, BROKER_BOOT_TIMEOUT_MS);
+    // A broker under a live disposal claim is adopted, not waited out: the
+    // adoption itself is what makes the claimer stand down (see adopt()).
+    return adopt(ready, { reused: true });
   }
+  // Only a connect-class failure means "nobody is home". Anything else is a
+  // failure to ask, and spawning on it would race a broker that is very much
+  // alive — so it surfaces instead of degrading silently.
+  if (!CONNECT_CLASS_CODES.has(health.code)) {
+    throw new Error(`could not reach the codex broker at ${socketPath}: ${health.error}`);
+  }
+
+  if (_spawnPromise) return _spawnPromise;
+  _spawnPromise = spawnAndAdoptBroker(env, socketPath);
+  try { return await _spawnPromise; }
+  finally { _spawnPromise = null; }
 }
 
 // Adopting a broker another bridge has CLAIMED for disposal needs care, and it
@@ -1130,18 +1110,22 @@ export async function ensureCodexBroker({ env = process.env } = {}) {
 // instead. It could: its address is an ephemeral port. This broker's address is
 // a fixed socket path, so "spawn my own instead" is not available.
 //
-// Two protections are real and one is NOT:
-//   - recording our adoption bumps `lastUsedAt`, and claimDisposal re-reads it
-//     at its confirm step — but that only saves an adoption that lands BEFORE
-//     the claim is published. By the time we can SEE a claim here, the confirm
-//     has already passed and there is no later one;
-//   - `disposeBroker` re-asks `thread/loaded/list` immediately before the kill —
-//     but a broker we just adopted has no thread on it yet, so that answer is
-//     empty and permits the kill;
-//   - what actually closes the window is the caller: `ensureCodexBroker` waits
-//     the dispose out and re-probes, so a broker that is killed underneath us
-//     costs one redundant spawn rather than a failed dispatch.
-// The claim is reported either way rather than hidden.
+// What protects the adoption is the DISPOSER, not anything the adopter does
+// afterwards: recording our adoption bumps `lastUsedAt`, and `disposeBroker`
+// re-reads it through the registry's `confirmDisposal` immediately before it
+// signals. A claim we can still SEE here belongs to a claimer that has not acted
+// yet — it is inside its interrogation stage, which is seconds of RPC — so our
+// bump lands first and it stands down.
+//
+// `disposeBroker`'s other two questions cannot do this job: a broker we just
+// adopted has no thread on it, so `thread/loaded/list` is empty and permits the
+// kill, and its `brokerPid` is of course still its own.
+//
+// What is left is the file write itself: a SIGTERM that lands between the health
+// probe above and our `record` below adopts a corpse, and the caller's first
+// call fails. That is microseconds of a lock-free protocol — the disposer's
+// confirm and its kill are one syscall apart — against the seconds of RPC the
+// claim used to cover. The claim is reported either way rather than hidden.
 function adopt(health, { reused }) {
   if (health.codexVersion) _lastKnownCodexVersion = health.codexVersion;
   const entry = { socketPath: health.socketPath, pid: health.brokerPid, appServerPid: health.appServerPid };
@@ -1234,8 +1218,9 @@ async function waitForReady(socketPath, budgetMs, exitedProbe = null) {
   }
 }
 
-// Stop a broker the reaper has claimed — but only after ASKING it TWO questions,
-// because the kill needs two different facts and one answer cannot carry both:
+// Stop a broker the reaper has claimed — but only after ASKING it TWO questions
+// and the REGISTRY a third, because the kill needs three different facts and no
+// one answer carries them:
 //   - "is it holding work?" — `thread/loaded/list`. The registry cannot know: a
 //     bridge that died mid-turn leaves no lease after LEASE_STALE_MS, and the
 //     turn it started is exactly the work this transport exists to protect.
@@ -1244,11 +1229,20 @@ async function waitForReady(socketPath, budgetMs, exitedProbe = null) {
 //     recycles pids, so `thread/loaded/list` succeeding proves something at the
 //     SOCKET is a broker, never that `entry.pid` still is. Signalling on the
 //     first answer alone is the pid-reuse bug wearing a reassuring comment.
+//   - "did anyone adopt it while we were asking?" — `confirmDisposal`, the
+//     registry's final look at the claim. The two questions above are both
+//     BLIND to a bridge that adopted this broker a moment ago: it has started no
+//     thread and holds no lease, and its adoption is recorded in the file, not
+//     on the wire. The answers above take seconds of RPC to collect; that is the
+//     window, and this is what closes it.
 //
-// A refusal here still lets the registry forget the entry. That is harmless
-// precisely because the broker's address is a fixed path, not an ephemeral port:
-// the next ensureCodexBroker connect-probes, finds it and re-records it.
-async function disposeBroker(entry) {
+// A refusal here still lets the registry forget the entry — except when the
+// refusal came from `confirmDisposal`, which withdraws the claim and so makes
+// the registry keep the adopter's entry. Forgetting on the other refusals is
+// harmless precisely because the broker's address is a fixed path, not an
+// ephemeral port: the next ensureCodexBroker connect-probes, finds it and
+// re-records it.
+async function disposeBroker(entry, { confirmDisposal }) {
   _lastDisposal = null;
   let conn = null;
   let brokerPid = null;
@@ -1286,6 +1280,16 @@ async function disposeBroker(entry) {
   // against a process that no longer exists, and the pid may now be anyone's.
   if (brokerPid == null || brokerPid !== entry.pid) {
     _impl.logEvent('warn', 'codex_appserver_dispose_pid_mismatch', { entryPid: entry.pid ?? null, brokerPid });
+    _lastDisposal = 'refused';
+    return;
+  }
+
+  // The last look before the signal, and as late as it can be taken. Everything
+  // above happened INSIDE the claim — a connect, an `initialize` handshake and a
+  // `thread/loaded/list`, each with its own timeout — and an adopting bridge
+  // leaves its mark in the registry (`lastUsedAt`), not on this connection.
+  if (!confirmDisposal()) {
+    _impl.logEvent('warn', 'codex_appserver_dispose_stood_down', { pid: entry.pid ?? null });
     _lastDisposal = 'refused';
     return;
   }

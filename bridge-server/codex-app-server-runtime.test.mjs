@@ -1203,18 +1203,15 @@ test('adopting the SAME broker over a live disposal claim keeps its leases and s
     leases: { [`${other}:codex-live`]: { pid: other, jobId: 'codex-live', renewedAt: claimedAt } },
   });
   const logs = [];
-  // The claimed broker survives its claimer here, so the re-probe below finds it
-  // and hands it over; `delay` is stubbed only to keep the test instant.
-  _setForTest({ connect: async () => fakeBrokerSocket(), delay: async () => {}, logEvent: (level, event) => logs.push(event) });
+  _setForTest({ connect: async () => fakeBrokerSocket(), logEvent: (level, event) => logs.push(event) });
 
   const adopted = await ensureCodexBroker({ env: {} });
   assert.equal(adopted.disposalClaimed, true);
   assert.ok(logs.includes('codex_appserver_adopted_over_disposal_claim'));
   assert.ok(readReg().leases[`${other}:codex-live`], 'the same broker keeps the leases held on it');
-  // Recording the adoption refreshes lastUsedAt, which is what makes a claimer
-  // that has not confirmed yet stand down. A claim we can already SEE is past
-  // that point, which is why ensureCodexBroker re-probes rather than trusting
-  // the bump (see the test below).
+  // Recording the adoption refreshes lastUsedAt, and THAT is the protection:
+  // the claimer re-reads it immediately before it signals (see the reaper test
+  // "a broker adopted mid-dispose is never signalled").
   assert.ok(Date.now() - readReg().lastUsedAt < 60_000);
 });
 
@@ -1303,13 +1300,13 @@ test('a connect that times out is never read as "nobody is home"', async () => {
   assert.equal(spawns, 0);
 });
 
-test('a broker under a CONFIRMED disposal claim is re-probed, not handed over mid-kill', async () => {
-  // claimDisposal publishes and confirms in one breath, so by the time a claim is
-  // visible here the claimer is already past its stand-down check: our
-  // lastUsedAt bump cannot save this broker, and `thread/loaded/list` is empty
-  // because we have not started a thread on it yet. Waiting the dispose out and
-  // looking again is what turns the window into the one redundant spawn it was
-  // always supposed to cost, instead of a raw ECONNREFUSED at the next dispatch.
+test('a broker under a live disposal claim is adopted AT ONCE, not waited out', async () => {
+  // This used to sleep 250 ms and re-probe, because the disposer never looked at
+  // the registry again after publishing its claim — so an adopter's `lastUsedAt`
+  // bump had nothing left to save it and the only safe move was to wait the
+  // dispose out. The disposer confirms immediately before it signals now, so the
+  // adoption IS the protection: waiting would only hand the claimer more time in
+  // which to act, and cost a redundant spawn whenever it did.
   const other = foreignLivePid();
   const claimedAt = Date.now();
   seedRegistry({
@@ -1319,23 +1316,22 @@ test('a broker under a CONFIRMED disposal claim is re-probed, not handed over mi
     disposing: { pid: other, at: claimedAt },
   });
 
-  let killed = false;
   let spawns = 0;
+  let connects = 0;
   _setForTest({
-    // The claimer's SIGTERM lands while we wait.
-    delay: async () => { killed = true; },
-    connect: async () => {
-      if (killed && spawns === 0) { const err = new Error('connect ECONNREFUSED'); err.code = 'ECONNREFUSED'; throw err; }
-      return fakeBrokerSocket({ brokerPid: killed ? 6060 : BROKER_PID });
-    },
+    connect: async () => { connects += 1; return fakeBrokerSocket({ brokerPid: BROKER_PID }); },
     spawnBroker: () => { spawns += 1; return new EventEmitter(); },
+    delay: async () => { throw new Error('ensureCodexBroker must not sleep on a disposal claim'); },
   });
 
   const broker = await ensureCodexBroker({ env: {} });
-  assert.equal(spawns, 1, 'the claimed broker was killed, so a replacement is spawned');
-  assert.equal(broker.pid, 6060);
-  assert.equal(broker.reused, false);
-  assert.equal(broker.disposalClaimed, false, 'the replacement inherits nothing from the disposed entry');
+  assert.equal(broker.pid, BROKER_PID, 'the claimed broker is handed over, not replaced');
+  assert.equal(broker.reused, true);
+  assert.equal(broker.disposalClaimed, true, 'and the claim is reported rather than hidden');
+  assert.equal(spawns, 0);
+  assert.equal(connects, 1, 'one probe, not one per pass');
+  // The bump is the whole protection — it is what the claimer re-reads.
+  assert.ok(Date.now() - readReg().lastUsedAt < 60_000);
 });
 
 test('a probe that could not tell is never read as "nobody is home"', async () => {
@@ -1467,6 +1463,46 @@ test('the reaper signals nothing when the socket says nobody is listening', asyn
   assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), true, 'the entry is still cleaned up');
   assert.deepEqual(kills, [], 'but nothing is signalled');
   assert.equal(readReg(), undefined);
+});
+
+test('a broker adopted mid-dispose is never signalled: the disposer re-confirms first', async () => {
+  // The failure this transport exists to prevent, driven end to end in one
+  // process. The reaper has published AND confirmed its claim and is inside its
+  // interrogation — a connect, an initialize handshake, a `thread/loaded/list`,
+  // seconds of RPC in the real thing — when another bridge adopts the same
+  // broker and is about to start a turn on it.
+  //
+  // Neither of the reaper's wire questions can see that bridge: it has loaded no
+  // thread yet, and it holds no lease because a lease needs a job and adoption
+  // comes first. All it has done is bump `lastUsedAt` in the registry, and
+  // re-reading that immediately before the signal is the only thing standing
+  // between the adopter and a SIGTERM through its first turn.
+  const kills = captureKills();
+  seedRegistry({ socketPath: brokerSocketPath(), pid: LIVE_BROKER_PID, lastUsedAt: Date.now() - 60 * 60_000 });
+
+  const logs = [];
+  let adopted = null;
+  _setForTest({
+    logEvent: (level, event) => logs.push(event),
+    connect: async () => fakeBrokerSocket({
+      brokerPid: LIVE_BROKER_PID,
+      handlers: {
+        // The other bridge gets in while the reaper is still asking. Its own
+        // probe opens a separate fake socket and never reaches this handler.
+        'thread/loaded/list': async () => {
+          adopted ??= await ensureCodexBroker({ env: {} });
+          return { data: [] };
+        },
+      },
+    }),
+  });
+
+  assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), false, 'standing down is not a reap');
+  assert.deepEqual(kills, [], 'the adopted broker must not be signalled');
+  assert.ok(logs.includes('codex_appserver_dispose_stood_down'));
+  assert.equal(adopted.pid, LIVE_BROKER_PID, 'the adopter got the live broker, not a corpse');
+  assert.ok(readReg(), 'and its entry survives — forgetting it would strand the broker unowned');
+  assert.equal(readReg().disposing, undefined, 'the withdrawn claim must not block the next adopter');
 });
 
 test('the idle reaper refuses a broker that still has a thread loaded', async () => {
