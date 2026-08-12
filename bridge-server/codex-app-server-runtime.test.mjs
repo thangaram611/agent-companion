@@ -38,7 +38,6 @@ import {
   steerCodexTurn,
   interruptCodexTurn,
   listLoadedCodexThreads,
-  getCodexThreadStatus,
   resolveCodexTurnId,
   resolveSteerConfirmMs,
   openCodexTurnWatcher,
@@ -48,8 +47,32 @@ import {
 } from './codex-app-server-runtime.mjs';
 import { resolveCodexTimeoutMs } from './codex-runtime.mjs';
 import { CODEX_PINNED_VERSION } from '../lib/codex-app-server-contract.mjs';
+import { note, threadItem, driftNote } from '../test/codex-wire-frames.mjs';
 import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
 import { fakeBrokerSocket, FAKE_BROKER_PID } from '../test/fake-codex-broker-socket.mjs';
+
+// Every artifact this suite provokes goes into its own sandbox, and neither pin
+// is ever unset: clearing a redirect is exactly what re-points a straggler at
+// the real path.
+//
+//   AGENT_COMPANION_HOME → lib/log.mjs's daemon.log. Measured 861 bytes of
+//     fabricated broker events per run appended to the operator's live
+//     ~/.claude/agent-companion/daemon.log — `codex_appserver_dispose_pid_mismatch`
+//     for pid 777777, a disposal claim by pid 23107, none of which existed.
+//   AGENT_RUNTIME_DIR → everything lib/runtime-paths.mjs resolves, so the
+//     registry and socket pins in beforeEach have a sandboxed FLOOR rather than
+//     being the only thing between this suite and the real runtime dir.
+//
+// Short dir names on purpose: a unix socket path over SUN_LEN (~104 bytes on
+// darwin) binds a silently truncated name (lib/runtime-paths.mjs).
+const HOME_SANDBOX = mkdtempSync(join(tmpdir(), 'cx-home-'));
+process.env.AGENT_COMPANION_HOME = HOME_SANDBOX;
+const RUNTIME_SANDBOX = mkdtempSync(join(tmpdir(), 'cx-rt-'));
+process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
+test.after(() => {
+  rmSync(HOME_SANDBOX, { recursive: true, force: true });
+  rmSync(RUNTIME_SANDBOX, { recursive: true, force: true });
+});
 
 const TID = 'T1';
 const BROKER_PID = FAKE_BROKER_PID;
@@ -85,7 +108,11 @@ async function connectFake(opts = {}, { env = {} } = {}) {
   return { conn, sock };
 }
 
-const note = (method, params) => ({ jsonrpc: '2.0', method, params });
+// `note` and `threadItem` come from test/codex-wire-frames.mjs, which BUILDS
+// every frame from the pinned contract: a field codex-cli 0.147.0 does not send
+// cannot be written down here, and the required ones a test does not care about
+// are filled in for it. The hand-rolled `{jsonrpc, method, params}` literal this
+// file used to carry is what let five wrong field names ship with green tests.
 
 // --- adapter selection -------------------------------------------------------
 
@@ -231,8 +258,11 @@ test('promptId keeps the codex prefix and encodes reply generation', () => {
 test('the accumulator streams deltas, folds a command, and completes on turn/completed', () => {
   const acc = createCodexTurnAccumulator(TID);
   acc.push(note('turn/started', { threadId: TID, turn: { id: 'TURN1' } }));
-  acc.push(note('item/started', { threadId: TID, item: { id: 'i1', type: 'commandExecution', command: 'npm test' } }));
-  acc.push(note('item/commandExecution/outputDelta', { threadId: TID, itemId: 'i1', chunk: 'ok\n' }));
+  acc.push(note('item/started', { threadId: TID, item: threadItem('commandExecution', { id: 'i1', command: 'npm test' }) }));
+  // `delta`, not `chunk`: the schema declares one payload field on every delta
+  // notification and the builder refuses the other three spellings this used to
+  // be written with.
+  acc.push(note('item/commandExecution/outputDelta', { threadId: TID, itemId: 'i1', delta: 'ok\n' }));
   acc.push(note('item/agentMessage/delta', { threadId: TID, itemId: 'm1', delta: 'Hello ' }));
   acc.push(note('item/agentMessage/delta', { threadId: TID, itemId: 'm1', delta: 'world' }));
 
@@ -243,8 +273,11 @@ test('the accumulator streams deltas, folds a command, and completes on turn/com
   assert.equal(acc.snapshot().toolCalls[0].status, 'in_progress');
   assert.equal(acc.snapshot().toolCalls[0].aggregated_output, 'ok\n');
 
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'i1', type: 'commandExecution', command: 'npm test', status: 'completed', exitCode: 0, aggregatedOutput: 'ok\n1 passing\n' } }));
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'm1', type: 'agentMessage', text: 'Hello world', phase: 'final_answer' } }));
+  acc.push(note('item/completed', {
+    threadId: TID,
+    item: threadItem('commandExecution', { id: 'i1', command: 'npm test', status: 'completed', exitCode: 0, aggregatedOutput: 'ok\n1 passing\n' }),
+  }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm1', text: 'Hello world', phase: 'final_answer' }) }));
   acc.push(note('turn/completed', { threadId: TID, turn: { id: 'TURN1', status: 'completed', items: [] } }));
 
   assert.deepEqual(acc.terminal, { status: 'completed', reason: 'turn/completed', error: null });
@@ -261,11 +294,25 @@ test('the accumulator streams deltas, folds a command, and completes on turn/com
   });
 });
 
+test('a delta spelt any way but the schema\'s cannot be written down', () => {
+  // The guard, asserted directly: these four were live reads in the accumulator,
+  // each with a green test feeding the same invention back to it. The builder is
+  // what makes rewriting one of them a red test rather than a silent no-op.
+  for (const invented of ['chunk', 'output', 'text']) {
+    assert.throws(
+      () => note('item/commandExecution/outputDelta', { threadId: TID, itemId: 'i1', [invented]: 'ok' }),
+      new RegExp(`carries \\\`${invented}\\\``),
+      `${invented} is not a field of item/commandExecution/outputDelta`,
+    );
+  }
+  assert.throws(() => note('item/agentMessage/delta', { threadId: TID, itemId: 'm1', text: 'hi' }), /carries `text`/);
+});
+
 test('the accumulator prefers the final answer over the commentary preamble', () => {
   const acc = createCodexTurnAccumulator(TID);
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'm1', type: 'agentMessage', text: 'Let me look at that.', phase: 'commentary' } }));
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'm2', type: 'agentMessage', text: 'THE ANSWER', phase: 'final_answer' } }));
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'm3', type: 'agentMessage', text: 'Anything else?', phase: 'commentary' } }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm1', text: 'Let me look at that.', phase: 'commentary' }) }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm2', text: 'THE ANSWER', phase: 'final_answer' }) }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm3', text: 'Anything else?', phase: 'commentary' }) }));
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
   assert.equal(acc.snapshot().message, 'THE ANSWER');
 });
@@ -314,12 +361,25 @@ test('an interrupted turn settles cancelled, with no answer', () => {
   assert.equal(acc.snapshot().message, 'partial thought');
 });
 
+test('a failed turn reports the message from Turn.error, which is an object', () => {
+  // `Turn.error` is a `TurnError` — "only populated when status is failed" — so
+  // the message is one level down. The two alternatives this used to read
+  // (`turn.error` itself, `turn.failure`) would have put `[object Object]` and
+  // `undefined` respectively in front of an operator.
+  const acc = createCodexTurnAccumulator(TID);
+  acc.push(note('turn/completed', { threadId: TID, turn: { id: 'TURN1', status: 'failed', error: { message: 'context window exceeded' } } }));
+  assert.equal(acc.terminal.status, 'failed');
+  assert.equal(acc.terminal.reason, 'failed');
+  assert.equal(acc.terminal.error, 'context window exceeded');
+  assert.throws(() => note('turn/completed', { threadId: TID, turn: { status: 'failed', failure: 'nope' } }), /carries `failure`/);
+});
+
 test('a failed command does not render like a successful one', () => {
   const acc = createCodexTurnAccumulator(TID);
-  acc.push(note('item/started', { threadId: TID, item: { id: 'i1', type: 'commandExecution', command: 'make build' } }));
+  acc.push(note('item/started', { threadId: TID, item: threadItem('commandExecution', { id: 'i1', command: 'make build' }) }));
   acc.push(note('item/completed', {
     threadId: TID,
-    item: { id: 'i1', type: 'commandExecution', command: 'make build', status: 'failed', exitCode: 2, aggregatedOutput: 'ld: symbol not found' },
+    item: threadItem('commandExecution', { id: 'i1', command: 'make build', status: 'failed', exitCode: 2, aggregatedOutput: 'ld: symbol not found' }),
   }));
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
   const call = acc.snapshot().toolCalls[0];
@@ -329,6 +389,8 @@ test('a failed command does not render like a successful one', () => {
   // The outcome lives on the ENTRY, never inside `input` — `input` stays the
   // invocation, which is what formatTerminalContent reads for "Files touched".
   assert.deepEqual(call.input, { command: 'make build' });
+  // And the snake_case twins are the exec stream's, not this transport's.
+  assert.throws(() => threadItem('commandExecution', { id: 'i1', command: 'x', exit_code: 2 }), /carries `exit_code`/);
 });
 
 test('a reasoning-only turn still produces content', () => {
@@ -345,29 +407,101 @@ test('a reasoning-only turn still produces content', () => {
   assert.notEqual(snap.thoughts.trim(), '');
 });
 
-test('a completed reasoning item replaces the deltas that streamed it', () => {
+test('reasoning deltas keep the array boundary their index fields announce', () => {
+  // `contentIndex` and `summaryIndex` are REQUIRED on the two reasoning delta
+  // methods precisely because `content` and `summary` are arrays, and the
+  // completed item joins their entries with a newline. An interrupted turn is
+  // the case where no completed item ever arrives to replace the deltas, so
+  // what streamed IS what the operator reads — it must not read as
+  // `Checking the config.Then the tests.Read config`.
+  const acc = createCodexTurnAccumulator(TID);
+  acc.push(note('item/reasoning/textDelta', { threadId: TID, itemId: 'r1', contentIndex: 0, delta: 'Checking ' }));
+  acc.push(note('item/reasoning/textDelta', { threadId: TID, itemId: 'r1', contentIndex: 0, delta: 'the config.' }));
+  acc.push(note('item/reasoning/textDelta', { threadId: TID, itemId: 'r1', contentIndex: 1, delta: 'Then the tests.' }));
+  acc.push(note('item/reasoning/summaryTextDelta', { threadId: TID, itemId: 'r1', summaryIndex: 0, delta: 'Read config' }));
+  acc.push(note('turn/completed', { threadId: TID, turn: { status: 'interrupted' } }));
+  assert.equal(acc.snapshot().thoughts, 'Checking the config.\nThen the tests.\nRead config');
+  // Same index, same entry: a chunk boundary inside one array entry is not a
+  // line break, or every token would land on its own line.
+  assert.equal(acc.snapshot().thoughts.split('\n')[0], 'Checking the config.');
+});
+
+test('a completed reasoning item replaces the deltas that streamed it, from content and summary', () => {
+  // A reasoning item is `{content: string[], summary: string[]}` — there is no
+  // `text`, which is what this branch used to read, so it never fired at all and
+  // the replay harvested no reasoning. Both arrays are joined: they are the raw
+  // chain and the model's own précis of it, streamed through two different delta
+  // methods into this one bucket.
   const acc = createCodexTurnAccumulator(TID);
   acc.push(note('item/reasoning/textDelta', { threadId: TID, itemId: 'r1', delta: 'half' }));
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'r1', type: 'reasoning', text: 'half a thought, whole' } }));
+  acc.push(note('item/completed', {
+    threadId: TID,
+    item: threadItem('reasoning', { id: 'r1', content: ['half a thought, whole'], summary: ['decided to look'] }),
+  }));
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
-  assert.equal(acc.snapshot().thoughts, 'half a thought, whole');
+  assert.equal(acc.snapshot().thoughts, 'half a thought, whole\ndecided to look');
+  assert.throws(() => threadItem('reasoning', { id: 'r1', text: 'half a thought, whole' }), /carries `text`/);
+});
+
+test('a fileChange item yields one entry per file, with the patch kind as a word', () => {
+  // `{changes: FileUpdateChange[]}`, each `{diff, kind, path}` — NOT the
+  // `{files:[…]}`/`{path,kind}` shape the exec collector guesses at, which is
+  // what this branch used to be handed. Every app-server job that edited a file
+  // produced zero toolCalls and an empty "Files touched" as a result.
+  //
+  // `kind` is a tagged OBJECT (`{type:'update', move_path?}`), so it is unwrapped
+  // to its tag: `input.kind` holds a string on the exec side and server.mjs
+  // renders these entries beside exec ones.
+  const acc = createCodexTurnAccumulator(TID);
+  acc.push(note('item/completed', {
+    threadId: TID,
+    item: threadItem('fileChange', {
+      id: 'f1',
+      status: 'completed',
+      changes: [
+        { path: 'src/a.mjs', kind: { type: 'update' }, diff: '@@ -1 +1 @@' },
+        { path: 'src/new.mjs', kind: { type: 'add' }, diff: '@@ -0,0 +1 @@' },
+      ],
+    }),
+  }));
+  acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
+  assert.deepEqual(acc.snapshot().toolCalls, [
+    { name: 'file_change', input: { path: 'src/a.mjs', kind: 'update' } },
+    { name: 'file_change', input: { path: 'src/new.mjs', kind: 'add' } },
+  ]);
+  assert.throws(() => threadItem('fileChange', { id: 'f1', files: [{ path: 'src/a.mjs' }] }), /carries `files`/);
+});
+
+test('an mcpToolCall records the arguments it was called with', () => {
+  // `arguments`, not `input`/`args` — neither of which is a property of the item,
+  // so every MCP call recorded `{}` and no test in the repo touched the branch.
+  const acc = createCodexTurnAccumulator(TID);
+  acc.push(note('item/completed', {
+    threadId: TID,
+    item: threadItem('mcpToolCall', { id: 'x1', server: 'filesystem', tool: 'read_file', status: 'completed', arguments: { path: '/w/a.mjs' } }),
+  }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('webSearch', { id: 'w1', query: 'codex app-server' }) }));
+  acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
+  assert.deepEqual(acc.snapshot().toolCalls, [
+    { name: 'read_file', input: { path: '/w/a.mjs' } },
+    { name: 'webSearch', input: { query: 'codex app-server' } },
+  ]);
+  assert.throws(() => threadItem('mcpToolCall', { id: 'x1', server: 's', tool: 't', input: {} }), /carries `input`/);
 });
 
 test('turn/completed replays its items without duplicating what already streamed', () => {
   // The salvage path for a bridge that attached mid-turn: the replay must add
   // what it missed and double nothing it saw.
   const acc = createCodexTurnAccumulator(TID);
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'i1', type: 'commandExecution', command: 'ls', status: 'completed', exitCode: 0 } }));
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'f1', type: 'fileChange', path: 'src/a.mjs', kind: 'modified' } }));
+  const ls = threadItem('commandExecution', { id: 'i1', command: 'ls', status: 'completed', exitCode: 0 });
+  const edit = threadItem('fileChange', { id: 'f1', status: 'completed', changes: [{ path: 'src/a.mjs', kind: { type: 'update' }, diff: '@@' }] });
+  acc.push(note('item/completed', { threadId: TID, item: ls }));
+  acc.push(note('item/completed', { threadId: TID, item: edit }));
   acc.push(note('turn/completed', {
     threadId: TID,
     turn: {
       status: 'completed',
-      items: [
-        { id: 'i1', type: 'commandExecution', command: 'ls', status: 'completed', exitCode: 0 },
-        { id: 'f1', type: 'fileChange', path: 'src/a.mjs', kind: 'modified' },
-        { id: 'm9', type: 'agentMessage', text: 'ONLY IN THE REPLAY', phase: 'final_answer' },
-      ],
+      items: [ls, edit, threadItem('agentMessage', { id: 'm9', text: 'ONLY IN THE REPLAY', phase: 'final_answer' })],
     },
   }));
   const snap = acc.snapshot();
@@ -394,24 +528,41 @@ test('another job\'s notifications never reach this thread\'s accumulator', () =
 });
 
 test('a thread-scoped error and an app-server death are both terminal, and differently', () => {
+  // The error notification is `{error: TurnError, threadId, turnId, willRetry}`,
+  // all four required — the message is one level down, and the flat
+  // `params.message` this used to read first is the EXEC stream's shape.
   const failed = createCodexTurnAccumulator(TID);
-  failed.push(note('error', { threadId: TID, message: 'model overloaded' }));
+  failed.push(note('error', { threadId: TID, turnId: 'TURN1', willRetry: false, error: { message: 'model overloaded' } }));
   assert.equal(failed.terminal.status, 'failed');
   assert.equal(failed.terminal.error, 'model overloaded');
+  assert.throws(() => note('error', { threadId: TID, message: 'model overloaded' }), /carries `message`/);
 
+  // `broker/appServerDied` is the broker's own frame, not an app-server method —
+  // hence driftNote, which is the only way to write a frame this pin has never
+  // seen and says so at the call site.
   const died = createCodexTurnAccumulator(TID);
-  died.push(note('broker/appServerDied', { code: 7, signal: null }));
+  died.push(driftNote('broker/appServerDied', { code: 7, signal: null }));
   assert.equal(died.terminal.status, 'unreachable');
   assert.match(died.terminal.error, /in-flight turn was lost/);
 });
 
-test('an item-level error is recorded but does not end the turn', () => {
+test('there is no `error` ThreadItem variant to record', () => {
+  // This branch existed and had a test; the item type it handled does not exist.
+  // The 18 variants carry no `error`, so a turn's errors arrive as the `error`
+  // NOTIFICATION (fatal) or as a `failed` status on the item that raised one.
+  assert.throws(
+    () => threadItem('error', { id: 'e1', message: 'tool blew up' }),
+    /is not one of codex-cli .* 18 ThreadItem variants/,
+  );
   const acc = createCodexTurnAccumulator(TID);
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'e1', type: 'error', message: 'tool blew up' } }));
-  assert.equal(acc.terminal, null);
+  acc.push(note('item/completed', {
+    threadId: TID,
+    item: threadItem('commandExecution', { id: 'i1', command: 'make', status: 'failed', exitCode: 1 }),
+  }));
+  assert.equal(acc.terminal, null, 'a failed item does not end the turn — only turn/completed and `error` do');
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
   assert.equal(acc.terminal.status, 'completed');
-  assert.equal(acc.snapshot().error, 'tool blew up');
+  assert.equal(acc.snapshot().toolCalls[0].status, 'failed');
 });
 
 test('a plan-only turn carries its plan so it does not read as empty', () => {
@@ -419,6 +570,9 @@ test('a plan-only turn carries its plan so it does not read as empty', () => {
   acc.push(note('turn/plan/updated', { threadId: TID, plan: [{ step: 'read the file', status: 'pending' }] }));
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
   assert.deepEqual(acc.snapshot().plan, [{ step: 'read the file', status: 'pending' }]);
+  // `steps` was the other spelling this read; `turn/plan/updated` declares
+  // `plan`, required.
+  assert.throws(() => note('turn/plan/updated', { threadId: TID, steps: [] }), /carries `steps`/);
 });
 
 // --- approvalPolicy and the absent model -------------------------------------
@@ -726,7 +880,7 @@ test('an unconfirmed steer says so — it is not reported as delivered, nor as f
   // window that sees nothing is the normal case, and the honest answer is
   // "accepted, not yet confirmed".
   const { conn } = await connectFake({
-    handlers: { 'turn/steer': (p) => ({ turn: { id: p.expectedTurnId } }) },  // no injection ever announced
+    handlers: { 'turn/steer': (p) => ({ turnId: p.expectedTurnId }) },  // no injection ever announced
   });
   const steer = await steerCodexTurn({
     conn, threadId: 'T9', prompt: 'switch to ripgrep', expectedTurnId: 'TURN1', confirmMs: 20,
@@ -743,12 +897,13 @@ test('the turn\'s own opening message never counts as a steer confirmation', asy
       'turn/steer': (p) => {
         // The opening prompt's userMessage, replayed while the steer is in
         // flight. Same item type, different text — and it must not confirm.
-        setTimeout(() => sock.deliver({
-          jsonrpc: '2.0',
-          method: 'item/completed',
-          params: { threadId: 'T9', item: { id: 'item_0', type: 'userMessage', content: [{ type: 'text', text: 'the original task' }] } },
-        }), 0);
-        return { turn: { id: p.expectedTurnId } };
+        setTimeout(() => sock.deliver(note('item/completed', {
+          threadId: 'T9',
+          item: threadItem('userMessage', { id: 'item_0', content: [{ type: 'text', text: 'the original task' }] }),
+        })), 0);
+        // `TurnSteerResponse` is `{turnId}`, the shape the fakes were corrected
+        // to — a handler that overrides one must not reintroduce the wrong one.
+        return { turnId: p.expectedTurnId };
       },
     },
   });
@@ -1008,7 +1163,10 @@ test('the level check carries a pinned model into the resume it performs', async
 test('the level check keeps watching an active thread', async () => {
   const { conn, sock } = await connectFake({ statuses: { [TID]: 'active' } });
   const watcher = await openCodexTurnWatcher({ conn, threadId: TID, initialLevelCheck: true, timeoutMs: 5_000 });
-  sock.deliver(note('turn/completed', { threadId: TID, turn: { status: 'completed', items: [{ type: 'agentMessage', text: 'live tail', phase: 'final_answer' }] } }));
+  sock.deliver(note('turn/completed', {
+    threadId: TID,
+    turn: { status: 'completed', items: [threadItem('agentMessage', { id: 'm1', text: 'live tail', phase: 'final_answer' })] },
+  }));
   const result = await watcher.done;
   conn.close();
   assert.equal(result.status, 'completed');
@@ -1067,18 +1225,15 @@ test('adopting the SAME broker over a live disposal claim keeps its leases and s
     leases: { [`${other}:codex-live`]: { pid: other, jobId: 'codex-live', renewedAt: claimedAt } },
   });
   const logs = [];
-  // The claimed broker survives its claimer here, so the re-probe below finds it
-  // and hands it over; `delay` is stubbed only to keep the test instant.
-  _setForTest({ connect: async () => fakeBrokerSocket(), delay: async () => {}, logEvent: (level, event) => logs.push(event) });
+  _setForTest({ connect: async () => fakeBrokerSocket(), logEvent: (level, event) => logs.push(event) });
 
   const adopted = await ensureCodexBroker({ env: {} });
   assert.equal(adopted.disposalClaimed, true);
   assert.ok(logs.includes('codex_appserver_adopted_over_disposal_claim'));
   assert.ok(readReg().leases[`${other}:codex-live`], 'the same broker keeps the leases held on it');
-  // Recording the adoption refreshes lastUsedAt, which is what makes a claimer
-  // that has not confirmed yet stand down. A claim we can already SEE is past
-  // that point, which is why ensureCodexBroker re-probes rather than trusting
-  // the bump (see the test below).
+  // Recording the adoption refreshes lastUsedAt, and THAT is the protection:
+  // the claimer re-reads it immediately before it signals (see the reaper test
+  // "a broker adopted mid-dispose is never signalled").
   assert.ok(Date.now() - readReg().lastUsedAt < 60_000);
 });
 
@@ -1167,13 +1322,13 @@ test('a connect that times out is never read as "nobody is home"', async () => {
   assert.equal(spawns, 0);
 });
 
-test('a broker under a CONFIRMED disposal claim is re-probed, not handed over mid-kill', async () => {
-  // claimDisposal publishes and confirms in one breath, so by the time a claim is
-  // visible here the claimer is already past its stand-down check: our
-  // lastUsedAt bump cannot save this broker, and `thread/loaded/list` is empty
-  // because we have not started a thread on it yet. Waiting the dispose out and
-  // looking again is what turns the window into the one redundant spawn it was
-  // always supposed to cost, instead of a raw ECONNREFUSED at the next dispatch.
+test('a broker under a live disposal claim is adopted AT ONCE, not waited out', async () => {
+  // This used to sleep 250 ms and re-probe, because the disposer never looked at
+  // the registry again after publishing its claim — so an adopter's `lastUsedAt`
+  // bump had nothing left to save it and the only safe move was to wait the
+  // dispose out. The disposer confirms immediately before it signals now, so the
+  // adoption IS the protection: waiting would only hand the claimer more time in
+  // which to act, and cost a redundant spawn whenever it did.
   const other = foreignLivePid();
   const claimedAt = Date.now();
   seedRegistry({
@@ -1183,23 +1338,109 @@ test('a broker under a CONFIRMED disposal claim is re-probed, not handed over mi
     disposing: { pid: other, at: claimedAt },
   });
 
-  let killed = false;
   let spawns = 0;
+  let connects = 0;
   _setForTest({
-    // The claimer's SIGTERM lands while we wait.
-    delay: async () => { killed = true; },
-    connect: async () => {
-      if (killed && spawns === 0) { const err = new Error('connect ECONNREFUSED'); err.code = 'ECONNREFUSED'; throw err; }
-      return fakeBrokerSocket({ brokerPid: killed ? 6060 : BROKER_PID });
-    },
+    connect: async () => { connects += 1; return fakeBrokerSocket({ brokerPid: BROKER_PID }); },
     spawnBroker: () => { spawns += 1; return new EventEmitter(); },
+    delay: async () => { throw new Error('ensureCodexBroker must not sleep on a disposal claim'); },
   });
 
   const broker = await ensureCodexBroker({ env: {} });
-  assert.equal(spawns, 1, 'the claimed broker was killed, so a replacement is spawned');
-  assert.equal(broker.pid, 6060);
+  assert.equal(broker.pid, BROKER_PID, 'the claimed broker is handed over, not replaced');
+  assert.equal(broker.reused, true);
+  assert.equal(broker.disposalClaimed, true, 'and the claim is reported rather than hidden');
+  assert.equal(spawns, 0);
+  // Two probes, and neither is a pass of the old loop: one to find the broker,
+  // one AFTER the bump to check the claimer had not already acted. No sleep
+  // between them — `delay` throws.
+  assert.equal(connects, 2);
+  // The bump is the whole protection — it is what the claimer re-reads.
+  assert.ok(Date.now() - readReg().lastUsedAt < 60_000);
+});
+
+test('an unclaimed broker is adopted on ONE probe — the second look is the claimed path only', async () => {
+  // The re-probe is the price of losing a race that can only happen when a
+  // disposer is already mid-dispose. Charging it to every dispatch would be a
+  // round trip per turn for a race nobody is running.
+  seedRegistry({ socketPath: brokerSocketPath(), pid: BROKER_PID, lastUsedAt: Date.now() });
+  let connects = 0;
+  _setForTest({ connect: async () => { connects += 1; return fakeBrokerSocket({ brokerPid: BROKER_PID }); } });
+
+  const broker = await ensureCodexBroker({ env: {} });
+  assert.equal(broker.disposalClaimed, false);
+  assert.equal(connects, 1);
+});
+
+test('a claimer that signalled before our bump landed costs a redundant spawn, not a corpse', async () => {
+  // The residual window the bump cannot cover: the claimer's `confirmDisposal`
+  // read the file in the gap between our probe answering and our `record`
+  // completing, so it saw the OLD `lastUsedAt` and signalled anyway. Handing
+  // that back would fail the caller's very first call with ECONNREFUSED. The
+  // look AFTER the bump catches it and turns it into the one redundant spawn
+  // this protocol promises as its worst case everywhere else.
+  const other = foreignLivePid();
+  const claimedAt = Date.now();
+  seedRegistry({
+    socketPath: brokerSocketPath(),
+    pid: BROKER_PID,
+    lastUsedAt: claimedAt - 60 * 60_000,
+    disposing: { pid: other, at: claimedAt },
+  });
+
+  let spawns = 0;
+  let connects = 0;
+  const logs = [];
+  _setForTest({
+    logEvent: (level, event) => logs.push(event),
+    spawnBroker: () => { spawns += 1; return new EventEmitter(); },
+    connect: async () => {
+      connects += 1;
+      // Probe 1 finds it alive; the SIGTERM lands while we record our adoption,
+      // so probe 2 finds nothing listening. The spawned replacement answers.
+      if (connects === 2) { const err = new Error('connect ECONNREFUSED'); err.code = 'ECONNREFUSED'; throw err; }
+      return fakeBrokerSocket({ brokerPid: connects === 1 ? BROKER_PID : 6060 });
+    },
+  });
+
+  const broker = await ensureCodexBroker({ env: {} });
+  assert.equal(spawns, 1, 'the adopted broker was already dead, so a replacement is spawned');
+  assert.equal(broker.pid, 6060, 'and the caller gets the replacement, not the corpse');
   assert.equal(broker.reused, false);
   assert.equal(broker.disposalClaimed, false, 'the replacement inherits nothing from the disposed entry');
+  assert.ok(logs.includes('codex_appserver_adopted_broker_gone'));
+  assert.equal(readReg().pid, 6060, 'and the registry describes the live broker');
+  assert.equal(readReg().disposing, undefined, 'not the dead one, nor its claim');
+});
+
+test('a re-probe that could not TELL keeps the adoption rather than racing a live broker', async () => {
+  // Same discipline as the first probe: EACCES/EMFILE is a failure to ask, not
+  // evidence of death, and the broker we reached one moment ago is far better
+  // evidence. Spawning here would race a broker that is very much alive.
+  const other = foreignLivePid();
+  const claimedAt = Date.now();
+  seedRegistry({
+    socketPath: brokerSocketPath(),
+    pid: BROKER_PID,
+    lastUsedAt: claimedAt - 60 * 60_000,
+    disposing: { pid: other, at: claimedAt },
+  });
+
+  let spawns = 0;
+  let connects = 0;
+  _setForTest({
+    spawnBroker: () => { spawns += 1; return new EventEmitter(); },
+    connect: async () => {
+      connects += 1;
+      if (connects === 2) { const err = new Error('too many open files'); err.code = 'EMFILE'; throw err; }
+      return fakeBrokerSocket({ brokerPid: BROKER_PID });
+    },
+  });
+
+  const broker = await ensureCodexBroker({ env: {} });
+  assert.equal(spawns, 0);
+  assert.equal(broker.pid, BROKER_PID);
+  assert.equal(broker.reused, true);
 });
 
 test('a probe that could not tell is never read as "nobody is home"', async () => {
@@ -1333,15 +1574,66 @@ test('the reaper signals nothing when the socket says nobody is listening', asyn
   assert.equal(readReg(), undefined);
 });
 
+test('a broker adopted mid-dispose is never signalled: the disposer re-confirms first', async () => {
+  // The failure this transport exists to prevent, driven end to end in one
+  // process. The reaper has published AND confirmed its claim and is inside its
+  // interrogation — a connect, an initialize handshake, a `thread/loaded/list`,
+  // seconds of RPC in the real thing — when another bridge adopts the same
+  // broker and is about to start a turn on it.
+  //
+  // Neither of the reaper's wire questions can see that bridge: it has loaded no
+  // thread yet, and it holds no lease because a lease needs a job and adoption
+  // comes first. All it has done is bump `lastUsedAt` in the registry, and
+  // re-reading that immediately before the signal is the only thing standing
+  // between the adopter and a SIGTERM through its first turn.
+  const kills = captureKills();
+  seedRegistry({ socketPath: brokerSocketPath(), pid: LIVE_BROKER_PID, lastUsedAt: Date.now() - 60 * 60_000 });
+
+  const logs = [];
+  let adopted = null;
+  _setForTest({
+    logEvent: (level, event) => logs.push(event),
+    connect: async () => fakeBrokerSocket({
+      brokerPid: LIVE_BROKER_PID,
+      handlers: {
+        // The other bridge gets in while the reaper is still asking. Its own
+        // probe opens a separate fake socket and never reaches this handler.
+        'thread/loaded/list': async () => {
+          adopted ??= await ensureCodexBroker({ env: {} });
+          return { data: [] };
+        },
+      },
+    }),
+  });
+
+  assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), false, 'standing down is not a reap');
+  assert.deepEqual(kills, [], 'the adopted broker must not be signalled');
+  assert.ok(logs.includes('codex_appserver_dispose_stood_down'));
+  assert.equal(adopted.pid, LIVE_BROKER_PID, 'the adopter got the live broker, not a corpse');
+  assert.ok(readReg(), 'and its entry survives — forgetting it would strand the broker unowned');
+  assert.equal(readReg().disposing, undefined, 'the withdrawn claim must not block the next adopter');
+});
+
 test('the idle reaper refuses a broker that still has a thread loaded', async () => {
   // The case no lease can cover: the bridge that started the turn DIED, so its
   // lease is long gone — and the turn it started is exactly the work this whole
   // transport exists to protect. `thread/loaded/list` is the authoritative
   // answer, immune to the PID reuse a pid probe would suffer.
-  const gone = await deadPid();
-  _setForTest({ connect: async () => fakeBrokerSocket({ handlers: { 'thread/loaded/list': () => ({ data: ['T-live'] }) } }) });
-  seedRegistry({ socketPath: brokerSocketPath(), pid: gone, lastUsedAt: Date.now() - 60 * 60_000 });
+  //
+  // The recorded pid is the one the live broker claims, deliberately: seeded
+  // with any other pid the reaper refuses on the identity mismatch instead, and
+  // the loaded thread stops being the thing under test — deleting the guard
+  // entirely still passed. Here it is the only refusal available.
+  _setForTest({
+    connect: async () => fakeBrokerSocket({
+      brokerPid: LIVE_BROKER_PID,
+      handlers: { 'thread/loaded/list': () => ({ data: ['T-live'] }) },
+    }),
+  });
+  const kills = captureKills();
+  seedRegistry({ socketPath: brokerSocketPath(), pid: LIVE_BROKER_PID, lastUsedAt: Date.now() - 60 * 60_000 });
   assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), false);
+  assert.deepEqual(kills, [], 'a broker holding a thread must not be signalled');
 });
 
 test('the idle reaper refuses when it could not interrogate the broker at all', async () => {
@@ -1497,19 +1789,28 @@ test('end to end: a turn streams through the real broker to a terminal summary',
   assert.equal(turn.attached, false);
 
   // Everything below travels app-server stdout -> broker -> threadId routing ->
-  // this connection -> the accumulator. Nothing is injected locally.
+  // this connection -> the accumulator. Nothing is injected locally — which is
+  // why these frames are BUILT from the pinned contract like every other frame
+  // in this suite rather than written out here. They were the last hand-written
+  // ones left, so the single test proving the accumulator works through a real
+  // broker was also the only one that could still disagree with the schema.
+  // `fake/emit` refuses an off-contract frame now too, so it cannot come back.
   await conn.call('fake/emit', {
     frames: [
-      { jsonrpc: '2.0', method: 'turn/started', params: { threadId, turn: { id: 'TURN1' } } },
-      { jsonrpc: '2.0', method: 'item/started', params: { threadId, item: { id: 'i1', type: 'commandExecution', command: 'rg TODO' } } },
-      { jsonrpc: '2.0', method: 'item/reasoning/textDelta', params: { threadId, itemId: 'r1', delta: 'scanning' } },
-      { jsonrpc: '2.0', method: 'item/completed', params: { threadId, item: { id: 'i1', type: 'commandExecution', command: 'rg TODO', status: 'failed', exitCode: 1, aggregatedOutput: 'no matches' } } },
-      { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId, itemId: 'm1', delta: 'No TODOs ' } },
-      { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId, itemId: 'm1', delta: 'anywhere.' } },
+      note('turn/started', { threadId, turn: { id: 'TURN1' } }),
+      note('item/started', { threadId, item: threadItem('commandExecution', { id: 'i1', command: 'rg TODO' }) }),
+      note('item/reasoning/textDelta', { threadId, itemId: 'r1', delta: 'scanning' }),
+      note('item/completed', { threadId, item: threadItem('commandExecution', {
+        id: 'i1', command: 'rg TODO', status: 'failed', exitCode: 1, aggregatedOutput: 'no matches',
+      }) }),
+      note('item/agentMessage/delta', { threadId, itemId: 'm1', delta: 'No TODOs ' }),
+      note('item/agentMessage/delta', { threadId, itemId: 'm1', delta: 'anywhere.' }),
       // Another job's event, on the same broker: it must never land here.
-      { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'T-OTHER', itemId: 'x', delta: 'SOMEONE ELSE' } },
-      { jsonrpc: '2.0', method: 'item/completed', params: { threadId, item: { id: 'm1', type: 'agentMessage', text: 'No TODOs anywhere.', phase: 'final_answer' } } },
-      { jsonrpc: '2.0', method: 'turn/completed', params: { threadId, turn: { id: 'TURN1', status: 'completed', items: [] } } },
+      note('item/agentMessage/delta', { threadId: 'T-OTHER', itemId: 'x', delta: 'SOMEONE ELSE' }),
+      note('item/completed', { threadId, item: threadItem('agentMessage', {
+        id: 'm1', text: 'No TODOs anywhere.', phase: 'final_answer',
+      }) }),
+      note('turn/completed', { threadId, turn: { id: 'TURN1', status: 'completed', items: [] } }),
     ],
   });
 

@@ -9,10 +9,26 @@ import { join } from 'node:path';
 
 const STATE_SANDBOX = mkdtempSync(join(tmpdir(), 'copilot-state-server-'));
 process.env.AGENT_COMPANION_HOME = STATE_SANDBOX;
+// runtimeDir() is pinned rather than the bridge log alone: AGENT_COMPANION_HOME
+// does not reach it (lib/host.mjs derives the companion home from the HOST, not
+// from that var), and the bridge log is not the only artifact a fake job leaves
+// behind. Measured for one run of this file against the operator's live
+// ~/.claude/agent-companion/runtime: 31,396 bytes of agent-bridge.log, 22,031
+// bytes of completions.jsonl — the ledger a restarted bridge HYDRATES JOBS FROM,
+// so fabricated jobs came back as real ones — and 19 digest files. One knob
+// moves all of them (lib/runtime-paths.test.mjs pins that invariant). Never
+// unset it in teardown: clearing it is exactly what re-points a straggler at the
+// real path. Short dir name because a unix socket path over SUN_LEN (~104 bytes
+// on darwin) binds a silently truncated name.
+const RUNTIME_SANDBOX = mkdtempSync(join(tmpdir(), 'ac-rt-srv-'));
+process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
 process.env.AGENT_COMPANION_DEFAULT_TARGET = 'copilot';
 const TEST_CWD = tmpdir();
 
-test.after(() => rmSync(STATE_SANDBOX, { recursive: true, force: true }));
+test.after(() => {
+  rmSync(STATE_SANDBOX, { recursive: true, force: true });
+  rmSync(RUNTIME_SANDBOX, { recursive: true, force: true });
+});
 
 async function bridge() {
   return import('./server.mjs');
@@ -112,7 +128,11 @@ test('server imports safely and dispatch handles the public boundary errors/stat
   assert.equal(statusWithDiagnostics.ok, true);
   assert.equal(statusWithDiagnostics.action, 'status');
   assert.equal(statusWithDiagnostics.diagnostics.runtime.adapter, process.env.COPILOT_RUNTIME_ADAPTER || 'acp');
-  assert.match(statusWithDiagnostics.diagnostics.runtime.dir, /copilot-state-server-|agent-companion/);
+  // Exact, not a regex that also accepted `agent-companion` — the operator's
+  // REAL runtime dir contains that substring, so the loose match passed while
+  // this suite was writing its fake ledger rows and digests there. This is now
+  // the in-suite proof that the AGENT_RUNTIME_DIR pin still reaches runtimeDir().
+  assert.equal(statusWithDiagnostics.diagnostics.runtime.dir, RUNTIME_SANDBOX);
   assert.equal(typeof statusWithDiagnostics.diagnostics.node.ok, 'boolean');
   await assert.rejects(() => mod.dispatch({ action: 'frobnicate' }), /unhandled action/);
 
@@ -1353,6 +1373,47 @@ test('OpenCode server mode: send routes through the HTTP server and completes', 
   }
 });
 
+test('OpenCode server mode: a watch that breaks after the session opened records WHY in the digest', async () => {
+  // The twin of the codex app-server test below. Both watch catches must store
+  // the failure on `adapterResult`, not only write it: once the session is open
+  // the job HAS a promptId, so emitNotification re-renders the digest body from
+  // `adapterResult` a moment later — and this branch used to leave the previous
+  // snapshot there, which rebuilt the file with the error text gone.
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-oc-watchfail';
+  try {
+    await withOpenCodeServer({
+      fetchJson: async (url) => {
+        if (url.includes('/global/health')) return { ok: true, data: { healthy: true } };
+        if (url.includes('/session?directory=')) return { ok: true, data: { id: 'ses_watchfail' } };
+        return { ok: true, data: {} };
+      },
+      // The session exists; the event stream the watcher needs does not.
+      openEventStream: async () => { throw new Error('event stream refused the connection'); },
+    }, async () => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'opencode', task: 'watch breaks', mode: 'EXECUTE',
+        template: 'general', cwd: TEST_CWD, host_session_id: 'sid-oc-watchfail', parallel: 'never', max_wait_sec: 5,
+      }));
+      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-oc-watchfail', max_wait_sec: 5 }));
+      assert.equal(terminal.status, 'failed');
+      const job = jobs.get(send.job_id);
+      assert.equal(job.detail, 'opencode_server_watch_error');
+      assert.ok(job.promptId, 'the session opened, so the digest refresh on notify is live');
+      assert.match(readFileSync(digestPath(send.job_id), 'utf8'), /event stream refused the connection/,
+        'the digest names the failure, not just the header');
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-oc-watchfail') jobs.delete(id);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
 test('REGRESSION OpenCode server model: a profile model reaches startOpenCodeServerPrompt body', async () => {
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
@@ -1815,6 +1876,7 @@ test('Codex app-server mode: end to end through the REAL broker and the shared f
   const { dispatch, jobs, _resetForTest } = mod;
   const cx = await import('./codex-app-server-runtime.mjs');
   const { fakeCodexBin } = await import('../test/fake-codex-app-server.mjs');
+  const { note, threadItem } = await import('../test/codex-wire-frames.mjs');
   _resetForTest();
 
   // Unix socket paths are truncated at SUN_LEN (~104 bytes), so the root stays
@@ -1872,10 +1934,15 @@ test('Codex app-server mode: end to end through the REAL broker and the shared f
   // app-server stdout -> broker -> threadId routing -> the bridge's own
   // connection. Nothing is injected into the bridge locally.
   const driver = await cx.connectCodexBroker({ socketPath: process.env.CODEX_BROKER_SOCKET_PATH });
+  // Built from the pinned contract (test/codex-wire-frames.mjs), not written by
+  // hand: these three frames are the bridge's only end-to-end proof that the
+  // digest it publishes came off a real wire, so their shape is the assertion.
   await driver.call('fake/emit', { frames: [
-    { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'T1', itemId: 'm1', delta: 'through the real broker' } },
-    { jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'T1', item: { id: 'm1', type: 'agentMessage', text: 'through the real broker', phase: 'final_answer' } } },
-    { jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'T1', turn: { id: 'TURN1', status: 'completed', items: [] } } },
+    note('item/agentMessage/delta', { threadId: 'T1', itemId: 'm1', delta: 'through the real broker' }),
+    note('item/completed', { threadId: 'T1', item: threadItem('agentMessage', {
+      id: 'm1', text: 'through the real broker', phase: 'final_answer',
+    }) }),
+    note('turn/completed', { threadId: 'T1', turn: { id: 'TURN1', status: 'completed', items: [] } }),
   ] });
   driver.close();
 
@@ -2451,6 +2518,51 @@ test('Codex app-server mode: hydrate resumes the job instead of retiring it, and
   } finally {
     for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-hydrate') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
     if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('a hydrated adapterResult does not latch the carry-forward off for the renders after it', async () => {
+  // The other side of W1.4'. Hydrate restores `job.adapterResult` from the
+  // ledger, so the FIRST render a new bridge makes can be the previous bridge's
+  // own completed answer — which the digest on disk already contains. When the
+  // carry memoized that verdict, it latched "nothing to carry" for the whole
+  // process, and the next render (the resumed watcher's first delta, whose
+  // accumulator is empty) rebuilt the digest from nothing: measured 7,507 bytes
+  // to 351, the dead bridge's work gone. The salvaged text is memoized now and
+  // the containment test runs per render, so the section comes back the moment
+  // the incoming render stops containing it.
+  const mod = await bridge();
+  const { jobs, _resetForTest } = mod;
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  try {
+    const jobId = 'codex-carry-latch';
+    // The hydrated result IS the dead bridge's answer, byte for byte — that is
+    // what makes containment hold on the first render.
+    const answer = Array.from({ length: 60 }, (_, i) => `MARKER-CARRY streamed line ${i} — work the dead bridge already paid for.`).join('\n');
+    const digest = digestPath(jobId);
+    writeFileSync(digest, _cxDeadBridgeDigest(jobId, 'MARKER-CARRY'));
+    const priorBytes = readFileSync(digest, 'utf8').length;
+
+    // A new process that hydrated this job: same digest on disk, and the dead
+    // bridge's own result restored onto the record.
+    _cxLiveJob(jobs, jobId, 'sid-cx-carry');
+    const job = jobs.get(jobId);
+    job.adapterResult = { stdout: answer, stderr: '', summary: { message: answer } };
+
+    mod.refreshDigestForJob(job);
+    // Nothing carried on this render: the render already says it.
+    assert.doesNotMatch(readFileSync(digest, 'utf8'), /Carried forward from the previous bridge/);
+
+    // The resumed watcher's first progress render, accumulator still empty.
+    job.adapterResult = { stdout: '', stderr: '', summary: { message: '' } };
+    mod.refreshDigestForJob(job);
+    const after = readFileSync(digest, 'utf8');
+    assert.match(after, /MARKER-CARRY/, "the dead bridge's streamed work survived a render that no longer contains it");
+    assert.ok(after.length > priorBytes / 2, `digest collapsed to ${after.length} bytes from ${priorBytes}`);
+  } finally {
+    jobs.delete('codex-carry-latch');
     _resetForTest();
   }
 });

@@ -24,6 +24,16 @@
 // (`unhandledMethodError`) rather than answered `{echo: method}` — a fake that
 // says yes to everything cannot tell a working call from a misspelt one.
 //
+// IT CHECKS WHAT IT EMITS, TOO. `fake/emit` is the only end-to-end route —
+// app-server stdout → broker → threadId routing → the bridge's accumulator — so
+// a frame written by hand here is a wrong wire shape with nothing between it and
+// a green assertion, which is precisely the hole the contract-built frame
+// builders close everywhere else. `serverFrameViolation` runs over every frame
+// before the first one goes out, and the whole batch is refused if any of them
+// is off-contract: a partially-emitted script is a worse failure to read than
+// none. A method the pin has never seen still passes — that is how a test
+// models drift — and so do server REQUESTS, which are not notifications.
+//
 // `contractViolation` is IMPORTED, not reimplemented: the fake is materialised
 // into a temp dir, so `fakeCodexBin` bakes in a file:// import of the real
 // module. A second copy of the rule could disagree with the fixture, which is
@@ -39,7 +49,9 @@ const CONTRACT_MODULE_URL = pathToFileURL(
 
 export const FAKE_APP_SERVER = `
 import { appendFileSync } from 'node:fs';
-import { contractViolation, unhandledMethodError } from ${JSON.stringify(CONTRACT_MODULE_URL)};
+import {
+  JSONRPC_INVALID_REQUEST, contractViolation, serverFrameViolation, unhandledMethodError,
+} from ${JSON.stringify(CONTRACT_MODULE_URL)};
 
 const TRACE = process.env.CODEX_FAKE_TRACE || '';
 const VERSION = process.env.CODEX_FAKE_VERSION || '0.147.0';
@@ -102,6 +114,21 @@ function handle(msg) {
     case 'initialized': return;
     case 'fake/emit': {
       const frames = p.frames || [];
+      // Checked before ANY of them is written: a script that emits three good
+      // frames and then refuses the fourth leaves the bridge mid-turn, and the
+      // test fails on a timeout instead of on the sentence that explains it.
+      for (const frame of frames) {
+        const bad = serverFrameViolation(frame.method, frame.params);
+        if (!bad) continue;
+        if (msg.id !== undefined) {
+          out({ jsonrpc: '2.0', id: msg.id, error: {
+            code: JSONRPC_INVALID_REQUEST,
+            message: 'fake/emit refuses a frame codex would never send: ' + bad
+              + ' — build it with note()/threadItem() from test/codex-wire-frames.mjs.',
+          } });
+        }
+        return;
+      }
       for (const frame of frames) out(frame);
       reply({ ok: true, emitted: frames.length });
       return;
@@ -135,11 +162,12 @@ function handle(msg) {
     case 'turn/start':
       reply({ turn: { id: 'TURN' + (++turnSeq) } });
       return;
-    // Echoes the steered turn, and stops there: unlike the socket fake, this
-    // one's event stream is script-driven through \`fake/emit\`, so announcing
-    // the injected userMessage here would fight the scripts. A test that wants
-    // to exercise steer CONFIRMATION emits the \`item/completed\` itself.
-    case 'turn/steer': reply({ turn: { id: p.expectedTurnId } }); return;
+    // Echoes the steered turn as \`TurnSteerResponse\` declares it — {turnId},
+    // not turn/start's {turn:{id}} — and stops there: unlike the socket fake,
+    // this one's event stream is script-driven through \`fake/emit\`, so
+    // announcing the injected userMessage here would fight the scripts. A test
+    // that wants steer CONFIRMATION emits the \`item/completed\` itself.
+    case 'turn/steer': reply({ turnId: p.expectedTurnId }); return;
     case 'turn/interrupt': reply({}); return;
     // Anything this fake does not implement is REFUSED rather than answered
     // \`{echo}\`. The old success fallback covered a typo, a codex rename and any

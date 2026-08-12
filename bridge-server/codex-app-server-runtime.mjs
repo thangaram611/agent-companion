@@ -57,7 +57,14 @@ import {
   LineReader,
   probeSocketVerdictForError,
 } from '../scripts/codex-app-server-broker.mjs';
-import { CODEX_PINNED_VERSION, routeNotification } from '../lib/codex-app-server-contract.mjs';
+import {
+  CODEX_PINNED_VERSION,
+  routeNotification,
+  // Responses whose `result.thread.id` means "this connection now owns that
+  // thread". Imported, not restated: it is the same set the broker subscribes
+  // on, and one copy of it is the point.
+  THREAD_OWNERSHIP_METHODS as OWNERSHIP_METHODS,
+} from '../lib/codex-app-server-contract.mjs';
 import { logEvent } from '../lib/log.mjs';
 import { codexBrokerRegistryPath, codexBrokerSocketPath } from '../lib/runtime-paths.mjs';
 import {
@@ -113,11 +120,6 @@ const CONNECT_CLASS_CODES = new Set(['ECONNREFUSED', 'ENOENT', 'ENOTSOCK']);
 // budget.
 const SPAWN_RACE_GRACE_MS = 2_000;
 
-// How long to let another bridge's confirmed disposal claim resolve before
-// re-probing the broker it claimed. A dispose is one connect, one
-// `thread/loaded/list` and a SIGTERM, so this is generous.
-const DISPOSAL_RECHECK_MS = 250;
-
 // A single `aggregated_output` can be a whole build log; the toolCalls entry is
 // a digest-facing artifact, not a transcript. Same cap as codex-runtime.mjs.
 const MAX_COMMAND_OUTPUT_CHARS = 4_000;
@@ -135,10 +137,6 @@ const INTERNAL = Symbol('codex app-server internal call');
 // Methods that must not reach the wire for a thread this connection did not
 // itself start or resume. See constraint 3 and probes/codex-app-server/unloaded.mjs.
 const ATTACH_BEFORE_METHODS = new Set(['turn/interrupt', 'turn/steer']);
-
-// Responses whose `result.thread.id` means "this connection now owns that
-// thread" — the same trigger the broker uses for its implicit subscription.
-const OWNERSHIP_METHODS = new Set(['thread/start', 'thread/resume', 'thread/fork']);
 
 const JSONRPC_METHOD_NOT_FOUND = -32601;
 
@@ -375,7 +373,6 @@ export function _setForTest(overrides = {}) {
 
 export function _resetForTest() {
   _impl = realImpl();
-  brokerRegistry.clearCache();
   _spawnPromise = null;
   _reapPromise = null;
   _lastKnownCodexVersion = null;
@@ -434,6 +431,16 @@ export function createCodexTurnAccumulator(threadId) {
   const messages = new Map();
   const messagePhases = new Map();
   const reasoning = new Map();
+  // itemId -> the `(channel, index)` the last reasoning delta on that item
+  // belonged to. Both reasoning delta methods declare their index REQUIRED —
+  // `contentIndex` on the text channel, `summaryIndex` on the summary one —
+  // and that is because `content` and `summary` are arrays whose entries the
+  // completed item joins with a newline. Streaming them into one bucket
+  // unseparated made the live render disagree with the completed one
+  // ('weighing options' + 'decided' read as `weighing optionsdecided`), and an
+  // interrupted turn is exactly the case where no completed item ever arrives
+  // to replace the deltas.
+  const reasoningSlot = new Map();
   const toolCalls = [];
   const commandEntries = new Map(); // itemId -> the toolCalls entry
   const completedItems = new Set(); // ids folded once (turn/completed replays them)
@@ -453,15 +460,29 @@ export function createCodexTurnAccumulator(threadId) {
     return !!id && id === threadId;
   }
 
-  function bucketKey(params) {
-    // Deltas that carry no item id all belong to the same streaming item; one
-    // shared bucket keeps them in order instead of scattering them.
-    return params?.itemId ?? params?.item?.id ?? '_';
-  }
-
+  // Deltas are bucketed by `itemId`, which all four delta notifications declare
+  // required (agentMessage, reasoning text, reasoning summary, command output),
+  // so there is no unkeyed case to fold into — the three fallbacks this used to
+  // carry were guesses at a shape the schema settles. A frame missing it is one
+  // the pin says cannot exist; dropping it beats inventing a bucket that
+  // `resolvedMessage` would then hand back as the answer.
   function appendTo(map, key, text) {
+    if (typeof key !== 'string' || !key) return;
     if (typeof text !== 'string' || !text) return;
     map.set(key, (map.get(key) || '') + text);
+  }
+
+  // One reasoning item's deltas, kept in ONE bucket so the completed item can
+  // replace them in place, but with the array boundary the two index fields
+  // announce: a delta that starts a different `(channel, index)` from the last
+  // one begins a new entry, and entries are newline-joined — the same join
+  // consumeCompletedItem uses on `[...content, ...summary]`.
+  function appendReasoning(itemId, slot, text) {
+    const key = typeof itemId === 'string' ? itemId : '';
+    if (!key || typeof text !== 'string' || !text) return;
+    if (reasoning.has(key) && reasoningSlot.get(key) !== slot) appendTo(reasoning, key, '\n');
+    reasoningSlot.set(key, slot);
+    appendTo(reasoning, key, text);
   }
 
   function commandEntryFor(item) {
@@ -508,23 +529,36 @@ export function createCodexTurnAccumulator(threadId) {
       return;
     }
     if (type === 'reasoning') {
+      // `{content: string[], summary: string[]}` — there is no `text`. Both are
+      // optional and both are joined rather than one winning: they are different
+      // channels (the raw chain and the model's own précis of it), they stream
+      // through two different delta methods into this same bucket, and a turn
+      // that produced only a summary must not read as having produced nothing.
+      // The newline is the same separator appendReasoning puts between the
+      // entries as they stream, so the live render and this one agree.
       const key = id || `rsn-${reasoning.size}`;
-      if (typeof item.text === 'string' && item.text) reasoning.set(key, item.text);
+      const text = [...(item.content || []), ...(item.summary || [])]
+        .filter((part) => typeof part === 'string' && part)
+        .join('\n');
+      if (text) reasoning.set(key, text);
       return;
     }
     if (type === 'commandExecution') {
       const entry = commandEntryFor(item);
       if (item.command != null) entry.input.command = item.command;
-      // A missing `status` names the EVENT ('the item completed'), never the
-      // exit outcome — the exit code stays authoritative there. Both spellings
-      // are read because the app-server is camelCase where the exec stream was
-      // snake_case, and only one of the two has ever been seen per transport.
-      const status = item.status ?? item.state;
-      entry.status = typeof status === 'string' && status ? status : 'completed';
-      entry.exit_code = item.exitCode ?? item.exit_code ?? entry.exit_code ?? null;
-      const output = item.aggregatedOutput ?? item.aggregated_output;
-      if (typeof output === 'string' && output) {
-        entry.aggregated_output = truncateChars(output, MAX_COMMAND_OUTPUT_CHARS);
+      // The schema declares `status` required on a commandExecution item, so the
+      // default names the EVENT ('the item completed') for a truncated frame
+      // only; the exit code stays authoritative for the outcome. The snake_case
+      // twins this used to read are the exec stream's vocabulary — that stream
+      // is parsed by codex-runtime.mjs and never reaches this accumulator.
+      entry.status = typeof item.status === 'string' && item.status ? item.status : 'completed';
+      // `?? entry.exit_code` is a no-clobber guard, not another spelling:
+      // `exitCode` is optional AND nullable, and this branch runs ahead of the
+      // replay guard, so a `turn/completed` replay of an item that already
+      // reported its code must not blank it back out.
+      entry.exit_code = item.exitCode ?? entry.exit_code ?? null;
+      if (typeof item.aggregatedOutput === 'string' && item.aggregatedOutput) {
+        entry.aggregated_output = truncateChars(item.aggregatedOutput, MAX_COMMAND_OUTPUT_CHARS);
       }
       return;
     }
@@ -539,20 +573,24 @@ export function createCodexTurnAccumulator(threadId) {
       return;
     }
     if (type === 'mcpToolCall') {
-      toolCalls.push({ name: item.tool || item.name || 'mcpToolCall', input: item.input || item.args || {} });
+      // `arguments` is required, as are `tool` and `server`. The `input`/`args`
+      // spellings this used to read are not properties of the item at all, so
+      // every MCP call in an app-server digest recorded an empty input. `server`
+      // is deliberately NOT carried: the entry's contract is `{name, input}` and
+      // nothing downstream renders a tool's origin, so recording it would be a
+      // field with no reader.
+      toolCalls.push({ name: item.tool, input: item.arguments ?? {} });
       return;
     }
     if (type === 'webSearch') {
       toolCalls.push({ name: 'webSearch', input: { query: item.query ?? null } });
       return;
     }
-    if (type === 'error') {
-      // Item-level errors are NON-fatal on this protocol exactly as on the exec
-      // stream: only `turn/completed` and the thread-scoped `error` notification
-      // end a turn. Recorded so the digest can show it.
-      errorText = errorText || item.message || item.error || 'codex reported an item error';
-    }
-    // todoList and anything unrecognised are tolerated without contributing.
+    // The other 14 variants — plan, todoList's replacement, the review-mode
+    // markers, the sub-agent and image items — are tolerated without
+    // contributing. There is NO `error` variant to handle: the 18 the schema
+    // declares do not include one, and a turn's errors arrive as the `error`
+    // notification (fatal) or as a `failed` status on the item that raised it.
   }
 
   function settle(status, { error = null, reason = null } = {}) {
@@ -563,22 +601,23 @@ export function createCodexTurnAccumulator(threadId) {
 
   function onNotification(method, params) {
     switch (method) {
+      // All four delta methods spell the payload `delta` and declare it
+      // required — `codex app-server generate-json-schema` names it, and the
+      // pinned fixture now records it, so there is nothing left to guess at.
       case 'item/agentMessage/delta':
-        appendTo(messages, bucketKey(params), params?.delta ?? params?.text);
+        appendTo(messages, params?.itemId, params?.delta);
         return;
       case 'item/reasoning/textDelta':
+        appendReasoning(params?.itemId, `c${params?.contentIndex}`, params?.delta);
+        return;
       case 'item/reasoning/summaryTextDelta':
-        appendTo(reasoning, bucketKey(params), params?.delta ?? params?.text);
+        appendReasoning(params?.itemId, `s${params?.summaryIndex}`, params?.delta);
         return;
       case 'item/commandExecution/outputDelta': {
         const entry = commandEntries.get(String(params?.itemId ?? ''));
         if (!entry) return;
-        // The payload field name was never captured off the wire (the probes
-        // logged this method's params truncated), so read the plausible spellings
-        // rather than silently dropping a live command's output.
-        const chunk = params?.chunk ?? params?.delta ?? params?.output ?? params?.text;
-        if (typeof chunk !== 'string' || !chunk) return;
-        entry.aggregated_output = truncateChars(`${entry.aggregated_output || ''}${chunk}`, MAX_COMMAND_OUTPUT_CHARS);
+        if (typeof params?.delta !== 'string' || !params.delta) return;
+        entry.aggregated_output = truncateChars(`${entry.aggregated_output || ''}${params.delta}`, MAX_COMMAND_OUTPUT_CHARS);
         return;
       }
       case 'item/started':
@@ -591,17 +630,22 @@ export function createCodexTurnAccumulator(threadId) {
         // Carried into the summary because isEmptyCompletedSummary counts a plan
         // as content: a turn that only replanned must not read as "completed but
         // returned nothing".
-        plan = params?.plan ?? params?.steps ?? plan;
+        plan = params?.plan ?? plan;
         return;
       case 'turn/started':
-        turnId = params?.turn?.id ?? params?.turnId ?? turnId;
+        // `{threadId, turn}` — there is no flat `turnId` on this notification.
+        turnId = params?.turn?.id ?? turnId;
         return;
       case 'turn/completed': {
         const turn = params?.turn || {};
         turnId = turn.id ?? turnId;
         for (const item of Array.isArray(turn.items) ? turn.items : []) consumeCompletedItem(item);
         const status = String(turn.status || '');
-        const failure = turn.error?.message || turn.error || turn.failure || null;
+        // `Turn.error` is a `TurnError`, i.e. an object whose `message` is
+        // required and is the only human-readable half; `|| turn.error` would
+        // have put `[object Object]` in the digest and `turn.failure` is not a
+        // property of a Turn at all.
+        const failure = turn.error?.message || null;
         if (status === 'interrupted') {
           // Settles with no answer — that is the documented shape of a
           // `turn/interrupt`, not a failure.
@@ -614,7 +658,19 @@ export function createCodexTurnAccumulator(threadId) {
         return;
       }
       case 'error':
-        settle('failed', { reason: 'error', error: params?.message || params?.error?.message || params?.error || 'codex reported a fatal error' });
+        // `{error: TurnError, threadId, turnId, willRetry}`, all four required —
+        // the message lives one level down and there is no flat `params.message`
+        // (that spelling is the exec stream's, whose `error` event really is
+        // `{message}`; codex-runtime.mjs reads it there).
+        //
+        // `willRetry` is READ BY NOTHING here, deliberately. The schema makes it
+        // required and `TurnStatus` carries `failed` with "Turn.error only
+        // populated when status is failed", which together suggest
+        // `turn/completed{status:'failed'}` is the real terminal and a
+        // `willRetry:true` error is mid-retry noise — but no `error` frame has
+        // ever been observed in any probe or rollout, so gating the terminal on
+        // it would be trading a measured behaviour for an inferred one.
+        settle('failed', { reason: 'error', error: params?.error?.message || 'codex reported a fatal error' });
         return;
       default:
         // thread/status/changed, tokenUsage, mcpServer/startupStatus and the rest
@@ -886,7 +942,12 @@ function createConnection(sock, { socketPath, env }) {
     // Notifications carry no id, so the broker forwards them upstream verbatim —
     // which makes this the one door that bypasses `call()`'s guards. The two
     // guarded families are refused here too, or the double-dispatch and the
-    // resume-before-act constraints would hold for `call()` only.
+    // resume-before-act constraints (header, 2 and 3) would hold for `call()`
+    // only. Nothing in this module calls it; it exists so that constraint holds
+    // for the caller who eventually does, on the door where it is easiest to
+    // forget. The one class this guard does NOT cover is the broker's own
+    // `broker/*` methods, which are meaningless without an id to answer — the
+    // broker drops those rather than forwarding them (BROKER_LOCAL_METHODS).
     notify(method, params = {}) {
       if (method === 'turn/start' || ATTACH_BEFORE_METHODS.has(method)) {
         throw new Error(
@@ -903,12 +964,12 @@ function createConnection(sock, { socketPath, env }) {
       return () => handlers.delete(handler);
     },
 
+    // No `unsubscribe` twin: the broker publishes `broker/unsubscribe`, but every
+    // connection here is per-job and per-action and closes in a `finally`, and
+    // the broker's `dropClient` releases the whole subscription set on close. A
+    // wrapper for a call this bridge never makes is a promise nothing keeps.
     subscribe(threadId, opts = {}) {
       return raw('broker/subscribe', { threadId }, opts);
-    },
-
-    unsubscribe(threadId, opts = {}) {
-      return raw('broker/unsubscribe', { threadId }, opts);
     },
 
     // 'fresh'    started here, no turn yet — status is idle by construction.
@@ -957,7 +1018,7 @@ const brokerRegistry = createSharedRuntimeRegistry({
   registryPath: codexBrokerRegistryPath,
   key: SHARED_BROKER_KEY,
   identity: (entry) => (entry?.socketPath && entry?.pid ? `${entry.socketPath}#${entry.pid}` : null),
-  dispose: (entry) => disposeBroker(entry),
+  dispose: (entry, ctx) => disposeBroker(entry, ctx),
 });
 
 let _spawnPromise = null;
@@ -1029,39 +1090,41 @@ export async function probeCodexBrokerHealth(socketPath = null) {
 export async function ensureCodexBroker({ env = process.env } = {}) {
   const socketPath = codexBrokerSocketPath();
 
-  // Two passes at most, and the second one exists solely for the disposal-claim
-  // window below: everything else either returns or throws on the first.
-  for (let pass = 0; ; pass += 1) {
-    const health = await probeCodexBrokerHealth(socketPath);
-    if (health.alive) {
-      const ready = health.ready ? health : await waitForReady(socketPath, BROKER_BOOT_TIMEOUT_MS);
-      const adopted = adopt(ready, { reused: true });
-      // The claimer published its intent AND confirmed it before we got here, so
-      // our `lastUsedAt` bump cannot make it stand down any more (see adopt()).
-      // Handing this broker back would hand the caller a runtime under a live
-      // kill order. Wait out the dispose — one connect, one `thread/loaded/list`
-      // and a SIGTERM — then look again: if it survived, it is ours; if it did
-      // not, the next pass spawns a replacement, which is exactly the "one
-      // redundant spawn, no lost work" this window is supposed to cost.
-      if (adopted.disposalClaimed && pass === 0) {
-        _impl.logEvent('warn', 'codex_appserver_awaiting_disposal_claim', { pid: adopted.pid });
-        await _impl.delay(DISPOSAL_RECHECK_MS);
-        continue;
-      }
-      return adopted;
-    }
+  const health = await probeCodexBrokerHealth(socketPath);
+  if (health.alive) {
+    const ready = health.ready ? health : await waitForReady(socketPath, BROKER_BOOT_TIMEOUT_MS);
+    // A broker under a live disposal claim is adopted, not waited out: the
+    // adoption itself is what makes the claimer stand down (see adopt()).
+    const broker = adopt(ready, { reused: true });
+    if (!broker.disposalClaimed) return broker;
+
+    // BUMP FIRST, VERIFY SECOND. The bump above is what makes a claimer that
+    // has not confirmed yet stand down; this catches the one interleaving the
+    // bump cannot cover — a claimer whose confirm read the file in the gap
+    // between our probe answering and our `record` landing, and which therefore
+    // saw the OLD `lastUsedAt` and signalled. Without this look the caller gets
+    // a corpse and its first call dies ECONNREFUSED; with it the cost is what
+    // this protocol promises everywhere else, one redundant spawn.
+    //
+    // Only on the claimed path: with no claim in the file there is no disposer
+    // to lose to, and an unconditional second probe would tax every dispatch.
+    const after = await probeCodexBrokerHealth(socketPath);
+    // Same discipline as below — only a connect-class failure means "gone".
+    // Anything else is a failure to ask, and the broker we just probed is far
+    // better evidence than a probe that could not tell.
+    if (after.alive || !CONNECT_CLASS_CODES.has(after.code)) return broker;
+    _impl.logEvent('warn', 'codex_appserver_adopted_broker_gone', { pid: broker.pid });
+  } else if (!CONNECT_CLASS_CODES.has(health.code)) {
     // Only a connect-class failure means "nobody is home". Anything else is a
     // failure to ask, and spawning on it would race a broker that is very much
     // alive — so it surfaces instead of degrading silently.
-    if (!CONNECT_CLASS_CODES.has(health.code)) {
-      throw new Error(`could not reach the codex broker at ${socketPath}: ${health.error}`);
-    }
-
-    if (_spawnPromise) return _spawnPromise;
-    _spawnPromise = spawnAndAdoptBroker(env, socketPath);
-    try { return await _spawnPromise; }
-    finally { _spawnPromise = null; }
+    throw new Error(`could not reach the codex broker at ${socketPath}: ${health.error}`);
   }
+
+  if (_spawnPromise) return _spawnPromise;
+  _spawnPromise = spawnAndAdoptBroker(env, socketPath);
+  try { return await _spawnPromise; }
+  finally { _spawnPromise = null; }
 }
 
 // Adopting a broker another bridge has CLAIMED for disposal needs care, and it
@@ -1071,18 +1134,26 @@ export async function ensureCodexBroker({ env = process.env } = {}) {
 // instead. It could: its address is an ephemeral port. This broker's address is
 // a fixed socket path, so "spawn my own instead" is not available.
 //
-// Two protections are real and one is NOT:
-//   - recording our adoption bumps `lastUsedAt`, and claimDisposal re-reads it
-//     at its confirm step — but that only saves an adoption that lands BEFORE
-//     the claim is published. By the time we can SEE a claim here, the confirm
-//     has already passed and there is no later one;
-//   - `disposeBroker` re-asks `thread/loaded/list` immediately before the kill —
-//     but a broker we just adopted has no thread on it yet, so that answer is
-//     empty and permits the kill;
-//   - what actually closes the window is the caller: `ensureCodexBroker` waits
-//     the dispose out and re-probes, so a broker that is killed underneath us
-//     costs one redundant spawn rather than a failed dispatch.
-// The claim is reported either way rather than hidden.
+// What protects the adoption is the DISPOSER, not anything the adopter does
+// afterwards: recording our adoption bumps `lastUsedAt`, and `disposeBroker`
+// re-reads it through the registry's `confirmDisposal` immediately before it
+// signals. A claim we can still SEE here belongs to a claimer that has not acted
+// yet — it is inside its interrogation stage, which is seconds of RPC — so our
+// bump lands first and it stands down.
+//
+// `disposeBroker`'s other two questions cannot do this job: a broker we just
+// adopted has no thread on it, so `thread/loaded/list` is empty and permits the
+// kill, and its `brokerPid` is of course still its own.
+//
+// What is left is OUR OWN gap, not the disposer's: the claimer loses only if
+// its confirm reads the file before our `record` lands, so the window is
+// everything between the health probe answering and that write completing — an
+// fs read plus an atomic write-and-rename, sub-millisecond to a few
+// milliseconds, against the seconds of RPC the claim used to cover. It is not
+// zero, so `ensureCodexBroker` re-probes once AFTER the bump on this path and
+// spawns a replacement if the claimer got there first; that turns the residual
+// into one redundant spawn instead of a dispatch that dies ECONNREFUSED. The
+// claim is reported either way rather than hidden.
 function adopt(health, { reused }) {
   if (health.codexVersion) _lastKnownCodexVersion = health.codexVersion;
   const entry = { socketPath: health.socketPath, pid: health.brokerPid, appServerPid: health.appServerPid };
@@ -1098,7 +1169,11 @@ function adopt(health, { reused }) {
   if (claim) {
     _impl.logEvent('warn', 'codex_appserver_adopted_over_disposal_claim', { pid: health.brokerPid, claimedBy: claim.pid });
   }
-  brokerRegistry.setCached(entry);
+  // No `setCached` twin to opencode's: that memo exists to recall an ephemeral
+  // `--port 0` address, and this broker's address is `codexBrokerSocketPath()` —
+  // a pure function of env that every path re-derives anyway. A memo here could
+  // only ever hold a pid that outlived its broker, which is the identity trap
+  // the comment above this registry was written to close.
   brokerRegistry.record(same ? { ...recorded, ...entry } : entry);
   return { socketPath: health.socketPath, pid: health.brokerPid, reused, disposalClaimed: !!claim };
 }
@@ -1175,8 +1250,9 @@ async function waitForReady(socketPath, budgetMs, exitedProbe = null) {
   }
 }
 
-// Stop a broker the reaper has claimed — but only after ASKING it TWO questions,
-// because the kill needs two different facts and one answer cannot carry both:
+// Stop a broker the reaper has claimed — but only after ASKING it TWO questions
+// and the REGISTRY a third, because the kill needs three different facts and no
+// one answer carries them:
 //   - "is it holding work?" — `thread/loaded/list`. The registry cannot know: a
 //     bridge that died mid-turn leaves no lease after LEASE_STALE_MS, and the
 //     turn it started is exactly the work this transport exists to protect.
@@ -1185,11 +1261,20 @@ async function waitForReady(socketPath, budgetMs, exitedProbe = null) {
 //     recycles pids, so `thread/loaded/list` succeeding proves something at the
 //     SOCKET is a broker, never that `entry.pid` still is. Signalling on the
 //     first answer alone is the pid-reuse bug wearing a reassuring comment.
+//   - "did anyone adopt it while we were asking?" — `confirmDisposal`, the
+//     registry's final look at the claim. The two questions above are both
+//     BLIND to a bridge that adopted this broker a moment ago: it has started no
+//     thread and holds no lease, and its adoption is recorded in the file, not
+//     on the wire. The answers above take seconds of RPC to collect; that is the
+//     window, and this is what closes it.
 //
-// A refusal here still lets the registry forget the entry. That is harmless
-// precisely because the broker's address is a fixed path, not an ephemeral port:
-// the next ensureCodexBroker connect-probes, finds it and re-records it.
-async function disposeBroker(entry) {
+// A refusal here still lets the registry forget the entry — except when the
+// refusal came from `confirmDisposal`, which withdraws the claim and so makes
+// the registry keep the adopter's entry. Forgetting on the other refusals is
+// harmless precisely because the broker's address is a fixed path, not an
+// ephemeral port: the next ensureCodexBroker connect-probes, finds it and
+// re-records it.
+async function disposeBroker(entry, { confirmDisposal }) {
   _lastDisposal = null;
   let conn = null;
   let brokerPid = null;
@@ -1227,6 +1312,16 @@ async function disposeBroker(entry) {
   // against a process that no longer exists, and the pid may now be anyone's.
   if (brokerPid == null || brokerPid !== entry.pid) {
     _impl.logEvent('warn', 'codex_appserver_dispose_pid_mismatch', { entryPid: entry.pid ?? null, brokerPid });
+    _lastDisposal = 'refused';
+    return;
+  }
+
+  // The last look before the signal, and as late as it can be taken. Everything
+  // above happened INSIDE the claim — a connect, an `initialize` handshake and a
+  // `thread/loaded/list`, each with its own timeout — and an adopting bridge
+  // leaves its mark in the registry (`lastUsedAt`), not on this connection.
+  if (!confirmDisposal()) {
+    _impl.logEvent('warn', 'codex_appserver_dispose_stood_down', { pid: entry.pid ?? null });
     _lastDisposal = 'refused';
     return;
   }
@@ -1272,13 +1367,6 @@ export async function reapIdleCodexBroker({ idleMs, hasLiveJobs = false, now = D
   finally { _reapPromise = null; }
 }
 
-// A broker another bridge has claimed for disposal is about to stop answering
-// even though it is healthy right now; adopting it would hand this job a runtime
-// that dies underneath it.
-export function codexBrokerDisposalClaim(now = Date.now()) {
-  return disposalClaimedBy(brokerRegistry.read(), now);
-}
-
 // Re-exported because the adapter's own tests reason in lease-staleness terms
 // and should not have to know where the machinery lives.
 export { LEASE_STALE_MS } from '../lib/shared-runtime-registry.mjs';
@@ -1296,7 +1384,7 @@ export async function startCodexThread({ conn, cwd, env = process.env, model = n
   const threadId = result?.thread?.id;
   if (!threadId) throw new Error('codex thread/start returned no thread id');
   conn._noteFreshThread(threadId);
-  return { threadId, rolloutPath: result.thread.path ?? null, thread: result.thread };
+  return { threadId, rolloutPath: result.thread.path ?? null };
 }
 
 // The turn a `Thread` payload ends on, or null. `turns` is carried by the
@@ -1316,7 +1404,12 @@ function lastTurnOf(thread) {
 
 // Resume is BOTH the reattach and the authoritative status read: it rejoins a
 // running thread, and its `thread.status` is the only place this protocol
-// reports whether a turn is in flight.
+// reports whether a turn is in flight — 'active' | 'idle' | 'notLoaded' |
+// 'systemError' | 'unknown'. So it is NOT a pure read: asking the question loads
+// the thread into the app-server and attaches this connection to it. That is
+// what every caller here wants (it is also the resume-before-act guard), but it
+// means a status surface must not call it speculatively for threads it does not
+// intend to touch.
 //
 // `sandbox` and `approvalPolicy` are sent explicitly here, not just on start.
 // Resume re-derives its context from config when they are omitted, which on the
@@ -1332,36 +1425,31 @@ function lastTurnOf(thread) {
 export async function resumeCodexThread({ conn, threadId, env = process.env, model = null, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
   const result = await conn.call('thread/resume', threadParams(env, { threadId, model }), { timeoutMs });
   const thread = result?.thread || {};
+  // `status.flags` and the raw `thread` are deliberately NOT passed through. The
+  // flag vocabulary (`waitingOnApproval`, `waitingOnUserInput`) already has a
+  // tested home in the pinned contract, and neither flag can be observed from
+  // here anyway: every server-to-client request is declined -32601 the moment it
+  // arrives, so a wait state cannot outlive the tick that created it.
   return {
     threadId: thread.id || threadId,
     status: String(thread.status?.type || thread.status || 'unknown'),
-    flags: thread.status?.flags || [],
     // Free with the answer we already asked for: resume carries the thread's
     // turns, so the caller that just learned "this thread is active" also
     // learns WHICH turn is active, without a second round trip.
     lastTurn: lastTurnOf(thread),
-    thread,
   };
-}
-
-// 'active' | 'idle' | 'notLoaded' | 'systemError' | 'unknown'.
-//
-// NOT a pure read: on this protocol `thread/resume` IS the status read, so
-// asking the question loads the thread into the app-server and attaches this
-// connection to it. That is exactly what the callers here want (it is also the
-// resume-before-act guard), but it means a status surface must not call this
-// speculatively for threads it does not intend to touch.
-export async function getCodexThreadStatus({ conn, threadId, env = process.env, model = null, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
-  const resumed = await resumeCodexThread({ conn, threadId, env, model, timeoutMs });
-  return resumed.status;
 }
 
 // The salvage channel. Measured caveat: `thread/read` returns MESSAGES ONLY —
 // no commandExecution, no reasoning — even though the rollout for the same
 // thread has all three. So this is a complete ANSWER salvage and not a
 // tool-activity record, and its summary says so by carrying no toolCalls.
-export async function readCodexThread({ conn, threadId, includeTurns = true, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
-  const result = await conn.call('thread/read', { threadId, includeTurns }, { timeoutMs });
+export async function readCodexThread({ conn, threadId, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
+  // `includeTurns` is pinned true rather than exposed: `turns` is the ONLY
+  // source of the `lastTurn` below (the schema populates it on `thread/read`
+  // only when this is true), so a caller that passed false would get a silent
+  // `lastTurn: null` — a knob whose one non-default value breaks the answer.
+  const result = await conn.call('thread/read', { threadId, includeTurns: true }, { timeoutMs });
   const messages = collectAgentMessages(result);
   const finals = messages.filter((m) => m.phase === 'final_answer');
   const chosen = (finals.length ? finals : messages).at(-1);
@@ -1487,7 +1575,7 @@ export async function resolveCodexTurnId({
 
   let lastTurn;
   try {
-    ({ lastTurn } = await readCodexThread({ conn, threadId, includeTurns: true, timeoutMs }));
+    ({ lastTurn } = await readCodexThread({ conn, threadId, timeoutMs }));
   } catch (err) {
     throw new Error(
       `${method} needs the running turn's id on thread ${threadId}, this bridge never recorded one `
@@ -1596,7 +1684,12 @@ export async function steerCodexTurn({
       { threadId, expectedTurnId: turnId, input: [{ type: 'text', text }] },
       { timeoutMs },
     );
-    return { threadId, turnId: result?.turn?.id ?? turnId, accepted: true, ...(await watch.settled()) };
+    // `TurnSteerResponse` is `{turnId}` (required) — NOT `{turn:{id}}`, which is
+    // `turn/start`'s shape and was read here by mistake. Both fakes returned the
+    // wrong one too, so the `?? turnId` fallback was doing all the work and no
+    // test could see it. The fallback stays: a steer never changes the turn, so
+    // the id we sent is the right answer if the echo ever goes missing.
+    return { threadId, turnId: result?.turnId ?? turnId, accepted: true, ...(await watch.settled()) };
   } finally {
     watch.detach();
   }
@@ -1713,10 +1806,10 @@ export async function openCodexTurnWatcher({
 // The turn may already be over — check level state before committing to the
 // stream. `active` means keep watching; anything else means ask the transcript.
 async function levelTerminal({ conn, threadId, env, model = null }) {
-  let status;
-  try { status = await getCodexThreadStatus({ conn, threadId, env, model }); }
+  let resumed;
+  try { resumed = await resumeCodexThread({ conn, threadId, env, model }); }
   catch { return null; }
-  if (status === 'active') return null;
+  if (resumed.status === 'active') return null;
   try {
     const transcript = await readCodexThread({ conn, threadId });
     if (!transcript.found) return null;

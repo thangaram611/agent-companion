@@ -73,6 +73,26 @@ test('Claude template sets the MCP deadline as a per-server field, not an env va
     `timeout ${timeout[1]}ms must exceed clampWaitSec's 1200s cap`);
 });
 
+test('Claude template names itself as the source and documents the adapter knob without setting it', () => {
+  // hooks/install-agent.sh regenerates ~/.claude/agents/agent-companion.md from
+  // this file on every session start, so the warning has to live where the edit
+  // that would be lost gets made.
+  assert.match(text, /THIS FILE IS THE SOURCE/);
+  assert.match(text, /re-materializes/);
+
+  const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
+  assert.ok(fm, 'frontmatter block extractable');
+  const frontmatter = fm[1];
+  // Documented as the supported way to select the codex transport...
+  assert.match(frontmatter, /CODEX_RUNTIME_ADAPTER: appserver/);
+  assert.match(frontmatter, /takes effect on the NEXT session/);
+  // ...and documented ONLY. `exec` is the default adapter, and a live `env:` key
+  // here would flip it for every operator who installs the plugin.
+  const active = frontmatter.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
+  assert.doesNotMatch(active, /CODEX_RUNTIME_ADAPTER/,
+    'the adapter knob is documented in a comment, never set as a live env key');
+});
+
 test('Claude template forbids re-routing a dispatch the bridge refused to route', () => {
   // Reported as "strength advertised but not wired"; forensics showed the
   // bridge answered STRENGTH_UNCONFIGURED in 23ms and the subagent re-sent the

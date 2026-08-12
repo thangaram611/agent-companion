@@ -29,7 +29,7 @@ const REPO = process.env.AGENT_COMPANION_REPO
 // (socket presence is not liveness), and `thread/loaded/list` is the
 // authoritative liveness answer that no pid probe can give.
 //
-// Deliberately NOT used here: `thread/resume` / `getCodexThreadStatus`. Resume
+// Deliberately NOT used here: `thread/resume`. Resume
 // is the status read on this protocol, and subscribing DRAINS the broker's
 // pre-subscription ring for that thread — so asking the question from the probe
 // would swallow the very events bridge B is about to hydrate on.

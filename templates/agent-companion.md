@@ -1,4 +1,13 @@
 ---
+# THIS FILE IS THE SOURCE. `hooks/install-agent.sh` re-materializes
+# ~/.claude/agents/agent-companion.md from it on EVERY session start —
+# unconditionally, with no checksum and no freshness check — so an edit made to
+# the materialized copy is silently discarded the next time a session opens.
+# Edit this template (the installed copy carries an AUTO-INSTALLED sentinel on
+# its line 2 saying the same thing); the next session picks it up. The one
+# exception is a destination WITHOUT that sentinel: the installer reads that as
+# hand-authored and leaves it alone forever.
+#
 # This is the Claude Code variant of the agent-companion subagent. The
 # Codex CLI variant lives at templates/agent-companion.toml (TOML schema
 # required by Codex's `agent_roles.rs`) and carries the same body adapted
@@ -78,6 +87,22 @@ mcpServers:
       # answers first. Codex expresses the same budget in seconds, as
       # `tool_timeout_sec = 1320` — see templates/agent-companion.toml.
       timeout: 1320000
+      # Bridge behaviour is configured HERE, as `env:` entries on this server —
+      # a sibling of command/args/timeout, honoured because this file is
+      # user-scoped (a plugin-shipped agent's frontmatter is ignored, which is
+      # why the installer copies it here at all). The one an operator is most
+      # likely to want:
+      #
+      #   env:
+      #     CODEX_RUNTIME_ADAPTER: appserver
+      #
+      # which moves codex jobs off the default single-shot `codex exec` pipe onto
+      # the shared app-server broker — in-flight `agent_reply`, restart resume,
+      # and streamed sub-turn digests (README.md, "Codex ships two adapters").
+      # `exec` stays the default while it is unset. The bridge reads it per
+      # dispatch out of the env it was SPAWNED with, and this file is read when a
+      # session starts the MCP server, so it takes effect on the NEXT session —
+      # not in the one where the edit is made.
 ---
 
 # YOUR ONE JOB — read this before anything else
