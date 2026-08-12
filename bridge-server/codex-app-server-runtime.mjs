@@ -942,7 +942,12 @@ function createConnection(sock, { socketPath, env }) {
     // Notifications carry no id, so the broker forwards them upstream verbatim —
     // which makes this the one door that bypasses `call()`'s guards. The two
     // guarded families are refused here too, or the double-dispatch and the
-    // resume-before-act constraints would hold for `call()` only.
+    // resume-before-act constraints (header, 2 and 3) would hold for `call()`
+    // only. Nothing in this module calls it; it exists so that constraint holds
+    // for the caller who eventually does, on the door where it is easiest to
+    // forget. The one class this guard does NOT cover is the broker's own
+    // `broker/*` methods, which are meaningless without an id to answer — the
+    // broker drops those rather than forwarding them (BROKER_LOCAL_METHODS).
     notify(method, params = {}) {
       if (method === 'turn/start' || ATTACH_BEFORE_METHODS.has(method)) {
         throw new Error(

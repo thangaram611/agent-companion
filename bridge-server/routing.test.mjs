@@ -14,13 +14,16 @@ import { dirname } from 'node:path';
 
 const SANDBOX = mkdtempSync(join(tmpdir(), 'routing-state-'));
 process.env.AGENT_COMPANION_HOME = SANDBOX;
-// Pinned into the sandbox rather than left to resolve through runtimeDir():
-// AGENT_COMPANION_HOME does not reach it (lib/host.mjs derives the companion
-// home from the HOST, not from that var), so every `log()` this suite provokes
-// appended to the operator's live ~/.claude/agent-companion/runtime log —
-// measured 4,150 bytes for one run of this file. Never unset it in teardown:
-// clearing it is exactly what re-points a straggler at the real path.
-process.env.AGENT_BRIDGE_LOG_FILE = join(SANDBOX, 'agent-bridge.log');
+// runtimeDir() is pinned rather than the bridge log alone: AGENT_COMPANION_HOME
+// does not reach it (lib/host.mjs derives the companion home from the HOST, not
+// from that var), and the bridge log is not the only artifact this suite leaves
+// behind. Measured for one run against the operator's live runtime dir: 4,150
+// bytes of agent-bridge.log, 1,577 bytes of completions.jsonl (the ledger a
+// restarted bridge hydrates jobs from) and 2 digest files. One knob moves all of
+// them. Never unset it in teardown: clearing it is exactly what re-points a
+// straggler at the real path.
+const RUNTIME_SANDBOX = mkdtempSync(join(tmpdir(), 'ac-rt-rtg-'));
+process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
 const TEST_CWD = tmpdir();
 const SERVER_SRC = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'server.mjs'), 'utf8');
 
@@ -58,7 +61,10 @@ const state = await import('../lib/state.mjs');
 const server = await import('./server.mjs');
 const { resolveRouting } = server;
 
-test.after(() => rmSync(SANDBOX, { recursive: true, force: true }));
+test.after(() => {
+  rmSync(SANDBOX, { recursive: true, force: true });
+  rmSync(RUNTIME_SANDBOX, { recursive: true, force: true });
+});
 
 function setProfiles(doc) { state.writeProfiles(doc); }
 function reset() {

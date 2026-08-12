@@ -73,6 +73,21 @@ import {
 export const BROKER_PROTOCOL_VERSION = 1;
 export const BROKER_CLIENT_NAME = 'agent-companion-broker';
 
+// The methods this broker answers ITSELF, in one place because two code paths
+// have to agree about them: the id-bearing `switch` in `_onClientLine` routes
+// them locally, and the id-LESS branch above it has to refuse the same names
+// instead of forwarding them. Forwarding either kind is a real failure, not a
+// cosmetic one — `initialize` would re-handshake a shared app-server that
+// already handshook once for everybody, and codex has never heard of `broker/*`,
+// so it answers -32600 for a call the client believes it made locally. A drift
+// test in the suite holds this set to the switch's own case labels.
+export const BROKER_LOCAL_METHODS = new Set([
+  'initialize',
+  'broker/status',
+  'broker/subscribe',
+  'broker/unsubscribe',
+]);
+
 const LOG_MAX_BYTES = 1024 * 1024; // 1 MB, same as the copilot daemon
 
 // A single frame can legitimately be large: `thread/read{includeTurns:true}`
@@ -619,7 +634,12 @@ export class Broker {
   //                                      id space and forwarded.
   //   {id, result|error}                 this client answering a server→client
   //                                      request; forwarded upstream verbatim.
-  //   {method, params} (no id)           forwarded upstream.
+  //   {method, params} (no id)           forwarded upstream — UNLESS it names one
+  //                                      of BROKER_LOCAL_METHODS, which is
+  //                                      dropped: a local call with no id is a
+  //                                      question the broker cannot answer, and
+  //                                      sending it on would put a `broker/*`
+  //                                      frame in front of codex.
   _onClientLine(client, line) {
     let msg;
     try { msg = JSON.parse(line); }
@@ -637,6 +657,13 @@ export class Broker {
       if (msg.method === 'initialized') return; // the client's half of a handshake it never made
       if (typeof msg.method !== 'string') {
         log('WARN', 'client', String(client.id), 'sent a frame with neither id nor method');
+        return;
+      }
+      if (BROKER_LOCAL_METHODS.has(msg.method)) {
+        // Dropped, loudly. The alternative is what this branch used to do:
+        // forward it, so a client's own `broker/unsubscribe` reached codex as an
+        // unknown method and the subscription it meant to drop stayed put.
+        log('WARN', 'client', String(client.id), 'sent local method as a notification; dropped', msg.method);
         return;
       }
       this._forwardUpstream(client, null, { jsonrpc: '2.0', method: msg.method, params: msg.params });

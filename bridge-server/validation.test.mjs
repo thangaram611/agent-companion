@@ -29,11 +29,13 @@ const TEST_CWD = tmpdir();
 // `formatPrompt`'s plan_path=latest resolution logs, and the log path resolves
 // through runtimeDir() at every call — so this pure-function suite appended to
 // the operator's live ~/.claude/agent-companion/runtime log (measured 145 bytes
-// per run). Pinned into a sandbox, and never unset: clearing the redirect is
-// what re-points a straggler at the real path.
-const LOG_SANDBOX = mkdtempSync(join(tmpdir(), 'copilot-validation-log-'));
-process.env.AGENT_BRIDGE_LOG_FILE = join(LOG_SANDBOX, 'agent-bridge.log');
-test.after(() => rmSync(LOG_SANDBOX, { recursive: true, force: true }));
+// per run). runtimeDir() itself is what gets pinned, the same knob every other
+// suite uses, so a later test that writes a digest or a ledger row is already
+// contained. Never unset: clearing the redirect is what re-points a straggler at
+// the real path.
+const RUNTIME_SANDBOX = mkdtempSync(join(tmpdir(), 'ac-rt-val-'));
+process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
+test.after(() => rmSync(RUNTIME_SANDBOX, { recursive: true, force: true }));
 
 function withPlansDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'copilot-plans-'));

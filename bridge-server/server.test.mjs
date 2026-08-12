@@ -9,17 +9,26 @@ import { join } from 'node:path';
 
 const STATE_SANDBOX = mkdtempSync(join(tmpdir(), 'copilot-state-server-'));
 process.env.AGENT_COMPANION_HOME = STATE_SANDBOX;
-// Pinned into the sandbox rather than left to resolve through runtimeDir():
-// AGENT_COMPANION_HOME does not reach it (lib/host.mjs derives the companion
-// home from the HOST, not from that var), so every `log()` this suite provokes
-// appended to the operator's live ~/.claude/agent-companion/runtime log —
-// measured 31,396 bytes for one run of this file. Never unset it in teardown:
-// clearing it is exactly what re-points a straggler at the real path.
-process.env.AGENT_BRIDGE_LOG_FILE = join(STATE_SANDBOX, 'agent-bridge.log');
+// runtimeDir() is pinned rather than the bridge log alone: AGENT_COMPANION_HOME
+// does not reach it (lib/host.mjs derives the companion home from the HOST, not
+// from that var), and the bridge log is not the only artifact a fake job leaves
+// behind. Measured for one run of this file against the operator's live
+// ~/.claude/agent-companion/runtime: 31,396 bytes of agent-bridge.log, 22,031
+// bytes of completions.jsonl — the ledger a restarted bridge HYDRATES JOBS FROM,
+// so fabricated jobs came back as real ones — and 19 digest files. One knob
+// moves all of them (lib/runtime-paths.test.mjs pins that invariant). Never
+// unset it in teardown: clearing it is exactly what re-points a straggler at the
+// real path. Short dir name because a unix socket path over SUN_LEN (~104 bytes
+// on darwin) binds a silently truncated name.
+const RUNTIME_SANDBOX = mkdtempSync(join(tmpdir(), 'ac-rt-srv-'));
+process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
 process.env.AGENT_COMPANION_DEFAULT_TARGET = 'copilot';
 const TEST_CWD = tmpdir();
 
-test.after(() => rmSync(STATE_SANDBOX, { recursive: true, force: true }));
+test.after(() => {
+  rmSync(STATE_SANDBOX, { recursive: true, force: true });
+  rmSync(RUNTIME_SANDBOX, { recursive: true, force: true });
+});
 
 async function bridge() {
   return import('./server.mjs');
@@ -119,7 +128,11 @@ test('server imports safely and dispatch handles the public boundary errors/stat
   assert.equal(statusWithDiagnostics.ok, true);
   assert.equal(statusWithDiagnostics.action, 'status');
   assert.equal(statusWithDiagnostics.diagnostics.runtime.adapter, process.env.COPILOT_RUNTIME_ADAPTER || 'acp');
-  assert.match(statusWithDiagnostics.diagnostics.runtime.dir, /copilot-state-server-|agent-companion/);
+  // Exact, not a regex that also accepted `agent-companion` — the operator's
+  // REAL runtime dir contains that substring, so the loose match passed while
+  // this suite was writing its fake ledger rows and digests there. This is now
+  // the in-suite proof that the AGENT_RUNTIME_DIR pin still reaches runtimeDir().
+  assert.equal(statusWithDiagnostics.diagnostics.runtime.dir, RUNTIME_SANDBOX);
   assert.equal(typeof statusWithDiagnostics.diagnostics.node.ok, 'boolean');
   await assert.rejects(() => mod.dispatch({ action: 'frobnicate' }), /unhandled action/);
 

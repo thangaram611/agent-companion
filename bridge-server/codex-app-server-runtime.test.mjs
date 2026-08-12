@@ -51,6 +51,29 @@ import { note, threadItem, driftNote } from '../test/codex-wire-frames.mjs';
 import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
 import { fakeBrokerSocket, FAKE_BROKER_PID } from '../test/fake-codex-broker-socket.mjs';
 
+// Every artifact this suite provokes goes into its own sandbox, and neither pin
+// is ever unset: clearing a redirect is exactly what re-points a straggler at
+// the real path.
+//
+//   AGENT_COMPANION_HOME → lib/log.mjs's daemon.log. Measured 861 bytes of
+//     fabricated broker events per run appended to the operator's live
+//     ~/.claude/agent-companion/daemon.log — `codex_appserver_dispose_pid_mismatch`
+//     for pid 777777, a disposal claim by pid 23107, none of which existed.
+//   AGENT_RUNTIME_DIR → everything lib/runtime-paths.mjs resolves, so the
+//     registry and socket pins in beforeEach have a sandboxed FLOOR rather than
+//     being the only thing between this suite and the real runtime dir.
+//
+// Short dir names on purpose: a unix socket path over SUN_LEN (~104 bytes on
+// darwin) binds a silently truncated name (lib/runtime-paths.mjs).
+const HOME_SANDBOX = mkdtempSync(join(tmpdir(), 'cx-home-'));
+process.env.AGENT_COMPANION_HOME = HOME_SANDBOX;
+const RUNTIME_SANDBOX = mkdtempSync(join(tmpdir(), 'cx-rt-'));
+process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
+test.after(() => {
+  rmSync(HOME_SANDBOX, { recursive: true, force: true });
+  rmSync(RUNTIME_SANDBOX, { recursive: true, force: true });
+});
+
 const TID = 'T1';
 const BROKER_PID = FAKE_BROKER_PID;
 

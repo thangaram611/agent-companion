@@ -59,6 +59,7 @@ mkdirSync(process.env.AGENT_HEARTBEAT_DIR, { recursive: true });
 
 const {
   AppServerConnection,
+  BROKER_LOCAL_METHODS,
   BROKER_PROTOCOL_VERSION,
   Broker,
   BrokerServer,
@@ -309,6 +310,47 @@ test('a frame with an explicit null id is a notification, not a request that can
   assert.deepEqual(connection.sent, [{ jsonrpc: '2.0', method: 'thread/unsubscribe', params: { threadId: 'T1' } }]);
   assert.equal(broker.pending.size, 0);
   assert.deepEqual(a.frames, []);
+});
+
+// A notification names the same methods a request does, so the id-less path has
+// to make the same local/upstream decision the switch makes — it used to forward
+// everything. The one that mattered: `conn.notify('broker/unsubscribe', …)` is a
+// call the client believes is local, and codex answers -32600 to a method it has
+// never heard of while the subscription the client meant to drop stays put.
+test('a local method sent as a notification is dropped, not put in front of codex', () => {
+  const { broker, connection } = makeBroker();
+  const a = attach(broker);
+  a.feed(rpc(1, 'broker/subscribe', { threadId: 'T1' }));
+  assert.equal(broker.subscriptions.threadCount(), 1);
+
+  for (const method of BROKER_LOCAL_METHODS) {
+    a.feed({ jsonrpc: '2.0', method, params: { threadId: 'T1' } });
+  }
+
+  // Nothing reached the app-server, and nothing was answered to a frame that
+  // carried no id to answer.
+  assert.deepEqual(connection.sent, []);
+  assert.equal(a.frames.length, 1); // the id-bearing subscribe, and only that
+  // The id-less `broker/unsubscribe` did NOT quietly take effect either: a
+  // notification is refused, not honoured through a side door.
+  assert.equal(broker.subscriptions.threadCount(), 1);
+
+  // An upstream method with no id still goes upstream — this guard is a filter,
+  // not a wall.
+  a.feed({ jsonrpc: '2.0', method: 'thread/unsubscribe', params: { threadId: 'T1' } });
+  assert.deepEqual(connection.sent, [{ jsonrpc: '2.0', method: 'thread/unsubscribe', params: { threadId: 'T1' } }]);
+});
+
+// The set and the switch are two spellings of one fact, and the bug above is
+// what a disagreement between them looks like. A `case` added to the switch
+// without the set fails here rather than three waves later on the wire.
+test('BROKER_LOCAL_METHODS is exactly the set of methods the client switch answers locally', () => {
+  const src = readFileSync(BROKER_PATH, 'utf8');
+  const body = src.slice(src.indexOf('_onClientLine(client, line) {'));
+  const switchBlock = body.slice(body.indexOf('switch (msg.method) {'), body.indexOf('  status() {'));
+  const cases = [...switchBlock.matchAll(/case '([^']+)':/g)].map((m) => m[1]).sort();
+  assert.ok(cases.length > 0, 'failed to locate the client-method switch');
+  assert.deepEqual(cases, [...BROKER_LOCAL_METHODS].sort());
 });
 
 // --- notification routing ----------------------------------------------------
