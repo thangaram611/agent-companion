@@ -1091,7 +1091,17 @@ test('AppServerConnection performs exactly one handshake against a real child pr
   assert.equal(result.userAgent, 'fake-app-server');
   assert.equal(connection.initialized, true);
 
-  const frames = readFileSync(tracePath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  // `initialize()` resolves on the RESPONSE, but the `initialized` notification
+  // that follows it is written to the child's stdin asynchronously and traced by
+  // a separate process. Reading the file once races that write — latent on this
+  // assertion since it was written, and surfaced by any change that shifts the
+  // fake's startup timing. Wait for the handshake to be complete on disk, then
+  // assert its exact shape: the point of the test is that there are exactly two
+  // frames and no second `initialize`, which a wait does not weaken.
+  const frames = await waitFor(() => {
+    const seen = readFileSync(tracePath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    return seen.length >= 2 ? seen : null;
+  }, { label: 'the initialize + initialized handshake to reach the trace' });
   assert.deepEqual(frames.map((f) => f.method), ['initialize', 'initialized']);
 
   const loaded = await connection.request('thread/loaded/list', {});

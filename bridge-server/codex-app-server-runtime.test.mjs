@@ -48,6 +48,7 @@ import {
 } from './codex-app-server-runtime.mjs';
 import { resolveCodexTimeoutMs } from './codex-runtime.mjs';
 import { CODEX_PINNED_VERSION } from '../lib/codex-app-server-contract.mjs';
+import { note, threadItem, driftNote } from '../test/codex-wire-frames.mjs';
 import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
 import { fakeBrokerSocket, FAKE_BROKER_PID } from '../test/fake-codex-broker-socket.mjs';
 
@@ -85,7 +86,11 @@ async function connectFake(opts = {}, { env = {} } = {}) {
   return { conn, sock };
 }
 
-const note = (method, params) => ({ jsonrpc: '2.0', method, params });
+// `note` and `threadItem` come from test/codex-wire-frames.mjs, which BUILDS
+// every frame from the pinned contract: a field codex-cli 0.147.0 does not send
+// cannot be written down here, and the required ones a test does not care about
+// are filled in for it. The hand-rolled `{jsonrpc, method, params}` literal this
+// file used to carry is what let five wrong field names ship with green tests.
 
 // --- adapter selection -------------------------------------------------------
 
@@ -231,8 +236,11 @@ test('promptId keeps the codex prefix and encodes reply generation', () => {
 test('the accumulator streams deltas, folds a command, and completes on turn/completed', () => {
   const acc = createCodexTurnAccumulator(TID);
   acc.push(note('turn/started', { threadId: TID, turn: { id: 'TURN1' } }));
-  acc.push(note('item/started', { threadId: TID, item: { id: 'i1', type: 'commandExecution', command: 'npm test' } }));
-  acc.push(note('item/commandExecution/outputDelta', { threadId: TID, itemId: 'i1', chunk: 'ok\n' }));
+  acc.push(note('item/started', { threadId: TID, item: threadItem('commandExecution', { id: 'i1', command: 'npm test' }) }));
+  // `delta`, not `chunk`: the schema declares one payload field on every delta
+  // notification and the builder refuses the other three spellings this used to
+  // be written with.
+  acc.push(note('item/commandExecution/outputDelta', { threadId: TID, itemId: 'i1', delta: 'ok\n' }));
   acc.push(note('item/agentMessage/delta', { threadId: TID, itemId: 'm1', delta: 'Hello ' }));
   acc.push(note('item/agentMessage/delta', { threadId: TID, itemId: 'm1', delta: 'world' }));
 
@@ -243,8 +251,11 @@ test('the accumulator streams deltas, folds a command, and completes on turn/com
   assert.equal(acc.snapshot().toolCalls[0].status, 'in_progress');
   assert.equal(acc.snapshot().toolCalls[0].aggregated_output, 'ok\n');
 
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'i1', type: 'commandExecution', command: 'npm test', status: 'completed', exitCode: 0, aggregatedOutput: 'ok\n1 passing\n' } }));
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'm1', type: 'agentMessage', text: 'Hello world', phase: 'final_answer' } }));
+  acc.push(note('item/completed', {
+    threadId: TID,
+    item: threadItem('commandExecution', { id: 'i1', command: 'npm test', status: 'completed', exitCode: 0, aggregatedOutput: 'ok\n1 passing\n' }),
+  }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm1', text: 'Hello world', phase: 'final_answer' }) }));
   acc.push(note('turn/completed', { threadId: TID, turn: { id: 'TURN1', status: 'completed', items: [] } }));
 
   assert.deepEqual(acc.terminal, { status: 'completed', reason: 'turn/completed', error: null });
@@ -261,11 +272,25 @@ test('the accumulator streams deltas, folds a command, and completes on turn/com
   });
 });
 
+test('a delta spelt any way but the schema\'s cannot be written down', () => {
+  // The guard, asserted directly: these four were live reads in the accumulator,
+  // each with a green test feeding the same invention back to it. The builder is
+  // what makes rewriting one of them a red test rather than a silent no-op.
+  for (const invented of ['chunk', 'output', 'text']) {
+    assert.throws(
+      () => note('item/commandExecution/outputDelta', { threadId: TID, itemId: 'i1', [invented]: 'ok' }),
+      new RegExp(`carries \\\`${invented}\\\``),
+      `${invented} is not a field of item/commandExecution/outputDelta`,
+    );
+  }
+  assert.throws(() => note('item/agentMessage/delta', { threadId: TID, itemId: 'm1', text: 'hi' }), /carries `text`/);
+});
+
 test('the accumulator prefers the final answer over the commentary preamble', () => {
   const acc = createCodexTurnAccumulator(TID);
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'm1', type: 'agentMessage', text: 'Let me look at that.', phase: 'commentary' } }));
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'm2', type: 'agentMessage', text: 'THE ANSWER', phase: 'final_answer' } }));
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'm3', type: 'agentMessage', text: 'Anything else?', phase: 'commentary' } }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm1', text: 'Let me look at that.', phase: 'commentary' }) }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm2', text: 'THE ANSWER', phase: 'final_answer' }) }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm3', text: 'Anything else?', phase: 'commentary' }) }));
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
   assert.equal(acc.snapshot().message, 'THE ANSWER');
 });
@@ -314,12 +339,25 @@ test('an interrupted turn settles cancelled, with no answer', () => {
   assert.equal(acc.snapshot().message, 'partial thought');
 });
 
+test('a failed turn reports the message from Turn.error, which is an object', () => {
+  // `Turn.error` is a `TurnError` — "only populated when status is failed" — so
+  // the message is one level down. The two alternatives this used to read
+  // (`turn.error` itself, `turn.failure`) would have put `[object Object]` and
+  // `undefined` respectively in front of an operator.
+  const acc = createCodexTurnAccumulator(TID);
+  acc.push(note('turn/completed', { threadId: TID, turn: { id: 'TURN1', status: 'failed', error: { message: 'context window exceeded' } } }));
+  assert.equal(acc.terminal.status, 'failed');
+  assert.equal(acc.terminal.reason, 'failed');
+  assert.equal(acc.terminal.error, 'context window exceeded');
+  assert.throws(() => note('turn/completed', { threadId: TID, turn: { status: 'failed', failure: 'nope' } }), /carries `failure`/);
+});
+
 test('a failed command does not render like a successful one', () => {
   const acc = createCodexTurnAccumulator(TID);
-  acc.push(note('item/started', { threadId: TID, item: { id: 'i1', type: 'commandExecution', command: 'make build' } }));
+  acc.push(note('item/started', { threadId: TID, item: threadItem('commandExecution', { id: 'i1', command: 'make build' }) }));
   acc.push(note('item/completed', {
     threadId: TID,
-    item: { id: 'i1', type: 'commandExecution', command: 'make build', status: 'failed', exitCode: 2, aggregatedOutput: 'ld: symbol not found' },
+    item: threadItem('commandExecution', { id: 'i1', command: 'make build', status: 'failed', exitCode: 2, aggregatedOutput: 'ld: symbol not found' }),
   }));
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
   const call = acc.snapshot().toolCalls[0];
@@ -329,6 +367,8 @@ test('a failed command does not render like a successful one', () => {
   // The outcome lives on the ENTRY, never inside `input` — `input` stays the
   // invocation, which is what formatTerminalContent reads for "Files touched".
   assert.deepEqual(call.input, { command: 'make build' });
+  // And the snake_case twins are the exec stream's, not this transport's.
+  assert.throws(() => threadItem('commandExecution', { id: 'i1', command: 'x', exit_code: 2 }), /carries `exit_code`/);
 });
 
 test('a reasoning-only turn still produces content', () => {
@@ -345,29 +385,82 @@ test('a reasoning-only turn still produces content', () => {
   assert.notEqual(snap.thoughts.trim(), '');
 });
 
-test('a completed reasoning item replaces the deltas that streamed it', () => {
+test('a completed reasoning item replaces the deltas that streamed it, from content and summary', () => {
+  // A reasoning item is `{content: string[], summary: string[]}` — there is no
+  // `text`, which is what this branch used to read, so it never fired at all and
+  // the replay harvested no reasoning. Both arrays are joined: they are the raw
+  // chain and the model's own précis of it, streamed through two different delta
+  // methods into this one bucket.
   const acc = createCodexTurnAccumulator(TID);
   acc.push(note('item/reasoning/textDelta', { threadId: TID, itemId: 'r1', delta: 'half' }));
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'r1', type: 'reasoning', text: 'half a thought, whole' } }));
+  acc.push(note('item/completed', {
+    threadId: TID,
+    item: threadItem('reasoning', { id: 'r1', content: ['half a thought, whole'], summary: ['decided to look'] }),
+  }));
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
-  assert.equal(acc.snapshot().thoughts, 'half a thought, whole');
+  assert.equal(acc.snapshot().thoughts, 'half a thought, whole\ndecided to look');
+  assert.throws(() => threadItem('reasoning', { id: 'r1', text: 'half a thought, whole' }), /carries `text`/);
+});
+
+test('a fileChange item yields one entry per file, with the patch kind as a word', () => {
+  // `{changes: FileUpdateChange[]}`, each `{diff, kind, path}` — NOT the
+  // `{files:[…]}`/`{path,kind}` shape the exec collector guesses at, which is
+  // what this branch used to be handed. Every app-server job that edited a file
+  // produced zero toolCalls and an empty "Files touched" as a result.
+  //
+  // `kind` is a tagged OBJECT (`{type:'update', move_path?}`), so it is unwrapped
+  // to its tag: `input.kind` holds a string on the exec side and server.mjs
+  // renders these entries beside exec ones.
+  const acc = createCodexTurnAccumulator(TID);
+  acc.push(note('item/completed', {
+    threadId: TID,
+    item: threadItem('fileChange', {
+      id: 'f1',
+      status: 'completed',
+      changes: [
+        { path: 'src/a.mjs', kind: { type: 'update' }, diff: '@@ -1 +1 @@' },
+        { path: 'src/new.mjs', kind: { type: 'add' }, diff: '@@ -0,0 +1 @@' },
+      ],
+    }),
+  }));
+  acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
+  assert.deepEqual(acc.snapshot().toolCalls, [
+    { name: 'file_change', input: { path: 'src/a.mjs', kind: 'update' } },
+    { name: 'file_change', input: { path: 'src/new.mjs', kind: 'add' } },
+  ]);
+  assert.throws(() => threadItem('fileChange', { id: 'f1', files: [{ path: 'src/a.mjs' }] }), /carries `files`/);
+});
+
+test('an mcpToolCall records the arguments it was called with', () => {
+  // `arguments`, not `input`/`args` — neither of which is a property of the item,
+  // so every MCP call recorded `{}` and no test in the repo touched the branch.
+  const acc = createCodexTurnAccumulator(TID);
+  acc.push(note('item/completed', {
+    threadId: TID,
+    item: threadItem('mcpToolCall', { id: 'x1', server: 'filesystem', tool: 'read_file', status: 'completed', arguments: { path: '/w/a.mjs' } }),
+  }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('webSearch', { id: 'w1', query: 'codex app-server' }) }));
+  acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
+  assert.deepEqual(acc.snapshot().toolCalls, [
+    { name: 'read_file', input: { path: '/w/a.mjs' } },
+    { name: 'webSearch', input: { query: 'codex app-server' } },
+  ]);
+  assert.throws(() => threadItem('mcpToolCall', { id: 'x1', server: 's', tool: 't', input: {} }), /carries `input`/);
 });
 
 test('turn/completed replays its items without duplicating what already streamed', () => {
   // The salvage path for a bridge that attached mid-turn: the replay must add
   // what it missed and double nothing it saw.
   const acc = createCodexTurnAccumulator(TID);
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'i1', type: 'commandExecution', command: 'ls', status: 'completed', exitCode: 0 } }));
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'f1', type: 'fileChange', path: 'src/a.mjs', kind: 'modified' } }));
+  const ls = threadItem('commandExecution', { id: 'i1', command: 'ls', status: 'completed', exitCode: 0 });
+  const edit = threadItem('fileChange', { id: 'f1', status: 'completed', changes: [{ path: 'src/a.mjs', kind: { type: 'update' }, diff: '@@' }] });
+  acc.push(note('item/completed', { threadId: TID, item: ls }));
+  acc.push(note('item/completed', { threadId: TID, item: edit }));
   acc.push(note('turn/completed', {
     threadId: TID,
     turn: {
       status: 'completed',
-      items: [
-        { id: 'i1', type: 'commandExecution', command: 'ls', status: 'completed', exitCode: 0 },
-        { id: 'f1', type: 'fileChange', path: 'src/a.mjs', kind: 'modified' },
-        { id: 'm9', type: 'agentMessage', text: 'ONLY IN THE REPLAY', phase: 'final_answer' },
-      ],
+      items: [ls, edit, threadItem('agentMessage', { id: 'm9', text: 'ONLY IN THE REPLAY', phase: 'final_answer' })],
     },
   }));
   const snap = acc.snapshot();
@@ -394,24 +487,41 @@ test('another job\'s notifications never reach this thread\'s accumulator', () =
 });
 
 test('a thread-scoped error and an app-server death are both terminal, and differently', () => {
+  // The error notification is `{error: TurnError, threadId, turnId, willRetry}`,
+  // all four required — the message is one level down, and the flat
+  // `params.message` this used to read first is the EXEC stream's shape.
   const failed = createCodexTurnAccumulator(TID);
-  failed.push(note('error', { threadId: TID, message: 'model overloaded' }));
+  failed.push(note('error', { threadId: TID, turnId: 'TURN1', willRetry: false, error: { message: 'model overloaded' } }));
   assert.equal(failed.terminal.status, 'failed');
   assert.equal(failed.terminal.error, 'model overloaded');
+  assert.throws(() => note('error', { threadId: TID, message: 'model overloaded' }), /carries `message`/);
 
+  // `broker/appServerDied` is the broker's own frame, not an app-server method —
+  // hence driftNote, which is the only way to write a frame this pin has never
+  // seen and says so at the call site.
   const died = createCodexTurnAccumulator(TID);
-  died.push(note('broker/appServerDied', { code: 7, signal: null }));
+  died.push(driftNote('broker/appServerDied', { code: 7, signal: null }));
   assert.equal(died.terminal.status, 'unreachable');
   assert.match(died.terminal.error, /in-flight turn was lost/);
 });
 
-test('an item-level error is recorded but does not end the turn', () => {
+test('there is no `error` ThreadItem variant to record', () => {
+  // This branch existed and had a test; the item type it handled does not exist.
+  // The 18 variants carry no `error`, so a turn's errors arrive as the `error`
+  // NOTIFICATION (fatal) or as a `failed` status on the item that raised one.
+  assert.throws(
+    () => threadItem('error', { id: 'e1', message: 'tool blew up' }),
+    /is not one of codex-cli .* 18 ThreadItem variants/,
+  );
   const acc = createCodexTurnAccumulator(TID);
-  acc.push(note('item/completed', { threadId: TID, item: { id: 'e1', type: 'error', message: 'tool blew up' } }));
-  assert.equal(acc.terminal, null);
+  acc.push(note('item/completed', {
+    threadId: TID,
+    item: threadItem('commandExecution', { id: 'i1', command: 'make', status: 'failed', exitCode: 1 }),
+  }));
+  assert.equal(acc.terminal, null, 'a failed item does not end the turn — only turn/completed and `error` do');
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
   assert.equal(acc.terminal.status, 'completed');
-  assert.equal(acc.snapshot().error, 'tool blew up');
+  assert.equal(acc.snapshot().toolCalls[0].status, 'failed');
 });
 
 test('a plan-only turn carries its plan so it does not read as empty', () => {
@@ -419,6 +529,9 @@ test('a plan-only turn carries its plan so it does not read as empty', () => {
   acc.push(note('turn/plan/updated', { threadId: TID, plan: [{ step: 'read the file', status: 'pending' }] }));
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
   assert.deepEqual(acc.snapshot().plan, [{ step: 'read the file', status: 'pending' }]);
+  // `steps` was the other spelling this read; `turn/plan/updated` declares
+  // `plan`, required.
+  assert.throws(() => note('turn/plan/updated', { threadId: TID, steps: [] }), /carries `steps`/);
 });
 
 // --- approvalPolicy and the absent model -------------------------------------
@@ -1008,7 +1121,10 @@ test('the level check carries a pinned model into the resume it performs', async
 test('the level check keeps watching an active thread', async () => {
   const { conn, sock } = await connectFake({ statuses: { [TID]: 'active' } });
   const watcher = await openCodexTurnWatcher({ conn, threadId: TID, initialLevelCheck: true, timeoutMs: 5_000 });
-  sock.deliver(note('turn/completed', { threadId: TID, turn: { status: 'completed', items: [{ type: 'agentMessage', text: 'live tail', phase: 'final_answer' }] } }));
+  sock.deliver(note('turn/completed', {
+    threadId: TID,
+    turn: { status: 'completed', items: [threadItem('agentMessage', { id: 'm1', text: 'live tail', phase: 'final_answer' })] },
+  }));
   const result = await watcher.done;
   conn.close();
   assert.equal(result.status, 'completed');

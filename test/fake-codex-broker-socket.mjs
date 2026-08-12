@@ -35,6 +35,7 @@
 import { EventEmitter } from 'node:events';
 
 import { contractViolation, unhandledMethodError } from '../lib/codex-app-server-contract.mjs';
+import { note, threadItem } from './codex-wire-frames.mjs';
 
 // The pid the fake broker claims as its own. `disposeBroker` only signals a pid
 // the LIVE broker claims, so a registry entry that expects to be disposed has
@@ -70,8 +71,11 @@ export function fakeBrokerSocket({
   sock.paramsFor = (method) => sock.calls.filter((c) => c.method === method).map((c) => c.params);
   sock.deliver = (frame) => sock.emit('data', `${JSON.stringify(frame)}\n`);
   // Push a thread-scoped app-server notification, the way the broker forwards
-  // one after routing it. Sugar over `deliver` because bridge tests write many.
-  sock.notify = (method, params = {}) => sock.deliver({ jsonrpc: '2.0', method, params: { threadId, ...params } });
+  // one after routing it. BUILT from the pinned contract (test/codex-wire-frames)
+  // rather than assembled here: this one line was how `{chunk}` for `{delta}` and
+  // `error {message}` got onto the wire in three suites at once, each with a
+  // green assertion on the read that matched the invention.
+  sock.notify = (method, params = {}) => sock.deliver(note(method, { threadId, ...params }));
 
   let steerSeq = 0;
   const defaults = {
@@ -96,8 +100,11 @@ export function fakeBrokerSocket({
     'thread/read': (p) => ({ thread: { id: p.threadId, turns: turns[p.threadId] || [] } }),
     'thread/loaded/list': () => ({ data: [] }),
     'turn/start': () => ({ turn: { id: 'TURN1' } }),
-    // The real server echoes the turn it steered; `{}` would let a caller that
-    // reads the echo pass against a fake and read undefined against codex.
+    // `TurnSteerResponse` is `{turnId}` — measured from the schema, and NOT the
+    // `{turn:{id}}` this used to return, which is `turn/start`'s shape. The
+    // comment that used to sit here said a `{}` answer "would let a caller that
+    // reads the echo pass against a fake and read undefined against codex", and
+    // that is exactly what the wrong echo did, one field over.
     //
     // And it ANNOUNCES the injection: the steered input arrives in the turn as
     // an `item/completed` whose item is a `userMessage` (measured 0.14 s after
@@ -108,15 +115,11 @@ export function fakeBrokerSocket({
     // writes them in. A test that wants the other measured case — a model
     // mid-reasoning, injection minutes away — overrides this handler.
     'turn/steer': (p) => {
-      setTimeout(() => sock.deliver({
-        jsonrpc: '2.0',
-        method: 'item/completed',
-        params: {
-          threadId: p.threadId,
-          item: { id: `steer-${++steerSeq}`, type: 'userMessage', content: p.input || [] },
-        },
-      }), 0);
-      return { turn: { id: p.expectedTurnId } };
+      setTimeout(() => sock.deliver(note('item/completed', {
+        threadId: p.threadId,
+        item: threadItem('userMessage', { id: `steer-${++steerSeq}`, content: p.input || [] }),
+      })), 0);
+      return { turnId: p.expectedTurnId };
     },
     'turn/interrupt': () => ({}),
   };

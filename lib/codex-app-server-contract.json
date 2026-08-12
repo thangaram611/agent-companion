@@ -641,421 +641,772 @@
       "method": "account/login/completed",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "error": "string?",
+        "loginId": "string?",
+        "onboardingEntrypoint": "enum:life_sciences?",
+        "success": "boolean"
+      }
     },
     {
       "method": "account/rateLimits/updated",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "rateLimits": "RateLimitSnapshot"
+      }
     },
     {
       "method": "account/updated",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "authMode": "enum:apikey|chatgpt|chatgptAuthTokens|headers|agentIdentity|personalAccessToken|bedrockApiKey?",
+        "planType": "enum:free|go|plus|pro|prolite|team|self_serve_business_prolite|self_serve_business_usage_based|business|ent26|enterprise_cbp_automation|enterprise_cbp_usage_based|enterprise|edu|unknown?"
+      }
     },
     {
       "method": "app/list/updated",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "data": "AppInfo[]"
+      }
     },
     {
       "method": "command/exec/outputDelta",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "capReached": "boolean",
+        "deltaBase64": "string",
+        "processId": "string",
+        "stream": "enum:stdout|stderr"
+      }
     },
     {
       "method": "configWarning",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "details": "string?",
+        "path": "string?",
+        "range": "TextRange?",
+        "summary": "string"
+      }
     },
     {
       "method": "deprecationNotice",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "details": "string?",
+        "summary": "string"
+      }
     },
     {
       "method": "error",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "error": "TurnError",
+        "threadId": "string",
+        "turnId": "string",
+        "willRetry": "boolean"
+      }
     },
     {
       "method": "externalAgentConfig/import/completed",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "importId": "string",
+        "itemTypeResults": "ExternalAgentConfigImportTypeResult[]"
+      }
     },
     {
       "method": "externalAgentConfig/import/progress",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "importId": "string",
+        "itemTypeResults": "ExternalAgentConfigImportTypeResult[]"
+      }
     },
     {
       "method": "fs/changed",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "changedPaths": "string[]",
+        "watchId": "string"
+      }
     },
     {
       "method": "fuzzyFileSearch/sessionCompleted",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "sessionId": "string"
+      }
     },
     {
       "method": "fuzzyFileSearch/sessionUpdated",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "files": "FuzzyFileSearchResult[]",
+        "query": "string",
+        "sessionId": "string"
+      }
     },
     {
       "method": "guardianWarning",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "message": "string",
+        "threadId": "string"
+      }
     },
     {
       "method": "hook/completed",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "run": "HookRunSummary",
+        "threadId": "string",
+        "turnId": "string?"
+      }
     },
     {
       "method": "hook/started",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "run": "HookRunSummary",
+        "threadId": "string",
+        "turnId": "string?"
+      }
     },
     {
       "method": "item/agentMessage/delta",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "delta": "string",
+        "itemId": "string",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/autoApprovalReview/completed",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "action": "GuardianApprovalReviewAction",
+        "completedAtMs": "integer",
+        "decisionSource": "enum:agent",
+        "review": "GuardianApprovalReview",
+        "reviewId": "string",
+        "startedAtMs": "integer",
+        "targetItemId": "string?",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/autoApprovalReview/started",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "action": "GuardianApprovalReviewAction",
+        "review": "GuardianApprovalReview",
+        "reviewId": "string",
+        "startedAtMs": "integer",
+        "targetItemId": "string?",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/commandExecution/outputDelta",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "delta": "string",
+        "itemId": "string",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/commandExecution/terminalInteraction",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "itemId": "string",
+        "processId": "string",
+        "stdin": "string",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/completed",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "completedAtMs": "integer",
+        "item": "ThreadItem",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/fileChange/outputDelta",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "delta": "string",
+        "itemId": "string",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/fileChange/patchUpdated",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "changes": "FileUpdateChange[]",
+        "itemId": "string",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/mcpToolCall/progress",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "itemId": "string",
+        "message": "string",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/plan/delta",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "delta": "string",
+        "itemId": "string",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/reasoning/summaryPartAdded",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "itemId": "string",
+        "summaryIndex": "integer",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/reasoning/summaryTextDelta",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "delta": "string",
+        "itemId": "string",
+        "summaryIndex": "integer",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/reasoning/textDelta",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "contentIndex": "integer",
+        "delta": "string",
+        "itemId": "string",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "item/started",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "item": "ThreadItem",
+        "startedAtMs": "integer",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "mcpServer/oauthLogin/completed",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": true
+      "optional": true,
+      "params": {
+        "error": "string?",
+        "name": "string",
+        "success": "boolean",
+        "threadId": "string?"
+      }
     },
     {
       "method": "mcpServer/startupStatus/updated",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": true
+      "optional": true,
+      "params": {
+        "error": "string?",
+        "failureReason": "enum:reauthenticationRequired?",
+        "name": "string",
+        "status": "enum:starting|ready|failed|cancelled",
+        "threadId": "string?"
+      }
     },
     {
       "method": "model/rerouted",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "fromModel": "string",
+        "reason": "enum:highRiskCyberActivity",
+        "threadId": "string",
+        "toModel": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "model/safetyBuffering/updated",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "fasterModel": "string?",
+        "model": "string",
+        "reasons": "string[]",
+        "showBufferingUi": "boolean",
+        "threadId": "string",
+        "turnId": "string",
+        "useCases": "string[]"
+      }
     },
     {
       "method": "model/verification",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string",
+        "turnId": "string",
+        "verifications": "enum:trustedAccessForCyber[]"
+      }
     },
     {
       "method": "process/exited",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "exitCode": "integer",
+        "processHandle": "string",
+        "stderr": "string",
+        "stderrCapReached": "boolean",
+        "stdout": "string",
+        "stdoutCapReached": "boolean"
+      }
     },
     {
       "method": "process/outputDelta",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "capReached": "boolean",
+        "deltaBase64": "string",
+        "processHandle": "string",
+        "stream": "enum:stdout|stderr"
+      }
     },
     {
       "method": "remoteControl/status/changed",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "environmentId": "string?",
+        "installationId": "string",
+        "serverName": "string",
+        "status": "enum:disabled|connecting|connected|errored"
+      }
     },
     {
       "method": "serverRequest/resolved",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "requestId": "any",
+        "threadId": "string"
+      }
     },
     {
       "method": "skills/changed",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {}
     },
     {
       "method": "thread/archived",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/closed",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/compacted",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "thread/deleted",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/environment/connected",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "environmentId": "string",
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/environment/disconnected",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "environmentId": "string",
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/goal/cleared",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/goal/updated",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "goal": "ThreadGoal",
+        "threadId": "string",
+        "turnId": "string?"
+      }
     },
     {
       "method": "thread/name/updated",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string",
+        "threadName": "string?"
+      }
     },
     {
       "method": "thread/realtime/closed",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "reason": "string?",
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/realtime/error",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "message": "string",
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/realtime/itemAdded",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "item": "any",
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/realtime/outputAudio/delta",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "audio": "ThreadRealtimeAudioChunk",
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/realtime/sdp",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "sdp": "string",
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/realtime/started",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "realtimeSessionId": "string?",
+        "threadId": "string",
+        "version": "enum:v1|v2|v3"
+      }
     },
     {
       "method": "thread/realtime/transcript/delta",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "delta": "string",
+        "role": "string",
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/realtime/transcript/done",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "role": "string",
+        "text": "string",
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/settings/updated",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string",
+        "threadSettings": "ThreadSettings"
+      }
     },
     {
       "method": "thread/started",
       "routing": "nested",
       "key": "params.thread.id",
-      "optional": false
+      "optional": false,
+      "params": {
+        "thread": "Thread"
+      }
     },
     {
       "method": "thread/status/changed",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "status": "ThreadStatus",
+        "threadId": "string"
+      }
     },
     {
       "method": "thread/tokenUsage/updated",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string",
+        "tokenUsage": "ThreadTokenUsage",
+        "turnId": "string"
+      }
     },
     {
       "method": "thread/unarchived",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string"
+      }
     },
     {
       "method": "turn/completed",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string",
+        "turn": "Turn"
+      }
     },
     {
       "method": "turn/diff/updated",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "diff": "string",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "turn/moderationMetadata",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "metadata": "any",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "turn/plan/updated",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "explanation": "string?",
+        "plan": "TurnPlanStep[]",
+        "threadId": "string",
+        "turnId": "string"
+      }
     },
     {
       "method": "turn/started",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": false
+      "optional": false,
+      "params": {
+        "threadId": "string",
+        "turn": "Turn"
+      }
     },
     {
       "method": "warning",
       "routing": "threadId",
       "key": "params.threadId",
-      "optional": true
+      "optional": true,
+      "params": {
+        "message": "string",
+        "threadId": "string?"
+      }
     },
     {
       "method": "windows/worldWritableWarning",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "extraCount": "integer",
+        "failedScan": "boolean",
+        "samplePaths": "string[]"
+      }
     },
     {
       "method": "windowsSandbox/setupCompleted",
       "routing": "global",
       "key": null,
-      "optional": false
+      "optional": false,
+      "params": {
+        "error": "string?",
+        "mode": "enum:elevated|unelevated",
+        "success": "boolean"
+      }
     }
   ],
   "serverRequests": [
@@ -1120,6 +1471,450 @@
       "optional": false
     }
   ],
+  "threadItems": {
+    "agentMessage": {
+      "id": "string",
+      "memoryCitation": "MemoryCitation?",
+      "phase": "enum:commentary|final_answer?",
+      "text": "string",
+      "type": "enum:agentMessage"
+    },
+    "collabAgentToolCall": {
+      "agentsStates": "object",
+      "id": "string",
+      "model": "string?",
+      "prompt": "string?",
+      "reasoningEffort": "string?",
+      "receiverThreadIds": "string[]",
+      "senderThreadId": "string",
+      "status": "enum:inProgress|completed|failed",
+      "tool": "enum:spawnAgent|sendInput|resumeAgent|wait|closeAgent",
+      "type": "enum:collabAgentToolCall"
+    },
+    "commandExecution": {
+      "aggregatedOutput": "string?",
+      "command": "string",
+      "commandActions": "CommandAction[]",
+      "cwd": "string",
+      "durationMs": "integer?",
+      "exitCode": "integer?",
+      "id": "string",
+      "pluginId": "string?",
+      "processId": "string?",
+      "scriptPath": "string?",
+      "source": "enum:agent|userShell|unifiedExecStartup|unifiedExecInteraction?",
+      "status": "enum:inProgress|completed|failed|declined",
+      "type": "enum:commandExecution"
+    },
+    "contextCompaction": {
+      "id": "string",
+      "type": "enum:contextCompaction"
+    },
+    "dynamicToolCall": {
+      "arguments": "any",
+      "contentItems": "DynamicToolCallOutputContentItem[]?",
+      "durationMs": "integer?",
+      "id": "string",
+      "namespace": "string?",
+      "status": "enum:inProgress|completed|failed",
+      "success": "boolean?",
+      "tool": "string",
+      "type": "enum:dynamicToolCall"
+    },
+    "enteredReviewMode": {
+      "id": "string",
+      "review": "string",
+      "type": "enum:enteredReviewMode"
+    },
+    "exitedReviewMode": {
+      "id": "string",
+      "review": "string",
+      "type": "enum:exitedReviewMode"
+    },
+    "fileChange": {
+      "changes": "FileUpdateChange[]",
+      "id": "string",
+      "status": "enum:inProgress|completed|failed|declined",
+      "type": "enum:fileChange"
+    },
+    "hookPrompt": {
+      "fragments": "HookPromptFragment[]",
+      "id": "string",
+      "type": "enum:hookPrompt"
+    },
+    "imageGeneration": {
+      "id": "string",
+      "result": "string",
+      "revisedPrompt": "string?",
+      "savedPath": "string?",
+      "status": "string",
+      "transparentBackground": "boolean?",
+      "type": "enum:imageGeneration"
+    },
+    "imageView": {
+      "id": "string",
+      "path": "string",
+      "type": "enum:imageView"
+    },
+    "mcpToolCall": {
+      "appContext": "McpToolCallAppContext?",
+      "arguments": "any",
+      "durationMs": "integer?",
+      "error": "McpToolCallError?",
+      "id": "string",
+      "mcpAppResourceUri": "string?",
+      "pluginId": "string?",
+      "readOnlyHint": "boolean?",
+      "result": "McpToolCallResult?",
+      "server": "string",
+      "status": "enum:inProgress|completed|failed",
+      "tool": "string",
+      "type": "enum:mcpToolCall"
+    },
+    "plan": {
+      "id": "string",
+      "text": "string",
+      "type": "enum:plan"
+    },
+    "reasoning": {
+      "content": "string[]?",
+      "id": "string",
+      "summary": "string[]?",
+      "type": "enum:reasoning"
+    },
+    "sleep": {
+      "durationMs": "integer",
+      "id": "string",
+      "type": "enum:sleep"
+    },
+    "subAgentActivity": {
+      "agentPath": "string",
+      "agentThreadId": "string",
+      "id": "string",
+      "kind": "enum:started|interacted|interrupted",
+      "type": "enum:subAgentActivity"
+    },
+    "userMessage": {
+      "clientId": "string?",
+      "content": "UserInput[]",
+      "id": "string",
+      "type": "enum:userMessage"
+    },
+    "webSearch": {
+      "action": "WebSearchAction?",
+      "id": "string",
+      "query": "string",
+      "results": "any[]?",
+      "type": "enum:webSearch"
+    }
+  },
+  "structuredTypes": {
+    "AskForApproval": [
+      "enum:untrusted|on-request|never",
+      {
+        "granular": "object"
+      }
+    ],
+    "CollaborationMode": {
+      "mode": "enum:plan|default",
+      "settings": "Settings"
+    },
+    "CommandAction": [
+      {
+        "command": "string",
+        "name": "string",
+        "path": "string",
+        "type": "enum:read"
+      },
+      {
+        "command": "string",
+        "path": "string?",
+        "type": "enum:listFiles"
+      },
+      {
+        "command": "string",
+        "path": "string?",
+        "query": "string?",
+        "type": "enum:search"
+      },
+      {
+        "command": "string",
+        "type": "enum:unknown"
+      }
+    ],
+    "FileUpdateChange": {
+      "diff": "string",
+      "kind": "PatchChangeKind",
+      "path": "string"
+    },
+    "GuardianApprovalReview": {
+      "rationale": "string?",
+      "riskLevel": "enum:low|medium|high|critical?",
+      "status": "enum:inProgress|approved|denied|timedOut|aborted",
+      "userAuthorization": "enum:unknown|low|medium|high?"
+    },
+    "GuardianApprovalReviewAction": [
+      {
+        "command": "string",
+        "cwd": "string",
+        "source": "enum:shell|unifiedExec",
+        "type": "enum:command"
+      },
+      {
+        "argv": "string[]",
+        "cwd": "string",
+        "program": "string",
+        "source": "enum:shell|unifiedExec",
+        "type": "enum:execve"
+      },
+      {
+        "cwd": "string",
+        "files": "string[]",
+        "type": "enum:applyPatch"
+      },
+      {
+        "host": "string",
+        "port": "integer",
+        "protocol": "enum:http|https|socks5Tcp|socks5Udp",
+        "target": "string",
+        "type": "enum:networkAccess"
+      },
+      {
+        "connectorId": "string?",
+        "connectorName": "string?",
+        "server": "string",
+        "toolName": "string",
+        "toolTitle": "string?",
+        "type": "enum:mcpToolCall"
+      },
+      {
+        "permissions": "RequestPermissionProfile",
+        "reason": "string?",
+        "type": "enum:requestPermissions"
+      }
+    ],
+    "HookOutputEntry": {
+      "kind": "enum:warning|stop|feedback|context|error",
+      "text": "string"
+    },
+    "HookPromptFragment": {
+      "hookRunId": "string",
+      "text": "string"
+    },
+    "HookRunSummary": {
+      "completedAt": "integer?",
+      "displayOrder": "integer",
+      "durationMs": "integer?",
+      "entries": "HookOutputEntry[]",
+      "eventName": "enum:preToolUse|permissionRequest|postToolUse|preCompact|postCompact|sessionStart|sessionEnd|userPromptSubmit|subagentStart|subagentStop|stop",
+      "executionMode": "enum:sync|async",
+      "handlerType": "enum:command|prompt|agent",
+      "id": "string",
+      "scope": "enum:thread|turn",
+      "source": "enum:system|user|project|mdm|sessionFlags|plugin|cloudRequirements|cloudManagedConfig|legacyManagedConfigFile|legacyManagedConfigMdm|unknown?",
+      "sourcePath": "string",
+      "startedAt": "integer",
+      "status": "enum:running|completed|failed|blocked|stopped",
+      "statusMessage": "string?"
+    },
+    "PatchChangeKind": [
+      {
+        "type": "enum:add"
+      },
+      {
+        "type": "enum:delete"
+      },
+      {
+        "move_path": "string?",
+        "type": "enum:update"
+      }
+    ],
+    "RequestPermissionProfile": {
+      "fileSystem": "AdditionalFileSystemPermissions?",
+      "network": "AdditionalNetworkPermissions?"
+    },
+    "SandboxPolicy": [
+      {
+        "type": "enum:dangerFullAccess"
+      },
+      {
+        "networkAccess": "boolean?",
+        "type": "enum:readOnly"
+      },
+      {
+        "networkAccess": "enum:restricted|enabled?",
+        "type": "enum:externalSandbox"
+      },
+      {
+        "excludeSlashTmp": "boolean?",
+        "excludeTmpdirEnvVar": "boolean?",
+        "networkAccess": "boolean?",
+        "type": "enum:workspaceWrite",
+        "writableRoots": "string[]?"
+      }
+    ],
+    "SessionSource": [
+      "enum:cli|vscode|exec|appServer|unknown",
+      {
+        "custom": "string"
+      },
+      {
+        "subAgent": "SubAgentSource"
+      }
+    ],
+    "Settings": {
+      "developer_instructions": "string?",
+      "model": "string",
+      "reasoning_effort": "string?"
+    },
+    "SubAgentSource": [
+      "enum:review|compact|memory_consolidation",
+      {
+        "thread_spawn": "object"
+      },
+      {
+        "other": "string"
+      }
+    ],
+    "Thread": {
+      "agentNickname": "string?",
+      "agentRole": "string?",
+      "cliVersion": "string",
+      "createdAt": "integer",
+      "cwd": "string",
+      "ephemeral": "boolean",
+      "forkedFromId": "string?",
+      "gitInfo": "GitInfo?",
+      "id": "string",
+      "modelProvider": "string",
+      "name": "string?",
+      "parentThreadId": "string?",
+      "path": "string?",
+      "preview": "string",
+      "recencyAt": "integer?",
+      "section": "ThreadSection?",
+      "sectionEnteredAt": "integer?",
+      "sessionId": "string",
+      "source": "SessionSource",
+      "status": "ThreadStatus",
+      "threadSource": "string?",
+      "turns": "Turn[]",
+      "updatedAt": "integer"
+    },
+    "ThreadGoal": {
+      "createdAt": "integer",
+      "objective": "string",
+      "status": "enum:active|paused|blocked|usageLimited|budgetLimited|complete",
+      "threadId": "string",
+      "timeUsedSeconds": "integer",
+      "tokenBudget": "integer?",
+      "tokensUsed": "integer",
+      "updatedAt": "integer"
+    },
+    "ThreadRealtimeAudioChunk": {
+      "data": "string",
+      "itemId": "string?",
+      "numChannels": "integer",
+      "sampleRate": "integer",
+      "samplesPerChannel": "integer?"
+    },
+    "ThreadSettings": {
+      "activePermissionProfile": "ActivePermissionProfile?",
+      "approvalPolicy": "AskForApproval",
+      "approvalsReviewer": "enum:user|auto_review|guardian_subagent",
+      "collaborationMode": "CollaborationMode",
+      "cwd": "string",
+      "effort": "string?",
+      "model": "string",
+      "modelProvider": "string",
+      "personality": "enum:none|friendly|pragmatic?",
+      "sandboxPolicy": "SandboxPolicy",
+      "serviceTier": "string?",
+      "summary": "enum:auto|concise|detailed|none?"
+    },
+    "ThreadStatus": [
+      {
+        "type": "enum:notLoaded"
+      },
+      {
+        "type": "enum:idle"
+      },
+      {
+        "type": "enum:systemError"
+      },
+      {
+        "activeFlags": "enum:waitingOnApproval|waitingOnUserInput[]",
+        "type": "enum:active"
+      }
+    ],
+    "ThreadTokenUsage": {
+      "last": "TokenUsageBreakdown",
+      "modelContextWindow": "integer?",
+      "total": "TokenUsageBreakdown"
+    },
+    "TokenUsageBreakdown": {
+      "cacheWriteInputTokens": "integer?",
+      "cachedInputTokens": "integer",
+      "inputTokens": "integer",
+      "outputTokens": "integer",
+      "reasoningOutputTokens": "integer",
+      "totalTokens": "integer"
+    },
+    "Turn": {
+      "completedAt": "integer?",
+      "durationMs": "integer?",
+      "error": "TurnError?",
+      "id": "string",
+      "items": "ThreadItem[]",
+      "itemsView": "enum:notLoaded|summary|full?",
+      "startedAt": "integer?",
+      "status": "enum:completed|interrupted|failed|inProgress"
+    },
+    "TurnError": {
+      "additionalDetails": "string?",
+      "codexErrorInfo": "CodexErrorInfo?",
+      "message": "string"
+    },
+    "TurnPlanStep": {
+      "status": "enum:pending|inProgress|completed",
+      "step": "string"
+    },
+    "UserInput": [
+      {
+        "text": "string",
+        "text_elements": "TextElement[]?",
+        "type": "enum:text"
+      },
+      {
+        "detail": "enum:auto|low|high|original?",
+        "type": "enum:image",
+        "url": "string"
+      },
+      {
+        "detail": "enum:auto|low|high|original?",
+        "path": "string",
+        "type": "enum:localImage"
+      },
+      {
+        "type": "enum:audio",
+        "url": "string"
+      },
+      {
+        "path": "string",
+        "type": "enum:localAudio"
+      },
+      {
+        "name": "string",
+        "path": "string",
+        "type": "enum:skill"
+      },
+      {
+        "name": "string",
+        "path": "string",
+        "type": "enum:mention"
+      }
+    ]
+  },
   "threadStatusTypes": [
     "active",
     "idle",

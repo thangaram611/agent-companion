@@ -135,11 +135,12 @@ function handle(msg) {
     case 'turn/start':
       reply({ turn: { id: 'TURN' + (++turnSeq) } });
       return;
-    // Echoes the steered turn, and stops there: unlike the socket fake, this
-    // one's event stream is script-driven through \`fake/emit\`, so announcing
-    // the injected userMessage here would fight the scripts. A test that wants
-    // to exercise steer CONFIRMATION emits the \`item/completed\` itself.
-    case 'turn/steer': reply({ turn: { id: p.expectedTurnId } }); return;
+    // Echoes the steered turn as \`TurnSteerResponse\` declares it — {turnId},
+    // not turn/start's {turn:{id}} — and stops there: unlike the socket fake,
+    // this one's event stream is script-driven through \`fake/emit\`, so
+    // announcing the injected userMessage here would fight the scripts. A test
+    // that wants steer CONFIRMATION emits the \`item/completed\` itself.
+    case 'turn/steer': reply({ turnId: p.expectedTurnId }); return;
     case 'turn/interrupt': reply({}); return;
     // Anything this fake does not implement is REFUSED rather than answered
     // \`{echo}\`. The old success fallback covered a typo, a codex rename and any

@@ -3,8 +3,8 @@
 //
 // Runs `codex app-server generate-json-schema` into a throwaway directory,
 // distils the 2.9 MB dump down to the routing table, the request/notification
-// inventories and the approval vocabularies the adapter answers with, and
-// rewrites the committed fixture. `lib/codex-app-server-contract.test.mjs`
+// inventories, the shapes of both wire directions and the approval vocabularies
+// the adapter answers with, and rewrites the committed fixture. `lib/codex-app-server-contract.test.mjs`
 // re-runs the same distillation and fails on any difference, so this script is
 // the only sanctioned way the fixture changes.
 //
@@ -84,6 +84,9 @@ console.log(`  ${n.length} server notifications: `
   + `${n.filter((e) => e.routing === 'nested').length} nested, `
   + `${n.filter((e) => e.routing === 'global').length} global`);
 console.log(`  ${n.filter((e) => e.optional).length} of those declare the thread id optional`);
+console.log(`  ${n.reduce((sum, e) => sum + Object.keys(e.params || {}).length, 0)} notification params fields, `
+  + `${Object.keys(contract.threadItems).length} ThreadItem variants carrying `
+  + `${Object.values(contract.threadItems).reduce((sum, f) => sum + Object.keys(f).length, 0)} fields`);
 console.log(`  ${contract.serverRequests.length} server requests, `
   + `${contract.serverRequests.filter((r) => r.threadScoped).length} thread-scoped`);
 console.log(`  ${Object.keys(contract.approvalDecisions).length} decision vocabularies`);

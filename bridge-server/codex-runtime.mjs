@@ -519,19 +519,39 @@ export function createCodexCollector({ onSession = () => {} } = {}) {
   }
 }
 
-// A file_change item may describe one file or a batch. The shape is STILL a
-// guess: no `file_change` item appeared in the ~24-run 0.147.0 census (every
-// probe ran without workspace-write, which is what produces one), so
-// `{files:[…]}` vs `{path,kind}` is unvalidated and "Files touched" depends on
-// it. Normalizing both shapes to one toolCalls entry per file at least keeps
-// downstream extraction from having to branch.
+// One file-change item, on either transport, to the one entry shape the digest
+// reads: `{name:'file_change', input:{path, kind}}`. That output contract is
+// what is worth a single home — `server.mjs`'s "Files touched" extraction reads
+// `tc.input.path` and does not branch on which transport produced it — so this
+// knows BOTH inbound shapes rather than being copied per adapter.
 //
-// Exported because the app-server adapter's `fileChange` item is the same
-// unvalidated guess about the same payload. One copy means one place to fix when
-// a workspace-write run finally produces one, instead of two that drift.
+// The app-server shape is MEASURED, from `codex app-server generate-json-schema`
+// (0.147.0, the pinned version): the `fileChange` ThreadItem is
+// `{changes: FileUpdateChange[], id, status, type}` with `changes` required, and
+// `FileUpdateChange` is `{diff, kind, path}` — all three required. `kind` is an
+// OBJECT there (`PatchChangeKind`: `{type:'add'|'delete'|'update', move_path?}`),
+// so it is unwrapped to its tag: `input.kind` holds a string on the exec side and
+// `[object Object]` in a digest would be the whole of what a reader saw.
+//
+// The exec shape is still a guess: no `file_change` item appeared in the ~24-run
+// 0.147.0 census (every probe ran without workspace-write, which is what produces
+// one), so `{files:[…]}` vs `{path,kind}` is unvalidated. It is kept exactly as it
+// was — an exec item has no `changes` array, so it cannot reach the branch above.
 export function fileChangeToolCalls(item) {
+  if (Array.isArray(item.changes)) {
+    return item.changes
+      .filter((change) => change && change.path)
+      .map((change) => ({ name: 'file_change', input: { path: change.path, kind: patchChangeKind(change.kind) } }));
+  }
   const files = Array.isArray(item.files) && item.files.length ? item.files : [item];
   return files
     .filter((f) => f && (f.path || f.file))
     .map((f) => ({ name: 'file_change', input: { path: f.path || f.file, kind: f.kind || f.status || null } }));
+}
+
+// `add` / `delete` / `update` out of the tagged object the app-server sends, or
+// the string itself if a transport ever sends a bare one.
+function patchChangeKind(kind) {
+  if (typeof kind === 'string') return kind || null;
+  return typeof kind?.type === 'string' ? kind.type : null;
 }

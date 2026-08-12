@@ -453,13 +453,14 @@ export function createCodexTurnAccumulator(threadId) {
     return !!id && id === threadId;
   }
 
-  function bucketKey(params) {
-    // Deltas that carry no item id all belong to the same streaming item; one
-    // shared bucket keeps them in order instead of scattering them.
-    return params?.itemId ?? params?.item?.id ?? '_';
-  }
-
+  // Deltas are bucketed by `itemId`, which all four delta notifications declare
+  // required (agentMessage, reasoning text, reasoning summary, command output),
+  // so there is no unkeyed case to fold into — the three fallbacks this used to
+  // carry were guesses at a shape the schema settles. A frame missing it is one
+  // the pin says cannot exist; dropping it beats inventing a bucket that
+  // `resolvedMessage` would then hand back as the answer.
   function appendTo(map, key, text) {
+    if (typeof key !== 'string' || !key) return;
     if (typeof text !== 'string' || !text) return;
     map.set(key, (map.get(key) || '') + text);
   }
@@ -508,23 +509,34 @@ export function createCodexTurnAccumulator(threadId) {
       return;
     }
     if (type === 'reasoning') {
+      // `{content: string[], summary: string[]}` — there is no `text`. Both are
+      // optional and both are joined rather than one winning: they are different
+      // channels (the raw chain and the model's own précis of it), they stream
+      // through two different delta methods into this same bucket, and a turn
+      // that produced only a summary must not read as having produced nothing.
       const key = id || `rsn-${reasoning.size}`;
-      if (typeof item.text === 'string' && item.text) reasoning.set(key, item.text);
+      const text = [...(item.content || []), ...(item.summary || [])]
+        .filter((part) => typeof part === 'string' && part)
+        .join('\n');
+      if (text) reasoning.set(key, text);
       return;
     }
     if (type === 'commandExecution') {
       const entry = commandEntryFor(item);
       if (item.command != null) entry.input.command = item.command;
-      // A missing `status` names the EVENT ('the item completed'), never the
-      // exit outcome — the exit code stays authoritative there. Both spellings
-      // are read because the app-server is camelCase where the exec stream was
-      // snake_case, and only one of the two has ever been seen per transport.
-      const status = item.status ?? item.state;
-      entry.status = typeof status === 'string' && status ? status : 'completed';
-      entry.exit_code = item.exitCode ?? item.exit_code ?? entry.exit_code ?? null;
-      const output = item.aggregatedOutput ?? item.aggregated_output;
-      if (typeof output === 'string' && output) {
-        entry.aggregated_output = truncateChars(output, MAX_COMMAND_OUTPUT_CHARS);
+      // The schema declares `status` required on a commandExecution item, so the
+      // default names the EVENT ('the item completed') for a truncated frame
+      // only; the exit code stays authoritative for the outcome. The snake_case
+      // twins this used to read are the exec stream's vocabulary — that stream
+      // is parsed by codex-runtime.mjs and never reaches this accumulator.
+      entry.status = typeof item.status === 'string' && item.status ? item.status : 'completed';
+      // `?? entry.exit_code` is a no-clobber guard, not another spelling:
+      // `exitCode` is optional AND nullable, and this branch runs ahead of the
+      // replay guard, so a `turn/completed` replay of an item that already
+      // reported its code must not blank it back out.
+      entry.exit_code = item.exitCode ?? entry.exit_code ?? null;
+      if (typeof item.aggregatedOutput === 'string' && item.aggregatedOutput) {
+        entry.aggregated_output = truncateChars(item.aggregatedOutput, MAX_COMMAND_OUTPUT_CHARS);
       }
       return;
     }
@@ -539,20 +551,24 @@ export function createCodexTurnAccumulator(threadId) {
       return;
     }
     if (type === 'mcpToolCall') {
-      toolCalls.push({ name: item.tool || item.name || 'mcpToolCall', input: item.input || item.args || {} });
+      // `arguments` is required, as are `tool` and `server`. The `input`/`args`
+      // spellings this used to read are not properties of the item at all, so
+      // every MCP call in an app-server digest recorded an empty input. `server`
+      // is deliberately NOT carried: the entry's contract is `{name, input}` and
+      // nothing downstream renders a tool's origin, so recording it would be a
+      // field with no reader.
+      toolCalls.push({ name: item.tool, input: item.arguments ?? {} });
       return;
     }
     if (type === 'webSearch') {
       toolCalls.push({ name: 'webSearch', input: { query: item.query ?? null } });
       return;
     }
-    if (type === 'error') {
-      // Item-level errors are NON-fatal on this protocol exactly as on the exec
-      // stream: only `turn/completed` and the thread-scoped `error` notification
-      // end a turn. Recorded so the digest can show it.
-      errorText = errorText || item.message || item.error || 'codex reported an item error';
-    }
-    // todoList and anything unrecognised are tolerated without contributing.
+    // The other 14 variants — plan, todoList's replacement, the review-mode
+    // markers, the sub-agent and image items — are tolerated without
+    // contributing. There is NO `error` variant to handle: the 18 the schema
+    // declares do not include one, and a turn's errors arrive as the `error`
+    // notification (fatal) or as a `failed` status on the item that raised it.
   }
 
   function settle(status, { error = null, reason = null } = {}) {
@@ -563,22 +579,21 @@ export function createCodexTurnAccumulator(threadId) {
 
   function onNotification(method, params) {
     switch (method) {
+      // All four delta methods spell the payload `delta` and declare it
+      // required — `codex app-server generate-json-schema` names it, and the
+      // pinned fixture now records it, so there is nothing left to guess at.
       case 'item/agentMessage/delta':
-        appendTo(messages, bucketKey(params), params?.delta ?? params?.text);
+        appendTo(messages, params?.itemId, params?.delta);
         return;
       case 'item/reasoning/textDelta':
       case 'item/reasoning/summaryTextDelta':
-        appendTo(reasoning, bucketKey(params), params?.delta ?? params?.text);
+        appendTo(reasoning, params?.itemId, params?.delta);
         return;
       case 'item/commandExecution/outputDelta': {
         const entry = commandEntries.get(String(params?.itemId ?? ''));
         if (!entry) return;
-        // The payload field name was never captured off the wire (the probes
-        // logged this method's params truncated), so read the plausible spellings
-        // rather than silently dropping a live command's output.
-        const chunk = params?.chunk ?? params?.delta ?? params?.output ?? params?.text;
-        if (typeof chunk !== 'string' || !chunk) return;
-        entry.aggregated_output = truncateChars(`${entry.aggregated_output || ''}${chunk}`, MAX_COMMAND_OUTPUT_CHARS);
+        if (typeof params?.delta !== 'string' || !params.delta) return;
+        entry.aggregated_output = truncateChars(`${entry.aggregated_output || ''}${params.delta}`, MAX_COMMAND_OUTPUT_CHARS);
         return;
       }
       case 'item/started':
@@ -591,17 +606,22 @@ export function createCodexTurnAccumulator(threadId) {
         // Carried into the summary because isEmptyCompletedSummary counts a plan
         // as content: a turn that only replanned must not read as "completed but
         // returned nothing".
-        plan = params?.plan ?? params?.steps ?? plan;
+        plan = params?.plan ?? plan;
         return;
       case 'turn/started':
-        turnId = params?.turn?.id ?? params?.turnId ?? turnId;
+        // `{threadId, turn}` — there is no flat `turnId` on this notification.
+        turnId = params?.turn?.id ?? turnId;
         return;
       case 'turn/completed': {
         const turn = params?.turn || {};
         turnId = turn.id ?? turnId;
         for (const item of Array.isArray(turn.items) ? turn.items : []) consumeCompletedItem(item);
         const status = String(turn.status || '');
-        const failure = turn.error?.message || turn.error || turn.failure || null;
+        // `Turn.error` is a `TurnError`, i.e. an object whose `message` is
+        // required and is the only human-readable half; `|| turn.error` would
+        // have put `[object Object]` in the digest and `turn.failure` is not a
+        // property of a Turn at all.
+        const failure = turn.error?.message || null;
         if (status === 'interrupted') {
           // Settles with no answer — that is the documented shape of a
           // `turn/interrupt`, not a failure.
@@ -614,7 +634,19 @@ export function createCodexTurnAccumulator(threadId) {
         return;
       }
       case 'error':
-        settle('failed', { reason: 'error', error: params?.message || params?.error?.message || params?.error || 'codex reported a fatal error' });
+        // `{error: TurnError, threadId, turnId, willRetry}`, all four required —
+        // the message lives one level down and there is no flat `params.message`
+        // (that spelling is the exec stream's, whose `error` event really is
+        // `{message}`; codex-runtime.mjs reads it there).
+        //
+        // `willRetry` is READ BY NOTHING here, deliberately. The schema makes it
+        // required and `TurnStatus` carries `failed` with "Turn.error only
+        // populated when status is failed", which together suggest
+        // `turn/completed{status:'failed'}` is the real terminal and a
+        // `willRetry:true` error is mid-retry noise — but no `error` frame has
+        // ever been observed in any probe or rollout, so gating the terminal on
+        // it would be trading a measured behaviour for an inferred one.
+        settle('failed', { reason: 'error', error: params?.error?.message || 'codex reported a fatal error' });
         return;
       default:
         // thread/status/changed, tokenUsage, mcpServer/startupStatus and the rest
@@ -1596,7 +1628,12 @@ export async function steerCodexTurn({
       { threadId, expectedTurnId: turnId, input: [{ type: 'text', text }] },
       { timeoutMs },
     );
-    return { threadId, turnId: result?.turn?.id ?? turnId, accepted: true, ...(await watch.settled()) };
+    // `TurnSteerResponse` is `{turnId}` (required) — NOT `{turn:{id}}`, which is
+    // `turn/start`'s shape and was read here by mistake. Both fakes returned the
+    // wrong one too, so the `?? turnId` fallback was doing all the work and no
+    // test could see it. The fallback stays: a steer never changes the turn, so
+    // the id we sent is the right answer if the echo ever goes missing.
+    return { threadId, turnId: result?.turnId ?? turnId, accepted: true, ...(await watch.settled()) };
   } finally {
     watch.detach();
   }
