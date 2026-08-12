@@ -1329,9 +1329,96 @@ test('a broker under a live disposal claim is adopted AT ONCE, not waited out', 
   assert.equal(broker.reused, true);
   assert.equal(broker.disposalClaimed, true, 'and the claim is reported rather than hidden');
   assert.equal(spawns, 0);
-  assert.equal(connects, 1, 'one probe, not one per pass');
+  // Two probes, and neither is a pass of the old loop: one to find the broker,
+  // one AFTER the bump to check the claimer had not already acted. No sleep
+  // between them — `delay` throws.
+  assert.equal(connects, 2);
   // The bump is the whole protection — it is what the claimer re-reads.
   assert.ok(Date.now() - readReg().lastUsedAt < 60_000);
+});
+
+test('an unclaimed broker is adopted on ONE probe — the second look is the claimed path only', async () => {
+  // The re-probe is the price of losing a race that can only happen when a
+  // disposer is already mid-dispose. Charging it to every dispatch would be a
+  // round trip per turn for a race nobody is running.
+  seedRegistry({ socketPath: brokerSocketPath(), pid: BROKER_PID, lastUsedAt: Date.now() });
+  let connects = 0;
+  _setForTest({ connect: async () => { connects += 1; return fakeBrokerSocket({ brokerPid: BROKER_PID }); } });
+
+  const broker = await ensureCodexBroker({ env: {} });
+  assert.equal(broker.disposalClaimed, false);
+  assert.equal(connects, 1);
+});
+
+test('a claimer that signalled before our bump landed costs a redundant spawn, not a corpse', async () => {
+  // The residual window the bump cannot cover: the claimer's `confirmDisposal`
+  // read the file in the gap between our probe answering and our `record`
+  // completing, so it saw the OLD `lastUsedAt` and signalled anyway. Handing
+  // that back would fail the caller's very first call with ECONNREFUSED. The
+  // look AFTER the bump catches it and turns it into the one redundant spawn
+  // this protocol promises as its worst case everywhere else.
+  const other = foreignLivePid();
+  const claimedAt = Date.now();
+  seedRegistry({
+    socketPath: brokerSocketPath(),
+    pid: BROKER_PID,
+    lastUsedAt: claimedAt - 60 * 60_000,
+    disposing: { pid: other, at: claimedAt },
+  });
+
+  let spawns = 0;
+  let connects = 0;
+  const logs = [];
+  _setForTest({
+    logEvent: (level, event) => logs.push(event),
+    spawnBroker: () => { spawns += 1; return new EventEmitter(); },
+    connect: async () => {
+      connects += 1;
+      // Probe 1 finds it alive; the SIGTERM lands while we record our adoption,
+      // so probe 2 finds nothing listening. The spawned replacement answers.
+      if (connects === 2) { const err = new Error('connect ECONNREFUSED'); err.code = 'ECONNREFUSED'; throw err; }
+      return fakeBrokerSocket({ brokerPid: connects === 1 ? BROKER_PID : 6060 });
+    },
+  });
+
+  const broker = await ensureCodexBroker({ env: {} });
+  assert.equal(spawns, 1, 'the adopted broker was already dead, so a replacement is spawned');
+  assert.equal(broker.pid, 6060, 'and the caller gets the replacement, not the corpse');
+  assert.equal(broker.reused, false);
+  assert.equal(broker.disposalClaimed, false, 'the replacement inherits nothing from the disposed entry');
+  assert.ok(logs.includes('codex_appserver_adopted_broker_gone'));
+  assert.equal(readReg().pid, 6060, 'and the registry describes the live broker');
+  assert.equal(readReg().disposing, undefined, 'not the dead one, nor its claim');
+});
+
+test('a re-probe that could not TELL keeps the adoption rather than racing a live broker', async () => {
+  // Same discipline as the first probe: EACCES/EMFILE is a failure to ask, not
+  // evidence of death, and the broker we reached one moment ago is far better
+  // evidence. Spawning here would race a broker that is very much alive.
+  const other = foreignLivePid();
+  const claimedAt = Date.now();
+  seedRegistry({
+    socketPath: brokerSocketPath(),
+    pid: BROKER_PID,
+    lastUsedAt: claimedAt - 60 * 60_000,
+    disposing: { pid: other, at: claimedAt },
+  });
+
+  let spawns = 0;
+  let connects = 0;
+  _setForTest({
+    spawnBroker: () => { spawns += 1; return new EventEmitter(); },
+    connect: async () => {
+      connects += 1;
+      if (connects === 2) { const err = new Error('too many open files'); err.code = 'EMFILE'; throw err; }
+      return fakeBrokerSocket({ brokerPid: BROKER_PID });
+    },
+  });
+
+  const broker = await ensureCodexBroker({ env: {} });
+  assert.equal(spawns, 0);
+  assert.equal(broker.pid, BROKER_PID);
+  assert.equal(broker.reused, true);
 });
 
 test('a probe that could not tell is never read as "nobody is home"', async () => {

@@ -1088,12 +1088,29 @@ export async function ensureCodexBroker({ env = process.env } = {}) {
     const ready = health.ready ? health : await waitForReady(socketPath, BROKER_BOOT_TIMEOUT_MS);
     // A broker under a live disposal claim is adopted, not waited out: the
     // adoption itself is what makes the claimer stand down (see adopt()).
-    return adopt(ready, { reused: true });
-  }
-  // Only a connect-class failure means "nobody is home". Anything else is a
-  // failure to ask, and spawning on it would race a broker that is very much
-  // alive — so it surfaces instead of degrading silently.
-  if (!CONNECT_CLASS_CODES.has(health.code)) {
+    const broker = adopt(ready, { reused: true });
+    if (!broker.disposalClaimed) return broker;
+
+    // BUMP FIRST, VERIFY SECOND. The bump above is what makes a claimer that
+    // has not confirmed yet stand down; this catches the one interleaving the
+    // bump cannot cover — a claimer whose confirm read the file in the gap
+    // between our probe answering and our `record` landing, and which therefore
+    // saw the OLD `lastUsedAt` and signalled. Without this look the caller gets
+    // a corpse and its first call dies ECONNREFUSED; with it the cost is what
+    // this protocol promises everywhere else, one redundant spawn.
+    //
+    // Only on the claimed path: with no claim in the file there is no disposer
+    // to lose to, and an unconditional second probe would tax every dispatch.
+    const after = await probeCodexBrokerHealth(socketPath);
+    // Same discipline as below — only a connect-class failure means "gone".
+    // Anything else is a failure to ask, and the broker we just probed is far
+    // better evidence than a probe that could not tell.
+    if (after.alive || !CONNECT_CLASS_CODES.has(after.code)) return broker;
+    _impl.logEvent('warn', 'codex_appserver_adopted_broker_gone', { pid: broker.pid });
+  } else if (!CONNECT_CLASS_CODES.has(health.code)) {
+    // Only a connect-class failure means "nobody is home". Anything else is a
+    // failure to ask, and spawning on it would race a broker that is very much
+    // alive — so it surfaces instead of degrading silently.
     throw new Error(`could not reach the codex broker at ${socketPath}: ${health.error}`);
   }
 
@@ -1121,11 +1138,15 @@ export async function ensureCodexBroker({ env = process.env } = {}) {
 // adopted has no thread on it, so `thread/loaded/list` is empty and permits the
 // kill, and its `brokerPid` is of course still its own.
 //
-// What is left is the file write itself: a SIGTERM that lands between the health
-// probe above and our `record` below adopts a corpse, and the caller's first
-// call fails. That is microseconds of a lock-free protocol — the disposer's
-// confirm and its kill are one syscall apart — against the seconds of RPC the
-// claim used to cover. The claim is reported either way rather than hidden.
+// What is left is OUR OWN gap, not the disposer's: the claimer loses only if
+// its confirm reads the file before our `record` lands, so the window is
+// everything between the health probe answering and that write completing — an
+// fs read plus an atomic write-and-rename, sub-millisecond to a few
+// milliseconds, against the seconds of RPC the claim used to cover. It is not
+// zero, so `ensureCodexBroker` re-probes once AFTER the bump on this path and
+// spawns a replacement if the claimer got there first; that turns the residual
+// into one redundant spawn instead of a dispatch that dies ECONNREFUSED. The
+// claim is reported either way rather than hidden.
 function adopt(health, { reused }) {
   if (health.codexVersion) _lastKnownCodexVersion = health.codexVersion;
   const entry = { socketPath: health.socketPath, pid: health.brokerPid, appServerPid: health.appServerPid };
