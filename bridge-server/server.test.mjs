@@ -1815,6 +1815,7 @@ test('Codex app-server mode: end to end through the REAL broker and the shared f
   const { dispatch, jobs, _resetForTest } = mod;
   const cx = await import('./codex-app-server-runtime.mjs');
   const { fakeCodexBin } = await import('../test/fake-codex-app-server.mjs');
+  const { note, threadItem } = await import('../test/codex-wire-frames.mjs');
   _resetForTest();
 
   // Unix socket paths are truncated at SUN_LEN (~104 bytes), so the root stays
@@ -1872,10 +1873,15 @@ test('Codex app-server mode: end to end through the REAL broker and the shared f
   // app-server stdout -> broker -> threadId routing -> the bridge's own
   // connection. Nothing is injected into the bridge locally.
   const driver = await cx.connectCodexBroker({ socketPath: process.env.CODEX_BROKER_SOCKET_PATH });
+  // Built from the pinned contract (test/codex-wire-frames.mjs), not written by
+  // hand: these three frames are the bridge's only end-to-end proof that the
+  // digest it publishes came off a real wire, so their shape is the assertion.
   await driver.call('fake/emit', { frames: [
-    { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'T1', itemId: 'm1', delta: 'through the real broker' } },
-    { jsonrpc: '2.0', method: 'item/completed', params: { threadId: 'T1', item: { id: 'm1', type: 'agentMessage', text: 'through the real broker', phase: 'final_answer' } } },
-    { jsonrpc: '2.0', method: 'turn/completed', params: { threadId: 'T1', turn: { id: 'TURN1', status: 'completed', items: [] } } },
+    note('item/agentMessage/delta', { threadId: 'T1', itemId: 'm1', delta: 'through the real broker' }),
+    note('item/completed', { threadId: 'T1', item: threadItem('agentMessage', {
+      id: 'm1', text: 'through the real broker', phase: 'final_answer',
+    }) }),
+    note('turn/completed', { threadId: 'T1', turn: { id: 'TURN1', status: 'completed', items: [] } }),
   ] });
   driver.close();
 

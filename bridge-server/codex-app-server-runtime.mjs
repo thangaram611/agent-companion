@@ -434,6 +434,16 @@ export function createCodexTurnAccumulator(threadId) {
   const messages = new Map();
   const messagePhases = new Map();
   const reasoning = new Map();
+  // itemId -> the `(channel, index)` the last reasoning delta on that item
+  // belonged to. Both reasoning delta methods declare their index REQUIRED —
+  // `contentIndex` on the text channel, `summaryIndex` on the summary one —
+  // and that is because `content` and `summary` are arrays whose entries the
+  // completed item joins with a newline. Streaming them into one bucket
+  // unseparated made the live render disagree with the completed one
+  // ('weighing options' + 'decided' read as `weighing optionsdecided`), and an
+  // interrupted turn is exactly the case where no completed item ever arrives
+  // to replace the deltas.
+  const reasoningSlot = new Map();
   const toolCalls = [];
   const commandEntries = new Map(); // itemId -> the toolCalls entry
   const completedItems = new Set(); // ids folded once (turn/completed replays them)
@@ -463,6 +473,19 @@ export function createCodexTurnAccumulator(threadId) {
     if (typeof key !== 'string' || !key) return;
     if (typeof text !== 'string' || !text) return;
     map.set(key, (map.get(key) || '') + text);
+  }
+
+  // One reasoning item's deltas, kept in ONE bucket so the completed item can
+  // replace them in place, but with the array boundary the two index fields
+  // announce: a delta that starts a different `(channel, index)` from the last
+  // one begins a new entry, and entries are newline-joined — the same join
+  // consumeCompletedItem uses on `[...content, ...summary]`.
+  function appendReasoning(itemId, slot, text) {
+    const key = typeof itemId === 'string' ? itemId : '';
+    if (!key || typeof text !== 'string' || !text) return;
+    if (reasoning.has(key) && reasoningSlot.get(key) !== slot) appendTo(reasoning, key, '\n');
+    reasoningSlot.set(key, slot);
+    appendTo(reasoning, key, text);
   }
 
   function commandEntryFor(item) {
@@ -514,6 +537,8 @@ export function createCodexTurnAccumulator(threadId) {
       // channels (the raw chain and the model's own précis of it), they stream
       // through two different delta methods into this same bucket, and a turn
       // that produced only a summary must not read as having produced nothing.
+      // The newline is the same separator appendReasoning puts between the
+      // entries as they stream, so the live render and this one agree.
       const key = id || `rsn-${reasoning.size}`;
       const text = [...(item.content || []), ...(item.summary || [])]
         .filter((part) => typeof part === 'string' && part)
@@ -586,8 +611,10 @@ export function createCodexTurnAccumulator(threadId) {
         appendTo(messages, params?.itemId, params?.delta);
         return;
       case 'item/reasoning/textDelta':
+        appendReasoning(params?.itemId, `c${params?.contentIndex}`, params?.delta);
+        return;
       case 'item/reasoning/summaryTextDelta':
-        appendTo(reasoning, params?.itemId, params?.delta);
+        appendReasoning(params?.itemId, `s${params?.summaryIndex}`, params?.delta);
         return;
       case 'item/commandExecution/outputDelta': {
         const entry = commandEntries.get(String(params?.itemId ?? ''));

@@ -112,7 +112,11 @@ function fill(shape, supplied, depth = 0) {
     else if (!parseFieldTag(tag).optional) out[name] = synthesize(name, tag, depth);
   }
   for (const [name, value] of Object.entries(supplied)) {
-    if (!(name in shape)) out[name] = value;
+    // `Object.hasOwn`, for the reason fieldsViolation uses it: `in` on a
+    // JSON-parsed shape answers true for `constructor` and its eleven siblings,
+    // and here that would DROP the caller's field silently instead of carrying
+    // it through to the refusal it has coming.
+    if (!Object.hasOwn(shape, name)) out[name] = value;
   }
   return out;
 }

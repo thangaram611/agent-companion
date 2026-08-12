@@ -385,6 +385,25 @@ test('a reasoning-only turn still produces content', () => {
   assert.notEqual(snap.thoughts.trim(), '');
 });
 
+test('reasoning deltas keep the array boundary their index fields announce', () => {
+  // `contentIndex` and `summaryIndex` are REQUIRED on the two reasoning delta
+  // methods precisely because `content` and `summary` are arrays, and the
+  // completed item joins their entries with a newline. An interrupted turn is
+  // the case where no completed item ever arrives to replace the deltas, so
+  // what streamed IS what the operator reads — it must not read as
+  // `Checking the config.Then the tests.Read config`.
+  const acc = createCodexTurnAccumulator(TID);
+  acc.push(note('item/reasoning/textDelta', { threadId: TID, itemId: 'r1', contentIndex: 0, delta: 'Checking ' }));
+  acc.push(note('item/reasoning/textDelta', { threadId: TID, itemId: 'r1', contentIndex: 0, delta: 'the config.' }));
+  acc.push(note('item/reasoning/textDelta', { threadId: TID, itemId: 'r1', contentIndex: 1, delta: 'Then the tests.' }));
+  acc.push(note('item/reasoning/summaryTextDelta', { threadId: TID, itemId: 'r1', summaryIndex: 0, delta: 'Read config' }));
+  acc.push(note('turn/completed', { threadId: TID, turn: { status: 'interrupted' } }));
+  assert.equal(acc.snapshot().thoughts, 'Checking the config.\nThen the tests.\nRead config');
+  // Same index, same entry: a chunk boundary inside one array entry is not a
+  // line break, or every token would land on its own line.
+  assert.equal(acc.snapshot().thoughts.split('\n')[0], 'Checking the config.');
+});
+
 test('a completed reasoning item replaces the deltas that streamed it, from content and summary', () => {
   // A reasoning item is `{content: string[], summary: string[]}` — there is no
   // `text`, which is what this branch used to read, so it never fired at all and
@@ -839,7 +858,7 @@ test('an unconfirmed steer says so — it is not reported as delivered, nor as f
   // window that sees nothing is the normal case, and the honest answer is
   // "accepted, not yet confirmed".
   const { conn } = await connectFake({
-    handlers: { 'turn/steer': (p) => ({ turn: { id: p.expectedTurnId } }) },  // no injection ever announced
+    handlers: { 'turn/steer': (p) => ({ turnId: p.expectedTurnId }) },  // no injection ever announced
   });
   const steer = await steerCodexTurn({
     conn, threadId: 'T9', prompt: 'switch to ripgrep', expectedTurnId: 'TURN1', confirmMs: 20,
@@ -856,12 +875,13 @@ test('the turn\'s own opening message never counts as a steer confirmation', asy
       'turn/steer': (p) => {
         // The opening prompt's userMessage, replayed while the steer is in
         // flight. Same item type, different text — and it must not confirm.
-        setTimeout(() => sock.deliver({
-          jsonrpc: '2.0',
-          method: 'item/completed',
-          params: { threadId: 'T9', item: { id: 'item_0', type: 'userMessage', content: [{ type: 'text', text: 'the original task' }] } },
-        }), 0);
-        return { turn: { id: p.expectedTurnId } };
+        setTimeout(() => sock.deliver(note('item/completed', {
+          threadId: 'T9',
+          item: threadItem('userMessage', { id: 'item_0', content: [{ type: 'text', text: 'the original task' }] }),
+        })), 0);
+        // `TurnSteerResponse` is `{turnId}`, the shape the fakes were corrected
+        // to — a handler that overrides one must not reintroduce the wrong one.
+        return { turnId: p.expectedTurnId };
       },
     },
   });
@@ -1613,19 +1633,28 @@ test('end to end: a turn streams through the real broker to a terminal summary',
   assert.equal(turn.attached, false);
 
   // Everything below travels app-server stdout -> broker -> threadId routing ->
-  // this connection -> the accumulator. Nothing is injected locally.
+  // this connection -> the accumulator. Nothing is injected locally — which is
+  // why these frames are BUILT from the pinned contract like every other frame
+  // in this suite rather than written out here. They were the last hand-written
+  // ones left, so the single test proving the accumulator works through a real
+  // broker was also the only one that could still disagree with the schema.
+  // `fake/emit` refuses an off-contract frame now too, so it cannot come back.
   await conn.call('fake/emit', {
     frames: [
-      { jsonrpc: '2.0', method: 'turn/started', params: { threadId, turn: { id: 'TURN1' } } },
-      { jsonrpc: '2.0', method: 'item/started', params: { threadId, item: { id: 'i1', type: 'commandExecution', command: 'rg TODO' } } },
-      { jsonrpc: '2.0', method: 'item/reasoning/textDelta', params: { threadId, itemId: 'r1', delta: 'scanning' } },
-      { jsonrpc: '2.0', method: 'item/completed', params: { threadId, item: { id: 'i1', type: 'commandExecution', command: 'rg TODO', status: 'failed', exitCode: 1, aggregatedOutput: 'no matches' } } },
-      { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId, itemId: 'm1', delta: 'No TODOs ' } },
-      { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId, itemId: 'm1', delta: 'anywhere.' } },
+      note('turn/started', { threadId, turn: { id: 'TURN1' } }),
+      note('item/started', { threadId, item: threadItem('commandExecution', { id: 'i1', command: 'rg TODO' }) }),
+      note('item/reasoning/textDelta', { threadId, itemId: 'r1', delta: 'scanning' }),
+      note('item/completed', { threadId, item: threadItem('commandExecution', {
+        id: 'i1', command: 'rg TODO', status: 'failed', exitCode: 1, aggregatedOutput: 'no matches',
+      }) }),
+      note('item/agentMessage/delta', { threadId, itemId: 'm1', delta: 'No TODOs ' }),
+      note('item/agentMessage/delta', { threadId, itemId: 'm1', delta: 'anywhere.' }),
       // Another job's event, on the same broker: it must never land here.
-      { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'T-OTHER', itemId: 'x', delta: 'SOMEONE ELSE' } },
-      { jsonrpc: '2.0', method: 'item/completed', params: { threadId, item: { id: 'm1', type: 'agentMessage', text: 'No TODOs anywhere.', phase: 'final_answer' } } },
-      { jsonrpc: '2.0', method: 'turn/completed', params: { threadId, turn: { id: 'TURN1', status: 'completed', items: [] } } },
+      note('item/agentMessage/delta', { threadId: 'T-OTHER', itemId: 'x', delta: 'SOMEONE ELSE' }),
+      note('item/completed', { threadId, item: threadItem('agentMessage', {
+        id: 'm1', text: 'No TODOs anywhere.', phase: 'final_answer',
+      }) }),
+      note('turn/completed', { threadId, turn: { id: 'TURN1', status: 'completed', items: [] } }),
     ],
   });
 

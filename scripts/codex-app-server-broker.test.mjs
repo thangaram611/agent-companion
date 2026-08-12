@@ -32,6 +32,15 @@ import { fileURLToPath } from 'node:url';
 // appended to $CODEX_FAKE_TRACE, so a test can assert exactly how many upstream
 // `initialize` frames the broker ever sent.
 import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
+// The frames the end-to-end tests push THROUGH that fake are built from the
+// pinned contract rather than written out here. The broker's own routing tests
+// below still hand-write theirs and should: they feed `_onUpstreamMessage`
+// directly to prove WHERE a frame is delivered, never what it says, and two of
+// them are methods this pin has never seen, which is the case the routing has to
+// handle. Everything that leaves the fake's stdout for a real accumulator goes
+// through these builders instead — and `fake/emit` refuses an off-contract
+// frame, so that route cannot go back to being hand-written.
+import { note } from '../test/codex-wire-frames.mjs';
 
 // Socket paths are truncated at SUN_LEN (~104 bytes). Keep every temp root
 // short — the runtime dir plus `codex-app-server.sock` has to fit.
@@ -956,9 +965,13 @@ test('end to end: one upstream handshake, brokered initialize, implicit subscrip
 
   await a.call('fake/emit', {
     frames: [
-      { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'T1', delta: 'for-a' } },
-      { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'T2', delta: 'for-b' } },
-      { jsonrpc: '2.0', method: 'account/rateLimits/updated', params: { used: 1 } },
+      note('item/agentMessage/delta', { threadId: 'T1', delta: 'for-a' }),
+      note('item/agentMessage/delta', { threadId: 'T2', delta: 'for-b' }),
+      // `RateLimitSnapshot` has no recorded shape — the distiller deliberately
+      // seeds only the thread-routed notifications, because nothing reads a
+      // global one's payload — so the builder takes the value as given and
+      // checks the frame around it.
+      note('account/rateLimits/updated', { rateLimits: {} }),
     ],
   });
 
@@ -966,8 +979,28 @@ test('end to end: one upstream handshake, brokered initialize, implicit subscrip
   assert.deepEqual(a.notifications.map((n) => n.params.delta ?? n.method), ['for-a', 'account/rateLimits/updated']);
   assert.deepEqual(b.notifications.map((n) => n.params.delta ?? n.method), ['for-b', 'account/rateLimits/updated']);
 
+  // The emit path checks itself. This is the only route a frame travels from an
+  // app-server's stdout into a real accumulator, so the hand-written `{chunk}`
+  // that shipped for `{delta}` would have had nothing between it and a green
+  // assertion — the builders close that everywhere a frame is CONSTRUCTED, and
+  // this closes it where one is SENT. The batch is refused whole, before any of
+  // it goes out.
+  await assert.rejects(
+    a.call('fake/emit', { frames: [
+      note('item/agentMessage/delta', { threadId: 'T1', delta: 'legal' }),
+      // Complete and legal apart from the invented field sitting beside the
+      // real one — the shape a presence-only check waves through.
+      { jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'T1', itemId: 'm1', turnId: 'TURN1', delta: 'ok', chunk: 'invented' } },
+    ] }),
+    /refuses a frame codex would never send.*carries `chunk`/,
+  );
+  assert.equal(a.notifications.length, 2, 'a refused batch emits nothing at all, not even its legal frames');
+
   // A server→client request lands on the thread's only subscriber, and its
-  // answer reaches the app-server verbatim.
+  // answer reaches the app-server verbatim. Hand-written because it is a
+  // REQUEST, not a notification: `note()` builds the notification union and the
+  // contract records no params shape for the request half, so there is nothing
+  // to build this one from.
   await a.call('fake/emit', {
     frames: [{ jsonrpc: '2.0', id: 9001, method: 'item/commandExecution/requestApproval', params: { threadId: 'T2', command: 'ls' } }],
   });
@@ -980,7 +1013,7 @@ test('end to end: one upstream handshake, brokered initialize, implicit subscrip
   // Disconnecting a client leaves the other one working and the child alive.
   b.close();
   await a.call('fake/emit', {
-    frames: [{ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'T1', delta: 'still-here' } }],
+    frames: [note('item/agentMessage/delta', { threadId: 'T1', delta: 'still-here' })],
   });
   await waitFor(() => a.notifications.some((n) => n.params?.delta === 'still-here'), { label: 'post-disconnect delivery' });
   const status = await a.call('broker/status');
@@ -1048,7 +1081,7 @@ test('end to end: a request sent before the handshake lands is queued and answer
 
   // The implicit subscription still lands, so the queue is not a side channel.
   await a.call('fake/emit', {
-    frames: [{ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { threadId: 'TQ', delta: 'queued-ok' } }],
+    frames: [note('item/agentMessage/delta', { threadId: 'TQ', delta: 'queued-ok' })],
   });
   await waitFor(() => a.notifications.some((n) => n.params?.delta === 'queued-ok'), { label: 'the queued thread\'s events' });
 });
@@ -1099,7 +1132,15 @@ test('AppServerConnection performs exactly one handshake against a real child pr
   // assert its exact shape: the point of the test is that there are exactly two
   // frames and no second `initialize`, which a wait does not weaken.
   const frames = await waitFor(() => {
-    const seen = readFileSync(tracePath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    // A torn read is another poll, not a failure: the writer is a separate
+    // process appending to this file, so a read that lands mid-line leaves a
+    // half object that `JSON.parse` throws on — out of the predicate, which
+    // `waitFor` does not catch. That would surface as a confusing SyntaxError
+    // instead of the one retry that fixes it.
+    let seen;
+    try {
+      seen = readFileSync(tracePath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    } catch { return null; }
     return seen.length >= 2 ? seen : null;
   }, { label: 'the initialize + initialized handshake to reach the trace' });
   assert.deepEqual(frames.map((f) => f.method), ['initialize', 'initialized']);
