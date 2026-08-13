@@ -630,7 +630,7 @@ node --check bridge-server/validation.mjs
 node --check lib/target-diagnostics.mjs
 node --check lib/doctor.mjs
 node --check scripts/onboard.mjs
-node --test $(find bridge-server lib scripts hooks templates test -name '*.test.mjs')
+find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 node --test
 node scripts/validate-codex-release.mjs
 claude plugin validate .
 ```

@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-08-11
+Last updated: 2026-08-13
 
 ## Goal
 
@@ -28,7 +28,8 @@ Agent Companion is organized around a harness + companion model:
 
 The current public flags and schema keep `host` and `target` for compatibility:
 `setup.sh --host claude|codex|both` selects harness surfaces, and
-`agent_send({ target })` or `default-target` selects today's companion runtime.
+`agent_send({ target })` still names a companion runtime directly, with
+`default-target` behind it as the pre-profile default (see Public MCP Surface).
 
 ## Flow
 
@@ -65,11 +66,17 @@ The only tools are the generic `agent_*` set:
 - `agent_reply`
 - `agent_cancel`
 
-`agent_send` accepts an optional `target` (`opencode` | `copilot` | `codex`). When
-omitted, the target resolves from `AGENT_COMPANION_DEFAULT_TARGET`, then the
-`default-target` state file. **There is no silent fallback** — if nothing is
-configured and no `target` is passed, `agent_send` returns a
-`TARGET_UNCONFIGURED` error pointing at onboarding. There are no legacy
+`agent_send` accepts an optional `target` (`opencode` | `copilot` | `codex`).
+When it is omitted, resolution starts at the default **profile**
+(`AGENT_COMPANION_DEFAULT_PROFILE`, else `profiles.json`'s `defaultProfile`) and
+routes to that profile's companion; a default profile that names no configured
+profile fails loudly with `PROFILE_UNKNOWN` rather than falling through to a
+target. Only when no default profile is configured does resolution fall back to
+`AGENT_COMPANION_DEFAULT_TARGET`, then the `default-target` state file. With no
+`profiles.json` the bridge synthesizes its one profile from `default-target`, so
+a legacy install resolves identically either way. **There is no silent
+fallback** — if nothing is configured and no `target` is passed, `agent_send`
+returns a `TARGET_UNCONFIGURED` error pointing at onboarding. There are no legacy
 `copilot_*` aliases and no legacy env overrides; the rename to the `agent-*`
 identity is complete.
 
@@ -129,10 +136,17 @@ of** `profile` or `strength`; an explicit `target` may co-exist as a refinement.
    `{companion, model, adapter}`.
 3. The resolved adapter owns that job until terminal status.
 
-No silent fallback: an unresolvable or ambiguous request returns an explicit
-`ok:false` envelope that echoes the candidate ids (`STRENGTH_UNCONFIGURED`,
-`STRENGTH_AMBIGUOUS`, `PROFILE_UNKNOWN`, `PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`,
-`CAPABILITY_UNAVAILABLE`), mirroring the existing `TARGET_UNCONFIGURED` posture.
+No silent fallback: a request that is unresolvable, ambiguous, or refused by the
+capability gate returns an explicit `ok:false` envelope that names the failure
+and, where candidates exist, echoes their ids (`TARGET_UNCONFIGURED`,
+`TARGET_UNSUPPORTED`, `STRENGTH_UNCONFIGURED`, `STRENGTH_AMBIGUOUS`,
+`PROFILE_UNKNOWN`, `PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`,
+`CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED`). The gate refusals
+(`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED`) have no
+candidate list to echo — they name the offending companion in `target` instead,
+and `MODEL_NOT_ALLOWED` adds `model` and a `hint`. Every one of them ships in the
+`TARGET_UNCONFIGURED` envelope shape, carrying the public `targets` and
+`profiles` lists so the harness can see what *is* configured.
 
 The invariant is two-sided, and the subagent half is the one that broke in the
 field: on any of those codes the companion subagent must return the error
@@ -210,8 +224,11 @@ State lives under the host-routed companion home `~/.{claude,codex}/agent-compan
 - `runtime/codex-app-server.sock`: the codex broker's unix socket. Its path is
   fixed and short on purpose — unix paths truncate silently at `SUN_LEN`
   (~104 bytes on darwin). **Socket presence is not liveness:** SIGKILL skips the
-  broker's unlink handler, so every start connect-probes the path and treats
-  `ECONNREFUSED` as the only safe-to-unlink verdict.
+  broker's unlink handler, so every start connect-probes the path and unlinks
+  only on an `absent` verdict — `ECONNREFUSED`, `ENOENT`, or `ENOTSOCK` (a plain
+  file left at the path). Any other code, such as `EMFILE` under a wide fan-out
+  or `EACCES`, is a probe that failed rather than an answer, and the start
+  refuses with `BROKER_SOCKET_INDETERMINATE` instead of guessing.
 - `runtime/codex-broker.json`: leases, `lastUsedAt` and the two-phase disposal
   claim for that broker. Unlike the OpenCode registry — which holds the only
   record of an ephemeral `--port 0` address — this file is bookkeeping, not an
@@ -246,7 +263,8 @@ because the cost of re-deriving them is a day each.
   it dies with its stdio parent and the turn ends `turn_aborted`. The **broker** buys the
   survival, not the protocol.
 - **A present socket is not a live broker.** SIGKILL skips the unlink handler. Connect-probe;
-  `ECONNREFUSED` is the safe-to-unlink verdict.
+  only an `absent` verdict — `ECONNREFUSED`, `ENOENT`, `ENOTSOCK` — authorises the unlink. An
+  indeterminate code (`EMFILE`, `EACCES`) refuses it, because it says nothing about liveness.
 - **`thread not found` does not mean the thread is gone.** It means "not loaded into this
   process", and `thread/resume` fixes it. Classifying it as unrecoverable would report a
   broker restart — the exact case this transport was chosen for — as lost work. The guard is

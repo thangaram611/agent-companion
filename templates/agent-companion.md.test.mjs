@@ -42,7 +42,7 @@ test('Claude template documents strength/profile routing without hardcoding ids'
 const ROUTING_ERROR_CODES = [
   'STRENGTH_UNCONFIGURED', 'STRENGTH_AMBIGUOUS', 'PROFILE_UNKNOWN',
   'PROFILE_AMBIGUOUS', 'ROUTING_CONFLICT', 'CAPABILITY_UNAVAILABLE',
-  'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
+  'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED', 'MODEL_NOT_ALLOWED',
 ];
 
 test('Claude template sets the MCP deadline as a per-server field, not an env var', () => {

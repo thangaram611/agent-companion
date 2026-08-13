@@ -1,6 +1,6 @@
 # Release Readiness
 
-Last updated: 2026-07-24
+Last updated: 2026-08-13
 
 This page is the public-readiness checklist for the harness + companion launch.
 It records the source-backed compatibility assumptions behind the repo copy,
@@ -17,13 +17,23 @@ Current vocabulary:
 | Product term | Current implementation term | Supported now |
 | --- | --- | --- |
 | Harness | `host` | Claude Code, Codex CLI |
-| Companion | `target` | OpenCode, GitHub Copilot CLI, Codex CLI |
-| Companion profile | not implemented yet | planned |
-| Strength | not implemented yet | planned |
+| Companion | `target` | OpenCode (`cli`/`server`), GitHub Copilot CLI, Codex CLI (`exec`/`appserver`) |
+| Companion profile | `profile` — a `profiles.json` entry | yes, `agent_send({ profile })` |
+| Strength | `strength` | yes — `reviewer`, `web_researcher`, `planner`, `fast_executor` |
 
-Current routing is still one-to-one: one `agent_send` resolves to one companion
-target runtime. The future direction is one-to-many companion profiles routed by
-strengths such as `reviewer`, `web_researcher`, `planner`, or `fast_executor`.
+Routing is one-to-many: a harness connects several companion profiles at once,
+and each `agent_send` resolves to exactly one of them. The request names a
+`strength` (preferred), a `profile` id, or a bare `target`; with none of those,
+the configured default profile wins. `resolveRouting` in
+`bridge-server/server.mjs` is the sole routing brain, and it never falls back
+silently — an unresolvable, ambiguous, or capability-gated request returns an
+`ok:false` envelope naming the failure, echoing the candidate ids where
+candidates exist.
+Two honest limits sit behind that: `STRENGTH_CAPABILITY_REQUIREMENTS` ships
+empty (no strength yet demands a capability), and a profile's `adapter` field is
+a capability declaration rather than transport selection at spawn — the
+transport a job starts on is still whatever `OPENCODE_RUNTIME_ADAPTER` /
+`CODEX_RUNTIME_ADAPTER` says, frozen per job in the ledger.
 
 ## Source-Backed Compatibility Notes
 
@@ -60,11 +70,12 @@ OpenCode companion:
   reports per-session busy/idle. One detached server is shared and reused across
   restarts.
 - `opencode models` lists configured provider models in `provider/model` form,
-  which is the right basis for future OpenCode companion profiles:
+  which is the form an OpenCode companion profile's `model` takes:
   <https://opencode.ai/docs/cli/>.
 - OpenCode also documents `opencode acp` for ACP-compatible editors:
-  <https://opencode.ai/docs/acp/>. The server adapter already covers reply/resume,
-  so an ACP stdio adapter is deferred.
+  <https://opencode.ai/docs/acp/>. The adapter set is `cli` and `server`, and
+  the server adapter already covers reply/resume, so an ACP stdio adapter stays
+  deferred — it is the one item on this page with no code behind it.
 - OpenCode permissions are configured as `allow`, `ask`, or `deny`; the `cli`
   adapter exposes opt-in `--dangerously-skip-permissions`, while the `server`
   adapter follows OpenCode's own permission config (no hidden auto-approval):
@@ -86,18 +97,55 @@ GitHub Copilot CLI companion:
 
 Codex CLI companion:
 
-- **Pinned to codex-cli 0.145.0** (the installed/verified version). The
-  `--json` ThreadEvent schema (`thread.started`/`item.*`/`turn.*`/top-level
-  `error`) and the `-c sandbox_workspace_write.network_access=<bool>` override
-  key are version-sensitive; a silently-renamed key degrades without an error
-  since the adapter does not pass `--strict-config`. Re-verify against
+- **Pinned to codex-cli 0.147.0** (the installed/verified version;
+  `lib/codex-app-server-contract.json` records the same `codexVersion`, and the
+  `exec` stream census in `bridge-server/codex-runtime.mjs` was taken against
+  it). The `--json` ThreadEvent schema (`thread.started`/`item.*`/`turn.*`/
+  top-level `error`) and the `-c sandbox_workspace_write.network_access=<bool>`
+  override key are version-sensitive; a silently-renamed key degrades without an
+  error since neither adapter passes `--strict-config`. Re-verify against
   `codex --version` before bumping the pin.
+- **Two transports ship, selected by `CODEX_RUNTIME_ADAPTER`**: `exec` (default,
+  `bridge-server/codex-runtime.mjs`) and `appserver`
+  (`bridge-server/codex-app-server-runtime.mjs` plus the detached broker in
+  `scripts/codex-app-server-broker.mjs`). `exec` is send-only; `appserver` adds
+  reply, restart resume, and streamed sub-turn digests. Where a note below names
+  a flag the bridge passes, that note is `exec`-only: the app-server carries the
+  same decisions as JSON-RPC params instead of argv.
 - `codex exec --json` is documented as the non-interactive entrypoint
   (`codex exec --help`; `learn.chatgpt.com/docs/non-interactive-mode`). Default
-  sandbox is `read-only` (edit-incapable); the bridge always passes
-  `--sandbox workspace-write` (or an explicit override) plus
+  sandbox is `read-only` (edit-incapable); on the `exec` adapter the bridge
+  always passes `--sandbox workspace-write` (or an explicit override) plus
   `--skip-git-repo-check` (codex refuses non-git cwds by default, and the
   bridge dispatches into arbitrary cwds).
+- On the `appserver` adapter the broker spawns bare `codex app-server` — no
+  sandbox flag, no `--skip-git-repo-check` — and the sandbox travels as params
+  on the wire. `thread/start` and `thread/resume` carry `sandbox`, the bare
+  kebab-case mode enum; `turn/start` carries `sandboxPolicy`, a camelCase tagged
+  union (`{type:'workspaceWrite', networkAccess}`, `{type:'readOnly',
+  networkAccess:false}`, `{type:'dangerFullAccess'}`) that is where the network
+  bit actually lives. Both adapters resolve the mode from the same
+  `AGENT_COMPANION_CODEX_SANDBOX_MODE` resolver, so the transports agree by
+  construction; `bypass` — an exec-transport spelling, one CLI flag that removes
+  the sandbox and the approvals together — collapses onto `dangerFullAccess`
+  here, because the app-server splits those into independent params. Every
+  `sandboxPolicy` variant defaults `networkAccess` to its restrictive value —
+  the inverse of exec, where omitting the `-c` key defers to the user's
+  `config.toml` and fails open — so the adapter states the network explicitly on
+  both transports. Measured 2026-08-11 against 0.147.0's own schema; the applied
+  policy is read back off the rollout's `turn_context.sandbox_policy`.
+- Under `appserver`, `approvalPolicy` is pinned to `never` and no caller or env
+  var can override it: a measured `read-only` thread that accepted one approval
+  wrote a file, so the sandbox — not the approval prompt — is the boundary. The
+  control surface is `turn/steer` for reply (injected into the running turn,
+  nothing cancelled), `turn/interrupt` for cancel (the thread stays live and
+  resumable), `thread/resume` for restart recovery, and `thread/read` as the
+  over-RPC salvage channel. `turn/interrupt` requires `turnId` and `turn/steer`
+  requires `expectedTurnId`; omitting either is an unconditional `-32600`.
+- The broker is one detached, machine-wide process at a fixed socket path,
+  owning one `codex app-server` over stdio; the bridge is a detachable client,
+  which is what lets a job outlive the bridge that started it. The app-server
+  child is deliberately not detached — it must die with its broker.
 - `codex login status` is documented as exiting 0 with credentials present,
   non-zero otherwise, and is explicitly called out as automation-friendly
   (`learn.chatgpt.com/docs/developer-commands`). Live-verified on 0.145.0: the
@@ -124,11 +172,23 @@ Automated gates:
 
 ```bash
 bash -n setup.sh hooks/*.sh
-find bridge-server lib scripts hooks templates -path '*/node_modules' -prune -o -type f -name '*.mjs' -print0 | xargs -0 -n1 node --check
-node --test --experimental-test-coverage $(find bridge-server lib scripts hooks templates -path '*/node_modules' -prune -o -type f -name '*.test.mjs' -print)
+find . -name '*.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 -n1 node --check
+find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 node --test --experimental-test-coverage
+(cd bridge-server && npm audit --omit=dev --audit-level=moderate)
 node scripts/validate-codex-release.mjs
 claude plugin validate .
 ```
+
+The first four commands are the same work `.github/workflows/ci.yml` does in its
+`Shell syntax`, `JavaScript syntax`, `Tests with coverage`, and `Production
+dependency audit` steps; the last two are release-only and have no CI
+counterpart. Discovery is anchored at the repo root rather than at a directory
+allowlist, because the allowlist these lines replaced omitted `test/` and so
+skipped the two cross-cutting guard suites —
+`test/exec-timeout-guard.test.mjs` (bounded shell-outs) and
+`test/profile-registry-guard.test.mjs` (single reader of `profiles.json`) — the
+exact drift this gate exists to catch. Measured 2026-08-13: the allowlist
+discovered 37 test files, the root-anchored form discovers 39.
 
 Manual smoke gates before a public tag:
 
@@ -143,13 +203,20 @@ Manual smoke gates before a public tag:
    `npm install`/fetch inside the sandbox) to prove the
    `AGENT_COMPANION_CODEX_NETWORK` override actually reaches the sandbox — not
    just that a send completes.
+8. Codex CLI companion on the app-server transport
+   (`CODEX_RUNTIME_ADAPTER=appserver`): `node probes/smoke/appserver.mjs` for
+   restart survival and `node probes/smoke/appserver-control.mjs` for the
+   reply/steer and cancel/interrupt control paths. Both drive the real bridge
+   against a real broker and a real `codex app-server`, and both spend real
+   tokens.
 
 ### Smoke evidence
 
-Recorded 2026-06-23 (macOS, Node 24.15.0). All six gates pass. The harness
-install smokes (1, 2, 6) were run under a sandboxed `$HOME` so the real
-`~/.claude` / `~/.codex` were never written, then the sandbox was deleted and
-the real config verified byte-identical.
+Recorded 2026-06-23 (macOS, Node 24.15.0), extended 2026-07-24 for gate 7 and
+2026-08-11 for gate 8. All eight gates pass. The harness install smokes
+(1, 2, 6) were run under a sandboxed `$HOME` so the real `~/.claude` /
+`~/.codex` were never written, then the sandbox was deleted and the real config
+verified byte-identical.
 
 - **Gate 1 — Claude source install: PASS.** `bash setup.sh --host claude --target none`
   (sandboxed `$HOME`) materialized the subagent, merged the `agent-bridge`
@@ -188,6 +255,31 @@ the real config verified byte-identical.
     sandbox_workspace_write.network_access=true` reached the Seatbelt
     sandbox); job `codex-mrym5oqi-29s7` verified the subagent-wrapper path
     end-to-end.
+- **Gate 8 — Codex app-server transport: PASS (2026-08-11, codex-cli 0.147.0).**
+  Both probes green against the real bridge, the real broker and a real
+  `codex app-server`:
+  - **Restart survival** — `probes/smoke/appserver.mjs`, 17/17. Bridge A
+    dispatches, banks the thread id and streams sub-turn text into the digest,
+    then is SIGKILLed mid-turn; the broker, its `codex app-server` and a live
+    shell descendant keep running the turn with zero bridges alive. Bridge B
+    hydrates on the same host session, resumes the *same* thread, and the job
+    reaches `completed` with the answer intact and A's streamed text preserved
+    under "Carried forward from the previous bridge". The verdict is explicitly
+    not the exec transport's `target_child_orphaned_by_bridge_restart`. Two of
+    the 17 checks read the applied sandbox back off the rollout —
+    `turn_context.sandbox_policy` is workspace-write with network access, and
+    applying it pinned neither model nor effort — and a final one holds
+    `agent_status` to the truth at terminal: `reply_available` false (the turn
+    is over) with `resume_available` still true (the thread is not).
+  - **Control surface** — `probes/smoke/appserver-control.mjs`, 18/18.
+    `agent_reply` steers a running turn (`turn/steer` with the required
+    `expectedTurnId`) and the turn obeys the injected instruction instead of the
+    one it started with; `agent_cancel` interrupts (`turn/interrupt` with
+    `turnId`) and the job settles `cancelled` while the thread survives — still
+    in `thread/loaded/list`, `thread/resume` → idle with its last turn recorded
+    `interrupted`, and `thread/read` still returning the history. Both turn-id
+    sources are exercised: the banked one from `turn/started` and the
+    restarted-bridge fallback that reads the running turn off `thread/read`.
 
 OpenCode server adapter (added 2026-06-23, same environment):
 
@@ -202,6 +294,9 @@ OpenCode server adapter (added 2026-06-23, same environment):
   reported `cancelled` even though OpenCode emitted no MessageAbortedError (the
   bridge's cancel intent is authoritative).
 
-Strength routing, companion profiles, multiple models per companion, and the
-OpenCode `acp` stdio adapter remain unimplemented; do not claim them until those
-paths have code and tests.
+Strength routing, companion profiles and per-profile models shipped 2026-06-23
+with committed regressions (`bridge-server/routing.test.mjs`,
+`lib/profile-registry.test.mjs`, `test/profile-registry-guard.test.mjs`); the
+codex app-server transport shipped 2026-08-11 with the probe evidence recorded
+above. The OpenCode `acp` stdio adapter is the one item this page still defers —
+claim it once that path has code and tests.

@@ -570,7 +570,7 @@ Expected:
    - `node --check bridge-server/server.mjs`
    - `node --check lib/target-diagnostics.mjs`
    - `node --check scripts/onboard.mjs`
-   - `node --test $(find bridge-server lib scripts hooks templates -name '*.test.mjs')`
+   - `find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 node --test`
    - Manual OpenCode-only setup on a machine without `copilot`.
    - Manual Copilot-only setup on a machine without `opencode`.
 

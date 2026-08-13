@@ -11,7 +11,11 @@
 //
 // `send` enqueues the task and returns `status=still_running` with the job_id
 // immediately (no blocking — the worker keeps running in the background). The
-// subagent then loops on `wait` until terminal, emitting a short line between
+// one exception is the reattach guard in `handleSend`: when a non-terminal job
+// already exists for the same thread and host session — including one hydrated
+// from the ledger after a bridge respawn — the send awaits that job and answers
+// with a wait response, bounded by the same clampWaitSec budget. The subagent
+// then loops on `wait` until terminal, emitting a short line between
 // iterations so a human watching the transcript can see progress.
 //
 // The host budget that actually bounds a wait is the MCP *tool idle* timeout,

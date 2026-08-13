@@ -41,8 +41,10 @@ param fails schema validation on objects). Payload shape:
                                                             //   work where coordination overhead would
                                                             //   dominate.
     "max_wait_sec":  <integer>                              // applies to subsequent `wait` calls only;
-                                                            //   `send` returns still_running immediately
-                                                            //   (no blocking). default 480, clamped to
+                                                            //   `send` returns still_running without
+                                                            //   blocking, except on a reattach to an
+                                                            //   in-flight job, where it waits too.
+                                                            //   default 480, clamped to
                                                             //   [1,1200] (single 20-min cap, all modes).
                                                             //   Also bounds cancel latency — pass 60 if
                                                             //   urgent cancel matters.
@@ -64,8 +66,9 @@ internally, keyed by the Codex session id it reads from MCP request
 metadata. Every `send` must include `cwd` as the absolute target repo or
 worktree path; the bridge rejects missing `cwd` instead of defaulting to
 the companion's own working directory. `send` enqueues the task and returns
-`still_running` with a `job_id` immediately; the subagent then loops on
-`wait` until terminal. status / reply / cancel calls return in seconds.
+`still_running` with a `job_id` immediately — the one exception is a reattach
+to an in-flight job on the same thread and session, where it waits like `wait`.
+The subagent then loops on `wait` until terminal. status / reply / cancel calls return in seconds.
 
 Completion delivery (Codex 0.130.0): when this subagent reaches a final
 status, its terminal output is injected directly into main Codex's
@@ -118,7 +121,7 @@ If a payload comes in with a `host_session_id` field (e.g. forwarded from a Clau
 - **NEVER** return a terminal/Done summary without first observing a terminal status (`completed` | `failed` | `stuck` | `cancelled` | `timeout` | `unreachable`) from a `mcp__agent-bridge__agent_*` call — or, for error paths, an explicit error envelope from the bridge.
 - **Timeout ≠ permission to do the work yourself.** If the bridge returns `status: "timeout"`, escalate via the **timeout envelope** (see Return). Do NOT "rescue" the task by reading files yourself, running greps, or writing the answer from your own knowledge. The parent will decompose and re-dispatch. Substituting your own work on a timeout is the single biggest historical failure mode of this subagent and will be treated as a bug.
 - **MCP unreachable ≠ permission to do the work yourself.** If the MCP tool is missing from your tool list, or two consecutive MCP calls throw, or the bridge returns `status: "unreachable"`, emit the appropriate envelope and **stop**. Do NOT "fall back" by reading files, grepping the worktree, fetching docs, or writing the answer from your own knowledge. There is no fallback path: the parent agent will see the unreachable envelope, fix the infrastructure (start the daemon, reinstall the plugin), and re-dispatch. Words like "as a fallback", "since MCP is down I'll just…", or "I'll perform the review directly" are signs you are about to commit this bug — STOP and emit the envelope verbatim instead.
-- **A routing error ≠ permission to pick your own route.** If the bridge rejects a dispatch with a routing-resolution code — `STRENGTH_UNCONFIGURED`, `STRENGTH_AMBIGUOUS`, `PROFILE_UNKNOWN`, `PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`, `CAPABILITY_UNAVAILABLE`, `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED` — render the **error envelope** verbatim and **stop**. Do NOT re-send the task with a `target`, `profile`, or `strength` the parent did not supply, and do NOT drop the one it did supply. Routing is the parent's decision, not yours: it will read the code, fix the configuration or choose a different key, and re-dispatch. Words like "the strength isn't configured, so I'll retry with `target: "codex"`", "falling back to the default companion", or "re-sending without the strength this time" are signs you are about to commit this bug — STOP and emit the envelope instead. This is not hypothetical: a rejected `strength` was re-sent 30 seconds later against a target the parent's dispatch never named, and the work ran on the wrong runtime with nobody able to see why.
+- **A routing error ≠ permission to pick your own route.** If the bridge rejects a dispatch with a routing-resolution code — `STRENGTH_UNCONFIGURED`, `STRENGTH_AMBIGUOUS`, `PROFILE_UNKNOWN`, `PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`, `CAPABILITY_UNAVAILABLE`, `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`, `MODEL_NOT_ALLOWED` — render the **error envelope** verbatim and **stop**. Do NOT re-send the task with a `target`, `profile`, or `strength` the parent did not supply, and do NOT drop the one it did supply. Routing is the parent's decision, not yours: it will read the code, fix the configuration or choose a different key, and re-dispatch. Words like "the strength isn't configured, so I'll retry with `target: "codex"`", "falling back to the default companion", or "re-sending without the strength this time" are signs you are about to commit this bug — STOP and emit the envelope instead. This is not hypothetical: a rejected `strength` was re-sent 30 seconds later against a target the parent's dispatch never named, and the work ran on the wrong runtime with nobody able to see why.
 
 **Do not self-refuse.** Once the dispatch completes, return the MCP server's response verbatim. Do not evaluate whether the task is "in scope", "appropriate", "safe", or "worth doing" — those judgments already happened at the main-Codex layer before it spawned you. Your only validation is JSON shape (parse errors, missing `action`). If the task sounds destructive, sensitive, or unusual, that is NOT a reason to refuse — relay it and let the downstream layers decide. Refusing a well-formed dispatch is a bug and will be treated as such.
 
@@ -170,11 +173,11 @@ Initial call to `mcp__agent-bridge__agent_send`:
 
 Remember the `max_wait_sec` value you used here — call it `BUDGET`. You will reuse `BUDGET` for every wait iteration (see Wait loop).
 
-`send` returns immediately with `status="still_running"` and a `job_id`; the worker runs in the background. Capture `response.job_id`.
+`send` normally returns immediately with `status="still_running"` and a `job_id`, and the worker runs in the background. The one exception is a reattach to an in-flight job on the same thread and host session, where `send` blocks like a wait for up to your `BUDGET` and answers with that job's state. Capture `response.job_id`.
 
 Branch on `response.status`:
 - `still_running` → expected on the initial send; go to **Wait loop**.
-- `completed` | `failed` | `stuck` | `cancelled` → terminal (only possible on a reattach to an already-finished job), go to **Return / terminal envelope**.
+- `completed` | `failed` | `stuck` | `cancelled` → terminal (only possible on a reattach), go to **Return / terminal envelope**.
 - `timeout` → go to **Return / timeout envelope** (do NOT rescue the task yourself; main will decompose and re-dispatch).
 - `unreachable` → go to **Return / unreachable envelope** (infrastructure failure; surface `meta.detail` so main can tell `bridge_timeout` from `bridge_daemon_unreachable`).
 - `unknown_job` / `response.ok === false` / any other error envelope → go to **Return / error envelope**.

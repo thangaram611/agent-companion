@@ -11,7 +11,7 @@
     {
       "name": "agent-companion",
       "source": "./",
-      "description": "Attach OpenCode or Copilot companions to Claude Code through a private subagent + MCP bridge."
+      "description": "Attach an OpenCode, GitHub Copilot, or Codex CLI companion to Claude Code through a private subagent + MCP bridge."
     }
   ]
 }

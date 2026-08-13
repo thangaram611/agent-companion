@@ -125,7 +125,7 @@ test('template forbids re-routing a dispatch the bridge refused to route', () =>
   // exactly the gap the subagent reroutes through.
   for (const code of ['STRENGTH_UNCONFIGURED', 'STRENGTH_AMBIGUOUS', 'PROFILE_UNKNOWN',
     'PROFILE_AMBIGUOUS', 'ROUTING_CONFLICT', 'CAPABILITY_UNAVAILABLE',
-    'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED']) {
+    'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED', 'MODEL_NOT_ALLOWED']) {
     assert.match(body, new RegExp(`\`${code}\``),
       `${code} named in the no-re-route prohibition`);
   }

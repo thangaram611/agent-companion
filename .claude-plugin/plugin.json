@@ -2,7 +2,7 @@
   "name": "agent-companion",
   "version": "0.0.1",
   "defaultEnabled": false,
-  "description": "Attach an OpenCode or Copilot companion to the Claude Code harness. Agent Companion spawns a private subagent with a dedicated MCP bridge so token-heavy delegated work leaves the parent context clean.",
+  "description": "Attach an OpenCode, GitHub Copilot, or Codex CLI companion to the Claude Code harness. Agent Companion spawns a private subagent with a dedicated MCP bridge so token-heavy delegated work leaves the parent context clean.",
   "author": {
     "name": "thangaram611",
     "email": "thangaram611@gmail.com",
@@ -17,6 +17,7 @@
     "delegation",
     "mcp",
     "subagent",
-    "acp"
+    "acp",
+    "codex"
   ]
 }

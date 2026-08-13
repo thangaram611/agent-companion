@@ -16,27 +16,28 @@ can be both the harness and a downstream companion — the two roles are
 independent; running Codex as a companion does not require Codex as the harness,
 or vice versa).
 
-Today, each delegated send runs on one explicitly selected or configured
-companion. The roadmap is one-to-many: connect multiple companion profiles at
-once, assign each profile strengths, and let the harness ask for the strength
-instead of a concrete runtime.
+Routing is one-to-many: connect multiple companion profiles at once, give each
+profile strengths, and let the harness ask for a strength instead of a concrete
+runtime. A send may name a strength, a configured profile, or a bare companion;
+the bridge resolves it to exactly one companion profile.
 
 The product posture is deliberately companion-neutral:
 
 - **Bring your harness.** Install the Claude Code surface, the Codex CLI surface,
   or both.
 - **Attach your companion.** Choose `opencode`, `copilot`, or `codex` on each
-  send, or persist one bridge default.
+  send, route by strength or profile, or persist one bridge default.
 - **Keep the parent clean.** Main Claude and main Codex never see the bridge MCP
   server directly.
 - **Use one public surface.** The subagent owns the generic `agent_*` tools:
   `agent_send`, `agent_wait`, `agent_status`, `agent_reply`, and
   `agent_cancel`.
-- **Avoid silent behavior.** If no target is passed or configured,
-  `agent_send` returns `TARGET_UNCONFIGURED` with onboarding guidance.
-- **Route by strengths next.** Future companion profiles can advertise strengths
-  such as `reviewer` or `web_researcher`; harnesses should consume those
-  strengths without hard-coding a vendor/runtime choice.
+- **Avoid silent behavior.** If a send selects nothing and nothing is
+  configured, `agent_send` returns `TARGET_UNCONFIGURED` with onboarding
+  guidance; an unresolvable profile or strength gets its own named error.
+- **Route by strengths.** Companion profiles advertise strengths such as
+  `reviewer` or `web_researcher`; harnesses request the strength and never
+  hard-code a vendor/runtime choice.
 
 Implementation note: today the CLI and MCP schema still use `host` for harness
 selection and `target` for companion selection. Those names are stable public
@@ -96,12 +97,14 @@ Notes:
     reply/re-steer, restart resume, and streamed event digests. One shared server
     roots each job at its own `cwd` via the `?directory=` query param. The server
     is detached and survives bridge restarts (like the Copilot daemon) so a
-    respawned bridge reattaches instead of re-spawning; set
-    `AGENT_COMPANION_OPENCODE_MODEL=provider/model` to pin a model, otherwise the
-    server's configured default is used.
+    respawned bridge reattaches instead of re-spawning.
   - Server-mode binds `127.0.0.1` and is unsecured; permission handling follows
     OpenCode's own config (the `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip`
     flag applies to the cli adapter only).
+  - `AGENT_COMPANION_OPENCODE_MODEL=provider/model` pins a model. In server mode
+    it is the fallback for any job whose profile pins none; on `cli` it reaches
+    the job as the synthesized default profile's model. A profile's own `model`
+    wins either way, and unset leaves OpenCode's configured default in place.
 - Copilot keeps `/fleet` parallel orchestration. `parallel: "auto"` can prepend
   `/fleet` for broad Copilot tasks; OpenCode and Codex remain single-job.
 - Codex ships two adapters, selected by `CODEX_RUNTIME_ADAPTER`:
@@ -142,32 +145,64 @@ Notes:
   `--ignore-user-config` for real jobs): every enabled MCP server
   boots on each spawn and can stall the first turn up to its configured
   `startup_timeout_sec`, and shell env is inherited into the child minus
-  `*KEY*`/`*SECRET*`/`*TOKEN*` names. Optional model pin:
-  `AGENT_COMPANION_CODEX_MODEL=<model id>`; timeout default 40 minutes, override
-  with `AGENT_COMPANION_CODEX_TIMEOUT_MS`.
+  `*KEY*`/`*SECRET*`/`*TOKEN*` names. Optional model pin for the default
+  profile: `AGENT_COMPANION_CODEX_MODEL=<model id>` (a profile's own `model`
+  wins); timeout default 40 minutes, override with
+  `AGENT_COMPANION_CODEX_TIMEOUT_MS`.
 - Goose and Aider are tracked as future companion adapter candidates.
 
-## Strength Routing Roadmap
+## Strength Routing
 
-The MVP has a one-to-one routing contract: one `agent_send` resolves to one
-companion target, either from the `target` argument or the configured
-`default-target`.
+Shipped 2026-06-23. `resolveRouting` is the bridge's only routing brain, and it
+never falls back silently: every request it cannot resolve comes back as a named
+error. Ambiguity and unknown-key errors echo the candidate ids; the
+capability-gate refusals (`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`,
+`MODEL_NOT_ALLOWED`) name the offending companion in `target` instead. Every
+envelope carries the public `targets` and `profiles` lists.
 
-The intended public model is one-to-many:
+One `agent_send` resolves to exactly one companion profile. A send may carry:
 
-- users connect multiple companion profiles at once;
-- a profile may represent a whole runtime, a provider-backed model inside that
-  runtime, or another configured adapter instance;
-- each profile declares strengths such as `reviewer`, `web_researcher`,
-  `planner`, or `fast_executor`;
-- the harness sees and requests strengths, while the bridge maps the strength to
-  the best configured companion profile.
+| Field | Meaning |
+| --- | --- |
+| `strength` | Preferred. Route to the configured profile that declares this label. |
+| `profile` | A specific configured profile id. Mutually exclusive with `strength`. |
+| `target` | A bare companion: `opencode`, `copilot`, or `codex`. |
+| *(none)* | The configured default profile wins — see Internal MCP Surface for the full zero-input order. |
 
-Example future profiles might look like `copilot_claude_sonnet_4_6` with
-`web_researcher`, `copilot_gpt_5_4` with `reviewer`, and a user-defined
-`opencode_provider_model` with `fast_executor`. That profile/strength router is
-not implemented yet; the current supported runtime selectors are `opencode`,
-`copilot`, and `codex`.
+Passing both `strength` and `profile` is `ROUTING_CONFLICT`. A `target` passed
+*alongside* one of them is read as an assertion, not a selector: if it disagrees
+with the resolved profile's companion, that is `ROUTING_CONFLICT` too.
+
+A profile pins one companion, optionally a model and an adapter, and declares
+strengths drawn from a closed vocabulary: `reviewer`, `web_researcher`,
+`planner`, `fast_executor`. Profiles inherit capabilities from their companion
+and never re-declare them. Author them with onboarding:
+
+```bash
+node scripts/onboard.mjs --define-profile copilot_claude_sonnet_4_6 \
+  --companion copilot --model claude-sonnet-4.6 --strength web_researcher
+node scripts/onboard.mjs --define-profile copilot_gpt_5_4 \
+  --companion copilot --model gpt-5.4 --strength reviewer
+node scripts/onboard.mjs --define-profile opencode_provider_model \
+  --companion opencode --model provider/model --strength fast_executor
+node scripts/onboard.mjs --set-default-profile copilot_gpt_5_4
+```
+
+Ambiguity is an error rather than a coin flip. When several profiles declare the
+same strength — or several target the same bare companion — the configured
+`defaultProfile` breaks the tie only when it is itself one of the candidates —
+it has to declare that strength, or target that companion. Otherwise the send
+fails `STRENGTH_AMBIGUOUS` or `PROFILE_AMBIGUOUS`. With no `profiles.json` at all the
+bridge synthesizes a single profile from `default-target`, so an install that
+never authored a profile routes exactly as it did before.
+
+Two open items:
+
+- `STRENGTH_CAPABILITY_REQUIREMENTS` ships empty: no strength yet demands a
+  capability, so the pre-spawn capability gate is fully wired but inert.
+- A profile's `adapter` field is a capability *declaration*. The transport a job
+  actually starts on is still whatever `OPENCODE_RUNTIME_ADAPTER` /
+  `CODEX_RUNTIME_ADAPTER` says at spawn, frozen per job from there.
 
 ## Requirements
 
@@ -216,7 +251,7 @@ bash setup.sh --host codex --target opencode
 # Claude only, Copilot default.
 bash setup.sh --host claude --target copilot
 
-# Harness/plugin surface only. Every send must pass target explicitly.
+# Harness/plugin surface only. Every send must select a companion explicitly.
 bash setup.sh --host both --target none
 ```
 
@@ -224,6 +259,8 @@ bash setup.sh --host both --target none
 hosts. If multiple targets are ready, pass the target explicitly.
 
 ## Onboarding Commands
+
+Targets:
 
 ```bash
 node scripts/onboard.mjs --list-targets
@@ -233,6 +270,21 @@ node scripts/onboard.mjs --target copilot --set-default
 node scripts/onboard.mjs --target codex --set-default
 node scripts/onboard.mjs --target opencode --smoke
 ```
+
+Companion profiles (ids, models and strength labels only — never secrets):
+
+```bash
+node scripts/onboard.mjs --list-profiles
+node scripts/onboard.mjs --define-profile <id> --companion opencode|copilot|codex \
+  [--model <m>] [--adapter <transport>] [--strength <labels>]
+node scripts/onboard.mjs --assign-strength <id> --strength <labels>
+node scripts/onboard.mjs --set-default-profile <id>
+```
+
+`--adapter` takes `cli|server` for OpenCode and `exec|appserver` for Codex.
+Copilot has no profile-selectable adapter; its transport is host-level.
+`--strength` takes a comma-separated subset of `reviewer`, `web_researcher`,
+`planner`, `fast_executor`.
 
 Useful flags:
 
@@ -244,14 +296,17 @@ Useful flags:
 | `--json` | Emit machine-readable reports. |
 | `--no-target-check` | Persist the target even if readiness checks fail. |
 | `--smoke` | Run an opt-in target smoke task when supported. |
+| `--yes` / `-y` | Strict non-interactive mode: skip the smoke confirmation, and fail rather than prompt on an ambiguous target or warn on a strength conflict. |
 
 For standalone host-specific writes, set `AGENT_COMPANION_HOST=codex` or
 `AGENT_COMPANION_HOST=claude` on the command. `setup.sh` does this for each
 host when it delegates to onboarding.
 
-`AGENT_COMPANION_DEFAULT_TARGET` overrides the persisted default. If neither is
-set and `agent_send` omits `target`, the bridge refuses the send instead of
-guessing.
+`AGENT_COMPANION_DEFAULT_PROFILE` overrides the persisted `defaultProfile`, and
+`AGENT_COMPANION_DEFAULT_TARGET` overrides the persisted `default-target`. The
+default profile is consulted first; `default-target` answers only when no
+default profile is configured. With nothing configured at all and `agent_send`
+omitting `target`, the bridge refuses the send instead of guessing.
 
 ## Install For Claude Code
 
@@ -390,6 +445,8 @@ agent_send({
   task,
   cwd,
   target?,
+  strength?,       // preferred routing input; mutually exclusive with profile
+  profile?,        // a specific configured profile id; mutually exclusive with strength
   mode?,
   template?,
   template_args?,
@@ -408,10 +465,22 @@ Important rules:
 
 - `cwd` is required on every send and must be an absolute target repo/worktree
   path.
-- `target` may be `opencode`, `copilot`, or `codex`. If omitted, resolution
-  checks `AGENT_COMPANION_DEFAULT_TARGET`, then the host state file.
-- `agent_send` returns `still_running` immediately with a `job_id`.
-- `agent_wait` blocks in bounded intervals. The max wait is 1200 seconds.
+- `target` may be `opencode`, `copilot`, or `codex`. Prefer `strength`, or
+  `profile` when you need one specific configured profile.
+- With `target`, `strength` and `profile` all omitted, resolution uses the
+  default profile — `AGENT_COMPANION_DEFAULT_PROFILE`, else the `defaultProfile`
+  key in `profiles.json` — and routes to that profile's companion. A default
+  profile naming no configured profile fails with `PROFILE_UNKNOWN` rather than
+  falling through. Only when no default profile is configured does resolution
+  fall back to `AGENT_COMPANION_DEFAULT_TARGET`, then the host `default-target`
+  state file. With no `profiles.json` the bridge synthesizes one profile from
+  `default-target`, so a legacy install resolves identically.
+- `agent_send` returns `still_running` immediately with a `job_id` — except when
+  it reattaches to an in-flight job on the same thread and host session (a
+  respawned bridge hydrates persisted jobs at startup), where it blocks like
+  `agent_wait` up to `max_wait_sec`.
+- `agent_wait` blocks in bounded intervals. The wait defaults to 480 seconds and
+  is capped at 1200 seconds.
 - `agent_status({ diagnostics: true })` embeds the same environment report as
   `node scripts/doctor.mjs --json`.
 
@@ -468,16 +537,44 @@ Per-host state lives under:
 ~/.codex/agent-companion/
 ```
 
-Runtime files live under each host's `runtime/` directory:
+Configuration and the job ledger sit at that state root:
 
 ```text
-copilot-acp.sock
-agent-bridge.log
-copilot-acp-daemon.log
-prompts/copilot-acp-<promptId>.jsonl
-digests/agent-digest-<jobId>.md
-completions.jsonl
+.host                                   install marker
+default-target                          persisted bare-companion default
+default-model                           persisted Copilot model default
+profiles.json                           companion profiles and `defaultProfile`
+threads/                                thread → companion session ids
+jobs/                                   persisted job ledger, replayed on hydrate
+daemon.log                              structured JSONL event log, rotated at 10 MB
 ```
+
+`daemon.log` is the one the Diagnostics section greps. Everything else lives one
+level down, under each host's `runtime/` directory:
+
+```text
+agent-bridge.log                        human-readable bridge trace
+copilot-acp.sock                        Copilot ACP daemon socket
+copilot-acp-daemon.log                  Copilot ACP daemon log
+copilot-otel-traces.jsonl               Copilot OTEL traces
+codex-app-server.sock                   codex app-server broker socket
+codex-app-server-broker.log             codex app-server broker log
+codex-broker.json                       codex broker leases and disposal claim
+opencode-servers.json                   pooled `opencode serve` registry
+heartbeats/                             host-liveness files the daemons reap against
+prompts/copilot-acp-<promptId>.jsonl    per-prompt event stream
+digests/agent-digest-<jobId>.md         rendered progress digests
+completions.jsonl                       orphan completion queue
+```
+
+Both shared-runtime registries survive bridge restarts, for different reasons.
+`opencode-servers.json` holds the only record of a server's ephemeral `--port 0`
+address, so it is how a respawned bridge reattaches to a still-listening
+`opencode serve` instead of spawning a duplicate. The broker's address is the
+fixed socket above, so a bridge finds it by connect-probing the socket and
+re-records what it adopted; `codex-broker.json` is bookkeeping — the leases,
+`lastUsedAt` and disposal claim that keep a broker still in use from being
+reaped.
 
 The bridge surfaces progress as:
 
@@ -519,9 +616,16 @@ Run the project checks locally:
 
 ```bash
 bash -n setup.sh hooks/*.sh
-find bridge-server lib scripts hooks templates -path '*/node_modules' -prune -o -type f -name '*.mjs' -print0 | xargs -0 -n1 node --check
-node --test --experimental-test-coverage $(find bridge-server lib scripts hooks templates -path '*/node_modules' -prune -o -type f -name '*.test.mjs' -print)
+find . -name '*.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 -n1 node --check
+find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 node --test --experimental-test-coverage
 ```
+
+These are the shell-syntax, JavaScript-syntax and test steps
+`.github/workflows/ci.yml` runs; CI additionally runs `npm ci` and
+`npm audit --omit=dev --audit-level=moderate` in `bridge-server/`. Discovery is anchored at
+the repo root rather than an allow-list of directories, because an allow-list
+omitting `test/` skips the two cross-cutting guard suites — the `profiles.json`
+single-reader guard and the sync-exec timeout guard.
 
 Package validation:
 
@@ -536,7 +640,8 @@ claude plugin validate .
 - The `agent-bridge` MCP server is subagent-only.
 - Main Claude and main Codex never call the bridge directly.
 - The bridge is spawned per invocation; there is no activation lifecycle.
-- Sends are non-blocking and waits are bounded.
+- Sends are non-blocking — the one exception is reattaching to an in-flight job
+  on the same thread, which blocks like a wait — and every wait is bounded.
 - Orphan completions are stored in `completions.jsonl` and drained by hooks.
 - Model choice is configuration, not a public tool parameter.
 - Node dependencies persist under plugin data; bundled source updates with the
@@ -549,8 +654,9 @@ claude plugin validate .
 - Session opt-in or pause.
 - OpenCode CLI in-flight reply/re-steer (server mode supports it).
 - OpenCode CLI restart resume (server mode supports it).
-- Codex in-flight reply/re-steer or restart resume (`codex exec` is a one-shot
-  non-interactive subprocess — see Supported Companions notes).
+- Codex `exec` in-flight reply/re-steer (app-server mode supports it via
+  `turn/steer`).
+- Codex `exec` restart resume (app-server mode supports it via `thread/resume`).
 - MCP elicitation or `NEEDS_USER_INPUT` flows.
 
 ## Repository Map
@@ -558,13 +664,16 @@ claude plugin validate .
 ```text
 .claude-plugin/        Claude plugin manifest and local marketplace manifest
 .codex-plugin/         Codex plugin manifest
+.github/workflows/     CI: shell syntax, JS syntax, tests with coverage, prod audit
 assets/readme/         README PNG assets plus editable SVG diagram sources
 bridge-server/         MCP server plus companion runtime adapters
 docs/                  Architecture, tracker, onboarding, and release readiness
 hooks/                 Claude and Codex lifecycle hooks
 lib/                   Shared state, host routing, diagnostics, prompt helpers
+probes/                Hand-run codex app-server and smoke harnesses, outside CI
 scripts/               Setup, onboarding, marketplace build, release validation
 templates/             Claude Markdown and Codex TOML subagent templates
+test/                  Cross-cutting guard suites and codex app-server doubles
 setup.sh               Host install and target onboarding entry point
 ```
 

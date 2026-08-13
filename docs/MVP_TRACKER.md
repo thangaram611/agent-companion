@@ -1,6 +1,6 @@
 # MVP Tracker
 
-Last updated: 2026-07-24
+Last updated: 2026-08-13
 
 ## MVP Definition
 
@@ -46,12 +46,14 @@ primary companion:
 - Kept Copilot adapter behavior intact:
   - ACP daemon path still works.
   - `/fleet` parallel orchestration still applies only to Copilot.
-  - reply/resume remains Copilot-only in the MVP.
+  - reply/resume was Copilot-only at this pass; the OpenCode `server` and Codex
+    `appserver` adapters added it later.
 
 - Updated subagent templates:
   - use `agent_*` tools.
   - document optional `target`.
-  - document the bring/configure-your-target posture with OpenCode and Copilot supported now.
+  - document the bring/configure-your-target posture: OpenCode and Copilot at
+    this pass, and both templates name Codex CLI too since its adapter landed.
   - keep Claude session-id forwarding and Codex MCP `_meta` behavior.
 
 - Updated permissions:
@@ -83,12 +85,15 @@ primary companion:
 - Public positioning and release-readiness alignment (this pass):
   - README now leads with the harness + companion slogan and defines the product
     vocabulary.
-  - Public docs distinguish today's one-to-one `target` routing from the future
-    one-to-many companion profile router.
+  - Public docs distinguish one-to-one `target` routing from the one-to-many
+    companion profile router, still ahead at this pass and shipped since (see
+    backlog item 2).
   - [docs/RELEASE_READINESS.md](RELEASE_READINESS.md) records source-backed
     compatibility notes and public release gates.
-  - Claude and Codex plugin manifests now describe the supported harnesses and
-    companions consistently.
+  - Claude and Codex plugin manifests describe the same harnesses and
+    companions as the rest of the docs: both name OpenCode, GitHub Copilot, and
+    Codex CLI, and the Codex manifest's long description records strength-routed
+    companion profiles as shipped rather than future.
   - `setup.sh` install copy maps `--host` to harness and `--target` to today's
     companion selector without renaming stable flags.
   - Copilot default-model fallback now uses a currently documented Copilot CLI
@@ -101,11 +106,13 @@ primary companion:
     (`resolveCodexSandbox`), a D10 ThreadEvent JSONL collector
     (`createCodexCollector`), and `cancelCodexRun`.
   - `lib/target-registry.mjs` carries the `codex` descriptor: `implemented:
-    true`, `reply:false`/`resume:false` (architecture-forced — `codex exec` is
-    a one-shot non-interactive subprocess), permissive `modelSelection`, and
-    the documented consequences (network-on-by-default inversion, the
-    `.git`/`.codex`/`.agents` carve-out, rollout accumulation, MCP-boot/env-
-    inheritance, the nested-sandbox caveat) as descriptor notes.
+    true`, `reply:false`/`resume:false` as the `codex exec` baseline (forced by
+    that transport — a one-shot non-interactive subprocess with no control
+    channel and nothing to reattach to — not by codex;
+    `CODEX_RUNTIME_ADAPTER=appserver` flips both true), permissive
+    `modelSelection`, and the documented consequences (network-on-by-default
+    inversion, the `.git`/`.codex`/`.agents` carve-out, rollout accumulation,
+    MCP-boot/env-inheritance, the nested-sandbox caveat) as descriptor notes.
   - `bridge-server/server.mjs` consolidates the non-copilot worker/cancel/info
     dispatch into one `CLI_RUNTIMES` table (`opencode`, `codex`) instead of a
     third id-literal branch; digest routing needed no change (`writeOpenCodeDigest`
@@ -158,10 +165,17 @@ primary companion:
   in v1; nested Seatbelt sandboxing is documented, not worked around (use
   `AGENT_COMPANION_CODEX_SANDBOX_MODE=bypass` in an externally-sandboxed bridge).
 - Goose and Aider are not implemented yet.
-- `assets/readme/target-matrix.png` / `.svg` predate the codex companion and do
-  not yet depict its row; regeneration is deferred (tracked here, not
-  reflected in the image yet — `scripts/validate-codex-release.mjs` only
-  asserts the file's existence, not its content).
+- Both README diagram assets predate the transport split and strength routing,
+  and regeneration is deferred (tracked here, not reflected in the images yet —
+  `scripts/validate-codex-release.mjs` asserts only that the files exist, never
+  their content):
+  - `assets/readme/target-matrix.png` / `.svg` has no codex row, and its
+    OpenCode row's `reply: not yet` / `restart resume: not yet` labels are wrong
+    for the `server` adapter. Regenerating it well means per-transport rows
+    (OpenCode cli / OpenCode server / Copilot / Codex exec / Codex app-server).
+  - `assets/readme/architecture.png` / `.svg` — the one actually embedded in
+    README — lists only `opencode-runtime` and `copilot-runtime` under target
+    adapters (no codex), and its runtime-state box omits `profiles.json`.
 
 ## Next Backlog
 
@@ -172,8 +186,12 @@ primary companion:
    - manually smoke a real OpenCode install and a real Copilot install — done
      2026-06-23: both companions pass a real bridge delegated send (OpenCode via
      Ollama Cloud free `gpt-oss:120b`; Copilot via `claude-sonnet-4.6`).
-   - All six pre-tag smoke gates pass (harness install smokes ran under a
-     sandboxed `$HOME`, real config verified untouched). See
+   - All eight pre-tag smoke gates pass: gates 1-6 recorded 2026-06-23, gate 7
+     (Codex CLI companion delegated send, including the network override) added
+     2026-07-24, and gate 8 (Codex app-server transport: restart survival via
+     `probes/smoke/appserver.mjs`, reply/steer and cancel/interrupt via
+     `probes/smoke/appserver-control.mjs`) added 2026-08-11. Harness install
+     smokes ran under a sandboxed `$HOME`, real config verified untouched. See
      [docs/RELEASE_READINESS.md](RELEASE_READINESS.md) "Smoke evidence".
 
 2. Strength-routed companion profiles — DONE (2026-06-23). Built per
@@ -182,7 +200,10 @@ primary companion:
    - `lib/profile-registry.mjs` is the single producer of `profiles.json`
      (`loadProfiles`), with a source-scanning single-producer guard test.
    - `resolveRouting` in `bridge-server/server.mjs` is the sole SEND routing
-     brain: constraint-consistency precedence, six no-silent-fallback codes, and
+     brain: constraint-consistency precedence, six new no-silent-fallback codes on
+     top of the existing `TARGET_UNCONFIGURED` / `TARGET_UNSUPPORTED` /
+     `MODEL_NOT_ALLOWED` (nine in total — see docs/ARCHITECTURE.md "Routing
+     Contract"), and
      a pre-spawn capability gate. Per-profile model reaches both the Copilot
      daemon and both OpenCode adapters; Copilot `.sid` files are namespaced by
      profile.
@@ -224,7 +245,8 @@ primary companion:
      spawn-core extraction.
    - Goose first candidate for desktop/CLI/API plus MCP/ACP fit.
    - Aider second candidate for git-native terminal workflows.
-   - Keep adapters capability-driven; do not assume reply/resume/parallel support.
+   - Keep adapters capability-driven: read reply/resume/parallel support from
+     the descriptor, which the selected adapter may upgrade.
 
 ## Validation Commands
 
@@ -234,13 +256,14 @@ node --check bridge-server/validation.mjs
 node --check bridge-server/opencode-runtime.mjs
 node --check bridge-server/opencode-server-runtime.mjs
 node --check bridge-server/codex-runtime.mjs
+node --check bridge-server/codex-app-server-runtime.mjs
 node --check lib/profile-registry.mjs
 node --check lib/target-registry.mjs
 node --check lib/target-diagnostics.mjs
 node --check lib/doctor.mjs
 node --check scripts/onboard.mjs
 node --check lib/state.mjs
-node --test $(find bridge-server lib scripts hooks templates test -name '*.test.mjs')
+find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 node --test
 node scripts/validate-codex-release.mjs
 claude plugin validate .
 ```
