@@ -13,7 +13,8 @@
 //   node scripts/onboard.mjs --doctor [--json]
 //   node scripts/onboard.mjs --target opencode --smoke
 //
-// Exit codes: 0 ready / host-only / informational; 2 usage error
+// Exit codes: 0 ready / host-only / informational; 1 --doctor reported not-ok,
+// or an unhandled error; 2 usage error
 // (unknown target, ambiguous --target auto under --yes, missing target under
 // --yes); 3 target chosen but not ready (actionable next steps printed),
 // unless --no-target-check is passed.

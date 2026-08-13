@@ -1,6 +1,6 @@
 <svg width="3200" height="2220" viewBox="0 0 1600 1110" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">Agent Companion architecture</title>
-  <desc id="desc">An architecture diagram: a parent host (Claude Code or Codex CLI) spawns a private Agent Companion subagent, which alone can see the agent-bridge MCP server. Inside the bridge, resolveRouting maps a strength or profile from profiles.json onto exactly one companion. One adapter per companion and transport then drives the work, and three of those transports hand off to detached machine-wide runtimes that outlive the bridge process. Everything is recorded in host-routed runtime state.</desc>
+  <desc id="desc">An architecture diagram: a parent host (Claude Code or Codex CLI) spawns a private Agent Companion subagent, which alone can see the agent-bridge MCP server. Inside the bridge, resolveRouting maps a strength or profile from profiles.json onto exactly one companion. One adapter per companion and transport then drives the work, and three of those transports hand off to detached runtimes — one per host home — that outlive the bridge process. Everything is recorded in host-routed runtime state.</desc>
   <defs>
     <linearGradient id="page" x1="0" y1="0" x2="1600" y2="1110" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#F8FAFC"/>
@@ -119,7 +119,7 @@
     <rect x="124" y="716" width="1352" height="124" rx="28" fill="#F1F5F9" stroke="#B9C7D6" stroke-dasharray="10 8"/>
   </g>
   <text x="158" y="764" class="sans label">Detached shared runtimes</text>
-  <text x="158" y="796" class="sans body">Machine-wide; they outlive the bridge.</text>
+  <text x="158" y="796" class="sans body">One per host home; they outlive the bridge.</text>
 
   <rect x="700" y="756" width="240" height="52" rx="26" fill="#FFFFFF" stroke="#F59E0B"/>
   <text x="820" y="788" text-anchor="middle" class="mono pillTxt">copilot-acp-daemon</text>

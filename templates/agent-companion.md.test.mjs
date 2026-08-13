@@ -8,8 +8,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const text = readFileSync(join(HERE, 'agent-companion.md'), 'utf8');
 
 test('Claude template documents status response rendering explicitly', () => {
-  assert.match(text, /Status envelope/);
-  assert.match(text, /response has `action: "status"` and `ok: true`/);
+  assert.match(text, /Status \/ acknowledgement envelope/);
+  assert.match(text, /`ok: true` with no `content` \+ `meta`/);
+  // The per-job status response carries no `action` key and no content/meta, so
+  // it must be named explicitly here; without it the subagent routes a healthy
+  // running job into the error envelope and prints a field that does not exist.
+  assert.match(text, /\*\*per-job status\*\*/);
+  assert.match(text, /`response.ok !== true`/);
   assert.match(text, /never emit `undefined`/);
   assert.match(text, /echo "\$CLAUDE_CODE_SESSION_ID"/);
   assert.match(text, /meta\.digest_uri/);

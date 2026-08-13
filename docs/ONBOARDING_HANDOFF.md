@@ -89,7 +89,7 @@ Do not say "OpenCode is the default product companion." Say:
 
 - "Bring your harness and attach your companion."
 - "Supported harnesses now: Claude Code and Codex CLI."
-- "Supported companions now: OpenCode and Copilot."
+- "Supported companions now: OpenCode, Copilot, and Codex."
 - "Choose companion per send, or configure a bridge default."
 - "Future routing will expose strengths backed by configured companion
   profiles."
@@ -583,7 +583,10 @@ Expected:
 - `agent_status({ diagnostics: true })` includes the same target readiness.
 - SessionStart does not start Copilot daemon when default target is OpenCode.
 - Existing Copilot users keep working.
-- Existing `copilot_*` aliases keep working.
+- Existing `copilot_*` aliases keep working. *(Superseded: the aliases were
+  deliberately removed in the rename pass that followed this one — the MCP
+  surface is `agent_*` only, with no back-compat shims. See
+  docs/MVP_TRACKER.md "Completed the full rename + legacy removal".)*
 - No onboarding path asks for or stores provider secrets.
 - No smoke test runs by default if it would consume AI quota.
 

@@ -108,13 +108,14 @@ fi
 # session_id, so this only triggers on misconfigured callers.
 [ -n "$MY_SID" ] || exit 0
 
-# Heartbeat: the daemon's heartbeat-aware inactivity tick scans this dir for
-# fresh mtimes and reschedules its shutdown timer when any host is still
+# Heartbeat: BOTH long-lived daemons — the Copilot ACP daemon and the codex
+# app-server broker — run a heartbeat-aware inactivity tick that scans this dir
+# for fresh mtimes and reschedules its shutdown timer when any host is still
 # active. Touch BEFORE the queue-empty fast path so idle drains (the common
-# case between Copilot jobs) still count as liveness — without this the
-# 15-min daemon idle timer would terminate the Copilot subprocess mid-session
-# whenever the user goes a stretch without triggering a Copilot job, even if
-# they're actively using Claude Code. Best-effort; failure here must not
+# case between jobs) still count as liveness — without this the 15-min idle
+# timer would terminate the Copilot subprocess (and now the codex app-server
+# broker) mid-session whenever the user goes a stretch without triggering a
+# job, even if they're actively using Claude Code. Best-effort; failure here must not
 # block the drain.
 #
 # Cost note: this block must stay above the queue-empty fast path, so it has to

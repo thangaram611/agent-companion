@@ -106,7 +106,8 @@ lifecycle shell hooks for both harnesses.
 **The bridge is disposable; the runtimes are not.** The bridge process is spawned inline from
 the subagent's frontmatter and has no activation lifecycle. Concurrent subagents *share one
 bridge process*, and that process is SIGINT'd when the **first** of them finishes. Anything that
-must outlive a subagent therefore lives in a detached, machine-wide runtime with its own socket,
+must outlive a subagent therefore lives in a detached runtime with its own socket — shared by
+every bridge on the machine that resolves to the same host home, so the two hosts get one each —
 never in bridge memory. This is the single most load-bearing fact in the repo.
 
 **No silent fallback, anywhere.** An unresolvable send returns an explicit `ok:false` envelope
@@ -142,7 +143,7 @@ second reader/definition is how these break.
 | `lib/target-registry.mjs` | What a companion can do (capabilities) **and** what it takes to be ready (onboarding). Two concerns, one descriptor, deliberately. |
 | `lib/profile-registry.mjs` | The **only** reader of `profiles.json`. `test/profile-registry-guard.test.mjs` fails on any other reference to `readProfilesRaw` / `PROFILES_FILE`. |
 | `lib/target-diagnostics.mjs` | `probeCommand` is the **only** sanctioned synchronous shell-out from bridge code. `test/exec-timeout-guard.test.mjs` fails on any new unbounded one — an unbounded probe wedges every in-flight job on that bridge. |
-| `lib/shared-runtime-registry.mjs` | Leases + two-phase disposal for machine-wide runtimes. A `dispose` that does anything before the destructive act must call `confirmDisposal()` as late as possible and abort when it returns false. |
+| `lib/shared-runtime-registry.mjs` | Leases + two-phase disposal for the detached shared runtimes (one per host home). A `dispose` that does anything before the destructive act must call `confirmDisposal()` as late as possible and abort when it returns false. |
 | `lib/codex-app-server-contract.json` | The pinned `codex app-server` wire contract. **Generated** — change it only via `scripts/gen-codex-app-server-contract.mjs`; the sibling test re-derives it and fails on drift. Test fakes build every frame through it, so a fixture claiming a field the schema does not declare fails to build. |
 | `lib/codex-app-server-contract.mjs` | Hand-written: the loader, `distillAppServerSchema`, `serializeContract`, and the routing / contract-violation checkers. The generator imports it, so edit here to change a distillation rule or add a check. |
 | `resolveRouting` (`bridge-server/server.mjs`) | The sole SEND routing brain. |

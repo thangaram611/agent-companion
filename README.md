@@ -88,8 +88,8 @@ companion runtime boundary.
 | OpenCode (cli, default) | `opencode run --format json --dir <cwd>` | yes | yes | yes | yes | no | no |
 | OpenCode (server) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
 | GitHub Copilot CLI | ACP daemon path | yes | yes | yes | yes | yes | yes, with ACP |
-| Codex CLI (exec, default) | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
-| Codex CLI (app-server) | `codex app-server` behind a shared broker | yes | yes | yes | yes | yes | yes |
+| Codex CLI (exec) | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
+| Codex CLI (app-server, what the templates ship) | `codex app-server` behind a shared broker | yes | yes | yes | yes | yes | yes |
 
 Notes:
 
@@ -102,7 +102,9 @@ Notes:
     respawned bridge reattaches instead of re-spawning.
   - Server-mode binds `127.0.0.1` and is unsecured; permission handling follows
     OpenCode's own config (the `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip`
-    flag applies to the cli adapter only).
+    flag applies to the cli adapter only). Job timeout defaults to 40 minutes,
+    override with `AGENT_COMPANION_OPENCODE_TIMEOUT_MS`; in server mode the
+    shared server's idle TTL is derived from it rather than set directly.
   - `AGENT_COMPANION_OPENCODE_MODEL=provider/model` pins a model. In server mode
     it is the fallback for any job whose profile pins none; on `cli` it reaches
     the job as the synthesized default profile's model. A profile's own `model`
@@ -110,7 +112,11 @@ Notes:
 - Copilot keeps `/fleet` parallel orchestration. `parallel: "auto"` can prepend
   `/fleet` for broad Copilot tasks; OpenCode and Codex remain single-job.
 - Codex ships two adapters, selected by `CODEX_RUNTIME_ADAPTER`:
-  - `exec` (default) is the single-shot `codex exec --json` adapter, and it is
+  - `exec` is the single-shot `codex exec --json` adapter — the *code* default,
+    but not what you get: both agent templates set
+    `CODEX_RUNTIME_ADAPTER=appserver` in the bridge's MCP `env`, so a real
+    install runs the app-server row above. Select it explicitly with
+    `CODEX_RUNTIME_ADAPTER=exec`. It is
     send-only: that pipe has no live control channel and leaves no daemon to
     reattach to after a bridge restart. The limit is the **transport**, not codex.
   - `appserver` talks JSON-RPC to a shared broker that owns one long-lived
@@ -123,9 +129,15 @@ Notes:
   - Under `appserver` the approval policy is pinned to `never` and is not
     configurable: a client that accepts one approval escalates past the sandbox
     (measured), so the sandbox stays the hard boundary. The broker is detached
-    and shared machine-wide, and is reaped once it has been idle with no live
-    job anywhere.
-- Sandbox behaviour is the same for both codex adapters. Sandbox defaults to
+    and shared by every bridge on the machine that resolves to the same host
+    home — its socket lives under `~/.{claude,codex}/agent-companion/runtime/`,
+    so the two harnesses get one broker each — and it is reaped once it has been
+    idle with no live job on that host.
+- Both codex adapters resolve the sandbox mode and network flag the same way,
+    with one exception: `bypass` is an exec-only escape hatch. On `exec` it
+    swaps `--sandbox` for `--dangerously-bypass-approvals-and-sandbox`, removing
+    the sandbox; on `appserver` there is no such flag, so it collapses onto
+    `danger-full-access`, which is still a sandbox. Sandbox defaults to
   `workspace-write` with network **ON** by default — the inverse of codex's own
   `codex exec` default (network OFF) — because a companion that can't `npm
   install` fails tasks confusingly; opt out per job with

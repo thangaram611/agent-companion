@@ -58,7 +58,11 @@ test('top-level TOML fields stay before the first table and use an allowlisted m
   const body = di[1];
   assert.match(body, /spawn_agent/);
   assert.match(body, /send_input/);
-  assert.match(body, /Status envelope/);
+  assert.match(body, /Status \/ acknowledgement envelope/);
+  assert.match(body, /`ok: true` with no `content` \+ `meta`/);
+  // Same per-job-status gap as the Claude template — see its suite for why.
+  assert.match(body, /\*\*per-job status\*\*/);
+  assert.match(body, /`response.ok !== true`/);
   assert.match(body, /never emit `undefined`/);
   assert.match(body, /meta\.digest_uri/);
   assert.match(body, /resource_link/);

@@ -413,7 +413,7 @@ export function syncOpenCodeServerLeases(jobIds = [], opts = {}) {
 
 // Best-effort idle reaper for the shared server. `hasLiveJobs` is this
 // process's own view and stays as a cheap short-circuit; leases are what make
-// the decision machine-wide.
+// the decision cross-process.
 export function reapIdleOpenCodeServer(opts = {}) {
   return serverRegistry.reapIdle(opts);
 }

@@ -142,7 +142,8 @@ Codex CLI companion:
   resumable), `thread/resume` for restart recovery, and `thread/read` as the
   over-RPC salvage channel. `turn/interrupt` requires `turnId` and `turn/steer`
   requires `expectedTurnId`; omitting either is an unconditional `-32600`.
-- The broker is one detached, machine-wide process at a fixed socket path,
+- The broker is one detached process per host home at a fixed socket path
+  under that home (so the Claude and Codex harnesses own one each),
   owning one `codex app-server` over stdio; the bridge is a detachable client,
   which is what lets a job outlive the bridge that started it. The app-server
   child is deliberately not detached — it must die with its broker.

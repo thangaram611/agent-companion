@@ -1,15 +1,28 @@
 #!/bin/bash
 # prewarm-target.sh — SessionStart hook
 #
-# Target-aware prewarm. The only target with a daemon to warm is Copilot (its
-# ACP daemon). Pre-spawning it at session start means the first delegation
-# call doesn't pay the daemon-spawn latency that otherwise surfaces as
-# "bridge_daemon_unreachable" when the daemon is cold.
+# Target-aware prewarm. Copilot is the only target this hook warms: pre-spawning
+# its ACP daemon at session start means the first delegation call doesn't pay the
+# daemon-spawn latency that otherwise surfaces as "bridge_daemon_unreachable"
+# when the daemon is cold.
 #
-# This runs ONLY when the configured default target resolves to `copilot`.
-# OpenCode has no daemon (single-shot CLI), and an unconfigured target means
-# onboarding hasn't chosen one yet — in both cases we do nothing and let the
-# bridge lazy-start whatever the first send needs.
+# It is NOT the only target with a long-lived process any more — OpenCode's
+# `server` adapter drives a detached `opencode serve`, and Codex's `appserver`
+# adapter is backed by a detached broker. Neither is warmed here, and that is a
+# scoping choice rather than an absence: both are opt-in transports selected per
+# job by an env var the hook cannot see at session start, whereas Copilot's
+# daemon is unconditional for a copilot-default install. Their cold-start cost is
+# real and is simply paid on first dispatch.
+#
+# So the three cases this hook sees:
+#   copilot  — prewarm the ACP daemon (below).
+#   opencode — default `cli` transport is single-shot with nothing to warm;
+#              `server` is opt-in and warmed lazily.
+#   codex    — default `exec` transport is single-shot with nothing to warm;
+#              `appserver` is opt-in and warmed lazily.
+# An unconfigured target means onboarding hasn't chosen one yet. In every
+# non-copilot case we do nothing and let the bridge lazy-start what the first
+# send needs.
 #
 # Idempotent: ensureDaemon() probes the socket first and only spawns when no
 # healthy daemon answers. Non-fatal: any failure here falls back to the bridge's

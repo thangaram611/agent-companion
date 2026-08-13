@@ -204,7 +204,7 @@ Initial call to `mcp__agent-bridge__agent_send`:
 }
 ```
 
-`max_wait_sec` **must** be a number, not a string — the bridge's validator hard-fails on `"480"` (see `validateWait` in `bridge-server/validation.mjs`). If the parent passes a string, coerce with `parseInt` before dispatching. Out-of-range or non-numeric values fall back to 480 server-side, but coerce explicitly so you don't lose the caller's intent.
+`max_wait_sec` **must** be a number, not a string — the bridge's validator hard-fails on `"480"` (see `validateWait` in `bridge-server/validation.mjs`). If the parent passes a string, coerce with `parseInt` before dispatching. A non-numeric value is rejected outright (`agent: max_wait_sec must be a number`) — it never reaches the clamp. A numeric value is clamped to [1,1200]: `3000` becomes 1200, not 480, and `-100` becomes 1. Only `0`, `NaN`, or a missing value falls back to 480.
 
 Remember the `max_wait_sec` value you used here — call it `BUDGET`. You will reuse `BUDGET` for every wait iteration (see Wait loop).
 
@@ -243,17 +243,19 @@ If a new user turn appears between iterations, treat it as a new dispatch input 
 
 Three render paths, depending on the response shape. Pick one and emit nothing else (no preamble, no commentary).
 
-### Status envelope — response has `action: "status"` and `ok: true`
+### Status / acknowledgement envelope — `ok: true` with no `content` + `meta`
+
+Four bridge responses take this shape: global status (`action: "status"`), **per-job status** (carries `job_id` and `status`, and no `action` key at all), reply-accepted (`action: "reply"`), and cancel-accepted (`action: "cancel"`, `status: "cancelling"`).
 
 Render exactly:
 
-    ## Agent `unknown` — **status**
+    ## Agent `<job_id, else "unknown">` — **<status, else action, else "status">**
 
     ```json
-    <the complete status response JSON>
+    <the complete response JSON>
     ```
 
-This envelope is used for global status responses, which intentionally do not have `content` + `meta`. If `diagnostics: true` was requested, the response includes a `diagnostics` doctor report; render it inside the complete JSON response, not as separate prose. Do NOT read fields that are absent, and never emit `undefined`.
+Render the WHOLE response. A per-job status carries `reply_available`, `resume_available`, `stuck_reason`, `detail` and an activity timeline that main needs, and an acknowledgement carries the `hint` naming what main should call next. If `diagnostics: true` was requested, the response includes a `diagnostics` doctor report; render it inside the complete JSON response, not as separate prose. Do NOT read fields that are absent, and never emit `undefined`.
 
 ### Terminal envelope — response has `content` + `meta`
 
@@ -267,13 +269,13 @@ Followed by a fenced JSON code block containing the response's `meta` field for 
 
 This envelope is used for `completed` | `failed` | `stuck` | `cancelled` | `timeout` | `unreachable` — all of which are bridge-supplied terminal states with `content` + `meta`. Render the bridge's `content` verbatim; do NOT re-author it. Do NOT add commentary, "next steps", or your own analysis even when the body suggests them — those belong to main, not to you.
 
-For `status: "timeout"`: the body already lists decomposition / `scope_hint` / `parallel:"never"` recommendations AND surfaces `meta.digest_uri` plus a tool `resource_link` for the smart-transcript digest (sub-agent reports, files touched, partial assistant message, todos). It may also include `meta.session_retired="true"`, meaning the bridge retired the timed-out ACP session so the next send on that thread starts clean. Pass these fields through unchanged. Do not perform the work yourself (see Absolute prohibitions) — but the parent may be able to finalise from the digest resource alone instead of re-dispatching.
+For `status: "timeout"`: on Copilot the body lists decomposition / `scope_hint` / `parallel:"never"` recommendations; on OpenCode and Codex it instead points at the digest, a smaller scoped re-send, and that companion's own timeout env var. Either way it surfaces `meta.digest_uri` plus a tool `resource_link` for the smart-transcript digest (sub-agent reports, files touched, partial assistant message, todos). It may also include `meta.session_retired="true"`, meaning the bridge retired the timed-out ACP session so the next send on that thread starts clean. Pass these fields through unchanged. Do not perform the work yourself (see Absolute prohibitions) — but the parent may be able to finalise from the digest resource alone instead of re-dispatching.
 
 For `status: "unreachable"`: surface `meta.detail` if present. The body itself already directs main to check the relevant companion runtime/configuration and logs.
 
 The `meta.digest_uri` field is also present on `completed`, `failed`, `stuck`, and `cancelled` envelopes whenever the job got far enough to register a prompt. Always relay it verbatim — it is the canonical handle for structured per-job progress without another bridge round-trip. If `meta.debug_digest_path` is present, relay it only as debug metadata; the resource URI is the normal UX.
 
-### Error envelope — `response.ok === false`, or `status ∈ { unknown_job, cancel-skipped, mcp_unreachable, validation-error }`, or any other shape lacking `content`/`meta`
+### Error envelope — `response.ok !== true` (this covers `status ∈ { unknown_job, cancel-skipped, mcp_unreachable, validation-error }`)
 
 ```
 ## Agent `<job_id or "unknown">` — **<status>**

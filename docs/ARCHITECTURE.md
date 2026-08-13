@@ -105,7 +105,8 @@ that specific job can do — independent of the current env.
 The Codex adapter is selected the same way, by `CODEX_RUNTIME_ADAPTER` (`exec`
 default, `appserver` opt-in), and records `codexAdapter` on the job for the same
 reason. `appserver` mode talks JSON-RPC over a unix socket to a **detached,
-machine-wide broker** that owns one `codex app-server` over stdio. The broker
+broker** — one per host home, shared by every bridge on the machine that
+resolves to it — that owns one `codex app-server` over stdio. The broker
 exists because `codex app-server` dies with its stdio parent (measured): the
 transport buys nothing on its own, so the survival property comes from the broker
 being long-lived and detached from every bridge. Reply is `turn/steer` (real

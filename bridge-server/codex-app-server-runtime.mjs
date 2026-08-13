@@ -96,7 +96,7 @@ const CONNECT_TIMEOUT_MS = 5_000;
 const HEALTH_PROBE_TIMEOUT_MS = 2_000;
 const DEFAULT_CALL_TIMEOUT_MS = 60_000;
 
-// One broker per machine, at one fixed socket path.
+// One broker per host home, at one fixed socket path under that home.
 const SHARED_BROKER_KEY = 'shared';
 
 // Only these mean "nobody is listening, so spawn one". Anything else (EACCES on
@@ -999,7 +999,9 @@ function createConnection(sock, { socketPath, env }) {
 }
 
 // ---------------------------------------------------------------------------
-// The shared broker — ONE detached process per machine, at one fixed socket
+// The shared broker — ONE detached process per host home (the socket lives
+// under ~/.{claude,codex}/agent-companion/runtime/, so a Claude-host bridge and
+// a Codex-host bridge each own their own), at one fixed socket
 // ---------------------------------------------------------------------------
 
 // Ownership — leases, stale pruning, the two-phase disposal claim and the idle

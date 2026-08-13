@@ -2,7 +2,7 @@
 # install-deps.sh — SessionStart hook
 #
 # Ensures bridge-server's node_modules is installed and reachable from the
-# plugin root's bridge-server/. Idempotent, concurrent-safe (flock),
+# plugin root's bridge-server/. Idempotent, concurrent-safe (atomic-mkdir lock dir, pid-stale reclaim),
 # lockfile-aware (sha256 of package.json + package-lock.json).
 #
 # NODE_PATH does NOT work for ESM bare imports (Node >= 22 — verified

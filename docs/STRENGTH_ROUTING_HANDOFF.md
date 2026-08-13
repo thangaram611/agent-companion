@@ -147,7 +147,7 @@ error → synthesis path):
   thread-slug** (`[a-zA-Z0-9._-]`) because the Copilot sid file is now namespaced
   `<thread>__<profileId>.sid`. The id charset already satisfies `threadPath`'s
   regex.
-- `companion`: **required**, ∈ `TARGET_IDS` (`opencode`|`copilot`). Unknown →
+- `companion`: **required**, ∈ `TARGET_IDS` (`opencode`|`copilot`|`codex`). Unknown →
   profile dropped with `loadError`.
 - `model`: optional. Validated **lazily** at send/readiness by
   `isModelAllowedFor(companion, model)`, not at load. Absent → companion default.
@@ -294,8 +294,10 @@ same detached server; sid namespacing keeps their Copilot sessions distinct.
 Resolution errors return the `TARGET_UNCONFIGURED` envelope shape:
 `{ok:false, action:'send', code, error, targets:listTargets(), profiles:listProfilesPublic(), candidates?}`.
 New codes: `STRENGTH_UNCONFIGURED`, `STRENGTH_AMBIGUOUS`, `PROFILE_UNKNOWN`,
-`PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`, `CAPABILITY_UNAVAILABLE`. Existing
-`TARGET_UNCONFIGURED`/`TARGET_UNSUPPORTED` unchanged.
+`PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`, `CAPABILITY_UNAVAILABLE`, plus
+`MODEL_NOT_ALLOWED` promoted to a first-class code by the pre-spawn capability
+gate. Existing `TARGET_UNCONFIGURED`/`TARGET_UNSUPPORTED` unchanged — nine in
+total; see docs/ARCHITECTURE.md "Routing Contract".
 
 > **Reattach-guard shape (critic fix — was contradictory).** The real in-flight
 > guard (`server.mjs:1809-1822`) returns `{ok:false, status:'target_mismatch', ...}`
@@ -409,7 +411,7 @@ breach.
 
 `running_jobs` entries (`:2212-2225`) gain `profile`/`strength`. The MCP
 instructions string (`:2243`) gains one clause about routing by strength/profile
-and discovering strengths via `{action:status}`. `defaultProfile` is added beside
+and discovering strengths via `{action:status}`. `default_profile` is added beside
 `default_target` in the always-on block.
 
 > **Leak test (critic fix — broadened).** The negative-assertion test must scan

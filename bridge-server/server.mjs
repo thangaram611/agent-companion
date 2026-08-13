@@ -338,7 +338,7 @@ const jobsGcTimer = setInterval(() => {
   const liveCodexAppServerJobs = [...jobs.entries()]
     .filter(([, j]) => j.target === 'codex' && j.codexAdapter === 'appserver' && !j.terminalAt)
     .map(([jobId]) => jobId);
-  // Renew our leases before reaping so this tick's view of machine-wide
+  // Renew our leases before reaping so this tick's view of cross-process
   // liveness includes our own jobs, and so other bridges see them too.
   try { syncOpenCodeServerLeases(liveOpenCodeServerJobs); }
   catch (err) { log('WARN', 'opencode server lease sync failed:', err.message); }
@@ -390,13 +390,17 @@ function persistJob(jobId) {
 // Wait-budget clamp. All modes share a single 1200s (20 min) cap; the
 // previous mode-aware split (900 ANALYZE / 540 other) was lifted when the
 // daemon prompt timeout grew from 10→25 min to accommodate /fleet jobs.
-// Claude Code's 600s stream-idle watchdog is satisfied by the companion's
-// per-iteration "still running" emission, so the clamp no longer needs to
-// stay under it. Codex's per-tool MCP timeout defaults to 120s
+// There is no 600s stream-idle watchdog — that figure was measured wrong and
+// removed from this file's header; see docs/ARCHITECTURE.md "Negative Results".
+// The budget that actually bounds a wait is the MCP *tool idle* timeout
+// (stdio default 1,800,000 ms), satisfied by each agent_wait RETURNING, not by
+// any mid-call emission. That leaves this cap 600s of headroom. Codex's per-tool MCP timeout defaults to 120s
 // (`codex-rs/codex-mcp/src/rmcp_client.rs:79`) but is user-configurable
 // via `[mcp_servers.X].tool_timeout_sec` in the agent TOML — see README's
-// Codex install section. Default 480s when input is missing, non-numeric,
-// or zero. Floor 1s to avoid no-wait races.
+// Codex install section. A NON-NUMERIC value never reaches here — validateSend
+// and validateWait reject it with `agent: max_wait_sec must be a number` before
+// dispatch. What reaches here is CLAMPED, not defaulted: 3000 -> 1200, -100 -> 1.
+// Only a missing value, 0, or NaN falls back to 480. Floor 1s avoids no-wait races.
 export function clampWaitSec(input) {
   const cap = 1200;
   return Math.max(1, Math.min(Number(input) || 480, cap));
@@ -3416,7 +3420,7 @@ function codexRuntimeStatus() {
     version_skew: appserver.installed_version
       ? appserver.installed_version !== appserver.pinned_version
       : null,
-    // The shared-runtime-registry entry for the one broker on this machine
+    // The shared-runtime-registry entry for the one broker on this host home
     // (`broker` above is the broker SCRIPT path, not its state).
     broker_registry: codexBrokerSnapshot(),
   };

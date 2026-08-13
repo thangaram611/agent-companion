@@ -109,8 +109,11 @@ codex app-server --listen ws://127.0.0.1:8795 &
 node probes/codex-app-server/zeroclient.mjs /tmp/work ws://127.0.0.1:8795
 node probes/codex-app-server/probe.mjs approval ws://127.0.0.1:8795 /tmp/work on-request read-only
 
-# broker (the production shape)
-SOCK=~/.claude/agent-companion/runtime/codex-broker.sock
+# broker (the PROTOTYPE, not the shipped one — see the table above)
+# Deliberately not under ~/.{claude,codex}/agent-companion/runtime/: the shipped
+# broker owns codex-app-server.sock there, and a prototype in the same directory
+# invites a bridge to adopt it.
+SOCK=$(mktemp -d)/proto-broker.sock
 node probes/codex-app-server/broker.mjs "$SOCK" /tmp/broker.log &
 node probes/codex-app-server/bclient.mjs "$SOCK" start /tmp/work    # prints THREADID=...
 node probes/codex-app-server/bclient.mjs "$SOCK" attach <threadId>
