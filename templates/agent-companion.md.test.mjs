@@ -73,7 +73,7 @@ test('Claude template sets the MCP deadline as a per-server field, not an env va
     `timeout ${timeout[1]}ms must exceed clampWaitSec's 1200s cap`);
 });
 
-test('Claude template names itself as the source and documents the adapter knob without setting it', () => {
+test('Claude template names itself as the source and SETS the adapter knob', () => {
   // hooks/install-agent.sh regenerates ~/.claude/agents/agent-companion.md from
   // this file on every session start, so the warning has to live where the edit
   // that would be lost gets made.
@@ -83,14 +83,21 @@ test('Claude template names itself as the source and documents the adapter knob 
   const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
   assert.ok(fm, 'frontmatter block extractable');
   const frontmatter = fm[1];
-  // Documented as the supported way to select the codex transport...
-  assert.match(frontmatter, /CODEX_RUNTIME_ADAPTER: appserver/);
   assert.match(frontmatter, /takes effect on the NEXT session/);
-  // ...and documented ONLY. `exec` is the default adapter, and a live `env:` key
-  // here would flip it for every operator who installs the plugin.
+  // SET, not merely documented — and set as a live `env:` key rather than a
+  // commented example. It was documentation-only while the app-server transport
+  // was new; it is now the shipped default, because on `exec` a codex job dies
+  // with the bridge that started it (measured: probes/smoke/orphan.mjs) and on
+  // the app-server it survives (probes/smoke/appserver.mjs).
+  //
+  // The value itself is asserted against the Codex template's twin in
+  // templates/host-parity.test.mjs — this file only checks the Claude host's
+  // mechanism, which is a YAML `env:` mapping under the agent-bridge server.
   const active = frontmatter.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
-  assert.doesNotMatch(active, /CODEX_RUNTIME_ADAPTER/,
-    'the adapter knob is documented in a comment, never set as a live env key');
+  assert.match(active, /^\s{6}env:\s*$/m,
+    'the bridge server needs a live `env:` block, not a commented example');
+  assert.match(active, /^\s{8}CODEX_RUNTIME_ADAPTER:\s*appserver\s*$/m,
+    'the adapter must be a live env key under that block');
 });
 
 test('Claude template forbids re-routing a dispatch the bridge refused to route', () => {

@@ -90,19 +90,27 @@ mcpServers:
       # Bridge behaviour is configured HERE, as `env:` entries on this server —
       # a sibling of command/args/timeout, honoured because this file is
       # user-scoped (a plugin-shipped agent's frontmatter is ignored, which is
-      # why the installer copies it here at all). The one an operator is most
-      # likely to want:
+      # why the installer copies it here at all).
       #
-      #   env:
-      #     CODEX_RUNTIME_ADAPTER: appserver
+      # Every key below must have a twin in templates/agent-companion.toml, whose
+      # `env` table is the Codex host's equivalent of this block. The two hosts
+      # express it differently — YAML mapping vs TOML inline table — but a knob
+      # that changes what the END USER can do belongs in both or neither, which
+      # templates/host-parity.test.mjs enforces. The mechanism may diverge; the
+      # capability may not.
       #
-      # which moves codex jobs off the default single-shot `codex exec` pipe onto
-      # the shared app-server broker — in-flight `agent_reply`, restart resume,
-      # and streamed sub-turn digests (README.md, "Codex ships two adapters").
-      # `exec` stays the default while it is unset. The bridge reads it per
-      # dispatch out of the env it was SPAWNED with, and this file is read when a
-      # session starts the MCP server, so it takes effect on the NEXT session —
-      # not in the one where the edit is made.
+      # The bridge reads these per dispatch out of the env it was SPAWNED with,
+      # and this file is read when a session starts the MCP server, so a change
+      # takes effect on the NEXT session — not in the one where the edit is made.
+      env:
+        # Moves codex jobs off the single-shot `codex exec` pipe onto the shared
+        # app-server broker: in-flight `agent_reply` (`turn/steer`), restart
+        # resume (`thread/resume` rejoins a RUNNING thread), and streamed
+        # sub-turn digests. On `exec` a job dies with the bridge that started it
+        # — measured, and the reason this is the shipped default rather than an
+        # opt-in (README.md, "Codex ships two adapters"). Set to `exec` to go
+        # back to the pipe.
+        CODEX_RUNTIME_ADAPTER: appserver
 ---
 
 # YOUR ONE JOB — read this before anything else

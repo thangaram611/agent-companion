@@ -309,4 +309,18 @@ tool_timeout_sec = 1320
 # hooks/install-agent-codex.sh at materialization time (NOT at runtime —
 # Codex MCP arg/env interpolation does not exist for unmanaged subagent
 # definitions).
-env = { AGENT_COMPANION_HOST = "codex" }
+#
+# Every key here must have a twin in templates/agent-companion.md's `env:` block,
+# which is the Claude host's equivalent. The two hosts express it differently —
+# TOML inline table vs YAML mapping — but a knob that changes what the END USER
+# can do belongs in both or neither, which templates/host-parity.test.mjs
+# enforces. AGENT_COMPANION_HOST is the exception the test knows about: it names
+# which host this file IS, so it cannot have a twin.
+#
+# CODEX_RUNTIME_ADAPTER moves codex jobs off the single-shot `codex exec` pipe
+# onto the shared app-server broker: in-flight `agent_reply` (`turn/steer`),
+# restart resume (`thread/resume` rejoins a RUNNING thread), and streamed
+# sub-turn digests. On `exec` a job dies with the bridge that started it. The
+# broker is host-scoped — this host's lives under ~/.codex/agent-companion/
+# runtime/, the Claude host's under ~/.claude/ — so the two never share one.
+env = { AGENT_COMPANION_HOST = "codex", CODEX_RUNTIME_ADAPTER = "appserver" }
