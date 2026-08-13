@@ -165,17 +165,15 @@ primary companion:
   in v1; nested Seatbelt sandboxing is documented, not worked around (use
   `AGENT_COMPANION_CODEX_SANDBOX_MODE=bypass` in an externally-sandboxed bridge).
 - Goose and Aider are not implemented yet.
-- Both README diagram assets predate the transport split and strength routing,
-  and regeneration is deferred (tracked here, not reflected in the images yet —
-  `scripts/validate-codex-release.mjs` asserts only that the files exist, never
-  their content):
-  - `assets/readme/target-matrix.png` / `.svg` has no codex row, and its
-    OpenCode row's `reply: not yet` / `restart resume: not yet` labels are wrong
-    for the `server` adapter. Regenerating it well means per-transport rows
-    (OpenCode cli / OpenCode server / Copilot / Codex exec / Codex app-server).
-  - `assets/readme/architecture.png` / `.svg` — the one actually embedded in
-    README — lists only `opencode-runtime` and `copilot-runtime` under target
-    adapters (no codex), and its runtime-state box omits `profiles.json`.
+- README diagram assets are current as of 2026-08-13 and are now reproducible:
+  every PNG is rendered from a committed SVG by
+  `bash scripts/render-readme-assets.sh` (headless Chrome, byte-deterministic).
+  `target-matrix` carries one row per transport, `architecture` shows the
+  routing brain, all three adapters and the detached shared runtimes, and `hero`
+  gained an SVG source it never had. `scripts/validate-codex-release.mjs` still
+  asserts only that the files exist, never their content, so an SVG edit that is
+  never re-rendered stays invisible to CI — re-run the script in the same
+  commit.
 
 ## Next Backlog
 

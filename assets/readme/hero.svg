@@ -1,0 +1,118 @@
+<svg width="3200" height="1800" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Companion</title>
+  <desc id="desc">Title banner. Come with any harness and attach any companion of your choice to it. A harness — Claude Code or Codex CLI — connects through the private agent-bridge MCP server to a companion: OpenCode, GitHub Copilot CLI, or Codex CLI. The bridge exposes five tools: agent_send, agent_wait, agent_status, agent_reply and agent_cancel.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#07111F"/>
+      <stop offset="0.54" stop-color="#0B1728"/>
+      <stop offset="1" stop-color="#0A2221"/>
+    </linearGradient>
+    <radialGradient id="glowTeal" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(760 500) rotate(90) scale(420 620)">
+      <stop offset="0" stop-color="#2DD4BF" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#2DD4BF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowBlue" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(240 180) rotate(120) scale(520 420)">
+      <stop offset="0" stop-color="#38BDF8" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#38BDF8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowAmber" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1420 780) rotate(150) scale(520 300)">
+      <stop offset="0" stop-color="#F59E0B" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#F59E0B" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wordmark" x1="380" y1="200" x2="1220" y2="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5EEAD4"/>
+      <stop offset="0.5" stop-color="#F8FAFC"/>
+      <stop offset="1" stop-color="#FCD34D"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="580" y1="0" x2="1020" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2DD4BF" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#F59E0B" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" stroke="#7DD3FC" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+    <filter id="cardShadow" x="-10%" y="-14%" width="120%" height="128%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#000713" flood-opacity="0.40"/>
+    </filter>
+    <style>
+      .sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .word { font-size: 92px; font-weight: 800; letter-spacing: -1.5px; }
+      .tag { font-size: 26px; font-weight: 500; fill: #C8D4E5; }
+      .eyebrow { font-size: 14px; font-weight: 800; letter-spacing: 2px; fill: #7C93AC; }
+      .pillTxt { font-size: 21px; font-weight: 700; fill: #F1F5F9; }
+      .bridgeTxt { font-size: 30px; font-weight: 780; fill: #F8FAFC; }
+      .bridgeSub { font-size: 17px; font-weight: 600; fill: #93C7C0; }
+      .cap { font-size: 15px; font-weight: 560; fill: #7C93AC; }
+      .chip { font-size: 16px; font-weight: 720; fill: #CBD5E1; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <rect width="1600" height="900" fill="url(#grid)"/>
+  <rect width="1600" height="900" fill="url(#glowBlue)"/>
+  <rect width="1600" height="900" fill="url(#glowTeal)"/>
+  <rect width="1600" height="900" fill="url(#glowAmber)"/>
+
+  <text x="800" y="232" text-anchor="middle" class="sans word" fill="url(#wordmark)">Agent Companion</text>
+  <path d="M580 268H1020" stroke="url(#rule)" stroke-width="3" stroke-linecap="round"/>
+  <text x="800" y="316" text-anchor="middle" class="sans tag">Come with any harness and attach any companion of your choice to it.</text>
+
+  <!-- harness -->
+  <g filter="url(#cardShadow)">
+    <rect x="138" y="420" width="330" height="240" rx="28" fill="#0E1A2B" fill-opacity="0.86" stroke="#38BDF8" stroke-opacity="0.42"/>
+  </g>
+  <text x="170" y="466" class="sans eyebrow">HARNESS</text>
+  <rect x="170" y="486" width="266" height="52" rx="26" fill="#0B2740" stroke="#38BDF8" stroke-opacity="0.40"/>
+  <text x="303" y="519" text-anchor="middle" class="sans pillTxt">Claude Code</text>
+  <rect x="170" y="550" width="266" height="52" rx="26" fill="#0B2740" stroke="#38BDF8" stroke-opacity="0.40"/>
+  <text x="303" y="583" text-anchor="middle" class="sans pillTxt">Codex CLI</text>
+  <text x="170" y="634" class="sans cap">the surface you already work in</text>
+
+  <path d="M482 540H556" stroke="#5EEAD4" stroke-opacity="0.7" stroke-width="4" stroke-linecap="round"/>
+  <path d="M544 527L562 540L544 553" stroke="#5EEAD4" stroke-opacity="0.7" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- bridge -->
+  <g filter="url(#cardShadow)">
+    <rect x="580" y="420" width="330" height="240" rx="28" fill="#08211F" stroke="#2DD4BF" stroke-width="2"/>
+  </g>
+  <rect x="604" y="444" width="282" height="192" rx="20" fill="none" stroke="#2DD4BF" stroke-opacity="0.36" stroke-dasharray="9 9"/>
+  <text x="745" y="500" text-anchor="middle" class="sans eyebrow">PRIVATE BRIDGE</text>
+  <text x="745" y="546" text-anchor="middle" class="mono bridgeTxt">agent-bridge</text>
+  <text x="745" y="578" text-anchor="middle" class="sans bridgeSub">subagent-only MCP server</text>
+  <rect x="646" y="596" width="198" height="30" rx="15" fill="#0F766E" fill-opacity="0.30"/>
+  <text x="745" y="617" text-anchor="middle" class="mono chip">no silent fallback</text>
+
+  <path d="M924 540H998" stroke="#FCD34D" stroke-opacity="0.75" stroke-width="4" stroke-linecap="round"/>
+  <path d="M986 527L1004 540L986 553" stroke="#FCD34D" stroke-opacity="0.75" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- companions -->
+  <g filter="url(#cardShadow)">
+    <rect x="1022" y="420" width="440" height="240" rx="28" fill="#0E1A2B" fill-opacity="0.86" stroke="#F59E0B" stroke-opacity="0.42"/>
+  </g>
+  <text x="1054" y="462" class="sans eyebrow">COMPANION</text>
+  <rect x="1054" y="478" width="376" height="50" rx="25" fill="#0E292B" stroke="#2DD4BF" stroke-opacity="0.46"/>
+  <circle cx="1084" cy="503" r="7" fill="#2DD4BF"/>
+  <text x="1108" y="510" class="sans pillTxt">OpenCode</text>
+  <rect x="1054" y="536" width="376" height="50" rx="25" fill="#332309" stroke="#F59E0B" stroke-opacity="0.52"/>
+  <circle cx="1084" cy="561" r="7" fill="#F59E0B"/>
+  <text x="1108" y="568" class="sans pillTxt">GitHub Copilot CLI</text>
+  <rect x="1054" y="594" width="376" height="50" rx="25" fill="#171B33" stroke="#A78BFA" stroke-opacity="0.52"/>
+  <circle cx="1084" cy="619" r="7" fill="#A78BFA"/>
+  <text x="1108" y="626" class="sans pillTxt">Codex CLI</text>
+
+  <!-- tool surface -->
+  <rect x="408" y="738" width="136" height="44" rx="22" fill="#FFFFFF" fill-opacity="0.06" stroke="#FFFFFF" stroke-opacity="0.14"/>
+  <text x="476" y="766" text-anchor="middle" class="mono chip">agent_send</text>
+  <rect x="558" y="738" width="136" height="44" rx="22" fill="#FFFFFF" fill-opacity="0.06" stroke="#FFFFFF" stroke-opacity="0.14"/>
+  <text x="626" y="766" text-anchor="middle" class="mono chip">agent_wait</text>
+  <rect x="708" y="738" width="155" height="44" rx="22" fill="#FFFFFF" fill-opacity="0.06" stroke="#FFFFFF" stroke-opacity="0.14"/>
+  <text x="785" y="766" text-anchor="middle" class="mono chip">agent_status</text>
+  <rect x="877" y="738" width="146" height="44" rx="22" fill="#FFFFFF" fill-opacity="0.06" stroke="#FFFFFF" stroke-opacity="0.14"/>
+  <text x="950" y="766" text-anchor="middle" class="mono chip">agent_reply</text>
+  <rect x="1037" y="738" width="155" height="44" rx="22" fill="#FFFFFF" fill-opacity="0.06" stroke="#FFFFFF" stroke-opacity="0.14"/>
+  <text x="1114" y="766" text-anchor="middle" class="mono chip">agent_cancel</text>
+
+  <text x="800" y="828" text-anchor="middle" class="sans cap">Token-heavy work runs outside the parent context; the parent gets a structured result, status, cancel, and a digest.</text>
+</svg>

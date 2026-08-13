@@ -74,6 +74,15 @@ read the diff — a moved thread id is a live misrouting bug):
 node scripts/gen-codex-app-server-contract.mjs
 ```
 
+README diagram assets — `assets/readme/*.svg` is the source, the `.png` beside it is committed
+build output because GitHub will not render local SVG in Markdown. Edit the SVG, then:
+
+```bash
+bash scripts/render-readme-assets.sh          # all three, byte-deterministic
+```
+
+Nothing in CI compares an SVG to its PNG, so re-render in the same commit as the edit.
+
 `probes/` are **not** tests — hand-run harnesses that spawn real `codex` runs and cost tokens.
 See `probes/README.md`; re-run them when the codex CLI or Claude Code is upgraded.
 

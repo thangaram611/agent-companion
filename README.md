@@ -81,6 +81,8 @@ companion runtime boundary.
 
 ## Supported Companions
 
+![Agent Companion companion matrix](assets/readme/target-matrix.png)
+
 | Companion | Runtime | Send | Wait | Status | Cancel | Reply | Restart resume |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | OpenCode (cli, default) | `opencode run --format json --dir <cwd>` | yes | yes | yes | yes | no | no |
@@ -627,6 +629,13 @@ the repo root rather than an allow-list of directories, because an allow-list
 omitting `test/` skips the two cross-cutting guard suites — the `profiles.json`
 single-reader guard and the sync-exec timeout guard.
 
+README diagram assets (the PNGs are build output; the SVGs are the source):
+
+```bash
+bash scripts/render-readme-assets.sh              # all three
+bash scripts/render-readme-assets.sh architecture # or one, by basename
+```
+
 Package validation:
 
 ```bash
@@ -665,7 +674,7 @@ claude plugin validate .
 .claude-plugin/        Claude plugin manifest and local marketplace manifest
 .codex-plugin/         Codex plugin manifest
 .github/workflows/     CI: shell syntax, JS syntax, tests with coverage, prod audit
-assets/readme/         README PNG assets plus editable SVG diagram sources
+assets/readme/         README diagrams: *.svg sources plus rendered *.png
 bridge-server/         MCP server plus companion runtime adapters
 docs/                  Architecture, tracker, onboarding, and release readiness
 hooks/                 Claude and Codex lifecycle hooks
