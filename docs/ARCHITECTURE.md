@@ -312,6 +312,17 @@ because the cost of re-deriving them is a day each.
   approval **wrote a file**. Under `approvalPolicy: 'never'` no approval request is ever sent
   and the sandbox is authoritative — which is why the app-server adapter pins it structurally
   rather than exposing it as a setting.
+- **Confining `plan_path` to the plans dir is not a boundary.** An audit finding once had
+  `plan_review` reject any plan whose real path fell outside `~/.{claude,codex}/plans`, so a
+  symlink there could not point Copilot at `/etc/passwd`. But the path only ever reaches the
+  companion *inside a prompt*, and every shipped companion reads the whole filesystem on its
+  own (Copilot runs `--allow-all-paths`; codex `workspace-write` confines writes, not reads;
+  OpenCode is unsandboxed) — and the caller is the subagent, which has `Bash` and copies the
+  file in anyway. Measured 2026-08-28: the check cost one bounced dispatch per scratchpad plan
+  plus a duplicate under `~/.claude/plans` that the harness then edited out of sync with the
+  copy the companion reviewed. An explicit `plan_path` is now accepted anywhere (still
+  absolute, existing, a file, and realpath-canonicalised); the plans dir remains only the
+  lookup scope for `plan_path: "latest"`.
 - **The agent file must be materialized into `~/.claude/agents/`.** Plugin subagents silently
   lose `mcpServers` / `hooks` / `permissionMode`.
 - **Config inheritance works — do not pin the model.** With no `model`, `turn_context` records

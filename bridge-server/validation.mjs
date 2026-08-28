@@ -19,7 +19,7 @@ import {
   existsSync,
   renameSync,
 } from 'node:fs';
-import { isAbsolute, join, sep as pathSep } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 import { plansDir, detectHost } from '../lib/host.mjs';
 import { bridgeLogFile, PRIVATE_FILE_MODE, chmodPrivate } from '../lib/runtime-paths.mjs';
@@ -254,23 +254,34 @@ export function appendRubberDuckReview(formatted) {
 
 // --- Plan path resolution ---------------------------------------------------
 
-// PLANS_DIR can be overridden via AGENT_PLANS_DIR for testing; otherwise
-// it routes through lib/host.mjs (so Codex resolves to ~/.codex/plans/
-// instead of Claude's directory). Resolved per call so tests can set the
-// env var without re-importing the module.
+// The plans dir is only the lookup scope for plan_path="latest"; an explicit
+// plan_path may live anywhere (see the plan_review branch of validateAgentArgs).
+// Overridable via AGENT_PLANS_DIR for testing; otherwise it routes through
+// lib/host.mjs (so Codex resolves to ~/.codex/plans/ instead of Claude's
+// directory). Resolved per call so tests can set the env var without
+// re-importing the module — which is why there is no import-time constant.
 export function getPlansDir() {
   return process.env.AGENT_PLANS_DIR || plansDir(detectHost());
 }
-export const PLANS_DIR = getPlansDir();
 
 export function resolveLatestPlanPath() {
   const plansDir = getPlansDir();
   let entries;
   try { entries = readdirSync(plansDir); }
   catch (err) { throw new Error(`agent: plans directory not readable (${plansDir}): ${err.message}`); }
+  // statSync follows symlinks; a dangling link or a stray directory named
+  // *.md must not turn "latest" into a raw ENOENT — skip it and keep looking.
   const candidates = entries
     .filter((f) => f.endsWith('.md'))
-    .map((f) => { const full = join(plansDir, f); return { full, mtimeMs: statSync(full).mtimeMs }; })
+    .flatMap((f) => {
+      const full = join(plansDir, f);
+      try {
+        const st = statSync(full);
+        return st.isFile() ? [{ full, mtimeMs: st.mtimeMs }] : [];
+      } catch {
+        return [];
+      }
+    })
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
   if (candidates.length === 0) {
     throw new Error(`agent: plan_path="latest" but no .md files found in ${plansDir}`);
@@ -457,17 +468,23 @@ function validateSend(args) {
     try { st = statSync(ta.plan_path); }
     catch { throw new Error(`agent: template_args.plan_path does not exist: ${ta.plan_path}`); }
     if (!st.isFile()) throw new Error(`agent: template_args.plan_path is not a file: ${ta.plan_path}`);
-    // v6.1 A8: resolve symlinks and verify the real path is inside PLANS_DIR.
-    // Without this, a symlink at ~/.claude/plans/foo.md → /etc/passwd would
-    // be passed verbatim to the prompt template and read by Copilot.
+    // Canonicalise (dereference symlinks) so the prompt names the file the
+    // companion will actually open and the log is honest about it. The path is
+    // deliberately NOT confined to the plans directory: an earlier audit
+    // finding had it rejected unless it resolved inside getPlansDir(), on the
+    // theory that a symlink there could point Copilot at /etc/passwd. That was
+    // never a boundary — every shipped companion reads the whole filesystem on
+    // its own (Copilot runs --allow-all-paths, codex workspace-write confines
+    // writes not reads, OpenCode is unsandboxed), so naming a path in a prompt
+    // grants nothing; and the caller is the subagent, which has Bash and can
+    // copy any file into the plans dir. In practice the rejection only cost a
+    // bounced dispatch plus a duplicate plan the harness then edited out of
+    // sync with the copy the companion reviewed. See ARCHITECTURE.md
+    // (Negative Results → Blast radius). `latest` still resolves inside the
+    // host's plans dir — that is a lookup scope, not a containment.
     let realPath;
     try { realPath = realpathSync(ta.plan_path); }
     catch { throw new Error(`agent: template_args.plan_path could not be resolved: ${ta.plan_path}`); }
-    const realPlansDir = (() => { try { return realpathSync(getPlansDir()); } catch { return getPlansDir(); } })();
-    const inside = realPath === realPlansDir || realPath.startsWith(realPlansDir + pathSep);
-    if (!inside) {
-      throw new Error(`agent: template_args.plan_path resolves outside ${getPlansDir()}: ${realPath}`);
-    }
     ta.plan_path = realPath;
     if (ta.focus_directive !== undefined && typeof ta.focus_directive !== 'string') {
       throw new Error('agent: template_args.focus_directive must be a string');

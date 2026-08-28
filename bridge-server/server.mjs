@@ -3629,7 +3629,7 @@ const AGENT_TOOLS = [
           description: 'Template-specific arguments. Keys are validated per template.',
           additionalProperties: false,
           properties: {
-            plan_path:       { type: 'string', description: '[plan_review] Absolute path to the plan .md, or "latest".' },
+            plan_path:       { type: 'string', description: '[plan_review] Absolute path to the plan .md (any location the companion can read — no plans-dir requirement), or "latest" for the newest .md in the host plans dir.' },
             focus_directive: { type: 'string', description: '[plan_review] Optional review focus.' },
             scope_hint:      { type: 'string', description: '[general] Scope hint for large-file analysis.' },
           },

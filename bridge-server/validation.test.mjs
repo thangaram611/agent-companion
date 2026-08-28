@@ -9,6 +9,7 @@ import {
   rmSync,
   symlinkSync,
   utimesSync,
+  realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -157,7 +158,7 @@ test('target:"codex" is accepted alongside opencode and copilot', () => {
   assert.throws(() => validateAgentArgs(sendArgs({ target: 'goose' })), /target must be one of/);
 });
 
-test('plan_review validates plan path existence, canonicalization, latest resolution, focus, and symlink escape', () => {
+test('plan_review validates plan path existence, canonicalization, latest resolution, focus, and accepts plans outside the plans dir', () => {
   assert.throws(() => validateAgentArgs({ action: 'send', template: 'plan_review' }),
     /requires template_args\.plan_path/);
   assert.throws(() => validateAgentArgs(planArgs('rel.md')), /plan_path must be absolute/);
@@ -186,16 +187,39 @@ test('plan_review validates plan path existence, canonicalization, latest resolu
       /focus_directive must be a string/);
   });
 
+  // The plans dir is a lookup scope for "latest", not a containment: a plan
+  // may live anywhere the companion can read (a session scratchpad, a repo
+  // docs/ folder, the other host's plans dir). Every shipped companion reads
+  // the whole filesystem on its own, so confining the *named* path bought
+  // nothing and cost a bounced dispatch plus a stale duplicate of the plan.
   const insideDir = mkdtempSync(join(tmpdir(), 'copilot-plans-'));
   const outsideDir = mkdtempSync(join(tmpdir(), 'copilot-out-'));
   const prev = process.env.AGENT_PLANS_DIR;
   process.env.AGENT_PLANS_DIR = insideDir;
   try {
-    const target = join(outsideDir, 'secret.md');
-    writeFileSync(target, '# secret');
+    const outsidePlan = join(outsideDir, 'scratch-plan.md');
+    writeFileSync(outsidePlan, '# scratch');
+    const outsideReal = realpathSync(outsidePlan);
+    // Plain file outside the plans dir: accepted, canonicalised.
+    const direct = validateAgentArgs(planArgs(outsidePlan));
+    assert.equal(direct.template_args.plan_path, outsideReal);
+    // Symlink inside the plans dir pointing outside: accepted, and the prompt
+    // gets the dereferenced target, never the link.
     const link = join(insideDir, 'innocent.md');
-    symlinkSync(target, link);
-    assert.throws(() => validateAgentArgs(planArgs(link)), /resolves outside/);
+    symlinkSync(outsidePlan, link);
+    const viaLink = validateAgentArgs(planArgs(link));
+    assert.equal(viaLink.template_args.plan_path, outsideReal);
+    // Dangling symlink still fails at existence, before canonicalisation.
+    const dangling = join(insideDir, 'dangling.md');
+    symlinkSync(join(outsideDir, 'missing.md'), dangling);
+    assert.throws(() => validateAgentArgs(planArgs(dangling)), /does not exist/);
+    // A directory is still not a plan.
+    assert.throws(() => validateAgentArgs(planArgs(outsideDir)), /is not a file/);
+    // "latest" is still scoped to the plans dir: the only .md there is the
+    // symlink, so it resolves to that link's target rather than anything in
+    // outsideDir by its own name.
+    const latest = validateAgentArgs(planArgs('latest'));
+    assert.equal(latest.template_args.plan_path, outsideReal);
   } finally {
     if (prev === undefined) delete process.env.AGENT_PLANS_DIR;
     else process.env.AGENT_PLANS_DIR = prev;
