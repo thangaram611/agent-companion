@@ -48,6 +48,7 @@ import {
   codexAppServerContract,
   codexVersionMismatchMessage,
   compareContracts,
+  connectionScopedNotificationMethods,
   contractDriftMessage,
   contractMatchMessage,
   contractUnverifiedMessage,
@@ -595,9 +596,21 @@ export class AppServerConnection {
   // connects. A shared app-server must not be re-initialized per bridge, so
   // clients get a local answer instead (see Broker._onClientLine).
   async initialize() {
+    // Decline, at the handshake, every notification this broker can only drop:
+    // the connection-scoped ones (`mcpServer/event/stream/notification`,
+    // `command/exec/outputDelta`, `process/*`, `fs/changed`) are addressed to
+    // the connection that made the originating request, and this is the one
+    // connection for every bridge, so nobody can be attributed. Codex honours
+    // `optOutNotificationMethods` per connection and ignores capability fields
+    // it does not know (both measured on 0.150.1), so this is safe on a codex
+    // that predates the field. `_routeNotification` still drops them if one
+    // arrives anyway — the opt-out is a courtesy, the drop is the guarantee.
     const result = await this.request(
       'initialize',
-      { clientInfo: { name: BROKER_CLIENT_NAME, version: String(BROKER_PROTOCOL_VERSION) } },
+      {
+        clientInfo: { name: BROKER_CLIENT_NAME, version: String(BROKER_PROTOCOL_VERSION) },
+        capabilities: { optOutNotificationMethods: connectionScopedNotificationMethods() },
+      },
       APP_SERVER_INIT_TIMEOUT_MS,
     );
     this.send({ jsonrpc: '2.0', method: 'initialized', params: {} });
@@ -626,6 +639,10 @@ export class Broker {
   constructor({ connection }) {
     this.connection = connection;
     this.subscriptions = new SubscriptionTable();
+    // Connection-scoped notifications dropped by _routeNotification (see there).
+    // Counted for broker/status; the first per method is a WARN, the rest DEBUG.
+    this.droppedConnectionScoped = 0;
+    this._warnedConnectionMethods = new Set();
     this.startedAt = now();
     this.clients = new Map(); // clientId -> client record
     this._nextClientId = 1;
@@ -809,6 +826,7 @@ export class Broker {
       subscriptions: this.subscriptions.threadCount(),
       codexVersion: this.connection?.codexVersion ?? null,
       contractStatus: this.connection?.contractStatus ?? 'pending',
+      droppedConnectionScoped: this.droppedConnectionScoped,
     };
   }
 
@@ -977,7 +995,21 @@ export class Broker {
   }
 
   _routeNotification(msg) {
-    const { routing, threadId, optional } = routeNotification(msg.method, msg.params);
+    const { routing, threadId, owner, optional } = routeNotification(msg.method, msg.params);
+
+    if (routing === 'connection') {
+      // Addressed to the connection that created `owner` — which, through this
+      // broker, is every bridge and therefore no bridge. Fanning it out would
+      // hand one job's process output or hosted-app events to every other job,
+      // so it is dropped. It should never arrive: the handshake opted out of
+      // these methods. WARN once per method that it did, then count quietly.
+      this.droppedConnectionScoped += 1;
+      const level = this._warnedConnectionMethods.has(msg.method) ? 'DEBUG' : 'WARN';
+      this._warnedConnectionMethods.add(msg.method);
+      log(level, 'dropped connection-scoped notification', msg.method, 'owner', String(owner),
+        '— addressed to one connection, which a shared broker cannot attribute; declined at initialize, arrived anyway');
+      return;
+    }
 
     if (routing === 'unknown') {
       // The installed codex emitted a method the pinned contract has never

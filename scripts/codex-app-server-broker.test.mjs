@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 // appended to $CODEX_FAKE_TRACE, so a test can assert exactly how many upstream
 // `initialize` frames the broker ever sent.
 import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
-import { CODEX_PINNED_VERSION, SCHEMA_GENERATOR_ARGS } from '../lib/codex-app-server-contract.mjs';
+import { CODEX_PINNED_VERSION, SCHEMA_GENERATOR_ARGS, connectionScopedNotificationMethods } from '../lib/codex-app-server-contract.mjs';
 
 // A real schema dump, captured once from whatever codex is on this machine, so
 // the fake can replay it (CODEX_FAKE_SCHEMA_DIR) and the broker's contract
@@ -293,6 +293,35 @@ test('broker/status reports the liveness fields the client probes on', () => {
 });
 
 // --- id remapping ------------------------------------------------------------
+
+test('a connection-scoped notification reaches no client, and is counted', () => {
+  // Addressed by codex to the ONE connection that made the originating request
+  // — which, through the broker, is every bridge and so no bridge. Fanning it
+  // out would hand one job's process output or hosted-app events to every other
+  // job. These are declined at the handshake; one arriving anyway is dropped.
+  const { broker } = makeBroker();
+  const a = attach(broker);
+  const b = attach(broker);
+  a.feed(rpc(1, 'broker/subscribe', { threadId: 'TA' }));
+  b.feed(rpc(1, 'broker/subscribe', { threadId: 'TB' }));
+  const before = { a: a.frames.length, b: b.frames.length };
+
+  broker._onUpstreamMessage({ jsonrpc: '2.0', method: 'fs/changed', params: { watchId: 'w-1', changedPaths: ['x'] } });
+  broker._onUpstreamMessage({ jsonrpc: '2.0', method: 'mcpServer/event/stream/notification', params: {
+    subscriptionId: 'sub-1', notification: { method: 'notifications/events/event', params: { kind: 'issue.updated' } },
+  } });
+  broker._onUpstreamMessage({ jsonrpc: '2.0', method: 'command/exec/outputDelta', params: {
+    processId: 'p-1', stream: 'stdout', deltaBase64: 'aGk=', capReached: false,
+  } });
+
+  assert.equal(a.frames.length, before.a, 'client A received nothing');
+  assert.equal(b.frames.length, before.b, 'client B received nothing');
+  assert.equal(broker.status().droppedConnectionScoped, 3);
+  // A genuinely global one still fans out — the drop is per class, not a mute.
+  broker._onUpstreamMessage({ jsonrpc: '2.0', method: 'skills/changed', params: {} });
+  assert.equal(a.frames.length, before.a + 1);
+  assert.equal(b.frames.length, before.b + 1);
+});
 
 test('two clients using the same downstream ids get their own responses, never crossed', () => {
   const { broker, connection } = makeBroker();
@@ -1027,6 +1056,12 @@ test('end to end: one upstream handshake, brokered initialize, implicit subscrip
     assert.equal(init.contractStatus, 'match');
     assert.ok(init.appServerPid > 0);
   }
+  // The one handshake declines every connection-scoped notification up front —
+  // read from the contract, so a regeneration that classifies a new one
+  // declines it the same day.
+  const handshake = broker.upstream().find((m) => m.method === 'initialize');
+  assert.deepEqual(handshake.params.capabilities, { optOutNotificationMethods: connectionScopedNotificationMethods() });
+  assert.ok(handshake.params.capabilities.optOutNotificationMethods.includes('mcpServer/event/stream/notification'));
   assert.equal(broker.upstream().filter((m) => m.method === 'initialize').length, 1,
     'the broker must handshake upstream exactly once, on everyone\'s behalf');
 

@@ -690,8 +690,8 @@
     },
     {
       "method": "command/exec/outputDelta",
-      "routing": "global",
-      "key": null,
+      "routing": "connection",
+      "key": "params.processId",
       "optional": false,
       "params": {
         "capReached": "boolean",
@@ -756,8 +756,8 @@
     },
     {
       "method": "fs/changed",
-      "routing": "global",
-      "key": null,
+      "routing": "connection",
+      "key": "params.watchId",
       "optional": false,
       "params": {
         "changedPaths": "string[]",
@@ -997,8 +997,8 @@
     },
     {
       "method": "mcpServer/event/stream/notification",
-      "routing": "global",
-      "key": null,
+      "routing": "connection",
+      "key": "params.subscriptionId",
       "optional": false,
       "params": {
         "notification": "McpServerEventNotification",
@@ -1071,8 +1071,8 @@
     },
     {
       "method": "process/exited",
-      "routing": "global",
-      "key": null,
+      "routing": "connection",
+      "key": "params.processHandle",
       "optional": false,
       "params": {
         "exitCode": "integer",
@@ -1085,8 +1085,8 @@
     },
     {
       "method": "process/outputDelta",
-      "routing": "global",
-      "key": null,
+      "routing": "connection",
+      "key": "params.processHandle",
       "optional": false,
       "params": {
         "capReached": "boolean",

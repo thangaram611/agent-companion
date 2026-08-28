@@ -96,7 +96,9 @@ two things a naive broker gets wrong, and both are closed in the shipped one.
 > - **Broadcast → per-thread subscription.** `SubscriptionTable` in
 >   `scripts/codex-app-server-broker.mjs` routes every notification by threadId through the
 >   pinned contract (`lib/codex-app-server-contract.mjs`'s `routeNotification` — 58 of 79
->   notifications carry the id flat on 0.150.1, `thread/started` nests it, 20 are genuinely global).
+>   notifications carry the id flat on 0.150.1, `thread/started` nests it, 5 are scoped to the
+>   connection that asked for them and are declined at `initialize` / dropped if seen, 15 are
+>   genuinely global).
 >   Clients subscribe explicitly (`broker/subscribe` / `broker/unsubscribe`) or implicitly on
 >   `thread/start` / `thread/resume` / `thread/fork`, so the common path costs no extra
 >   round-trip. A bounded ring buffers notifications for a thread nobody has subscribed to yet

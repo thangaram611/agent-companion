@@ -308,6 +308,22 @@ because the cost of re-deriving them is a day each.
   for killing jobs; what kills them is a *companion subagent returning*, because overlapping
   subagents share one bridge process that is SIGINT'd when the first of them finishes.
   Status is only special because it is the fastest thing that can finish.
+- **"No thread id" does not mean "broadcast".** The distiller classified every notification
+  without a thread id as `global`, and the broker fanned those out to every bridge. Read against
+  the codex source (rust-v0.150.1, 2026-08-28): codex has three delivery paths, not two — thread
+  subscribers, **one connection** (`send_server_notification_to_connection`), and broadcast —
+  and five pinned notifications take the middle one: `mcpServer/event/stream/notification`
+  (`subscriptionId`), `command/exec/outputDelta` (`processId`), `process/outputDelta` /
+  `process/exited` (`processHandle`), `fs/changed` (`watchId`). Through a broker that owns the
+  single connection they are addressed to nobody, and "global" would have handed one job's
+  process output or hosted-app events to every other job. They are now a third routing class,
+  `connection`: declined at the handshake via `capabilities.optOutNotificationMethods` (honoured
+  per connection; unknown capability fields are ignored — both measured) and dropped with a WARN
+  if one arrives anyway. Dormant today — `mcpServer/event/stream/*` is `#[experimental]` and the
+  broker never opts in; nothing here calls `command/exec`, `process/*` or `fs/watch` — but the
+  owner-key rule is a table (`subscriptionId`, `processId`, `processHandle`, `watchId`), not a
+  shape heuristic: `sessionId`, `loginId` and `importId` look identical and codex genuinely
+  broadcasts those.
 - **A superseded broker that never retires is not a reaper bug.** The idle reaper held a
   pre-upgrade broker alive for hours on the machine that ran the test suite, and the cause was
   not in the reaper: `hooks/drain-completions.test.mjs` shelled the hook out with the real

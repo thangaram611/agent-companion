@@ -458,10 +458,11 @@ export function createCodexTurnAccumulator(threadId) {
   // Does this frame belong to the thread we are watching? Resolved through the
   // pinned contract, never by reading `params.threadId` directly: 58 of 79
   // notifications carry it flat (0.150.1; 51 of 70 on 0.147.0), `thread/started`
-  // nests it at `params.thread.id`, and 20 are genuinely global.
+  // nests it at `params.thread.id`, 5 are scoped to a connection (dropped by
+  // the broker before they get here) and 15 are genuinely global.
   function forThisThread(method, params) {
     const { routing, threadId: id } = routeNotification(method, params);
-    if (routing === 'global' || routing === 'unknown') return false;
+    if (routing === 'global' || routing === 'connection' || routing === 'unknown') return false;
     return !!id && id === threadId;
   }
 

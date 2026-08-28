@@ -109,6 +109,7 @@ console.log(`  ${c.length} client requests: `
 console.log(`  ${n.length} server notifications: `
   + `${n.filter((e) => e.routing === 'threadId').length} threadId, `
   + `${n.filter((e) => e.routing === 'nested').length} nested, `
+  + `${n.filter((e) => e.routing === 'connection').length} connection-scoped (declined at initialize, dropped if seen), `
   + `${n.filter((e) => e.routing === 'global').length} global`);
 console.log(`  ${n.filter((e) => e.optional).length} of those declare the thread id optional`);
 console.log(`  ${n.reduce((sum, e) => sum + Object.keys(e.params || {}).length, 0)} notification params fields, `
