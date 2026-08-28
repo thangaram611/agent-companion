@@ -184,6 +184,16 @@ node scripts/validate-codex-release.mjs
 claude plugin validate .
 ```
 
+On the audit gate: every advisory the bridge has ever carried came in through
+`@modelcontextprotocol/sdk`'s HTTP-transport dependencies (`hono`, `express`,
+`ajv`, `express-rate-limit`), which a stdio-only server never loads. Measured
+2026-08-28 on five advisories: bumping the SDK cleared none of them, because
+the patched versions already sat inside the ranges the SDK declares — only the
+lockfile was stale. The fix for that class is `npm update <the transitives>`
+in `bridge-server/` with `package.json` untouched, never an SDK bump or an
+`overrides` block; upstream (modelcontextprotocol/typescript-sdk#2042) reached
+the same conclusion. Gate re-verified clean that day.
+
 The first four commands are the same work `.github/workflows/ci.yml` does in its
 `Shell syntax`, `JavaScript syntax`, `Tests with coverage`, and `Production
 dependency audit` steps; the last two are release-only and have no CI
