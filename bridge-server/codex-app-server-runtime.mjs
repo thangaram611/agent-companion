@@ -292,6 +292,10 @@ export function codexAppServerRuntimeInfo(env = process.env) {
   // version field, so this is the sole runtime source, and an absent key is more
   // honest than a guess from `codex --version` we never made.
   if (_lastKnownCodexVersion) info.installed_version = _lastKnownCodexVersion;
+  // The broker's verdict on whether that installed codex still speaks the
+  // pinned wire contract: match | drift | unverified | pending. Same rule as the
+  // version — only present once a broker has reported it.
+  if (_lastKnownContractStatus) info.contract_status = _lastKnownContractStatus;
   return info;
 }
 
@@ -376,6 +380,7 @@ export function _resetForTest() {
   _spawnPromise = null;
   _reapPromise = null;
   _lastKnownCodexVersion = null;
+  _lastKnownContractStatus = null;
   _lastDisposal = null;
 }
 
@@ -451,9 +456,9 @@ export function createCodexTurnAccumulator(threadId) {
   let sawEvent = false;
 
   // Does this frame belong to the thread we are watching? Resolved through the
-  // pinned contract, never by reading `params.threadId` directly: 51 of 70
-  // notifications carry it flat, `thread/started` nests it at
-  // `params.thread.id`, and 18 are genuinely global.
+  // pinned contract, never by reading `params.threadId` directly: 58 of 79
+  // notifications carry it flat (0.150.1; 51 of 70 on 0.147.0), `thread/started`
+  // nests it at `params.thread.id`, and 20 are genuinely global.
   function forThisThread(method, params) {
     const { routing, threadId: id } = routeNotification(method, params);
     if (routing === 'global' || routing === 'unknown') return false;
@@ -774,6 +779,7 @@ export async function connectCodexBroker({
     );
   }
   if (info.codexVersion) _lastKnownCodexVersion = info.codexVersion;
+  if (info.contractStatus) _lastKnownContractStatus = info.contractStatus;
   conn.broker = info;
   return conn;
 }
@@ -1026,6 +1032,7 @@ const brokerRegistry = createSharedRuntimeRegistry({
 let _spawnPromise = null;
 let _reapPromise = null;
 let _lastKnownCodexVersion = null;
+let _lastKnownContractStatus = null;
 // What `dispose` actually did. The registry's reapIdle reports "the entry was
 // claimed and disposed"; ours must report "the broker was stopped", and those
 // differ exactly when dispose refuses (see disposeBroker).
@@ -1070,6 +1077,7 @@ export async function probeCodexBrokerHealth(socketPath = null) {
       brokerPid: info.brokerPid ?? status?.brokerPid ?? null,
       appServerPid: info.appServerPid ?? status?.appServerPid ?? null,
       codexVersion: info.codexVersion ?? null,
+      contractStatus: status?.contractStatus ?? info.contractStatus ?? null,
       clients: status?.clients ?? null,
       uptimeMs: status?.uptimeMs ?? null,
       error: null,
@@ -1158,6 +1166,7 @@ export async function ensureCodexBroker({ env = process.env } = {}) {
 // claim is reported either way rather than hidden.
 function adopt(health, { reused }) {
   if (health.codexVersion) _lastKnownCodexVersion = health.codexVersion;
+  if (health.contractStatus) _lastKnownContractStatus = health.contractStatus;
   const entry = { socketPath: health.socketPath, pid: health.brokerPid, appServerPid: health.appServerPid };
 
   // Merge only into the SAME broker. A recorded entry with a different pid

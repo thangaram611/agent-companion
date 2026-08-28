@@ -325,6 +325,16 @@ because the cost of re-deriving them is a day each.
   lookup scope for `plan_path: "latest"`.
 - **The agent file must be materialized into `~/.claude/agents/`.** Plugin subagents silently
   lose `mcpServers` / `hooks` / `permissionMode`.
+- **A codex version bump is not a wire-contract change.** The contract fixture used to pin
+  `codex --version` and fail the drift test on any other version, on the theory that the
+  protocol carries no version field so the version string was the only early warning. Measured
+  2026-08-28: 0.147.0 → 0.150.1 added 9 notifications, widened enums, added one required
+  `Thread` field, and moved nothing — and the pin had turned that into a red build with nothing
+  to review, as it would for a pure bug-fix release. The only thing that can say whether an
+  upgrade changed the wire is the wire's own schema (`codex app-server generate-json-schema`,
+  ~90 ms, ~4 MB), so that is what the drift test and the broker's boot probe compare
+  (`compareContracts`), classified with routing moves first. The version is recorded as
+  provenance only.
 - **Config inheritance works — do not pin the model.** With no `model`, `turn_context` records
   exactly `~/.codex/config.toml`'s model and effort. Passing `model: null` is *not* the same
   as omitting the key.

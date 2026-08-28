@@ -23,6 +23,7 @@ import path from 'node:path';
 import {
   CONTRACT_PATH,
   SCHEMA_GENERATOR_ARGS,
+  compareContracts,
   distillAppServerSchema,
   parseCodexVersion,
   serializeContract,
@@ -70,11 +71,37 @@ const serialized = serializeContract(contract);
 const current = (() => {
   try { return readFileSync(CONTRACT_PATH, 'utf8'); } catch { return null; }
 })();
+const previous = (() => {
+  try { return current === null ? null : JSON.parse(current); } catch { return null; }
+})();
 
 writeFileSync(CONTRACT_PATH, serialized);
 
 const n = contract.serverNotifications;
 console.log(`Wrote ${CONTRACT_PATH} from codex-cli ${codexVersion}${current === serialized ? ' (unchanged)' : ''}`);
+
+// Read the diff FOR the operator, classified the way the broker and the drift
+// test classify it: routing moves first, because at runtime those are one
+// job's events arriving at another job's bridge. A version-only bump says so
+// in one line instead of leaving a two-line git diff to be interpreted.
+if (previous && current !== serialized) {
+  const diff = compareContracts(previous, contract);
+  const from = previous.codexVersion || 'unknown';
+  if (diff.identical) {
+    console.log(`  wire contract unchanged since codex-cli ${from}; only the recorded provenance moved`);
+  } else {
+    console.log(`  wire contract changed since codex-cli ${from}:`);
+    const section = (title, items, note) => {
+      if (!items.length) return;
+      console.log(`    ${title} (${items.length})${note ? ` — ${note}` : ''}`);
+      for (const item of items) console.log(`      ${item}`);
+    };
+    section('ROUTING MOVED', diff.routing, 'READ EVERY LINE: a moved thread id is a live misrouting bug');
+    section('removed', diff.removed, 'the adapter may still send or expect these');
+    section('added', diff.added);
+    section('shape changed', diff.changed);
+  }
+}
 const c = contract.clientRequests;
 console.log(`  ${c.length} client requests: `
   + `${c.filter((e) => e.required.length).length} with required params, `

@@ -67,8 +67,11 @@ node scripts/validate-codex-release.mjs      # end-to-end in an isolated CODEX_H
 claude plugin validate .
 ```
 
-Regenerate the pinned codex wire contract (the only sanctioned way that fixture changes; then
-read the diff — a moved thread id is a live misrouting bug):
+Regenerate the pinned codex wire contract (the only sanctioned way that fixture changes; the
+generator prints what moved, classified — read the `ROUTING MOVED` block first, a moved thread
+id is a live misrouting bug). The fixture's `codexVersion` is provenance, not a gate: after a
+codex upgrade the drift test and the broker's boot probe compare the live schema, so a
+version-only bump stays green and only a real schema change fails:
 
 ```bash
 node scripts/gen-codex-app-server-contract.mjs
@@ -144,7 +147,7 @@ second reader/definition is how these break.
 | `lib/profile-registry.mjs` | The **only** reader of `profiles.json`. `test/profile-registry-guard.test.mjs` fails on any other reference to `readProfilesRaw` / `PROFILES_FILE`. |
 | `lib/target-diagnostics.mjs` | `probeCommand` is the **only** sanctioned synchronous shell-out from bridge code. `test/exec-timeout-guard.test.mjs` fails on any new unbounded one — an unbounded probe wedges every in-flight job on that bridge. |
 | `lib/shared-runtime-registry.mjs` | Leases + two-phase disposal for the detached shared runtimes (one per host home). A `dispose` that does anything before the destructive act must call `confirmDisposal()` as late as possible and abort when it returns false. |
-| `lib/codex-app-server-contract.json` | The pinned `codex app-server` wire contract. **Generated** — change it only via `scripts/gen-codex-app-server-contract.mjs`; the sibling test re-derives it and fails on drift. Test fakes build every frame through it, so a fixture claiming a field the schema does not declare fails to build. |
+| `lib/codex-app-server-contract.json` | The pinned `codex app-server` wire contract. **Generated** — change it only via `scripts/gen-codex-app-server-contract.mjs`; the sibling test re-derives it from the installed codex and fails on schema drift — a version-only bump passes; the fixture's `codexVersion` is provenance, not a gate. Test fakes build every frame through it, so a fixture claiming a field the schema does not declare fails to build. |
 | `lib/codex-app-server-contract.mjs` | Hand-written: the loader, `distillAppServerSchema`, `serializeContract`, and the routing / contract-violation checkers. The generator imports it, so edit here to change a distillation rule or add a check. |
 | `resolveRouting` (`bridge-server/server.mjs`) | The sole SEND routing brain. |
 

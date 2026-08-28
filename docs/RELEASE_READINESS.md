@@ -97,10 +97,12 @@ GitHub Copilot CLI companion:
 
 Codex CLI companion:
 
-- **Pinned to codex-cli 0.147.0** (the installed/verified version;
-  `lib/codex-app-server-contract.json` records the same `codexVersion`, and the
-  `exec` stream census in `bridge-server/codex-runtime.mjs` was taken against
-  it). The `--json` ThreadEvent schema (`thread.started`/`item.*`/`turn.*`/
+- **Wire contract generated from codex-cli 0.150.1** (`lib/codex-app-server-contract.json`
+  records that `codexVersion` as provenance; the `exec` stream census in
+  `bridge-server/codex-runtime.mjs` was taken on 0.147.0 and the 0.147.0 → 0.150.1 app-server
+  delta was purely additive). The version is **not** the gate: the drift test and the broker's
+  boot probe both compare the installed codex's live schema to the fixture, so a version-only
+  bump passes and only a real schema change fails — classified, routing moves first. The `--json` ThreadEvent schema (`thread.started`/`item.*`/`turn.*`/
   top-level `error`) and the `-c sandbox_workspace_write.network_access=<bool>`
   override key are version-sensitive; a silently-renamed key degrades without an
   error since neither adapter passes `--strict-config`. Re-verify against

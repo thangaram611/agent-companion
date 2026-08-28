@@ -50,11 +50,14 @@ const CONTRACT_MODULE_URL = pathToFileURL(
 export const FAKE_APP_SERVER = `
 import { appendFileSync } from 'node:fs';
 import {
-  JSONRPC_INVALID_REQUEST, contractViolation, serverFrameViolation, unhandledMethodError,
+  CODEX_PINNED_VERSION, JSONRPC_INVALID_REQUEST, contractViolation, serverFrameViolation, unhandledMethodError,
 } from ${JSON.stringify(CONTRACT_MODULE_URL)};
 
 const TRACE = process.env.CODEX_FAKE_TRACE || '';
-const VERSION = process.env.CODEX_FAKE_VERSION || '0.147.0';
+// Defaults to the PINNED version, not a literal: the broker skips the live
+// schema check when the version matches the pin, and a fake reporting a stale
+// literal would send every broker test down the (fake-unsupported) dump path.
+const VERSION = process.env.CODEX_FAKE_VERSION || CODEX_PINNED_VERSION;
 const INIT_DELAY_MS = Number(process.env.CODEX_FAKE_INIT_DELAY_MS || 0);
 
 if (process.argv[2] === '--version') {
@@ -66,6 +69,14 @@ if (process.argv[2] === '--version') {
   }
   process.stdout.write('codex-cli ' + VERSION + '\\n');
   process.exit(0);
+}
+if (process.argv[2] === 'app-server' && process.argv[3] === 'generate-json-schema') {
+  // The broker's contract probe, on a version that differs from the pin. The
+  // fake has no schema to dump, and MUST say so and exit rather than fall
+  // through to the stdio server below — that would sit on stdin until the
+  // probe's SIGKILL, stalling every test that boots a real broker.
+  process.stderr.write('fake codex: no schema dump\\n');
+  process.exit(2);
 }
 if (process.argv[2] !== 'app-server') {
   process.stderr.write('fake codex: unsupported argv\\n');

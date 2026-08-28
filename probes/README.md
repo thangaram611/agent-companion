@@ -61,7 +61,9 @@ terminal envelope, which does not carry the cancel metadata at all.)
 
 ## `codex-app-server/` — transport and architecture validation
 
-Everything here targets `codex app-server` (codex-cli 0.147.0). `broker.mjs` was the
+Everything here targets `codex app-server` (measured on codex-cli 0.147.0; the wire contract was
+regenerated on 0.150.1, where the delta was purely additive and none of these were re-run —
+the behavioural claims below are still 0.147.0 measurements). `broker.mjs` was the
 **architecture prototype**; the shipped broker is `scripts/codex-app-server-broker.mjs` and
 the bridge-side client is `bridge-server/codex-app-server-runtime.mjs`. Read the prototype for
 the *idea*, never as a description of the current design — the two gaps it left open are the
@@ -85,8 +87,8 @@ two things a naive broker gets wrong, and both are closed in the shipped one.
 >
 > - **Broadcast → per-thread subscription.** `SubscriptionTable` in
 >   `scripts/codex-app-server-broker.mjs` routes every notification by threadId through the
->   pinned contract (`lib/codex-app-server-contract.mjs`'s `routeNotification` — 51 of 70
->   notifications carry the id flat, `thread/started` nests it, 18 are genuinely global).
+>   pinned contract (`lib/codex-app-server-contract.mjs`'s `routeNotification` — 58 of 79
+>   notifications carry the id flat on 0.150.1, `thread/started` nests it, 20 are genuinely global).
 >   Clients subscribe explicitly (`broker/subscribe` / `broker/unsubscribe`) or implicitly on
 >   `thread/start` / `thread/resume` / `thread/fork`, so the common path costs no extra
 >   round-trip. A bounded ring buffers notifications for a thread nobody has subscribed to yet

@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.147.0",
+  "codexVersion": "0.150.1",
   "clientRequests": [
     {
       "method": "account/login/cancel",
@@ -664,8 +664,8 @@
       "key": null,
       "optional": false,
       "params": {
-        "authMode": "enum:apikey|chatgpt|chatgptAuthTokens|headers|agentIdentity|personalAccessToken|bedrockApiKey?",
-        "planType": "enum:free|go|plus|pro|prolite|team|self_serve_business_prolite|self_serve_business_usage_based|business|ent26|enterprise_cbp_automation|enterprise_cbp_usage_based|enterprise|edu|unknown?"
+        "authMode": "enum:apikey|chatgpt|chatgptAuthTokens|headers|agentIdentity|personalAccessToken|bedrockApiKey|bedrockAccessKeys?",
+        "planType": "enum:free|go|plus|pro|prolite|team|self_serve_business_prolite|self_serve_business_usage_based|business|ent26|enterprise_cbp_automation|enterprise_cbp_usage_based|enterprise|edu|edu_plus|edu_pro|unknown?"
       }
     },
     {
@@ -675,6 +675,17 @@
       "optional": false,
       "params": {
         "data": "AppInfo[]"
+      }
+    },
+    {
+      "method": "autoApprovalReview/strictReviewRequired",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "startedAtMs": "integer",
+        "threadId": "string",
+        "turnId": "string"
       }
     },
     {
@@ -985,6 +996,16 @@
       }
     },
     {
+      "method": "mcpServer/event/stream/notification",
+      "routing": "global",
+      "key": null,
+      "optional": false,
+      "params": {
+        "notification": "McpServerEventNotification",
+        "subscriptionId": "string"
+      }
+    },
+    {
       "method": "mcpServer/oauthLogin/completed",
       "routing": "threadId",
       "key": "params.threadId",
@@ -1072,6 +1093,16 @@
         "deltaBase64": "string",
         "processHandle": "string",
         "stream": "enum:stdout|stderr"
+      }
+    },
+    {
+      "method": "project/changed",
+      "routing": "global",
+      "key": null,
+      "optional": false,
+      "params": {
+        "changeType": "enum:created|updated|deleted",
+        "projectId": "string"
       }
     },
     {
@@ -1191,6 +1222,25 @@
       }
     },
     {
+      "method": "thread/project/updated",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "projectId": "string",
+        "threadId": "string"
+      }
+    },
+    {
+      "method": "thread/queue/changed",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "threadId": "string"
+      }
+    },
+    {
       "method": "thread/realtime/closed",
       "routing": "threadId",
       "key": "params.threadId",
@@ -1207,6 +1257,37 @@
       "optional": false,
       "params": {
         "message": "string",
+        "threadId": "string"
+      }
+    },
+    {
+      "method": "thread/realtime/item/completed",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "item": "ThreadRealtimeItem",
+        "threadId": "string"
+      }
+    },
+    {
+      "method": "thread/realtime/item/started",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "item": "ThreadRealtimeItem",
+        "threadId": "string"
+      }
+    },
+    {
+      "method": "thread/realtime/item/transcript/delta",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "delta": "string",
+        "itemId": "string",
         "threadId": "string"
       }
     },
@@ -1270,6 +1351,15 @@
       "params": {
         "role": "string",
         "text": "string",
+        "threadId": "string"
+      }
+    },
+    {
+      "method": "thread/reverted",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
         "threadId": "string"
       }
     },
@@ -1473,6 +1563,7 @@
   ],
   "threadItems": {
     "agentMessage": {
+      "delivery": "enum:async?",
       "id": "string",
       "memoryCitation": "MemoryCitation?",
       "phase": "enum:commentary|final_answer?",
@@ -1487,8 +1578,8 @@
       "reasoningEffort": "string?",
       "receiverThreadIds": "string[]",
       "senderThreadId": "string",
-      "status": "enum:inProgress|completed|failed",
-      "tool": "enum:spawnAgent|sendInput|resumeAgent|wait|closeAgent",
+      "status": "enum:inProgress|completed|failed|interrupted",
+      "tool": "enum:spawnAgent|sendInput|resumeAgent|wait|closeAgent|sendMessage|followupTask|interruptAgent|listAgents",
       "type": "enum:collabAgentToolCall"
     },
     "commandExecution": {
@@ -1543,6 +1634,7 @@
       "type": "enum:hookPrompt"
     },
     "imageGeneration": {
+      "failure": "ImageGenerationFailure?",
       "id": "string",
       "result": "string",
       "revisedPrompt": "string?",
@@ -1591,7 +1683,7 @@
       "agentPath": "string",
       "agentThreadId": "string",
       "id": "string",
-      "kind": "enum:started|interacted|interrupted",
+      "kind": "enum:started|interacted|interrupted|completed",
       "type": "enum:subAgentActivity"
     },
     "userMessage": {
@@ -1668,6 +1760,13 @@
         "type": "enum:execve"
       },
       {
+        "approvalId": "string",
+        "cwd": "string",
+        "processId": "string",
+        "stdin": "string",
+        "type": "enum:writeStdin"
+      },
+      {
         "cwd": "string",
         "files": "string[]",
         "type": "enum:applyPatch"
@@ -1706,9 +1805,9 @@
       "displayOrder": "integer",
       "durationMs": "integer?",
       "entries": "HookOutputEntry[]",
-      "eventName": "enum:preToolUse|permissionRequest|postToolUse|preCompact|postCompact|sessionStart|sessionEnd|userPromptSubmit|subagentStart|subagentStop|stop",
+      "eventName": "enum:preToolUse|permissionRequest|postToolUse|preCompact|postCompact|sessionStart|sessionEnd|userPromptSubmit|subagentStart|subagentStop|stop|interrupt",
       "executionMode": "enum:sync|async",
-      "handlerType": "enum:command|prompt|agent",
+      "handlerType": "enum:command|mcpTool|prompt|agent",
       "id": "string",
       "scope": "enum:thread|turn",
       "source": "enum:system|user|project|mdm|sessionFlags|plugin|cloudRequirements|cloudManagedConfig|legacyManagedConfigFile|legacyManagedConfigMdm|unknown?",
@@ -1791,6 +1890,7 @@
       "parentThreadId": "string?",
       "path": "string?",
       "preview": "string",
+      "projectId": "string",
       "recencyAt": "integer?",
       "section": "ThreadSection?",
       "sectionEnteredAt": "integer?",
@@ -1818,6 +1918,38 @@
       "sampleRate": "integer",
       "samplesPerChannel": "integer?"
     },
+    "ThreadRealtimeBemItemPresentation": [
+      {
+        "type": "enum:wholeItem"
+      },
+      {
+        "type": "enum:inlineMarkdown"
+      },
+      {
+        "index": "integer",
+        "type": "enum:inlineVisualization"
+      }
+    ],
+    "ThreadRealtimeItem": [
+      {
+        "type": "enum:realtimeSessionStarted"
+      },
+      {
+        "role": "enum:user|assistant",
+        "text": "string",
+        "type": "enum:transcriptSegment"
+      },
+      {
+        "item_id": "string",
+        "presentation": "ThreadRealtimeBemItemPresentation",
+        "turn_id": "string",
+        "type": "enum:bemItemPromoted"
+      },
+      {
+        "outcome": "enum:ended|failed",
+        "type": "enum:realtimeSessionClosed"
+      }
+    ],
     "ThreadSettings": {
       "activePermissionProfile": "ActivePermissionProfile?",
       "approvalPolicy": "AskForApproval",
@@ -1933,6 +2065,7 @@
         "approved",
         "approved_execpolicy_amendment",
         "approved_for_session",
+        "approved_mcp_policy_amendment",
         "denied",
         "network_policy_amendment",
         "timed_out"
@@ -1945,6 +2078,7 @@
         "approved",
         "approved_execpolicy_amendment",
         "approved_for_session",
+        "approved_mcp_policy_amendment",
         "denied",
         "network_policy_amendment",
         "timed_out"

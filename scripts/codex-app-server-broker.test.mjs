@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 // appended to $CODEX_FAKE_TRACE, so a test can assert exactly how many upstream
 // `initialize` frames the broker ever sent.
 import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
+import { CODEX_PINNED_VERSION } from '../lib/codex-app-server-contract.mjs';
 // The frames the end-to-end tests push THROUGH that fake are built from the
 // pinned contract rather than written out here. The broker's own routing tests
 // below still hand-write theirs and should: they feed `_onUpstreamMessage`
@@ -123,6 +124,7 @@ function fakeConnection({ initialized = true, loadedThreads = [] } = {}) {
     dead: false,
     codexVersion: '0.147.0',
     versionProbed: true,
+    contractStatus: 'match',
     killed: false,
     sent: [],
     _nextId: 1,
@@ -241,6 +243,7 @@ test('initialize is answered locally for every client and never forwarded upstre
       appServerInitialized: true,
       codexVersion: '0.147.0',
       codexVersionProbed: true,
+      contractStatus: 'match',
     });
   }
   // Not one initialize reached the app-server: the broker did that once, at boot.
@@ -994,7 +997,11 @@ test('end to end: one upstream handshake, brokered initialize, implicit subscrip
     assert.equal(init.brokered, true);
     assert.equal(init.protocol, BROKER_PROTOCOL_VERSION);
     assert.equal(init.appServerInitialized, true);
-    assert.equal(init.codexVersion, '0.147.0');
+    // The fake reports the pinned version, so the broker takes the contract as
+    // matching without a schema dump — the path every real boot on a matching
+    // codex takes.
+    assert.equal(init.codexVersion, CODEX_PINNED_VERSION);
+    assert.equal(init.contractStatus, 'match');
     assert.ok(init.appServerPid > 0);
   }
   assert.equal(broker.upstream().filter((m) => m.method === 'initialize').length, 1,
@@ -1078,7 +1085,7 @@ test('end to end: the app-server dying tells every client and takes the broker d
   assert.equal(existsSync(broker.socketPath), false, 'the socket must not outlive a clean exit');
 });
 
-test('a codex whose version differs from the pinned contract warns and still serves', async (t) => {
+test('a codex whose version differs from the pinned contract verifies the schema instead, and still serves', async (t) => {
   const broker = await startRealBroker(t, { CODEX_FAKE_VERSION: '9.9.9' });
   const a = new TestClient(broker.socketPath);
   await a.ready;
@@ -1091,11 +1098,22 @@ test('a codex whose version differs from the pinned contract warns and still ser
   assert.equal(init.codexVersion, '9.9.9');
   assert.equal(init.appServerInitialized, true, 'a version skew is advisory, never a hard fail');
 
-  const logged = await waitFor(() => {
-    const text = existsSync(broker.logPath) ? readFileSync(broker.logPath, 'utf8') : '';
-    return text.includes('[WARN]') && text.includes('9.9.9') ? text : false;
-  }, { label: 'the version WARN' });
-  assert.match(logged, /pinned to codex-cli/);
+  // The skew itself is INFO — it decides nothing. What decides is the live
+  // schema, and the fake has none to dump, so the verdict is `unverified` and
+  // the WARN says exactly that rather than "pinned to X, you have Y".
+  const settled = await waitFor(async () => {
+    const r = await a.call('initialize', { clientInfo: { name: 'bridge-a', version: '1' } });
+    return r.contractStatus !== 'pending' ? r : false;
+  }, { label: 'the contract probe to settle' });
+  assert.equal(settled.contractStatus, 'unverified');
+  const status = await a.call('broker/status', {});
+  assert.equal(status.contractStatus, 'unverified');
+  assert.equal(status.codexVersion, '9.9.9');
+
+  const text = readFileSync(broker.logPath, 'utf8');
+  assert.match(text, /\[INFO\].*generated from codex-cli .*this machine has codex-cli 9\.9\.9/);
+  assert.match(text, /\[WARN\].*could not verify the app-server wire contract against codex-cli 9\.9\.9: fake codex: no schema dump/);
+  assert.ok(!/\[WARN\][^\n]*pinned to codex-cli/.test(text), 'a version skew alone is no longer a WARN');
 });
 
 test('end to end: a request sent before the handshake lands is queued and answered, not lost', async (t) => {
@@ -1144,6 +1162,16 @@ test('a codex whose --version probe fails still reports itself ready', async (t)
   }, { label: 'the broker to finish booting without a version' });
   assert.equal(init.codexVersion, null, 'unknown stays honestly unknown');
   assert.equal(init.brokered, true);
+
+  // An unreadable version still gets its schema compared — a wrapper binary
+  // that mangles `--version` can dump a schema fine. The fake cannot, so the
+  // verdict is `unverified`, and it arrives after readiness, not as part of it.
+  const settled = await waitFor(async () => {
+    const r = await a.call('initialize', { clientInfo: { name: 'bridge-a', version: '1' } });
+    return r.contractStatus !== 'pending' ? r : false;
+  }, { label: 'the contract probe to settle without a version' });
+  assert.equal(settled.contractStatus, 'unverified');
+  assert.match(readFileSync(broker.logPath, 'utf8'), /could not verify the app-server wire contract against an unrecognised codex version/);
 
   // Ready means ready: it serves.
   const started = await a.call('thread/start', { threadId: 'TV', cwd: '/tmp', approvalPolicy: 'never' });

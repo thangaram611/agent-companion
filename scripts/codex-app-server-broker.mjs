@@ -28,19 +28,30 @@ import {
   closeSync,
   existsSync,
   lstatSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as joinPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { resolveCodexBin } from '../bridge-server/codex-runtime.mjs';
 import {
   CODEX_PINNED_VERSION,
+  SCHEMA_GENERATOR_ARGS,
+  codexAppServerContract,
   codexVersionMismatchMessage,
+  compareContracts,
+  contractDriftMessage,
+  contractMatchMessage,
+  contractUnverifiedMessage,
+  distillAppServerSchema,
   parseCodexVersion,
   routeNotification,
   routeRequest,
@@ -110,6 +121,9 @@ const PREINIT_QUEUE_CAP = 512;
 const APP_SERVER_INIT_TIMEOUT_MS = 30_000;
 const LOADED_LIST_TIMEOUT_MS = 10_000;
 const VERSION_PROBE_TIMEOUT_MS = 10_000;
+// `codex app-server generate-json-schema` writes ~4 MB in ~90 ms (measured on
+// 0.150.1); the budget is generous because a hang here must still end.
+const CONTRACT_PROBE_TIMEOUT_MS = 30_000;
 
 // Idle reaper, mirroring the copilot daemon's shape and constants. The two
 // heartbeat TTLs are IMPORTED, not restated: both daemons sweep (and unlink
@@ -380,6 +394,11 @@ export class AppServerConnection {
     // against a broker that is serving perfectly. Readiness gates on this flag;
     // `codexVersion: null` stays the honest "unknown, already warned" value.
     this.versionProbed = false;
+    // Whether the installed codex's live schema matches the pinned contract:
+    // 'pending' until the probe answers, then 'match' | 'drift' | 'unverified'.
+    // Advisory, like the version — reported in `initialize` and `broker/status`
+    // so a bridge or `doctor` can show it, never gated on.
+    this.contractStatus = 'pending';
     this.reader = new LineReader();
     this._nextId = 1;
     this._own = new Map(); // upstream id -> { resolve, reject, timer } for the broker's own calls
@@ -421,9 +440,16 @@ export class AppServerConnection {
   }
 
   // Advisory only, and asynchronous: the protocol carries no version field, so
-  // a CLI upgrade surfaces as a shape mismatch at runtime and this WARN is the
-  // only early notice. It must never block or fail the boot — a broker that
-  // refuses to start on a version bump takes every delegation down with it.
+  // a CLI upgrade that changed the wire would otherwise surface as a shape
+  // mismatch mid-job, and this is the only early notice. It must never block
+  // or fail the boot — a broker that refuses to start on a version bump takes
+  // every delegation down with it.
+  //
+  // The version is provenance, not the verdict. Same version as the pin means
+  // the same binary that generated the fixture, so the schema is taken as
+  // matching (the fixture's own integrity is the test suite's job). Any other
+  // outcome — a different version, or no readable version at all — runs the
+  // real check: dump the live schema and compare it to the pin, classified.
   _probeVersion(bin) {
     execFile(bin, ['--version'], { timeout: VERSION_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout) => {
       // Set on BOTH paths: the probe is over either way, and a client waiting
@@ -432,15 +458,69 @@ export class AppServerConnection {
       this.versionProbed = true;
       if (err) {
         log('WARN', 'could not read `codex --version`:', err.message);
+        this._probeContract(bin, null);
         return;
       }
       const installed = parseCodexVersion(stdout);
       this.codexVersion = installed;
       if (installed && installed === CODEX_PINNED_VERSION) {
+        this.contractStatus = 'match';
         log('INFO', 'codex version matches the pinned contract:', installed);
         return;
       }
-      log('WARN', codexVersionMismatchMessage(installed));
+      log('INFO', codexVersionMismatchMessage(installed));
+      this._probeContract(bin, installed);
+    });
+  }
+
+  // The schema check itself. Bounded and SIGKILLed like the version probe, and
+  // the temp dir is removed on every path. Three verdicts, all advisory:
+  //   match      — identical wire contract; the pin is merely behind on provenance
+  //   drift      — something moved; the WARN lists what, routing changes first
+  //   unverified — the dump could not be produced or read; say so rather than
+  //                pretend either way
+  _probeContract(bin, installed) {
+    let schemaDir;
+    try {
+      schemaDir = mkdtempSync(joinPath(tmpdir(), 'codex-app-server-schema-'));
+    } catch (err) {
+      this.contractStatus = 'unverified';
+      log('WARN', contractUnverifiedMessage(installed, `could not create a temp dir: ${err.message}`));
+      return;
+    }
+    // A broker stopped while the dump child is still starting (measured: the
+    // test suite does exactly this, ~ms after boot) never reaches the callback
+    // below, so the dir is also reaped on the process's own way out. Every
+    // shutdown path here ends in process.exit(), which runs 'exit' listeners
+    // synchronously; only SIGKILL skips it, and nothing can help that.
+    const reap = () => rmSync(schemaDir, { recursive: true, force: true });
+    process.once('exit', reap);
+    execFile(bin, [...SCHEMA_GENERATOR_ARGS, schemaDir], {
+      timeout: CONTRACT_PROBE_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    }, (err, _stdout, stderr) => {
+      process.removeListener('exit', reap);
+      try {
+        if (err) {
+          this.contractStatus = 'unverified';
+          log('WARN', contractUnverifiedMessage(installed, String(stderr || err.message).trim()));
+          return;
+        }
+        const live = distillAppServerSchema(schemaDir, installed || 'unknown');
+        const diff = compareContracts(codexAppServerContract(), live);
+        if (diff.identical) {
+          this.contractStatus = 'match';
+          log('INFO', contractMatchMessage(installed));
+        } else {
+          this.contractStatus = 'drift';
+          log('WARN', contractDriftMessage(installed, diff));
+        }
+      } catch (probeErr) {
+        this.contractStatus = 'unverified';
+        log('WARN', contractUnverifiedMessage(installed, probeErr.message));
+      } finally {
+        reap();
+      }
     });
   }
 
@@ -691,6 +771,7 @@ export class Broker {
           appServerInitialized: !!this.connection?.initialized,
           codexVersion: this.connection?.codexVersion ?? null,
           codexVersionProbed: !!this.connection?.versionProbed,
+          contractStatus: this.connection?.contractStatus ?? 'pending',
         });
         return;
       case 'broker/status':
@@ -716,6 +797,8 @@ export class Broker {
       uptimeMs: now() - this.startedAt,
       clients: this.clients.size,
       subscriptions: this.subscriptions.threadCount(),
+      codexVersion: this.connection?.codexVersion ?? null,
+      contractStatus: this.connection?.contractStatus ?? 'pending',
     };
   }
 
