@@ -61,9 +61,10 @@ terminal envelope, which does not carry the cancel metadata at all.)
 
 ## `codex-app-server/` — transport and architecture validation
 
-Everything here targets `codex app-server` (measured on codex-cli 0.147.0; the wire contract was
-regenerated on 0.150.1, where the delta was purely additive and none of these were re-run —
-the behavioural claims below are still 0.147.0 measurements). `broker.mjs` was the
+Everything here targets `codex app-server` (first measured on codex-cli 0.147.0; the wire
+contract was regenerated on 0.150.1, where the delta was purely additive, and on 2026-08-28
+`smoke/appserver.mjs` (17/17) and `smoke/appserver-control.mjs` (18/18) were re-run against
+0.150.1 — the probes in this directory and the exec-transport smokes were not). `broker.mjs` was the
 **architecture prototype**; the shipped broker is `scripts/codex-app-server-broker.mjs` and
 the bridge-side client is `bridge-server/codex-app-server-runtime.mjs`. Read the prototype for
 the *idea*, never as a description of the current design — the two gaps it left open are the

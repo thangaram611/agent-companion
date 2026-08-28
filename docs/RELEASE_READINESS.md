@@ -260,7 +260,7 @@ verified byte-identical.
     sandbox_workspace_write.network_access=true` reached the Seatbelt
     sandbox); job `codex-mrym5oqi-29s7` verified the subagent-wrapper path
     end-to-end.
-- **Gate 8 — Codex app-server transport: PASS (2026-08-11, codex-cli 0.147.0).**
+- **Gate 8 — Codex app-server transport: PASS (2026-08-11, codex-cli 0.147.0; re-verified 2026-08-28 on codex-cli 0.150.1 — `appserver.mjs` 17/17, `appserver-control.mjs` 18/18).**
   Both probes green against the real bridge, the real broker and a real
   `codex app-server`:
   - **Restart survival** — `probes/smoke/appserver.mjs`, 17/17. Bridge A
