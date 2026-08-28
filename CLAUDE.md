@@ -173,6 +173,11 @@ second reader/definition is how these break.
   `lib/runtime-paths.mjs` and `lib/log.mjs` re-read their env per call — deliberately, so a
   statically-importing suite can redirect them — and four shipped suites sandbox that way with
   plain top-level imports.
+- **A suite that shells out to a hook must sandbox `AGENT_RUNTIME_DIR` at module level.** The
+  hooks fall back to the real `~/.{claude,codex}/agent-companion/runtime`, and a per-test env
+  only covers the tests someone remembered — the rest wrote fixture heartbeats into the real
+  dir and kept the shared brokers' idle reapers extended for 30 min per run.
+  `test/runtime-sandbox-guard.test.mjs` enforces it.
 - **`bridge-server/server.test.mjs`'s fake-OpenCode-CLI test is timing-sensitive** (a 5 s poll
   budget). It has been observed failing under full-suite concurrency and passing in ~0.6 s alone
   — re-run the file before treating it as a real regression.

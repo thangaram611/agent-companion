@@ -62,9 +62,16 @@ terminal envelope, which does not carry the cancel metadata at all.)
 ## `codex-app-server/` — transport and architecture validation
 
 Everything here targets `codex app-server` (first measured on codex-cli 0.147.0; the wire
-contract was regenerated on 0.150.1, where the delta was purely additive, and on 2026-08-28
-`smoke/appserver.mjs` (17/17) and `smoke/appserver-control.mjs` (18/18) were re-run against
-0.150.1 — the probes in this directory and the exec-transport smokes were not). `broker.mjs` was the
+contract was regenerated on 0.150.1, where the delta was purely additive). Re-measured on
+0.150.1 on 2026-08-28 with identical results: all four `smoke/` scripts (12/12, 8/8, 17/17,
+18/18), `unloaded.mjs`, `errs.mjs` (through the prototype broker), and `probe.mjs`'s `approval`
+matrix (workspace-write/on-request wrote with 0 approvals; read-only + one accepted approval
+**wrote — still escalates past the sandbox**; `--deny` blocked), `inherit` (turn_context model
+`gpt-5.6-sol` / effort `xhigh` from `config.toml`, approval `never`), `sandbox` (workspace-write:
+`cwd=ok`, `git=blocked`) and `errors`. Not re-run: the prototype-broker scripts `bclient.mjs`,
+`conc.mjs`, the ws role scripts `zeroclient.mjs` / `probeA.mjs` / `probeB.mjs` / `wsclient.mjs`,
+and the `steerpatch` scenario — every claim they made is now asserted end-to-end by the shipped
+broker's smokes. `broker.mjs` was the
 **architecture prototype**; the shipped broker is `scripts/codex-app-server-broker.mjs` and
 the bridge-side client is `bridge-server/codex-app-server-runtime.mjs`. Read the prototype for
 the *idea*, never as a description of the current design — the two gaps it left open are the

@@ -308,6 +308,15 @@ because the cost of re-deriving them is a day each.
   for killing jobs; what kills them is a *companion subagent returning*, because overlapping
   subagents share one bridge process that is SIGINT'd when the first of them finishes.
   Status is only special because it is the fastest thing that can finish.
+- **A superseded broker that never retires is not a reaper bug.** The idle reaper held a
+  pre-upgrade broker alive for hours on the machine that ran the test suite, and the cause was
+  not in the reaper: `hooks/drain-completions.test.mjs` shelled the hook out with the real
+  `$HOME`, so every run wrote thirteen fixture-session heartbeats (`sid-A`, `café-1`, …) into
+  the operator's real `runtime/heartbeats/`, and `HOST_LIVENESS_TTL_MS` (30 min) then counted
+  each as a live host. Measured 2026-08-28. The suite now sandboxes `AGENT_RUNTIME_DIR` at
+  module level and `test/runtime-sandbox-guard.test.mjs` fails any suite that drives a
+  runtime-writing hook without that. If a daemon looks immortal, list the heartbeats dir
+  before suspecting the reaper.
 - **Auto-accepting an approval defeats the sandbox.** A `read-only` thread that accepted one
   approval **wrote a file**. Under `approvalPolicy: 'never'` no approval request is ever sent
   and the sandbox is authoritative — which is why the app-server adapter pins it structurally

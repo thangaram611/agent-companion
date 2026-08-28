@@ -11,6 +11,21 @@ import { fileURLToPath } from 'node:url';
 const __dirname = resolve(fileURLToPath(import.meta.url), '..');
 const SCRIPT = join(__dirname, 'drain-completions.sh');
 
+// Sandbox the runtime dir for the WHOLE suite, at module level. Every shell-out
+// below spreads `process.env`, and the hook derives its heartbeat dir from
+// AGENT_RUNTIME_DIR with the operator's real ~/.claude/agent-companion/runtime
+// as the fallback — so before this, each test fired a heartbeat named after
+// its fixture session (`sid-A`, `café-1`, `sess_abc_def`, …) into the REAL
+// heartbeats dir. Measured 2026-08-28: those files kept the shared codex
+// broker's idle reaper extended for HOST_LIVENESS_TTL_MS (30 min) after every
+// `node --test`, which is why a superseded broker never retired on a machine
+// that ran the suite. test/runtime-sandbox-guard.test.mjs fails any suite that
+// drives this hook without such an assignment.
+const RUNTIME_SANDBOX = mkdtempSync(join(tmpdir(), 'drain-rt-'));
+process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
+process.env.AGENT_HEARTBEAT_DIR = join(RUNTIME_SANDBOX, 'heartbeats');
+test.after(() => rmSync(RUNTIME_SANDBOX, { recursive: true, force: true }));
+
 function makeQueueFile(rows) {
   const dir = mkdtempSync(join(tmpdir(), 'drain-test-'));
   const path = join(dir, 'completions.jsonl');
