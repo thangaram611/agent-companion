@@ -1,6 +1,7 @@
 // Validation tests for the single `copilot` tool. Pure-function:
 // no sockets, no daemon, no state-layer side effects.
 
+import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

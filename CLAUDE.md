@@ -167,17 +167,24 @@ second reader/definition is how these break.
   (ms) and `tool_timeout_sec` in the Codex TOML. `env: { MCP_TOOL_TIMEOUT }` reaches the child
   and is ignored by the host. Never raise `clampWaitSec` past 1500 s without a per-server
   `timeout`.
-- **Tests sandbox `$HOME` by env** — `process.env.AGENT_COMPANION_HOME = mkdtempSync(...)`, plus
-  `AGENT_RUNTIME_DIR` for runtime paths. Only `lib/state.mjs` binds at import time (`BASE_DIR`,
-  line 27), so a suite touching **state** must set the env and then `await import('./x.mjs')`.
-  `lib/runtime-paths.mjs` and `lib/log.mjs` re-read their env per call — deliberately, so a
-  statically-importing suite can redirect them — and four shipped suites sandbox that way with
-  plain top-level imports.
-- **A suite that shells out to a hook must sandbox `AGENT_RUNTIME_DIR` at module level.** The
-  hooks fall back to the real `~/.{claude,codex}/agent-companion/runtime`, and a per-test env
-  only covers the tests someone remembered — the rest wrote fixture heartbeats into the real
-  dir and kept the shared brokers' idle reapers extended for 30 min per run.
-  `test/runtime-sandbox-guard.test.mjs` enforces it.
+- **Tests sandbox `$HOME` by env** — `import '../test/sandbox-home.mjs';` as the **first** import
+  sets `AGENT_COMPANION_HOME` and `AGENT_RUNTIME_DIR` to a tmpdir before anything else evaluates
+  (ESM evaluates imports in statement order). That matters because `lib/state.mjs` binds
+  `BASE_DIR` at import time and now throws under `node --test` if it resolves to the real home —
+  so a plain `process.env.X = …` line in the suite body is too late for a static import that
+  reaches state through `validation.mjs`, `profile-registry`, `onboard.mjs` or a daemon. The
+  older pattern (set the env, then `await import('./x.mjs')`) still works. `lib/runtime-paths.mjs`
+  and `lib/log.mjs` re-read their env per call — deliberately, so a statically-importing suite
+  can redirect them.
+- **Under `node --test`, the real `~/.{claude,codex}/agent-companion` is refused.**
+  `lib/host.mjs`'s `refuseRealHomeUnderTest` keys on `NODE_TEST_CONTEXT` (set by the runner in
+  every test child, inherited by everything a test spawns) and throws from `runtimeDir()`,
+  from `state.mjs` at import, and from `hooks/drain-completions.sh` (exit 78) on any path
+  under the real account home. So a suite that touches runtime or state must sandbox
+  (`AGENT_RUNTIME_DIR` / `AGENT_COMPANION_HOME`, or `HOME`) at module level — a per-test env
+  only covers the tests someone remembered, and the rest once wrote fixture heartbeats into
+  the real dir and kept the shared brokers' idle reapers extended 30 min per run. Anything
+  under `os.tmpdir()` passes. `test/runtime-sandbox-guard.test.mjs` proves the precondition.
 - **`bridge-server/server.test.mjs`'s fake-OpenCode-CLI test is timing-sensitive** (a 5 s poll
   budget). It has been observed failing under full-suite concurrency and passing in ~0.6 s alone
   — re-run the file before treating it as a real regression.

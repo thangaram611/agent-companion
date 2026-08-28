@@ -15,6 +15,7 @@
 // If a future edit ever pulls @iarna/toml or a built-in TOML parser into
 // scope, replace these checks with a real parse + structural assertions.
 
+import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

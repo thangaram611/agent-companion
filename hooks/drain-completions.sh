@@ -31,6 +31,32 @@ QUEUE="${AGENT_QUEUE_PATH:-$RUNTIME_DIR/completions.jsonl}"
 LOCK="${QUEUE}.lock"
 HEARTBEAT_DIR="${AGENT_HEARTBEAT_DIR:-$RUNTIME_DIR/heartbeats}"
 
+# Test-sandbox precondition, the bash twin of lib/host.mjs's
+# refuseRealHomeUnderTest: `node --test` sets NODE_TEST_CONTEXT in every test
+# child and this hook inherits it when a suite shells it out. A suite that
+# forgot to sandbox AGENT_RUNTIME_DIR used to write a heartbeat per fixture
+# session into the operator's REAL runtime dir (measured 2026-08-28: kept the
+# shared codex broker alive 30 min per run). The real home is read from the
+# account (`~user`), not $HOME, so a sandboxed $HOME passes; so does anything
+# under $TMPDIR. Never fires outside the suite.
+if [ -n "${NODE_TEST_CONTEXT:-}" ]; then
+  real_home="$(eval echo "~$(id -un)" 2>/dev/null || true)"
+  tmp_root="${TMPDIR:-/tmp}"
+  for candidate in "$RUNTIME_DIR" "$HEARTBEAT_DIR"; do
+    case "$candidate" in
+      "${tmp_root%/}"/*) continue ;;
+    esac
+    if [ -n "$real_home" ]; then
+      case "$candidate" in
+        "$real_home"|"$real_home"/*)
+          echo "drain-completions: refusing to use the operator's real runtime dir ($candidate) from inside node --test — set AGENT_RUNTIME_DIR to a sandbox" >&2
+          exit 78
+          ;;
+      esac
+    fi
+  done
+fi
+
 # ---------------------------------------------------------------------------
 # Fork budget
 #

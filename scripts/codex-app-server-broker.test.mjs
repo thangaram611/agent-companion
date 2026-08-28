@@ -313,10 +313,21 @@ test('a connection-scoped notification reaches no client, and is counted', () =>
   broker._onUpstreamMessage({ jsonrpc: '2.0', method: 'command/exec/outputDelta', params: {
     processId: 'p-1', stream: 'stdout', deltaBase64: 'aGk=', capReached: false,
   } });
+  broker._onUpstreamMessage({ jsonrpc: '2.0', method: 'process/outputDelta', params: {
+    processHandle: 'h-1', stream: 'stderr', deltaBase64: 'aGk=', capReached: false,
+  } });
+  broker._onUpstreamMessage({ jsonrpc: '2.0', method: 'process/exited', params: {
+    processHandle: 'h-1', exitCode: 0, stdout: '', stderr: '', stdoutCapReached: false, stderrCapReached: false,
+  } });
 
   assert.equal(a.frames.length, before.a, 'client A received nothing');
   assert.equal(b.frames.length, before.b, 'client B received nothing');
-  assert.equal(broker.status().droppedConnectionScoped, 3);
+  // All five, so a drop keyed on a literal method list instead of the routing
+  // class cannot pass by covering only some of them.
+  assert.deepEqual([...connectionScopedNotificationMethods()].sort(), [
+    'command/exec/outputDelta', 'fs/changed', 'mcpServer/event/stream/notification', 'process/exited', 'process/outputDelta',
+  ]);
+  assert.equal(broker.status().droppedConnectionScoped, 5);
   // A genuinely global one still fans out — the drop is per class, not a mute.
   broker._onUpstreamMessage({ jsonrpc: '2.0', method: 'skills/changed', params: {} });
   assert.equal(a.frames.length, before.a + 1);

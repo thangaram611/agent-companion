@@ -19,8 +19,9 @@ const SCRIPT = join(__dirname, 'drain-completions.sh');
 // heartbeats dir. Measured 2026-08-28: those files kept the shared codex
 // broker's idle reaper extended for HOST_LIVENESS_TTL_MS (30 min) after every
 // `node --test`, which is why a superseded broker never retired on a machine
-// that ran the suite. test/runtime-sandbox-guard.test.mjs fails any suite that
-// drives this hook without such an assignment.
+// that ran the suite. The hook itself now refuses the real runtime dir under
+// NODE_TEST_CONTEXT (exit 78), so forgetting this assignment fails loudly
+// instead of leaking; test/runtime-sandbox-guard.test.mjs proves that.
 const RUNTIME_SANDBOX = mkdtempSync(join(tmpdir(), 'drain-rt-'));
 process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
 process.env.AGENT_HEARTBEAT_DIR = join(RUNTIME_SANDBOX, 'heartbeats');

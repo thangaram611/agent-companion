@@ -5,6 +5,7 @@
 // any second prompt-bg on the same Copilot sessionId, and replyPrompt must
 // refuse to restart when the prior turn never drains.
 
+import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

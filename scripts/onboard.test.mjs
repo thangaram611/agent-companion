@@ -2,6 +2,7 @@
 // exercised directly; the CLI exit-code paths run in a subprocess with a
 // temp HOME so no real default-target is written.
 
+import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
