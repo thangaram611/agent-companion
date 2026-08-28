@@ -48,7 +48,7 @@ const CONTRACT_MODULE_URL = pathToFileURL(
 ).href;
 
 export const FAKE_APP_SERVER = `
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, cpSync } from 'node:fs';
 import {
   CODEX_PINNED_VERSION, JSONRPC_INVALID_REQUEST, contractViolation, serverFrameViolation, unhandledMethodError,
 } from ${JSON.stringify(CONTRACT_MODULE_URL)};
@@ -71,10 +71,20 @@ if (process.argv[2] === '--version') {
   process.exit(0);
 }
 if (process.argv[2] === 'app-server' && process.argv[3] === 'generate-json-schema') {
-  // The broker's contract probe, on a version that differs from the pin. The
-  // fake has no schema to dump, and MUST say so and exit rather than fall
+  // The broker's contract probe, on a version that differs from the pin. With
+  // CODEX_FAKE_SCHEMA_DIR set the fake replays that directory as its dump —
+  // a test that has a real codex captures one and can then reach the probe's
+  // \`match\` and \`drift\` verdicts, mutating the copy for the latter. Without
+  // it the fake has no schema, and MUST say so and exit rather than fall
   // through to the stdio server below — that would sit on stdin until the
   // probe's SIGKILL, stalling every test that boots a real broker.
+  const replay = process.env.CODEX_FAKE_SCHEMA_DIR || '';
+  const outIdx = process.argv.indexOf('--out');
+  const outDir = outIdx === -1 ? '' : process.argv[outIdx + 1];
+  if (replay && outDir) {
+    cpSync(replay, outDir, { recursive: true });
+    process.exit(0);
+  }
   process.stderr.write('fake codex: no schema dump\\n');
   process.exit(2);
 }

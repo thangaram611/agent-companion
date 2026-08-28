@@ -87,6 +87,7 @@ export function fakeBrokerSocket({
       appServerInitialized: true,
       codexVersion: '0.147.0',
       codexVersionProbed: true,
+      contractStatus: 'match',
     }),
     'broker/status': () => ({ ok: true, protocol: 1, brokerPid, appServerPid: FAKE_APP_SERVER_PID, uptimeMs: 1, clients: 1, subscriptions: 0 }),
     'broker/subscribe': (p) => ({ ok: true, threadId: p.threadId, flushed: 0 }),

@@ -71,7 +71,8 @@ Regenerate the pinned codex wire contract (the only sanctioned way that fixture 
 generator prints what moved, classified — read the `ROUTING MOVED` block first, a moved thread
 id is a live misrouting bug). The fixture's `codexVersion` is provenance, not a gate: after a
 codex upgrade the drift test and the broker's boot probe compare the live schema, so a
-version-only bump stays green and only a real schema change fails:
+version-only bump stays green and only a real schema change fails the test — the broker still
+boots either way and reports `contractStatus: match|drift|unverified`, never refusing to serve:
 
 ```bash
 node scripts/gen-codex-app-server-contract.mjs

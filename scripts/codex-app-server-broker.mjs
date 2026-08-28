@@ -490,12 +490,22 @@ export class AppServerConnection {
     }
     // A broker stopped while the dump child is still starting (measured: the
     // test suite does exactly this, ~ms after boot) never reaches the callback
-    // below, so the dir is also reaped on the process's own way out. Every
-    // shutdown path here ends in process.exit(), which runs 'exit' listeners
-    // synchronously; only SIGKILL skips it, and nothing can help that.
-    const reap = () => rmSync(schemaDir, { recursive: true, force: true });
+    // below, so the child and the dir are also reaped on the process's own way
+    // out — the child first, because node does not kill children on exit and a
+    // wrapper wedged in the dump would otherwise outlive its timeout timer with
+    // nobody to fire it. Every shutdown path here ends in process.exit(), which
+    // runs 'exit' listeners synchronously; only SIGKILL skips it, and nothing
+    // can help that. Cleanup itself must not throw: this probe is advisory,
+    // and an EPERM on a temp dir is no reason to take the broker down.
+    let child = null;
+    const reap = () => {
+      try { if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); } catch {}
+      try { rmSync(schemaDir, { recursive: true, force: true }); } catch (err) {
+        log('WARN', 'could not remove the schema probe dir', schemaDir, err.message);
+      }
+    };
     process.once('exit', reap);
-    execFile(bin, [...SCHEMA_GENERATOR_ARGS, schemaDir], {
+    child = execFile(bin, [...SCHEMA_GENERATOR_ARGS, schemaDir], {
       timeout: CONTRACT_PROBE_TIMEOUT_MS,
       killSignal: 'SIGKILL',
     }, (err, _stdout, stderr) => {

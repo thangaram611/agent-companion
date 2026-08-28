@@ -102,7 +102,9 @@ Codex CLI companion:
   `bridge-server/codex-runtime.mjs` was taken on 0.147.0 and the 0.147.0 → 0.150.1 app-server
   delta was purely additive). The version is **not** the gate: the drift test and the broker's
   boot probe both compare the installed codex's live schema to the fixture, so a version-only
-  bump passes and only a real schema change fails — classified, routing moves first. The `--json` ThreadEvent schema (`thread.started`/`item.*`/`turn.*`/
+  bump passes and only a real schema change fails the test — classified, routing moves first.
+  The broker never refuses to boot on it: it reports `contractStatus: match|drift|unverified`
+  on `initialize` / `broker/status` and keeps serving. The `--json` ThreadEvent schema (`thread.started`/`item.*`/`turn.*`/
   top-level `error`) and the `-c sandbox_workspace_write.network_access=<bool>`
   override key are version-sensitive; a silently-renamed key degrades without an
   error since neither adapter passes `--strict-config`. Re-verify against

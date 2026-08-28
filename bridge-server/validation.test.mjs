@@ -10,6 +10,8 @@ import {
   symlinkSync,
   utimesSync,
   realpathSync,
+  mkdirSync,
+  chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -220,6 +222,22 @@ test('plan_review validates plan path existence, canonicalization, latest resolu
     // outsideDir by its own name.
     const latest = validateAgentArgs(planArgs('latest'));
     assert.equal(latest.template_args.plan_path, outsideReal);
+    // Only "nothing there" is skippable. A candidate that exists but cannot be
+    // stat'ed (its directory is unreadable) must surface, not silently lose to
+    // an older plan — that would be the fallback this bridge refuses.
+    // Root can stat anything, so the case is meaningless there.
+    if (typeof process.getuid === 'function' && process.getuid() !== 0) {
+      const lockedDir = join(outsideDir, 'locked');
+      mkdirSync(lockedDir);
+      writeFileSync(join(lockedDir, 'plan.md'), '# locked');
+      symlinkSync(join(lockedDir, 'plan.md'), join(insideDir, 'locked.md'));
+      chmodSync(lockedDir, 0o000);
+      try {
+        assert.throws(() => validateAgentArgs(planArgs('latest')), /could not stat candidate .*locked\.md: EACCES/);
+      } finally {
+        chmodSync(lockedDir, 0o700);
+      }
+    }
   } finally {
     if (prev === undefined) delete process.env.AGENT_PLANS_DIR;
     else process.env.AGENT_PLANS_DIR = prev;

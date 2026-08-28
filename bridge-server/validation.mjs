@@ -271,6 +271,9 @@ export function resolveLatestPlanPath() {
   catch (err) { throw new Error(`agent: plans directory not readable (${plansDir}): ${err.message}`); }
   // statSync follows symlinks; a dangling link or a stray directory named
   // *.md must not turn "latest" into a raw ENOENT — skip it and keep looking.
+  // Only "there is nothing there" is skippable, though: an EACCES on the
+  // newest plan silently resolving to an older one is exactly the fallback
+  // this bridge refuses everywhere else, so any other error is the answer.
   const candidates = entries
     .filter((f) => f.endsWith('.md'))
     .flatMap((f) => {
@@ -278,8 +281,9 @@ export function resolveLatestPlanPath() {
       try {
         const st = statSync(full);
         return st.isFile() ? [{ full, mtimeMs: st.mtimeMs }] : [];
-      } catch {
-        return [];
+      } catch (err) {
+        if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') return [];
+        throw new Error(`agent: plan_path="latest" could not stat candidate ${full}: ${err.message}`);
       }
     })
     .sort((a, b) => b.mtimeMs - a.mtimeMs);

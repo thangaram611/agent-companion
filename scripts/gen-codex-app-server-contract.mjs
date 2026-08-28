@@ -2,7 +2,7 @@
 // Regenerate lib/codex-app-server-contract.json from the installed codex.
 //
 // Runs `codex app-server generate-json-schema` into a throwaway directory,
-// distils the 2.9 MB dump down to the routing table, the request/notification
+// distils the ~4 MB dump down to the routing table, the request/notification
 // inventories, the shapes of both wire directions and the approval vocabularies
 // the adapter answers with, and rewrites the committed fixture. `lib/codex-app-server-contract.test.mjs`
 // re-runs the same distillation and fails on any difference, so this script is

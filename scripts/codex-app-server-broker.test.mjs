@@ -11,9 +11,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer, connect as connectSocket } from 'node:net';
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -32,7 +33,29 @@ import { fileURLToPath } from 'node:url';
 // appended to $CODEX_FAKE_TRACE, so a test can assert exactly how many upstream
 // `initialize` frames the broker ever sent.
 import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
-import { CODEX_PINNED_VERSION } from '../lib/codex-app-server-contract.mjs';
+import { CODEX_PINNED_VERSION, SCHEMA_GENERATOR_ARGS } from '../lib/codex-app-server-contract.mjs';
+
+// A real schema dump, captured once from whatever codex is on this machine, so
+// the fake can replay it (CODEX_FAKE_SCHEMA_DIR) and the broker's contract
+// probe can be driven to its `match` and `drift` verdicts instead of only to
+// `unverified`. Null when there is no codex here; the two tests that need it
+// skip, the same way the contract suite's drift test does.
+function captureRealSchemaDump() {
+  const bin = process.env.CODEX_BIN || 'codex';
+  const opts = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000, killSignal: 'SIGKILL' };
+  const version = spawnSync(bin, ['--version'], opts);
+  if (version.error?.code === 'ENOENT' || version.status !== 0) return null;
+  const dir = mkdtempSync(join(tmpdir(), 'codex-real-schema-'));
+  const dump = spawnSync(bin, [...SCHEMA_GENERATOR_ARGS, dir], opts);
+  if (dump.status !== 0) {
+    rmSync(dir, { recursive: true, force: true });
+    return null;
+  }
+  return dir;
+}
+const REAL_SCHEMA_DUMP = captureRealSchemaDump();
+test.after(() => { if (REAL_SCHEMA_DUMP) rmSync(REAL_SCHEMA_DUMP, { recursive: true, force: true }); });
+const NEEDS_REAL_DUMP = REAL_SCHEMA_DUMP ? false : 'no codex on this machine to capture a schema dump from';
 // The frames the end-to-end tests push THROUGH that fake are built from the
 // pinned contract rather than written out here. The broker's own routing tests
 // below still hand-write theirs and should: they feed `_onUpstreamMessage`
@@ -1114,6 +1137,58 @@ test('a codex whose version differs from the pinned contract verifies the schema
   assert.match(text, /\[INFO\].*generated from codex-cli .*this machine has codex-cli 9\.9\.9/);
   assert.match(text, /\[WARN\].*could not verify the app-server wire contract against codex-cli 9\.9\.9: fake codex: no schema dump/);
   assert.ok(!/\[WARN\][^\n]*pinned to codex-cli/.test(text), 'a version skew alone is no longer a WARN');
+});
+
+async function settledContract(client) {
+  return waitFor(async () => {
+    const r = await client.call('initialize', { clientInfo: { name: 'bridge-a', version: '1' } });
+    return r.contractStatus !== 'pending' ? r : false;
+  }, { label: 'the contract probe to settle' });
+}
+
+test('a skewed codex whose live schema matches the pin settles on contractStatus match', { skip: NEEDS_REAL_DUMP }, async (t) => {
+  // The upgrade case: a new version, an unchanged wire. The fake reports 9.9.9
+  // and replays a real dump, so the probe runs the real distiller on real
+  // files and must find nothing moved.
+  const broker = await startRealBroker(t, { CODEX_FAKE_VERSION: '9.9.9', CODEX_FAKE_SCHEMA_DIR: REAL_SCHEMA_DUMP });
+  const a = new TestClient(broker.socketPath);
+  await a.ready;
+  t.after(() => a.close());
+
+  const settled = await settledContract(a);
+  assert.equal(settled.contractStatus, 'match');
+  assert.equal(settled.codexVersion, '9.9.9');
+  assert.equal((await a.call('broker/status', {})).contractStatus, 'match');
+  const text = readFileSync(broker.logPath, 'utf8');
+  assert.match(text, /\[INFO\].*codex-cli 9\.9\.9: the live app-server schema matches the pinned contract/);
+  assert.ok(!text.includes('[WARN]'), `a matching schema is not a warning:\n${text}`);
+});
+
+test('a skewed codex whose live schema moved settles on contractStatus drift, with the move classified', { skip: NEEDS_REAL_DUMP }, async (t) => {
+  // Rename one notification in the replayed dump: the pin then sees one method
+  // removed and one added, and nothing else — which is what the WARN must say.
+  const mutated = mkdtempSync(join(tmpdir(), 'codex-mutated-schema-'));
+  t.after(() => rmSync(mutated, { recursive: true, force: true }));
+  cpSync(REAL_SCHEMA_DUMP, mutated, { recursive: true });
+  const file = join(mutated, 'ServerNotification.json');
+  const text = readFileSync(file, 'utf8');
+  assert.ok(text.includes('"thread/reverted"'), 'the dump names thread/reverted');
+  writeFileSync(file, text.replaceAll('"thread/reverted"', '"thread/revertedRenamed"'));
+
+  const broker = await startRealBroker(t, { CODEX_FAKE_VERSION: '9.9.9', CODEX_FAKE_SCHEMA_DIR: mutated });
+  const a = new TestClient(broker.socketPath);
+  await a.ready;
+  t.after(() => a.close());
+
+  const settled = await settledContract(a);
+  assert.equal(settled.contractStatus, 'drift');
+  assert.equal(settled.appServerInitialized, true, 'drift is advisory: the broker still serves');
+  assert.equal((await a.call('broker/status', {})).contractStatus, 'drift');
+  const log = readFileSync(broker.logPath, 'utf8');
+  assert.match(log, /\[WARN\].*codex-cli 9\.9\.9 no longer matches the pinned app-server contract/);
+  assert.match(log, /removed \(1\)[^\n]*\n\s+serverNotifications\.thread\/reverted\n/);
+  assert.match(log, /added \(1\):\n\s+serverNotifications\.thread\/revertedRenamed\n/);
+  assert.ok(!log.includes('ROUTING MOVED'), 'a rename is not a routing move');
 });
 
 test('end to end: a request sent before the handshake lands is queued and answered, not lost', async (t) => {

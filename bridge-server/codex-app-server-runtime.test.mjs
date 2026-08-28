@@ -1188,6 +1188,8 @@ test('a live broker is reused and never respawned', async () => {
   assert.equal(codexBrokerSnapshot().pid, 4242);
   // And the version the broker reported is now the runtime-info answer.
   assert.equal(codexAppServerRuntimeInfo({}).installed_version, '0.147.0');
+  // And so is the broker's contract verdict, under the runtime's own key.
+  assert.equal(codexAppServerRuntimeInfo({}).contract_status, 'match');
 });
 
 test('adopting a REPLACEMENT broker inherits neither the dead one\'s claim nor its leases', async () => {
