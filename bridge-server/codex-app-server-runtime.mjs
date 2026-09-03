@@ -368,7 +368,11 @@ function realSpawnBroker({ env }) {
 }
 
 function realDelay(ms) {
-  return new Promise((resolve) => { const t = setTimeout(resolve, ms); if (t.unref) t.unref(); });
+  // Callers await this delay as part of broker boot/restart and steer
+  // confirmation. It must therefore keep the process alive: an unref'd timer
+  // lets Node exit with the awaiting Promise unresolved when no socket happens
+  // to be active (reproduced on Node 22 in the isolated steer test).
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
 // `kill` is a seam because it is the ONE destructive action in this module: a
