@@ -1,6 +1,6 @@
 # Release Readiness
 
-Last updated: 2026-08-13
+Last updated: 2026-09-03
 
 This page is the public-readiness checklist for the harness + companion launch.
 It records the source-backed compatibility assumptions behind the repo copy,
@@ -55,6 +55,17 @@ Codex plugins:
   `hooks/hooks.json` path, and plugin-bundled hooks still go through trust
   review:
   <https://developers.openai.com/codex/hooks>.
+- Codex agent roles intentionally cannot add MCP authority: the bounded role
+  overlay omits `mcp_servers`, and the upstream regression test asserts that a
+  child retains the parent's MCP set. Agent Companion therefore declares its
+  bridge in the Codex-only plugin manifest, where the child inherits it:
+  <https://github.com/openai/codex/blob/rust-v0.152.1/codex-rs/core/src/agent/role.rs#L33-L119>,
+  <https://github.com/openai/codex/blob/rust-v0.152.1/codex-rs/core/src/agent/role_tests.rs#L403-L480>.
+- Codex 0.152.1 supports the inline native `mcpServers` object and resolves a
+  relative `cwd` against the installed plugin root. This preserves the 1320s
+  tool timeout and avoids a root `.mcp.json` that Claude might also discover:
+  <https://github.com/openai/codex/blob/rust-v0.152.1/codex-rs/core-plugins/src/manifest.rs#L446-L470>,
+  <https://github.com/openai/codex/blob/rust-v0.152.1/codex-rs/codex-mcp/src/plugin_config.rs#L281-L289>.
 
 OpenCode companion:
 
@@ -97,18 +108,20 @@ GitHub Copilot CLI companion:
 
 Codex CLI companion:
 
-- **Wire contract generated from codex-cli 0.150.1** (`lib/codex-app-server-contract.json`
+- **Wire contract generated from codex-cli 0.152.1** (`lib/codex-app-server-contract.json`
   records that `codexVersion` as provenance; the `exec` stream census in
-  `bridge-server/codex-runtime.mjs` was taken on 0.147.0 and the 0.147.0 → 0.150.1 app-server
-  delta was purely additive). The version is **not** the gate: the drift test and the broker's
-  boot probe both compare the installed codex's live schema to the fixture, so a version-only
-  bump passes and only a real schema change fails the test — classified, routing moves first.
+  `bridge-server/codex-runtime.mjs` was taken on 0.147.0, and the historical
+  0.147.0 → 0.150.1 app-server delta was purely additive). The version is
+  **not** the gate: the drift test compares the configured CLI's live schema and
+  the broker boot probe compares its selected binary's schema to the fixture, so
+  a version-only bump passes and only a real schema change fails the test —
+  classified, routing moves first.
   The broker never refuses to boot on it: it reports `contractStatus: match|drift|unverified`
   on `initialize` / `broker/status` and keeps serving. The `--json` ThreadEvent schema (`thread.started`/`item.*`/`turn.*`/
   top-level `error`) and the `-c sandbox_workspace_write.network_access=<bool>`
   override key are version-sensitive; a silently-renamed key degrades without an
   error since neither adapter passes `--strict-config`. Re-verify against
-  `codex --version` before bumping the pin.
+  the configured and selected `codex --version` before bumping the pin.
 - **Two transports ship, selected by `CODEX_RUNTIME_ADAPTER`**: `exec` (default,
   `bridge-server/codex-runtime.mjs`) and `appserver`
   (`bridge-server/codex-app-server-runtime.mjs` plus the detached broker in
@@ -151,6 +164,26 @@ Codex CLI companion:
   owning one `codex app-server` over stdio; the bridge is a detachable client,
   which is what lets a job outlive the bridge that started it. The app-server
   child is deliberately not detached — it must die with its broker.
+- App-server startup is gated on a complete Codex/`codex-code-mode-host` pair.
+  The configured/PATH Codex remains the desired-version anchor; a matching
+  unquarantined pair under `$CODEX_HOME/plugins/.plugin-appserver/` may replace
+  an incomplete or quarantined configured pair without symlinks or xattr
+  mutation. A complete quarantined configured pair is advisory rather than a
+  hard failure when no usable fallback exists. Quarantine inspection is
+  tri-state: probe failures remain indeterminate and never count as confirmed
+  attribute absence.
+- `initialize` and `broker/status` expose the exact running version, invoked and
+  canonical paths, helper, source, stat identity, and quarantine verdict. Each
+  send compares those with a fresh installation inspection and safely replaces
+  a stale broker only when clients, leases and active-turn reads permit it.
+  Configuration `EPERM` and dead-broker failures during `thread/start` receive
+  one guarded restart/retry.
+- A live, known-zero-tool `turn/completed` with a universal pre-execution
+  command blocker is not accepted as success. A recovered `thread/read`
+  transcript is remapped only when it explicitly names the unavailable runner.
+  The result is `unreachable`, detail `codex_code_mode_host_unavailable`, and
+  machine-readable `failure_class: runtime_unavailable` across status, wait and
+  notification surfaces; ordinary zero-tool answers remain completed.
 - `codex login status` is documented as exiting 0 with credentials present,
   non-zero otherwise, and is explicitly called out as automation-friendly
   (`learn.chatgpt.com/docs/developer-commands`). Live-verified on 0.145.0: the
@@ -223,12 +256,16 @@ Manual smoke gates before a public tag:
    restart survival and `node probes/smoke/appserver-control.mjs` for the
    reply/steer and cancel/interrupt control paths. Both drive the real bridge
    against a real broker and a real `codex app-server`, and both spend real
-   tokens.
+   tokens. Run `CODEX_RUNTIME_ADAPTER=appserver node scripts/doctor.mjs --json`
+   before and after a Codex package upgrade; record the selected and running
+   path/version/helper, and require no stale-runtime warning before the smoke.
 
 ### Smoke evidence
 
 Recorded 2026-06-23 (macOS, Node 24.15.0), extended 2026-07-24 for gate 7 and
-2026-08-11 for gate 8. All eight gates pass. The harness install smokes
+2026-08-11 for gate 8, and re-verified on the live hosts 2026-09-03 with
+Claude Code 2.1.259 and codex-cli 0.152.1. All eight gates pass. The original
+harness install smokes
 (1, 2, 6) were run under a sandboxed `$HOME` so the real `~/.claude` /
 `~/.codex` were never written, then the sandbox was deleted and the real config
 verified byte-identical.
@@ -236,10 +273,15 @@ verified byte-identical.
 - **Gate 1 — Claude source install: PASS.** `bash setup.sh --host claude --target none`
   (sandboxed `$HOME`) materialized the subagent, merged the `agent-bridge`
   permission into `settings.json`, added the agent-teams env, and wrote the host
-  marker.
+  marker. The 2026-09-03 live reinstall and the user's exact interactive
+  `claude` alias both loaded the materialized agent and called bridge status
+  without a permission denial.
 - **Gate 2 — Codex source install: PASS.** `bash setup.sh --host codex --target none`
   (sandboxed `$HOME`) materialized the TOML subagent, merged `hooks.json`, and
-  wrote the host marker.
+  wrote the host marker. On 2026-09-03 the installed Codex plugin's parent and
+  named `agent-companion` child both called the manifest-declared bridge under
+  `approval_policy=never`; Codex exposes the raw server `agent-bridge` to the
+  model as deferred `functions.exec` tools named `mcp__agent_bridge__*`.
 - **Gate 3 — OpenCode delegated send: PASS.** OpenCode `1.17.9` connected to
   Ollama Cloud (free `gpt-oss:120b`). Drove the bridge `dispatch()`
   (`agent_send` → still_running + job_id → `agent_wait` → `completed`); the
@@ -251,7 +293,12 @@ verified byte-identical.
 - **Gate 6 — Claude marketplace install: PASS.** `claude plugin marketplace add .`
   then `claude plugin install agent-companion@agent-companion` (sandboxed `$HOME`)
   installed `agent-companion@agent-companion` v0.0.1, disabled by default (matches
-  `defaultEnabled: false`).
+  `defaultEnabled: false`). A live uninstall/reinstall on 2026-09-03 refreshed
+  that cache byte-for-byte, it was enabled at user scope, and delegated job
+  `codex-mtl4zzpn-oc8j` completed through the Codex app-server in 15 seconds
+  with one tool call and the requested working directory. The equivalent Codex
+  parent → named child → bridge job `codex-mtl4u87x-irqo` completed in 13
+  seconds with one tool call.
 - **Gate 7 — Codex CLI companion delegated send: PASS (2026-07-24, codex-cli
   0.145.0, ChatGPT auth).** Three live checks, all green:
   - **JSONL schema** — one throwaway `codex exec --json` turn (read-only,
@@ -295,6 +342,19 @@ verified byte-identical.
     `interrupted`, and `thread/read` still returning the history. Both turn-id
     sources are exercised: the banked one from `turn/started` and the
     restarted-bridge fallback that reads the running turn off `thread/read`.
+  - **2026-09-02 cask-upgrade incident and regression boundary** — an orphaned
+    0.151.0 broker survived a Homebrew upgrade, the affected local 0.152.0
+    payload lacked the helper, and job `codex-mtjptuj4-89gw` was incorrectly
+    promoted to `completed` after every command failed before execution. These
+    three bridge defects are covered respectively by stale/idle broker tests,
+    `lib/codex-install.test.mjs` plus doctor diagnostics, and the server's
+    persistence/status/wait/notification regression. On the subsequently
+    installed 0.152.1 cask, the packaged helper was present and a complete
+    quarantined cask pair passed the runtime smoke; quarantine remains visible
+    as an advisory. The precise TCC responsible-process mechanism, Gatekeeper
+    inheritance mechanism, and reason the historical local 0.152.0 payload
+    differed from the currently published archive remain unproven; see
+    `docs/ARCHITECTURE.md` “Codex Upgrade Incident Evidence”.
 
 OpenCode server adapter (added 2026-06-23, same environment):
 

@@ -5,10 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A delegation plugin: a **harness** (Claude Code or Codex CLI) spawns an isolated
-`agent-companion` subagent, which owns a private `agent-bridge` MCP server, which runs the work
-on a **companion** runtime (OpenCode, GitHub Copilot CLI, or Codex CLI). The parent agent never
-sees the bridge tools. The matrix is 2 harnesses × 3 companions, and two of the companions ship
-two transports each — parity across that matrix is the product, not an implementation detail.
+`agent-companion` subagent, which uses `agent-bridge` to run work on a **companion** runtime
+(OpenCode, GitHub Copilot CLI, or Codex CLI). Claude scopes the MCP server to the subagent.
+Current Codex forbids role-local MCP authority, so its plugin registers the internal bridge at
+session scope and the child inherits it; main can see the schemas, but direct use is unsupported.
+The matrix is 2 harnesses × 3 companions, and two companions ship two transports each — parity
+across that matrix is the product, not an implementation detail.
 
 Read `README.md` for the user-facing contract and `docs/ARCHITECTURE.md` before any non-trivial
 change. `docs/ARCHITECTURE.md` carries a **Negative Results** section: things that look wrong
@@ -95,7 +97,8 @@ See `probes/README.md`; re-run them when the codex CLI or Claude Code is upgrade
 ```
 harness (claude|codex)
   └─ agent-companion subagent          templates/agent-companion.{md,toml}
-       └─ agent-bridge MCP server      bridge-server/server.mjs   (spawned per invocation)
+       └─ agent-bridge MCP server      bridge-server/server.mjs
+            (agent-local on Claude; inherited plugin MCP on Codex)
             ├─ resolveRouting          → one profile → {companion, model, adapter}
             └─ adapter                 bridge-server/<companion>[-<transport>]-runtime.mjs
                  └─ detached shared runtime, when the transport has one
@@ -107,12 +110,12 @@ scripts. `bridge-server/` is the MCP server plus one file per companion×transpo
 `scripts/` holds the long-lived daemons and the install/onboard/package CLIs. `hooks/` holds
 lifecycle shell hooks for both harnesses.
 
-**The bridge is disposable; the runtimes are not.** The bridge process is spawned inline from
-the subagent's frontmatter and has no activation lifecycle. Concurrent subagents *share one
-bridge process*, and that process is SIGINT'd when the **first** of them finishes. Anything that
-must outlive a subagent therefore lives in a detached runtime with its own socket — shared by
-every bridge on the machine that resolves to the same host home, so the two hosts get one each —
-never in bridge memory. This is the single most load-bearing fact in the repo.
+**The bridge is disposable; the runtimes are not.** Claude owns it through the standalone
+agent's MCP frontmatter; Codex owns it through the plugin/session registration inherited by the
+agent role. Either host may replace the bridge process. Anything that must outlive that process
+therefore lives in a detached runtime with its own socket — shared by every bridge on the
+machine that resolves to the same host home, so the two hosts get one each — never in bridge
+memory. This is the single most load-bearing fact in the repo.
 
 **No silent fallback, anywhere.** An unresolvable send returns an explicit `ok:false` envelope
 (`TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`, `STRENGTH_UNCONFIGURED`, `STRENGTH_AMBIGUOUS`,
@@ -146,7 +149,8 @@ second reader/definition is how these break.
 | `lib/runtime-paths.mjs` | All transient runtime paths — logs, sockets, prompt streams, digests. |
 | `lib/target-registry.mjs` | What a companion can do (capabilities) **and** what it takes to be ready (onboarding). Two concerns, one descriptor, deliberately. |
 | `lib/profile-registry.mjs` | The **only** reader of `profiles.json`. `test/profile-registry-guard.test.mjs` fails on any other reference to `readProfilesRaw` / `PROFILES_FILE`. |
-| `lib/target-diagnostics.mjs` | `probeCommand` is the **only** sanctioned synchronous shell-out from bridge code. `test/exec-timeout-guard.test.mjs` fails on any new unbounded one — an unbounded probe wedges every in-flight job on that bridge. |
+| `lib/command-probe.mjs` | `probeCommand` is the **only** sanctioned synchronous shell-out from bridge code. It stays dependency-free so broker preflight does not initialize durable state. `test/exec-timeout-guard.test.mjs` fails on any duplicate or unbounded one. |
+| `lib/target-diagnostics.mjs` | Target/profile readiness inspection; re-exports the shared `probeCommand` for existing callers. |
 | `lib/shared-runtime-registry.mjs` | Leases + two-phase disposal for the detached shared runtimes (one per host home). A `dispose` that does anything before the destructive act must call `confirmDisposal()` as late as possible and abort when it returns false. |
 | `lib/codex-app-server-contract.json` | The pinned `codex app-server` wire contract. **Generated** — change it only via `scripts/gen-codex-app-server-contract.mjs`; the sibling test re-derives it from the installed codex and fails on schema drift — a version-only bump passes; the fixture's `codexVersion` is provenance, not a gate. Test fakes build every frame through it, so a fixture claiming a field the schema does not declare fails to build. |
 | `lib/codex-app-server-contract.mjs` | Hand-written: the loader, `distillAppServerSchema`, `serializeContract`, and the routing / contract-violation checkers. The generator imports it, so edit here to change a distillation rule or add a check. |
@@ -158,15 +162,15 @@ second reader/definition is how these break.
   re-materializes `~/.claude/agents/agent-companion.md` on *every* session start, unconditionally.
   Edits to the installed copy are silently discarded. (A destination lacking the AUTO-INSTALLED
   sentinel is treated as hand-authored and left alone forever.)
-- **Host parity is a test, not a convention.** The two templates configure the same bridge
-  through different mechanisms (YAML `env:` + `timeout` in ms vs TOML `env = {}` +
-  `tool_timeout_sec` in seconds). Mechanism may diverge; capability may not —
-  `templates/host-parity.test.mjs` enforces it. A knob documented only in a comment counts as
-  *not set*.
+- **Host parity is a test, not a convention.** Claude configures the bridge in the standalone
+  agent frontmatter (YAML `env:` + `timeout` in ms); Codex configures it in
+  `.codex-plugin/plugin.json` (`env` + `tool_timeout_sec` in seconds). Mechanism may diverge;
+  capability may not — `templates/host-parity.test.mjs` enforces it. A knob documented only in
+  a comment counts as *not set*.
 - **MCP timeouts:** the working fields are a **sibling** `timeout:` on the Claude server entry
-  (ms) and `tool_timeout_sec` in the Codex TOML. `env: { MCP_TOOL_TIMEOUT }` reaches the child
-  and is ignored by the host. Never raise `clampWaitSec` past 1500 s without a per-server
-  `timeout`.
+  (ms) and `tool_timeout_sec` in the Codex plugin manifest. `env: { MCP_TOOL_TIMEOUT }` reaches
+  the child and is ignored by the host. Never raise `clampWaitSec` past 1500 s without a
+  per-server timeout.
 - **Tests sandbox `$HOME` by env** — `import '../test/sandbox-home.mjs';` as the **first** import
   sets `AGENT_COMPANION_HOME` and `AGENT_RUNTIME_DIR` to a tmpdir before anything else evaluates
   (ESM evaluates imports in statement order). That matters because `lib/state.mjs` binds

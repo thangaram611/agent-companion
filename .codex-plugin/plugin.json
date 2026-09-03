@@ -1,7 +1,7 @@
 {
   "name": "agent-companion",
   "version": "0.0.1",
-  "description": "Attach an OpenCode, GitHub Copilot, or Codex CLI companion to the Codex CLI harness. Agent Companion spawns a private subagent with a dedicated MCP bridge so token-heavy coding work leaves the parent context clean.",
+  "description": "Attach an OpenCode, GitHub Copilot, or Codex CLI companion to the Codex CLI harness. Agent Companion delegates through a dedicated subagent and MCP bridge so token-heavy coding work leaves the parent context clean.",
   "author": {
     "name": "thangaram611",
     "email": "thangaram611@gmail.com",
@@ -19,11 +19,27 @@
     "acp",
     "codex"
   ],
+  "mcpServers": {
+    "agent-bridge": {
+      "command": "/bin/bash",
+      "args": [
+        "hooks/launch-agent-bridge.sh"
+      ],
+      "cwd": ".",
+      "env": {
+        "AGENT_COMPANION_HOST": "codex",
+        "CODEX_RUNTIME_ADAPTER": "appserver"
+      },
+      "default_tools_approval_mode": "approve",
+      "startup_timeout_sec": 120,
+      "tool_timeout_sec": 1320
+    }
+  },
   "hooks": "./hooks/hooks-codex.json",
   "interface": {
     "displayName": "Agent Companion",
     "shortDescription": "Attach OpenCode, Copilot, or Codex companions to Codex.",
-    "longDescription": "Adds a Codex subagent that delegates implementation, review, and research work to a chosen companion runtime, currently OpenCode, GitHub Copilot CLI, or Codex CLI, through a private MCP bridge, per-host runtime state, and completion drain hooks. The public direction is harness plus companion, with strength-routed companion profiles that map labels such as reviewer, web_researcher, planner, and fast_executor onto the configured companions.",
+    "longDescription": "Adds a Codex subagent that delegates implementation, review, and research work to a chosen companion runtime, currently OpenCode, GitHub Copilot CLI, or Codex CLI, through an internal MCP bridge, per-host runtime state, and completion drain hooks. Codex registers the bridge at plugin scope so the subagent can inherit it; the subagent remains the supported caller. The public direction is harness plus companion, with strength-routed companion profiles that map labels such as reviewer, web_researcher, planner, and fast_executor onto the configured companions.",
     "developerName": "thangaram611",
     "category": "Engineering",
     "capabilities": [

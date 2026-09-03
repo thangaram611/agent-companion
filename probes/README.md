@@ -30,17 +30,28 @@ node probes/smoke/appserver.mjs         # expect 17/17  (~90 s; spawns the share
 node probes/smoke/appserver-control.mjs # expect 18/18  (~35 s; spawns the shared broker)
 ```
 
+After a Codex/Homebrew upgrade, first capture the read-only installation and
+broker comparison with:
+
+```sh
+CODEX_RUNTIME_ADAPTER=appserver node scripts/doctor.mjs --json
+```
+
+Doctor does not start or stop the broker. A selected/running path, version, or
+identity mismatch must be resolved by the bridge's guarded idle restart before
+the app-server smokes are treated as evidence for the new installation.
+
 `orphan.mjs` deliberately leaves one orphaned `codex exec` child alive for a few seconds —
 that is the condition under test. It dies at its next stdout write.
 
 Both app-server probes reap the broker they used with **SIGTERM** on the way out (never SIGKILL, which
 skips the unlink handler and leaves the stale socket every later start has to probe around).
-It skips the reap if anyone else is on that broker — a thread loaded from another session, or a
-client that is connected but has not started one yet. Those are the broker's own two idle gates
-(`_cheapGatesHold`), and the second one matters because `thread/start` is a round trip: a bridge
-inside it holds a connection and owns nothing yet. `probeCodexBrokerHealth` counts its own
-connection, so "somebody else" is `clients - 1`, never `clients`. The bridge-side idle reaper
-cannot do this job for it: `disposeBroker` refuses while any thread is loaded.
+It skips the reap if another client is connected or any loaded thread is active or cannot be
+proved idle. A completed/idle thread may remain loaded and no longer pins the broker. The client
+gate matters because `thread/start` is a round trip: a bridge inside it holds a connection and
+owns nothing yet. `probeCodexBrokerHealth` counts its own connection, so "somebody else" is
+`clients - 1`, never `clients`. The bridge-side reaper and upgrade restart use the same
+active-turn check plus leases and a two-phase disposal claim.
 
 Each bridge logs into the run's temp dir (`AGENT_BRIDGE_LOG_FILE`): the restart-resume check is
 asserted against B's *own* log line (`codex-appserver resume: <job> thread=<id>`, emitted by
@@ -62,7 +73,7 @@ terminal envelope, which does not carry the cancel metadata at all.)
 ## `codex-app-server/` — transport and architecture validation
 
 Everything here targets `codex app-server` (first measured on codex-cli 0.147.0; the wire
-contract was regenerated on 0.150.1, where the delta was purely additive). Re-measured on
+contract is generated from 0.152.1). The transport behavior was last fully re-measured on
 0.150.1 on 2026-08-28 with identical results: all four `smoke/` scripts (12/12, 8/8, 17/17,
 18/18), `unloaded.mjs`, `errs.mjs` (through the prototype broker), and `probe.mjs`'s `approval`
 matrix (workspace-write/on-request wrote with 0 approvals; read-only + one accepted approval
@@ -95,8 +106,8 @@ two things a naive broker gets wrong, and both are closed in the shipped one.
 >
 > - **Broadcast → per-thread subscription.** `SubscriptionTable` in
 >   `scripts/codex-app-server-broker.mjs` routes every notification by threadId through the
->   pinned contract (`lib/codex-app-server-contract.mjs`'s `routeNotification` — 58 of 79
->   notifications carry the id flat on 0.150.1, `thread/started` nests it, 5 are scoped to the
+>   pinned contract (`lib/codex-app-server-contract.mjs`'s `routeNotification` — 60 of 81
+>   notifications carry the id flat on 0.152.1, `thread/started` nests it, 5 are scoped to the
 >   connection that asked for them and are declined at `initialize` / dropped if seen, 15 are
 >   genuinely global).
 >   Clients subscribe explicitly (`broker/subscribe` / `broker/unsubscribe`) or implicitly on
@@ -108,7 +119,9 @@ two things a naive broker gets wrong, and both are closed in the shipped one.
 > - **No idle reaper → two of them.** In the broker: `startIdleReaper` / `_onInactivityTick`
 >   (15 min inactivity, 60 s recheck) refuses to exit while any client is connected, while any
 >   host heartbeat is fresh (`lib/heartbeat.mjs`, the same sweep the Copilot daemon uses — the
->   TTLs are imported, not restated), or while `thread/loaded/list` is non-empty. In the bridge:
+>   TTLs are imported, not restated), or while a loaded thread's
+>   `thread/read {includeTurns:true}` shows an active turn or cannot prove
+>   inactivity. Completed/idle loaded threads do not block. In the bridge:
 >   `reapIdleCodexBroker` in `bridge-server/codex-app-server-runtime.mjs`, driven by the leases
 >   and two-phase disposal claim in `lib/shared-runtime-registry.mjs`, and called on
 >   `server.mjs`'s GC tick. It SIGTERMs only a pid the live broker claims as its own.

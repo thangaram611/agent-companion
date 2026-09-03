@@ -74,6 +74,28 @@ if (args[0] === 'plugin' && args[1] === 'add') {
   process.exit(0);
 }
 
+if (args.join(' ') === 'mcp list --json') {
+  printJson([{
+    name: 'agent-bridge',
+    enabled: true,
+    transport: {
+      type: 'stdio',
+      command: '/bin/bash',
+      args: ['hooks/launch-agent-bridge.sh'],
+      env: {
+        AGENT_COMPANION_HOST: 'codex',
+        CODEX_RUNTIME_ADAPTER: 'appserver',
+      },
+      env_vars: [],
+      cwd: path.join(codexHome, 'plugins', 'cache', 'agent-companion', 'agent-companion', '0.0.1')
+    },
+    startup_timeout_sec: 120,
+    tool_timeout_sec: 1320,
+    auth_status: 'unsupported'
+  }]);
+  process.exit(0);
+}
+
 fail('unexpected fake codex invocation: ' + args.join(' '));
 `);
   chmodSync(fakeCodex, 0o755);
@@ -106,6 +128,7 @@ test('validates Codex release package through an isolated marketplace install', 
       ['plugin', 'add', '--help'],
       ['plugin', 'marketplace', 'add', out, '--json'],
       ['plugin', 'add', 'agent-companion@agent-companion', '--json'],
+      ['mcp', 'list', '--json'],
     ]);
 
     const codexHomes = new Set(calls.map((call) => call.codexHome));

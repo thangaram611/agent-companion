@@ -141,6 +141,12 @@ done
 if [ ! -d "$LOCK_DIR" ] || [ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" != "$$" ]; then
   # Couldn't acquire in time — another SessionStart holds it; it'll finish
   # the install on our behalf. Exit cleanly so the hook banner stays green.
+  # The MCP launcher opts into a stricter contract: exit 75 (EX_TEMPFAIL) so
+  # it can retry without mistaking an in-progress install for readiness.
+  if [ "${AGENT_COMPANION_REQUIRE_DEPS:-0}" = "1" ]; then
+    echo "agent-companion: dependency install is still held by another process" >&2
+    exit 75
+  fi
   exit 0
 fi
 

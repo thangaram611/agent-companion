@@ -27,17 +27,22 @@ import {
   connectCodexBroker,
   ensureCodexBroker,
   probeCodexBrokerHealth,
+  codexBrokerStaleReasons,
   codexBrokerSnapshot,
   syncCodexBrokerLeases,
+  restartCodexBrokerIfIdle,
   reapIdleCodexBroker,
   codexBrokerIdleTtlMs,
   startCodexThread,
+  startCodexThreadWithBrokerRecovery,
+  codexBrokerErrorNeedsRespawn,
   resumeCodexThread,
   readCodexThread,
   startCodexTurn,
   steerCodexTurn,
   interruptCodexTurn,
   listLoadedCodexThreads,
+  inspectLoadedCodexThreadActivity,
   resolveCodexTurnId,
   resolveSteerConfirmMs,
   openCodexTurnWatcher,
@@ -76,6 +81,19 @@ test.after(() => {
 
 const TID = 'T1';
 const BROKER_PID = FAKE_BROKER_PID;
+const FAKE_INSTALL = {
+  ready: true,
+  blocker: null,
+  selected: {
+    path: '/fake/codex',
+    realPath: '/fake/codex',
+    version: '0.147.0',
+    helperPath: '/fake/codex-code-mode-host',
+    source: 'installed',
+    identity: 'fake-codex-0.147.0',
+    quarantined: false,
+  },
+};
 
 let regDir;
 beforeEach(() => {
@@ -85,6 +103,10 @@ beforeEach(() => {
   // would create) and so the registry's path+pid identity has a stable path.
   process.env.CODEX_BROKER_SOCKET_PATH = join(regDir, 'b.sock');
   _resetForTest();
+  _setForTest({
+    inspectCodexInstall: () => FAKE_INSTALL,
+    pathExists: () => true,
+  });
 });
 afterEach(() => {
   _resetForTest();
@@ -552,7 +574,7 @@ test('there is no `error` ThreadItem variant to record', () => {
   // NOTIFICATION (fatal) or as a `failed` status on the item that raised one.
   assert.throws(
     () => threadItem('error', { id: 'e1', message: 'tool blew up' }),
-    /is not one of codex-cli .* 18 ThreadItem variants/,
+    /is not one of codex-cli .* 19 ThreadItem variants/,
   );
   const acc = createCodexTurnAccumulator(TID);
   acc.push(note('item/completed', {
@@ -1072,6 +1094,31 @@ test('thread/read salvages the final answer and says it has no tool record', asy
   assert.deepEqual(read.summary.toolCalls, []);
 });
 
+test('loaded-thread activity fails safe when an idle thread has malformed or unknown turn state', async () => {
+  const threads = {
+    'T-missing-status': { id: 'T-missing-status', status: { type: 'idle' }, turns: [{ id: 'TURN-MISSING' }] },
+    'T-malformed-turns': { id: 'T-malformed-turns', status: { type: 'idle' }, turns: { bad: true } },
+    'T-terminal': { id: 'T-terminal', status: { type: 'idle' }, turns: [{ id: 'TURN-DONE', status: 'completed' }] },
+    'T-empty': { id: 'T-empty', status: { type: 'idle' }, turns: [] },
+  };
+  const { conn } = await connectFake({
+    handlers: {
+      'thread/loaded/list': () => ({ data: Object.keys(threads) }),
+      'thread/read': (p) => ({ thread: threads[p.threadId] }),
+    },
+  });
+
+  const activity = await inspectLoadedCodexThreadActivity({ conn });
+  conn.close();
+  assert.deepEqual(
+    activity.active.map((state) => state.threadId),
+    ['T-missing-status', 'T-malformed-turns'],
+    'only empty or positively terminal idle state permits disposal',
+  );
+  assert.equal(activity.states.find((state) => state.threadId === 'T-terminal').active, false);
+  assert.equal(activity.states.find((state) => state.threadId === 'T-empty').active, false);
+});
+
 // --- the turn watcher --------------------------------------------------------
 
 test('the watcher subscribes before it returns, then settles on turn/completed', async () => {
@@ -1175,6 +1222,223 @@ test('the level check keeps watching an active thread', async () => {
 
 // --- ensure / health ---------------------------------------------------------
 
+test('broker staleness separates installed selection from the running image', () => {
+  const current = FAKE_INSTALL;
+  assert.deepEqual(codexBrokerStaleReasons({
+    alive: true,
+    codexVersion: '0.146.0',
+    codexPath: '/old/codex',
+    codexRealPath: '/old/codex',
+    codexIdentity: 'old-image',
+  }, current, { pathExists: () => false }), [
+    'running version 0.146.0 differs from selected version 0.147.0',
+    'running executable /old/codex differs from selected executable /fake/codex',
+    'the selected Codex executable was replaced in place',
+    'running executable no longer exists: /old/codex',
+  ]);
+  assert.deepEqual(codexBrokerStaleReasons({
+    alive: true,
+    codexVersion: '0.147.0',
+    codexPath: '/fake/codex',
+    codexRealPath: '/fake/codex',
+    codexIdentity: 'fake-codex-0.147.0',
+  }, current, { pathExists: () => true }), []);
+  assert.deepEqual(codexBrokerStaleReasons({ alive: true, codexVersion: '0.147.0' }, current), [
+    'running broker predates executable-identity reporting',
+  ]);
+});
+
+test('a superseded idle broker is stopped and replaced before the send adopts it', async () => {
+  let staleUp = true;
+  let replacementUp = false;
+  let spawns = 0;
+  const kills = [];
+  const staleSocket = () => fakeBrokerSocket({
+    brokerPid: process.pid,
+    codexVersion: '0.146.0',
+    codexPath: '/old/codex',
+    codexRealPath: '/old/codex',
+    codexIdentity: 'old-image',
+    handlers: { 'thread/loaded/list': () => ({ data: ['T-finished'] }) },
+    statuses: { 'T-finished': 'idle' },
+    turns: { 'T-finished': [{ id: 'TURN-DONE', status: 'completed' }] },
+  });
+  _setForTest({
+    connect: async () => {
+      if (staleUp) return staleSocket();
+      if (replacementUp) return fakeBrokerSocket({ brokerPid: process.pid });
+      const err = new Error('connect ENOENT');
+      err.code = 'ENOENT';
+      throw err;
+    },
+    kill: (pid, signal) => { kills.push({ pid, signal }); staleUp = false; },
+    spawnBroker: () => {
+      spawns += 1;
+      replacementUp = true;
+      return new EventEmitter();
+    },
+  });
+
+  const broker = await ensureCodexBroker({ env: {} });
+  assert.equal(broker.reused, false);
+  assert.equal(spawns, 1);
+  assert.deepEqual(kills, [{ pid: process.pid, signal: 'SIGTERM' }]);
+});
+
+test('a superseded broker with an active turn is never stopped', async () => {
+  let spawns = 0;
+  const kills = [];
+  _setForTest({
+    connect: async () => fakeBrokerSocket({
+      brokerPid: process.pid,
+      codexVersion: '0.146.0',
+      codexPath: '/old/codex',
+      codexRealPath: '/old/codex',
+      codexIdentity: 'old-image',
+      handlers: { 'thread/loaded/list': () => ({ data: ['T-running'] }) },
+      statuses: { 'T-running': 'active' },
+      turns: { 'T-running': [{ id: 'TURN-LIVE', status: 'inProgress' }] },
+    }),
+    kill: (pid, signal) => kills.push({ pid, signal }),
+    spawnBroker: () => { spawns += 1; return new EventEmitter(); },
+  });
+
+  const broker = await ensureCodexBroker({ env: {} });
+  assert.equal(broker.reused, true, 'active work keeps the old broker until a later send can safely replace it');
+  assert.equal(spawns, 0);
+  assert.deepEqual(kills, []);
+});
+
+test('an incomplete selected installation fails before any broker is adopted or spawned', async () => {
+  let connects = 0;
+  let spawns = 0;
+  _setForTest({
+    inspectCodexInstall: () => ({
+      ready: false,
+      selected: null,
+      blocker: { code: 'code_mode_host_missing', message: 'the selected Codex package has no codex-code-mode-host' },
+    }),
+    connect: async () => { connects += 1; return fakeBrokerSocket(); },
+    spawnBroker: () => { spawns += 1; return new EventEmitter(); },
+  });
+  await assert.rejects(
+    () => ensureCodexBroker({ env: {} }),
+    (err) => err.code === 'CODEX_APP_SERVER_INSTALL_UNAVAILABLE' && /codex-code-mode-host/.test(err.message),
+  );
+  assert.equal(connects, 0);
+  assert.equal(spawns, 0);
+});
+
+test('configuration EPERM and dead-broker signatures are the only bounded thread-start recovery triggers', () => {
+  const vanishedSocket = new Error('connect ENOENT /tmp/codex-app-server.sock');
+  vanishedSocket.code = 'ENOENT';
+  assert.equal(codexBrokerErrorNeedsRespawn(new Error('failed to load configuration: Operation not permitted (os error 1)')), true);
+  assert.equal(codexBrokerErrorNeedsRespawn(new Error('codex app-server exited (code=1, signal=null)')), true);
+  assert.equal(codexBrokerErrorNeedsRespawn(new Error('connection closed by peer')), true);
+  assert.equal(codexBrokerErrorNeedsRespawn(vanishedSocket), true);
+  assert.equal(codexBrokerErrorNeedsRespawn(new Error('/opt/homebrew/bin/codex-code-mode-host: No such file or directory')), false);
+  assert.equal(codexBrokerErrorNeedsRespawn(new Error('model rejected the prompt')), false);
+});
+
+test('thread/start configuration EPERM retires an idle broker and retries exactly once', async () => {
+  let up = true;
+  let threadStarts = 0;
+  let spawns = 0;
+  const kills = [];
+  const makeSocket = () => fakeBrokerSocket({
+    brokerPid: process.pid,
+    handlers: {
+      'thread/start': () => {
+        threadStarts += 1;
+        if (threadStarts === 1) {
+          return { __error: { code: -32603, message: 'failed to load configuration: Operation not permitted (os error 1)' } };
+        }
+        return { thread: { id: 'T-after-restart', path: '/fake/rollout.jsonl', turns: [] } };
+      },
+    },
+  });
+  _setForTest({
+    connect: async () => {
+      if (up) return makeSocket();
+      const err = new Error('connect ENOENT');
+      err.code = 'ENOENT';
+      throw err;
+    },
+    kill: (pid, signal) => { kills.push({ pid, signal }); up = false; },
+    spawnBroker: () => {
+      spawns += 1;
+      up = true;
+      return new EventEmitter();
+    },
+  });
+
+  const opened = await startCodexThreadWithBrokerRecovery({ cwd: '/workspace', env: {} });
+  try {
+    assert.equal(opened.threadId, 'T-after-restart');
+    assert.equal(opened.brokerRestarted, true);
+    assert.equal(threadStarts, 2);
+    assert.equal(spawns, 1);
+    assert.deepEqual(kills, [{ pid: process.pid, signal: 'SIGTERM' }]);
+  } finally {
+    opened.conn.close();
+  }
+});
+
+test('a broker lost between ensure and connect is retired and connected exactly once more', async () => {
+  const absent = new Error('connect ENOENT');
+  absent.code = 'ENOENT';
+  let connects = 0;
+  let spawns = 0;
+  let failingSocket = null;
+  const intermediateSockets = [];
+  const replacementSocket = () => fakeBrokerSocket({
+    brokerPid: 5150,
+    handlers: {
+      'thread/start': () => ({ thread: { id: 'T-after-connect-race', path: '/fake/recovered.jsonl', turns: [] } }),
+    },
+  });
+
+  _setForTest({
+    connect: async () => {
+      connects += 1;
+      if (connects === 1) {
+        const sock = fakeBrokerSocket({ brokerPid: LIVE_BROKER_PID });
+        intermediateSockets.push(sock);
+        return sock;
+      }
+      if (connects === 2) {
+        failingSocket = fakeBrokerSocket({
+          brokerPid: LIVE_BROKER_PID,
+          handlers: {
+            initialize: () => ({ __error: { code: -32603, message: 'connection closed by peer' } }),
+          },
+        });
+        return failingSocket;
+      }
+      if (connects === 3 || connects === 4) throw absent;
+      const sock = replacementSocket();
+      if (connects === 5) intermediateSockets.push(sock);
+      return sock;
+    },
+    spawnBroker: () => {
+      spawns += 1;
+      return new EventEmitter();
+    },
+  });
+
+  const opened = await startCodexThreadWithBrokerRecovery({ cwd: '/workspace', env: {} });
+  try {
+    assert.equal(opened.threadId, 'T-after-connect-race');
+    assert.equal(opened.brokerRestarted, true);
+    assert.equal(spawns, 1, 'the bounded recovery spawns one replacement');
+    assert.equal(connects, 6, 'one failed connection is followed by exactly one ensure/connect attempt');
+    assert.equal(failingSocket.destroyed, true, 'the failed initialize connection must not leak');
+    assert.ok(intermediateSockets.every((sock) => sock.destroyed), 'health-probe connections must be closed too');
+  } finally {
+    opened.conn.close();
+  }
+});
+
 test('a live broker is reused and never respawned', async () => {
   let spawns = 0;
   _setForTest({ connect: async () => fakeBrokerSocket(), spawnBroker: () => { spawns += 1; return new EventEmitter(); } });
@@ -1187,7 +1451,8 @@ test('a live broker is reused and never respawned', async () => {
   // Adoption records the broker so the lease machinery has something to hold.
   assert.equal(codexBrokerSnapshot().pid, 4242);
   // And the version the broker reported is now the runtime-info answer.
-  assert.equal(codexAppServerRuntimeInfo({}).installed_version, '0.147.0');
+  assert.equal(codexAppServerRuntimeInfo({}).running_version, '0.147.0');
+  assert.equal(codexAppServerRuntimeInfo({}).selected_version, '0.147.0');
   // And so is the broker's contract verdict, under the runtime's own key.
   assert.equal(codexAppServerRuntimeInfo({}).contract_status, 'match');
 });
@@ -1534,6 +1799,135 @@ test('the idle reaper stops a broker with nothing loaded and nobody holding it',
   assert.deepEqual(kills, [{ pid: LIVE_BROKER_PID, signal: 'SIGTERM' }]);
 });
 
+test('an overlapping TTL reap cannot overwrite an on-demand restart disposal verdict', async () => {
+  const refused = new Error('connect ECONNREFUSED');
+  refused.code = 'ECONNREFUSED';
+  let connects = 0;
+  let overlappingReap = null;
+  const kills = [];
+
+  seedRegistry({
+    socketPath: brokerSocketPath(),
+    pid: LIVE_BROKER_PID,
+    lastUsedAt: Date.now() - 60 * 60_000,
+  });
+  _setForTest({
+    connect: async () => {
+      connects += 1;
+      if (connects === 1) {
+        return fakeBrokerSocket({
+          brokerPid: LIVE_BROKER_PID,
+          handlers: { 'thread/loaded/list': () => ({ data: [] }) },
+        });
+      }
+      throw refused;
+    },
+    kill: (pid, signal) => {
+      kills.push({ pid, signal });
+      // Queue the TTL path before disposeBroker's resolved promise resumes the
+      // restart. The old shared `_lastDisposal` side channel was reset here,
+      // turning this successful stop into a reported refusal.
+      queueMicrotask(() => {
+        overlappingReap = reapIdleCodexBroker({ idleMs: 30 * 60_000 });
+      });
+    },
+  });
+
+  const restarted = await restartCodexBrokerIfIdle({
+    reason: 'test executable replacement',
+    health: {
+      alive: true,
+      ready: true,
+      socketPath: brokerSocketPath(),
+      brokerPid: LIVE_BROKER_PID,
+      appServerPid: 4243,
+      clients: 1,
+    },
+  });
+
+  assert.equal(restarted, true, 'the restart must retain its own successful disposal result');
+  assert.ok(overlappingReap, 'the TTL path overlapped before the restart consumed its result');
+  assert.equal(await overlappingReap, false, 'the already-claimed entry is not independently reaped');
+  assert.deepEqual(kills, [{ pid: LIVE_BROKER_PID, signal: 'SIGTERM' }]);
+  assert.equal(readReg(), undefined);
+});
+
+test('stale-broker restart accepts a healthy replacement at the same socket as proof the old pid is gone', async () => {
+  const replacementPid = 5150;
+  let connects = 0;
+  const kills = [];
+  seedRegistry({ socketPath: brokerSocketPath(), pid: LIVE_BROKER_PID, lastUsedAt: Date.now() });
+  _setForTest({
+    connect: async () => {
+      connects += 1;
+      if (connects === 1) {
+        return fakeBrokerSocket({
+          brokerPid: LIVE_BROKER_PID,
+          handlers: { 'thread/loaded/list': () => ({ data: [] }) },
+        });
+      }
+      return fakeBrokerSocket({ brokerPid: replacementPid });
+    },
+    kill: (pid, signal) => kills.push({ pid, signal }),
+    delay: async () => { throw new Error('a healthy replacement must be recognized without waiting'); },
+  });
+
+  assert.equal(await restartCodexBrokerIfIdle({
+    reason: 'test replacement race',
+    health: {
+      alive: true,
+      ready: true,
+      socketPath: brokerSocketPath(),
+      brokerPid: LIVE_BROKER_PID,
+      appServerPid: 4243,
+      clients: 1,
+    },
+  }), true);
+  assert.equal(connects, 2, 'one disposal connection and one replacement health probe are sufficient');
+  assert.deepEqual(kills, [{ pid: LIVE_BROKER_PID, signal: 'SIGTERM' }]);
+});
+
+test('stale-broker restart times out honestly when post-signal probes are indeterminate', async () => {
+  const indeterminate = new Error('permission denied while probing broker socket');
+  indeterminate.code = 'EACCES';
+  let connects = 0;
+  let clock = 0;
+  seedRegistry({ socketPath: brokerSocketPath(), pid: LIVE_BROKER_PID, lastUsedAt: Date.now() });
+  _setForTest({
+    connect: async () => {
+      connects += 1;
+      if (connects === 1) {
+        return fakeBrokerSocket({
+          brokerPid: LIVE_BROKER_PID,
+          handlers: { 'thread/loaded/list': () => ({ data: [] }) },
+        });
+      }
+      throw indeterminate;
+    },
+    kill: () => {},
+    now: () => clock,
+    delay: async () => { clock += 5_000; },
+  });
+
+  await assert.rejects(
+    () => restartCodexBrokerIfIdle({
+      reason: 'test indeterminate stop',
+      health: {
+        alive: true,
+        ready: true,
+        socketPath: brokerSocketPath(),
+        brokerPid: LIVE_BROKER_PID,
+        appServerPid: 4243,
+        clients: 1,
+      },
+    }),
+    (err) => err.code === 'CODEX_BROKER_RESTART_DEFERRED'
+      && err.detail === 'codex_broker_stop_timeout'
+      && /did not stop within 5000ms/.test(err.message),
+  );
+  assert.equal(connects, 3, 'EACCES is re-probed through the budget, never accepted as gone');
+});
+
 test('the reaper really does SIGTERM the broker process', async (t) => {
   // The only test that lets the real kill through — and it supplies its own
   // victim, so a recycled pid can never make this signal a bystander.
@@ -1616,7 +2010,7 @@ test('a broker adopted mid-dispose is never signalled: the disposer re-confirms 
   assert.equal(readReg().disposing, undefined, 'the withdrawn claim must not block the next adopter');
 });
 
-test('the idle reaper refuses a broker that still has a thread loaded', async () => {
+test('the idle reaper refuses a broker that still has an active turn', async () => {
   // The case no lease can cover: the bridge that started the turn DIED, so its
   // lease is long gone — and the turn it started is exactly the work this whole
   // transport exists to protect. `thread/loaded/list` is the authoritative
@@ -1630,12 +2024,29 @@ test('the idle reaper refuses a broker that still has a thread loaded', async ()
     connect: async () => fakeBrokerSocket({
       brokerPid: LIVE_BROKER_PID,
       handlers: { 'thread/loaded/list': () => ({ data: ['T-live'] }) },
+      statuses: { 'T-live': 'active' },
+      turns: { 'T-live': [{ id: 'TURN-LIVE', status: 'inProgress' }] },
     }),
   });
   const kills = captureKills();
   seedRegistry({ socketPath: brokerSocketPath(), pid: LIVE_BROKER_PID, lastUsedAt: Date.now() - 60 * 60_000 });
   assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), false);
-  assert.deepEqual(kills, [], 'a broker holding a thread must not be signalled');
+  assert.deepEqual(kills, [], 'a broker holding an active turn must not be signalled');
+});
+
+test('the idle reaper may stop a broker whose loaded threads are all completed', async () => {
+  _setForTest({
+    connect: async () => fakeBrokerSocket({
+      brokerPid: LIVE_BROKER_PID,
+      handlers: { 'thread/loaded/list': () => ({ data: ['T-done'] }) },
+      statuses: { 'T-done': 'idle' },
+      turns: { 'T-done': [{ id: 'TURN-DONE', status: 'completed' }] },
+    }),
+  });
+  const kills = captureKills();
+  seedRegistry({ socketPath: brokerSocketPath(), pid: LIVE_BROKER_PID, lastUsedAt: Date.now() - 60 * 60_000 });
+  assert.equal(await reapIdleCodexBroker({ idleMs: 30 * 60_000 }), true);
+  assert.deepEqual(kills, [{ pid: LIVE_BROKER_PID, signal: 'SIGTERM' }]);
 });
 
 test('the idle reaper refuses when it could not interrogate the broker at all', async () => {
@@ -1754,13 +2165,21 @@ test('end to end: a turn streams through the real broker to a terminal summary',
   process.env.AGENT_HEARTBEAT_DIR = join(dir, 'hb');
   mkdirSync(process.env.AGENT_HEARTBEAT_DIR, { recursive: true });
 
+  const codexPath = fakeCodexBin(dir);
+  // The real broker now validates the app-server installation as a package
+  // pair before spawning it, so the E2E fixture must provide the helper its
+  // fake Codex parent would resolve beside itself.
+  fakeCodexBin(dir, 'codex-code-mode-host');
   const env = {
     ...process.env,
-    CODEX_BIN: fakeCodexBin(dir),
+    CODEX_BIN: codexPath,
     CODEX_FAKE_TRACE: tracePath,
     CODEX_BROKER_LOG_LEVEL: 'ERROR',
   };
 
+  // Unlike the socket-level tests, this E2E must compare the real broker's
+  // launch metadata with the installation it just materialised above.
+  _resetForTest();
   const broker = await ensureCodexBroker({ env });
   t.after(() => {
     try { process.kill(broker.pid, 'SIGKILL'); } catch { /* already gone */ }

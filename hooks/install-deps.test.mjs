@@ -231,6 +231,26 @@ test('a fresh pid-less lock is respected, not stolen', async () => {
   }
 });
 
+test('strict callers receive EX_TEMPFAIL while another installer owns the lock', () => {
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules\n' });
+  try {
+    mkdirSync(ctx.lock, { recursive: true });
+    writeFileSync(join(ctx.lock, 'pid'), String(process.pid));
+
+    const hook = runSync(ctx, { AGENT_COMPANION_LOCK_WAIT_SEC: '1' });
+    assert.equal(hook.code, 0, 'normal SessionStart callers keep the quiet contention contract');
+
+    const launcher = runSync(ctx, {
+      AGENT_COMPANION_LOCK_WAIT_SEC: '1',
+      AGENT_COMPANION_REQUIRE_DEPS: '1',
+    });
+    assert.equal(launcher.code, 75);
+    assert.match(launcher.stderr, /dependency install is still held/);
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
 test('a malformed lock-wait override is ignored without erroring', () => {
   const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules\n' });
   try {

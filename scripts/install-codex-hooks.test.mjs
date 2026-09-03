@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync,
-  mkdirSync,
+  mkdirSync, statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
@@ -193,5 +193,55 @@ test('uninstall removes only managed entries, preserves user entries', () => {
     assert.equal(cfg.hooks.UserPromptSubmit, undefined,
       'event keys with no remaining entries are removed');
     assert.equal(cfg.hooks.PostToolUse, undefined);
+  });
+});
+
+test('uninstall is a byte-for-byte no-op when no managed entries exist', () => {
+  withHome((home) => {
+    const f = join(home, '.codex', 'hooks.json');
+    mkdirSync(dirname(f), { recursive: true });
+    const original = JSON.stringify({
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
+      },
+    }) + '\n';
+    writeFileSync(f, original);
+    const before = statSync(f).mtimeMs;
+
+    const result = runScript(home, ['--uninstall']);
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /no agent-companion hooks present/);
+    assert.equal(readFileSync(f, 'utf8'), original);
+    assert.equal(statSync(f).mtimeMs, before);
+    assert.deepEqual(
+      readdirSync(join(home, '.codex')).filter((name) => /hooks\.json\.bak\./.test(name)),
+      [],
+      'a no-op uninstall must not create a backup',
+    );
+  });
+});
+
+test('CODEX_HOME selects the hooks file for migration cleanup', () => {
+  withHome((home) => {
+    const codexHome = join(home, 'custom codex home');
+    const f = join(codexHome, 'hooks.json');
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, JSON.stringify({
+      hooks: {
+        SessionStart: [
+          { _managed_by: 'agent-companion', hooks: [] },
+          { hooks: [{ type: 'command', command: 'echo user' }] },
+        ],
+      },
+    }));
+
+    const result = runScript(home, ['--uninstall'], { CODEX_HOME: codexHome });
+
+    assert.equal(result.code, 0, result.stderr);
+    const cleaned = JSON.parse(readFileSync(f, 'utf8'));
+    assert.equal(cleaned.hooks.SessionStart.length, 1);
+    assert.equal(cleaned.hooks.SessionStart[0].hooks[0].command, 'echo user');
+    assert.equal(existsSync(join(home, '.codex', 'hooks.json')), false);
   });
 });

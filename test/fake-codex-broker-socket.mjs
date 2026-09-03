@@ -55,6 +55,13 @@ export function fakeBrokerSocket({
   turns = {},
   brokerPid = FAKE_BROKER_PID,
   threadId = 'T1',
+  codexVersion = '0.147.0',
+  codexPath = '/fake/codex',
+  codexRealPath = '/fake/codex',
+  codexHelperPath = '/fake/codex-code-mode-host',
+  codexSource = 'installed',
+  codexIdentity = 'fake-codex-0.147.0',
+  codexQuarantined = false,
 } = {}) {
   const sock = new EventEmitter();
   sock.frames = [];  // everything the adapter wrote
@@ -85,11 +92,33 @@ export function fakeBrokerSocket({
       brokerPid,
       appServerPid: FAKE_APP_SERVER_PID,
       appServerInitialized: true,
-      codexVersion: '0.147.0',
+      codexVersion,
       codexVersionProbed: true,
       contractStatus: 'match',
+      codexPath,
+      codexRealPath,
+      codexHelperPath,
+      codexSource,
+      codexIdentity,
+      codexQuarantined,
     }),
-    'broker/status': () => ({ ok: true, protocol: 1, brokerPid, appServerPid: FAKE_APP_SERVER_PID, uptimeMs: 1, clients: 1, subscriptions: 0 }),
+    'broker/status': () => ({
+      ok: true,
+      protocol: 1,
+      brokerPid,
+      appServerPid: FAKE_APP_SERVER_PID,
+      uptimeMs: 1,
+      clients: 1,
+      subscriptions: 0,
+      codexVersion,
+      contractStatus: 'match',
+      codexPath,
+      codexRealPath,
+      codexHelperPath,
+      codexSource,
+      codexIdentity,
+      codexQuarantined,
+    }),
     'broker/subscribe': (p) => ({ ok: true, threadId: p.threadId, flushed: 0 }),
     // No `broker/unsubscribe` default: the adapter has no wrapper for it and no
     // bridge puts it on the wire, so a default here would answer a call this
@@ -101,7 +130,13 @@ export function fakeBrokerSocket({
     }),
     // `turns` hangs off the THREAD, not off the response — the shape the real
     // ThreadReadResponse declares (`{thread: {…, turns: […]}}`).
-    'thread/read': (p) => ({ thread: { id: p.threadId, turns: turns[p.threadId] || [] } }),
+    'thread/read': (p) => ({
+      thread: {
+        id: p.threadId,
+        status: { type: statuses[p.threadId] || 'idle' },
+        turns: turns[p.threadId] || [],
+      },
+    }),
     'thread/loaded/list': () => ({ data: [] }),
     'turn/start': () => ({ turn: { id: 'TURN1' } }),
     // `TurnSteerResponse` is `{turnId}` — measured from the schema, and NOT the

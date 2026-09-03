@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.150.1",
+  "codexVersion": "0.152.1",
   "clientRequests": [
     {
       "method": "account/login/cancel",
@@ -490,6 +490,13 @@
       ]
     },
     {
+      "method": "thread/items/list",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
       "method": "thread/list",
       "paramsRequired": true,
       "required": []
@@ -529,6 +536,14 @@
       ]
     },
     {
+      "method": "thread/revert",
+      "paramsRequired": true,
+      "required": [
+        "beforeTurnId",
+        "threadId"
+      ]
+    },
+    {
       "method": "thread/rollback",
       "paramsRequired": true,
       "required": [
@@ -556,6 +571,13 @@
       "method": "thread/start",
       "paramsRequired": true,
       "required": []
+    },
+    {
+      "method": "thread/turns/list",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
     },
     {
       "method": "thread/unarchive",
@@ -1067,6 +1089,30 @@
         "threadId": "string",
         "turnId": "string",
         "verifications": "enum:trustedAccessForCyber[]"
+      }
+    },
+    {
+      "method": "modelProvider/authRecoveryCompleted",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "message": "string",
+        "provider": "string",
+        "threadId": "string",
+        "turnId": "string"
+      }
+    },
+    {
+      "method": "modelProvider/authRecoveryStarted",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "message": "string",
+        "provider": "string",
+        "threadId": "string",
+        "turnId": "string"
       }
     },
     {
@@ -1628,6 +1674,13 @@
       "status": "enum:inProgress|completed|failed|declined",
       "type": "enum:fileChange"
     },
+    "functionCallOutput": {
+      "id": "string",
+      "name": "string",
+      "namespace": "string?",
+      "output": "any",
+      "type": "enum:functionCallOutput"
+    },
     "hookPrompt": {
       "fragments": "HookPromptFragment[]",
       "id": "string",
@@ -1884,6 +1937,7 @@
       "ephemeral": "boolean",
       "forkedFromId": "string?",
       "gitInfo": "GitInfo?",
+      "historyMode": "enum:legacy|paginated?",
       "id": "string",
       "modelProvider": "string",
       "name": "string?",
@@ -2005,7 +2059,8 @@
     "TurnError": {
       "additionalDetails": "string?",
       "codexErrorInfo": "CodexErrorInfo?",
-      "message": "string"
+      "message": "string",
+      "misalignment": "MisalignmentErrorDetails?"
     },
     "TurnPlanStep": {
       "status": "enum:pending|inProgress|completed",

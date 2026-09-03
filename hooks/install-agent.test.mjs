@@ -1,11 +1,8 @@
 // install-agent.sh / install-agent-codex.sh integration tests via shell-out.
 //
-// Both scripts used to carry their own hand-copy of the node resolver in
-// hooks/node-tools.sh, under a "keep these two blocks in sync" comment. They did
-// not stay in sync: both copies dropped the AGENT_COMPANION_NODE branch, so the
-// documented override — the one escape hatch a user has when auto-detection
-// picks the wrong Node for the MCP server spawn — silently did nothing in the
-// two places that actually bake a node path into a config file.
+// The Claude installer resolves and bakes Node for its agent-local MCP entry.
+// The Codex installer deliberately does not: current Codex strips role-local
+// MCP config and inherits the bridge from the plugin manifest.
 //
 // These tests pin the override, the drift (there must be no second copy), and
 // the no-op behaviour the header comments now claim.
@@ -13,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, copyFileSync, statSync, rmSync, chmodSync, realpathSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, copyFileSync, statSync, rmSync, chmodSync, realpathSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,8 +31,6 @@ const VARIANTS = [
     name: 'codex',
     script: join(__dirname, 'install-agent-codex.sh'),
     dest: ['.codex', 'agents', 'agent-companion.toml'],
-    // TOML: `command = "<path>"`
-    commandOf: (src) => src.match(/^[ \t]*command[ \t]*=[ \t]*"([^"]+)"[ \t]*$/m)?.[1],
     sentinel: 'hooks/install-agent-codex.sh',
   },
 ];
@@ -69,31 +64,33 @@ function copyOfNode(dir) {
 }
 
 for (const variant of VARIANTS) {
-  test(`${variant.name}: AGENT_COMPANION_NODE selects the node baked into the MCP config`, () => {
-    const home = makeHome();
-    try {
-      const override = copyOfNode(home);
-      run(variant, home, { AGENT_COMPANION_NODE: override });
-      const written = variant.commandOf(readFileSync(destPath(variant, home), 'utf8'));
-      assert.equal(written, override, 'the documented AGENT_COMPANION_NODE override must be honored');
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
+  if (variant.commandOf) {
+    test(`${variant.name}: AGENT_COMPANION_NODE selects the node baked into the MCP config`, () => {
+      const home = makeHome();
+      try {
+        const override = copyOfNode(home);
+        run(variant, home, { AGENT_COMPANION_NODE: override });
+        const written = variant.commandOf(readFileSync(destPath(variant, home), 'utf8'));
+        assert.equal(written, override, 'the documented AGENT_COMPANION_NODE override must be honored');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
 
-  test(`${variant.name}: an unusable AGENT_COMPANION_NODE falls through to detection`, () => {
-    const home = makeHome();
-    try {
-      run(variant, home, { AGENT_COMPANION_NODE: '/nonexistent/node' });
-      const written = variant.commandOf(readFileSync(destPath(variant, home), 'utf8'));
-      // Must not be left as the bogus override, and must not be a hard failure:
-      // a bad override degrades to auto-detection, it does not break the install.
-      assert.notEqual(written, '/nonexistent/node');
-      assert.ok(written && written !== 'node', `expected a resolved node path, got ${written}`);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
+    test(`${variant.name}: an unusable AGENT_COMPANION_NODE falls through to detection`, () => {
+      const home = makeHome();
+      try {
+        run(variant, home, { AGENT_COMPANION_NODE: '/nonexistent/node' });
+        const written = variant.commandOf(readFileSync(destPath(variant, home), 'utf8'));
+        // Must not be left as the bogus override, and must not be a hard failure:
+        // a bad override degrades to auto-detection, it does not break the install.
+        assert.notEqual(written, '/nonexistent/node');
+        assert.ok(written && written !== 'node', `expected a resolved node path, got ${written}`);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  }
 
   test(`${variant.name}: a no-op rerun leaves the destination's mtime untouched`, () => {
     const home = makeHome();
@@ -159,8 +156,8 @@ for (const variant of VARIANTS) {
   });
 }
 
-test('neither install-agent script re-implements the shared node resolver', () => {
-  for (const variant of VARIANTS) {
+test('only the Claude agent installer resolves Node for its agent-local MCP', () => {
+  for (const variant of VARIANTS.filter((entry) => entry.commandOf)) {
     const src = readFileSync(variant.script, 'utf8');
     assert.ok(
       src.includes('node-tools.sh'),
@@ -176,6 +173,24 @@ test('neither install-agent script re-implements the shared node resolver', () =
       false,
       `${variant.name} still carries a copy of the nvm resolution chain`,
     );
+  }
+  const codex = VARIANTS.find((entry) => entry.name === 'codex');
+  const codexSrc = readFileSync(codex.script, 'utf8');
+  assert.equal(codexSrc.includes('node-tools.sh'), false);
+  assert.equal(codexSrc.includes('AGENT_COMPANION_NODE'), false);
+});
+
+test('codex: CODEX_HOME selects the materialized agent directory', () => {
+  const home = makeHome();
+  try {
+    const codex = VARIANTS.find((entry) => entry.name === 'codex');
+    const codexHome = join(home, 'custom codex home');
+    run(codex, home, { CODEX_HOME: codexHome });
+    const installed = join(codexHome, 'agents', 'agent-companion.toml');
+    assert.ok(readFileSync(installed, 'utf8').includes(codex.sentinel));
+    assert.equal(existsSync(join(home, '.codex', 'agents', 'agent-companion.toml')), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

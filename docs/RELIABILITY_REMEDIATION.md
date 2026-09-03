@@ -10,6 +10,16 @@ schema). Five of revision 1's structural claims did not survive.
 Everything below is either measured on this machine or cited. Where something is design
 rather than evidence, it says so.
 
+> **2026-09-03 implementation note:** W1.0 is now host-specific. Claude keeps
+> its inline agent-local MCP server. Codex 0.151.0 through 0.153.0-alpha.5
+> intentionally reject role-local `mcp_servers`, so the Codex-only plugin
+> manifest registers `agent-bridge` at session scope and the custom agent
+> inherits it. Codex 0.152.1 sanitizes that raw id to the model-visible
+> `mcp__agent_bridge__*` namespace; the manifest also pre-approves these
+> internal tools so `codex exec` can call them with approval policy `never`.
+> See `docs/ARCHITECTURE.md` for the operative design; the plan below preserves
+> the earlier evidence and alternatives considered.
+
 ---
 
 ## 0. What changed since revision 1

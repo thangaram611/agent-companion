@@ -341,6 +341,11 @@ test('buildJobResponse and session-reborn content preserve bridge-owned status/d
     terminalJob('j2', 'unreachable', { detail: 'bridge_daemon_unreachable' }),
     { status: 'completed', summary: { message: 'oops' } },
   ).status, 'unreachable');
+  assert.equal(buildJobResponse(
+    terminalJob('j2-class', 'unreachable', {
+      target: 'codex', detail: 'codex_code_mode_host_unavailable',
+    }),
+  ).failure_class, 'runtime_unavailable');
   assert.equal(buildJobResponse({ jobId: 'j3', status: 'starting', startedAt: Date.now() }, { status: 'running' }).status, 'running');
   assert.equal(buildJobResponse(terminalJob('j4', 'unreachable', { detail: 'bridge_timeout' })).detail, 'bridge_timeout');
   assert.equal(buildJobResponse(terminalJob('j5', 'completed')).detail, null);
@@ -406,6 +411,7 @@ test('emitNotification writes queue rows with status remaps, detail/session meta
     assert.equal(event.claudeSessionId, 'cc-test-session-abc');
     assert.equal(event.meta.status, 'unreachable');
     assert.equal(event.meta.detail, 'bridge_daemon_unreachable');
+    assert.equal(event.meta.failure_class, 'runtime_unavailable');
 
     emitNotification({
       jobId: 'j-capi', status: 'completed',
@@ -433,6 +439,24 @@ test('emitNotification writes queue rows with status remaps, detail/session meta
     assert.equal(event.meta.detail, undefined);
     assert.equal(event.meta.rubber_duck, 'clean');
     assert.equal((await import('node:fs')).statSync(queueFile).mode & 0o777, 0o600);
+
+    // Defensive boundary: even a direct/reconciled notification cannot
+    // publish this protocol completion as a task verdict.
+    emitNotification({
+      jobId: 'j-code-host', target: 'codex', status: 'completed',
+      summary: {
+        stopReason: 'turn/completed', toolCalls: [],
+        message: 'I cannot run commands because codex-code-mode-host is missing.',
+      },
+      duration: 3000, task: 'review', mode: 'ANALYZE', cwd: '/tmp',
+    });
+    event = readQueue(queueFile).at(-1);
+    assert.equal(event.meta.status, 'unreachable');
+    assert.equal(event.meta.detail, 'codex_code_mode_host_unavailable');
+    assert.equal(event.meta.failure_class, 'runtime_unavailable');
+    assert.equal(event.meta.stop_reason, 'turn/completed');
+    assert.match(event.content, /app-server was reachable, but its command runner was unavailable/);
+    assert.match(event.content, /not a task verdict/);
   });
 });
 
@@ -1687,6 +1711,18 @@ async function withCodexAppServer({ handlers = {}, statuses = {}, turns = {}, co
     // A live broker answers the health probe, so nothing here may spawn one;
     // a test that wants the spawn path asks for it explicitly.
     spawnBroker: spawnBroker || (() => { throw new Error('the bridge spawned a broker instead of reusing the live one'); }),
+    // Match the selected installation to the identity reported by the shared
+    // fake broker. Upgrade-staleness checks are adapter tests; bridge tests need
+    // a stable healthy broker unless they explicitly arrange otherwise.
+    inspectCodexInstall: () => ({
+      ready: true,
+      selected: {
+        version: '0.147.0', path: '/fake/codex', realPath: '/fake/codex',
+        helperPath: '/fake/codex-code-mode-host', source: 'installed',
+        identity: 'fake-codex-0.147.0', quarantined: false,
+      },
+    }),
+    pathExists: () => true,
   });
   try { return await body({ cx, sockets, live: () => sockets[sockets.length - 1] }); }
   finally {
@@ -1871,6 +1907,94 @@ test('Codex app-server mode: the thread id is persisted while the job is still r
   }
 });
 
+test('Codex app-server mode: a zero-tool code-mode-host blocker is persisted and surfaced as runtime unavailable', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  const incident =
+    'Unable to complete the review: every read-only command failed before execution because ' +
+    '/opt/homebrew/bin/codex-code-mode-host is missing';
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-code-host';
+  try {
+    await withQueue(async (queueFile) => {
+      await withCodexAppServer({}, async ({ live }) => {
+        const send = parse(await dispatch({
+          action: 'send', target: 'codex', task: 'review the repository', mode: 'ANALYZE',
+          template: 'general', cwd: TEST_CWD, host_session_id: 'sid-cx-code-host', parallel: 'never', max_wait_sec: 5,
+        }));
+        assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.sessionId === 'T1'), 'thread id captured');
+        const sock = live();
+        assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'turn started');
+
+        sock.notify('item/completed', {
+          item: { id: 'm1', type: 'agentMessage', text: incident, phase: 'final_answer' },
+        });
+        sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+        assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.terminalAt), 'job settled');
+
+        // Normalize before retention: process memory and the restart ledger must
+        // agree, while the protocol-level stop reason remains salvage evidence.
+        const job = jobs.get(send.job_id);
+        assert.equal(job.status, 'unreachable');
+        assert.equal(job.detail, 'codex_code_mode_host_unavailable');
+        assert.match(job.error, /no task verdict was produced/);
+        assert.equal(job.summary.message, incident);
+        assert.deepEqual(job.summary.toolCalls, []);
+        assert.equal(job.summary.stopReason, 'turn/completed');
+
+        const persisted = state.readJob(send.job_id);
+        assert.equal(persisted.status, 'unreachable');
+        assert.equal(persisted.detail, 'codex_code_mode_host_unavailable');
+        assert.equal(persisted.summary.message, incident);
+        assert.equal(persisted.summary.stopReason, 'turn/completed');
+
+        const digest = readFileSync(digestPath(send.job_id), 'utf8');
+        assert.match(digest, /\*\*Status:\*\* `unreachable`/);
+        assert.match(digest, /Unable to complete the review/);
+
+        const status = parse(await dispatch({
+          action: 'status', job_id: send.job_id, host_session_id: 'sid-cx-code-host',
+        }));
+        assert.equal(status.status, 'unreachable');
+        assert.equal(status.detail, 'codex_code_mode_host_unavailable');
+        assert.equal(status.failure_class, 'runtime_unavailable');
+
+        assert.ok(await _cxUntil(() => existsSync(queueFile) && readQueue(queueFile).some((row) => row.jobId === send.job_id)),
+          'terminal queued');
+        const event = readQueue(queueFile).find((row) => row.jobId === send.job_id);
+        assert.equal(event.meta.status, 'unreachable');
+        assert.equal(event.meta.detail, 'codex_code_mode_host_unavailable');
+        assert.equal(event.meta.failure_class, 'runtime_unavailable');
+        assert.equal(event.meta.stop_reason, 'turn/completed');
+        assert.match(event.content, /app-server was reachable, but its command runner was unavailable/);
+        assert.match(event.content, /not a task verdict/);
+        assert.match(event.content, /Unable to complete the review/);
+
+        const terminal = parse(await dispatch({
+          action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-code-host', max_wait_sec: 5,
+        }));
+        assert.equal(terminal.status, 'unreachable');
+        assert.equal(terminal.meta.detail, 'codex_code_mode_host_unavailable');
+        assert.equal(terminal.meta.failure_class, 'runtime_unavailable');
+        assert.equal(terminal.meta.stop_reason, 'turn/completed');
+        assert.match(terminal.content, /not a task verdict/);
+      });
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) {
+      if (jobs.get(id)?.claudeSessionId !== 'sid-cx-code-host') continue;
+      try { state.deleteJob(id); } catch {}
+      jobs.delete(id);
+    }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
 test('Codex app-server mode: end to end through the REAL broker and the shared fake app-server', async (t) => {
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
@@ -1898,6 +2022,12 @@ test('Codex app-server mode: end to end through the REAL broker and the shared f
   process.env.AGENT_HEARTBEAT_DIR = join(dir, 'hb');
   process.env.CODEX_RUNTIME_ADAPTER = 'appserver';
   process.env.CODEX_BIN = fakeCodexBin(dir);
+  // Installation selection now requires a complete executable pair before it
+  // will spawn the real broker. The fake parent never invokes this helper, but
+  // it must have the same regular-file shape as the package Codex resolves.
+  const fakeHelper = join(dir, 'codex-code-mode-host');
+  writeFileSync(fakeHelper, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  chmodSync(fakeHelper, 0o700);
   process.env.CODEX_BROKER_LOG_LEVEL = 'ERROR';
   process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-e2e';
   cx._resetForTest();
@@ -2104,7 +2234,12 @@ test('Codex app-server mode: the bridge owns the cancel verdict when the turn ra
         // stream reports `completed`. Only the intent recorded before the
         // interrupt tells the operator their cancel was honoured.
         'turn/interrupt': () => {
-          workerSock?.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text: 'raced to the end', phase: 'final_answer' } });
+          workerSock?.notify('item/completed', {
+            item: {
+              id: 'm1', type: 'agentMessage', phase: 'final_answer',
+              text: 'I cannot run commands because codex-code-mode-host is missing.',
+            },
+          });
           workerSock?.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
           return {};
         },
@@ -2123,6 +2258,8 @@ test('Codex app-server mode: the bridge owns the cancel verdict when the turn ra
       }
       assert.equal(term.status, 'cancelled');
       assert.equal(jobs.get(send.job_id).detail, 'cancelled');
+      assert.equal(term.meta.failure_class, undefined, 'cancellation wins over runtime blocker remapping');
+      assert.match(term.content, /Partial output:[\s\S]*codex-code-mode-host is missing/);
     });
   } finally {
     for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-race') jobs.delete(id);
@@ -2522,6 +2659,89 @@ test('Codex app-server mode: hydrate resumes the job instead of retiring it, and
   }
 });
 
+test('Codex app-server mode: a thread/read-recovered named runner blocker never persists completed', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  const jobId = 'codex-hydrate-code-host';
+  const hostSid = 'sid-cx-hydrate-code-host';
+  const incident =
+    'Unable to complete the review: every read-only command failed before execution because ' +
+    '/opt/homebrew/bin/codex-code-mode-host is missing';
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = hostSid;
+  try {
+    await withQueue(async (queueFile) => {
+      await withCodexAppServer({
+        statuses: { T1: 'idle' },
+        handlers: {
+          'thread/read': (p) => ({ thread: {
+            id: p.threadId,
+            turns: [{ id: 'TURN1', status: 'completed', items: [
+              { id: 'm1', type: 'agentMessage', text: incident, phase: 'final_answer' },
+            ] }],
+          } }),
+        },
+      }, async () => {
+        _cxLiveJob(jobs, jobId, hostSid);
+        mod.persistJob(jobId);
+        jobs.delete(jobId);
+        mod._resetForTest();
+
+        mod.hydrateJobsFromLedger();
+        assert.ok(await _cxUntil(() => jobs.get(jobId)?.terminalAt), 'the recovered job settles');
+        const job = jobs.get(jobId);
+        assert.equal(job.status, 'unreachable');
+        assert.equal(job.detail, 'codex_code_mode_host_unavailable');
+        assert.equal(job.summary.message, incident);
+        assert.deepEqual(job.summary.toolCalls, []);
+        assert.equal(job.summary.stopReason, 'thread/read');
+
+        const persisted = state.readJob(jobId);
+        assert.equal(persisted.status, 'unreachable');
+        assert.equal(persisted.detail, 'codex_code_mode_host_unavailable');
+        assert.equal(persisted.summary.message, incident);
+        assert.equal(persisted.summary.stopReason, 'thread/read');
+
+        const digest = readFileSync(digestPath(jobId), 'utf8');
+        assert.match(digest, /\*\*Status:\*\* `unreachable`/);
+        assert.match(digest, /Unable to complete the review/);
+
+        const status = parse(await dispatch({ action: 'status', job_id: jobId, host_session_id: hostSid }));
+        assert.equal(status.status, 'unreachable');
+        assert.equal(status.detail, 'codex_code_mode_host_unavailable');
+        assert.equal(status.failure_class, 'runtime_unavailable');
+
+        assert.ok(await _cxUntil(() => existsSync(queueFile) && readQueue(queueFile).some((row) => row.jobId === jobId)),
+          'recovered terminal queued');
+        const event = readQueue(queueFile).find((row) => row.jobId === jobId);
+        assert.equal(event.meta.status, 'unreachable');
+        assert.equal(event.meta.detail, 'codex_code_mode_host_unavailable');
+        assert.equal(event.meta.failure_class, 'runtime_unavailable');
+        assert.equal(event.meta.stop_reason, 'thread/read');
+        assert.match(event.content, /not a task verdict/);
+
+        const terminal = parse(await dispatch({
+          action: 'wait', job_id: jobId, host_session_id: hostSid, max_wait_sec: 5,
+        }));
+        assert.equal(terminal.status, 'unreachable');
+        assert.equal(terminal.meta.detail, 'codex_code_mode_host_unavailable');
+        assert.equal(terminal.meta.failure_class, 'runtime_unavailable');
+        assert.equal(terminal.meta.stop_reason, 'thread/read');
+        assert.match(terminal.content, /not a task verdict/);
+      });
+    });
+  } finally {
+    try { state.deleteJob(jobId); } catch {}
+    jobs.delete(jobId);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
 test('a hydrated adapterResult does not latch the carry-forward off for the renders after it', async () => {
   // The other side of W1.4'. Hydrate restores `job.adapterResult` from the
   // ledger, so the FIRST render a new bridge makes can be the previous bridge's
@@ -2755,7 +2975,7 @@ test('applyAdapterCapabilities flips codex only under the app-server adapter', a
   }
 });
 
-test('agent_status merges the codex app-server block, with pinned-vs-installed version skew', async () => {
+test('agent_status keeps contract skew separate from installed-vs-running upgrade skew', async () => {
   const mod = await bridge();
   const { dispatch, _resetForTest } = mod;
   _resetForTest();
@@ -2770,7 +2990,8 @@ test('agent_status merges the codex app-server block, with pinned-vs-installed v
     // No broker has spoken to this process yet, so skew is unknown — which is
     // not the same as "no skew". There is no protocol version field on this
     // transport, so this is the only drift warning there is.
-    assert.equal(rt.version_skew, null);
+    assert.equal(rt.contract_version_skew, null);
+    assert.equal(rt.upgrade_version_skew, null);
     // The exec knobs are still there: the app-server block merges onto them.
     assert.ok(rt.timeout_ms > 0);
     assert.ok(rt.bin);
@@ -3328,6 +3549,137 @@ test('hydrate never believes a ledger pid that has been reused by this bridge pr
 // restarted under a live job) inherited `verify CODEX_BIN…` from the target
 // descriptor and told the operator to go check a binary that was never involved.
 
+test('Codex command-runner blocker detection is narrow and does not promote prose or failed items', async () => {
+  const { isCodexCommandRunnerBlocker } = await bridge();
+  const exactIncident = {
+    message:
+      'Unable to complete the review: every read-only command failed before execution because ' +
+      '/opt/homebrew/bin/codex-code-mode-host is missing',
+    toolCalls: [], stopReason: 'turn/completed',
+  };
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed', summary: exactIncident,
+  }), true);
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'I cannot run commands because the command runner was not found.',
+      toolCalls: [], stopReason: 'turn/completed',
+    },
+  }), true, 'concise self-report');
+  for (const [message, stopReason, label] of [
+    ['codex-code-mode-host is unavailable.', 'turn/completed', 'literal live runner diagnostic'],
+    ['codex-code-mode-host is unavailable.', 'thread/read', 'literal recovered runner diagnostic'],
+    [
+      'The configured codex-code-mode-host binary path does not exist.',
+      'thread/read',
+      'configured-path diagnostic recovered from thread/read',
+    ],
+    [
+      'I cannot run commands because the command runner/tool access is unavailable.',
+      'turn/completed',
+      'live direct runner/tool-access self-report',
+    ],
+    [
+      'I cannot run commands because tool access is unavailable.',
+      'thread/read',
+      'named access blocker recovered from thread/read',
+    ],
+  ]) {
+    assert.equal(isCodexCommandRunnerBlocker({
+      target: 'codex', status: 'completed',
+      summary: { message, toolCalls: [], stopReason },
+    }), true, label);
+  }
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'Unable to complete the review: all read-only commands failed before execution.',
+      toolCalls: [], stopReason: 'turn/completed',
+    },
+  }), true, 'live universal pre-execution failure does not need to repeat the runner name');
+
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'The review is complete and no commands were needed.',
+      toolCalls: [], stopReason: 'turn/completed',
+    },
+  }), false, 'an ordinary zero-tool answer is valid');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'For documentation, the old message was: "Unable to complete because codex-code-mode-host is missing."',
+      toolCalls: [], stopReason: 'turn/completed',
+    },
+  }), false, 'quoted examples are not self-reported blockers');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'The phrase "every command failed before execution" is only an example; the review is complete.',
+      toolCalls: [], stopReason: 'turn/completed',
+    },
+  }), false, 'quoted universal-failure prose is not a self-report');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'Unable to complete this wording task without quoting "every command failed before execution".',
+      toolCalls: [], stopReason: 'turn/completed',
+    },
+  }), false, 'a self-reported wording task does not promote its quoted universal-failure example');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'Unable to complete this documentation sentence without quoting "codex-code-mode-host is missing".',
+      toolCalls: [], stopReason: 'turn/completed',
+    },
+  }), false, 'a self-reported documentation task does not promote its quoted runner example');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'Unable to complete this wording task without quoting "codex-code-mode-host is unavailable".',
+      toolCalls: [], stopReason: 'turn/completed',
+    },
+  }), false, 'quoted unavailable wording is not runtime evidence');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'Tool access is unavailable in the hypothetical environment, but the requested explanation is complete.',
+      toolCalls: [], stopReason: 'turn/completed',
+    },
+  }), false, 'an ordinary statement about another environment is not a direct runtime diagnostic');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'opencode', status: 'completed', summary: exactIncident,
+  }), false, 'other companions are unchanged');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'cancelled', summary: exactIncident,
+  }), false, 'cancellation takes precedence');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      ...exactIncident,
+      toolCalls: [{ name: 'shell', status: 'failed', input: { command: 'git status' } }],
+    },
+  }), false, 'a recorded failed item retains the existing completed-turn behavior');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'Unable to complete because a dependency is missing.',
+      toolCalls: [], stopReason: 'turn/completed',
+    },
+  }), false, 'generic task failures do not implicate the command runner');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed', summary: { ...exactIncident, stopReason: 'thread/read' },
+  }), true, 'an exact named-runner blocker survives thread/read recovery');
+  assert.equal(isCodexCommandRunnerBlocker({
+    target: 'codex', status: 'completed',
+    summary: {
+      message: 'Unable to complete the review: every command failed before execution.',
+      toolCalls: [], stopReason: 'thread/read',
+    },
+  }), false, 'thread/read lacks tool history, so generic zero-tool inference remains disabled');
+});
+
 test('classifyUnreachable keys on failure class, not on which target produced the failure', async () => {
   const { classifyUnreachable } = await bridge();
 
@@ -3346,6 +3698,7 @@ test('classifyUnreachable keys on failure class, not on which target produced th
 
   // runtime_unavailable — the binary is genuinely the suspect.
   assert.equal(classifyUnreachable('bridge_daemon_unreachable', 'copilot'), 'runtime_unavailable');
+  assert.equal(classifyUnreachable('codex_code_mode_host_unavailable', 'codex'), 'runtime_unavailable');
   assert.equal(classifyUnreachable(null, 'codex', 'spawn codex ENOENT'), 'runtime_unavailable');
   assert.equal(classifyUnreachable(null, 'codex', 'codex exited with code 127'), 'runtime_unavailable');
   assert.equal(classifyUnreachable(null, 'opencode', '/bin/sh: opencode: command not found'), 'runtime_unavailable');

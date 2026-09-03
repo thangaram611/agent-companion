@@ -105,8 +105,20 @@ function validateMarketplaceTree(marketplaceRoot) {
   assert(marketplace.plugins?.[0]?.source?.path === `./plugins/${PLUGIN_NAME}`, 'marketplace source path mismatch');
   assert(manifest.name === PLUGIN_NAME, 'plugin manifest name mismatch');
   assert(manifest.hooks === './hooks/hooks-codex.json', 'plugin manifest hooks path mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.command === '/bin/bash', 'plugin MCP launcher command mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.args?.length === 1 && manifest.mcpServers['agent-bridge'].args[0] === 'hooks/launch-agent-bridge.sh', 'plugin MCP launcher arguments mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.cwd === '.', 'plugin MCP launcher cwd mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.env?.AGENT_COMPANION_HOST === 'codex', 'plugin MCP host mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.env?.CODEX_RUNTIME_ADAPTER === 'appserver', 'plugin MCP Codex adapter mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.default_tools_approval_mode === 'approve', 'plugin MCP approval mode mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.startup_timeout_sec === 120, 'plugin MCP startup timeout mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.tool_timeout_sec === 1320, 'plugin MCP tool timeout mismatch');
   assertExists(path.join(pluginRoot, 'hooks', 'hooks-codex.json'), 'Codex hook manifest');
+  assertExists(path.join(pluginRoot, 'hooks', 'launch-agent-bridge.sh'), 'Codex bridge launcher');
   assertExists(path.join(pluginRoot, 'templates', 'agent-companion.toml'), 'Codex agent template');
+  const roleTemplate = readFileSync(path.join(pluginRoot, 'templates', 'agent-companion.toml'), 'utf8');
+  assert(roleTemplate.includes('mcp__agent_bridge__agent_send'), 'Codex role does not use normalized agent_bridge tool names');
+  assert(!roleTemplate.includes('mcp__agent-bridge__'), 'Codex role contains unsanitized agent-bridge tool names');
   assertExists(path.join(pluginRoot, 'bridge-server', 'server.mjs'), 'bridge server');
   assertExists(path.join(pluginRoot, 'assets', 'readme', 'hero.png'), 'README assets');
   assertExists(path.join(pluginRoot, 'assets', 'readme', 'architecture.png'), 'README architecture asset');
@@ -114,6 +126,7 @@ function validateMarketplaceTree(marketplaceRoot) {
   assertMissing(path.join(pluginRoot, 'scripts', 'build-codex-marketplace.test.mjs'), 'test file in release package');
   assertMissing(path.join(pluginRoot, 'scripts', 'validate-codex-release.test.mjs'), 'validator test file in release package');
   assertMissing(path.join(pluginRoot, '.plugin-data'), 'plugin data directory in release package');
+  assertMissing(path.join(pluginRoot, '.mcp.json'), 'root MCP config that Claude would also discover');
   assertMissing(path.join(pluginRoot, 'dist'), 'nested dist directory in release package');
 }
 
@@ -126,7 +139,10 @@ function validateInstalledTree(codexHome, installedPath) {
   const manifest = readJson(path.join(resolvedInstalledPath, '.codex-plugin', 'plugin.json'));
   assert(manifest.name === PLUGIN_NAME, 'installed plugin manifest name mismatch');
   assert(manifest.hooks === './hooks/hooks-codex.json', 'installed plugin manifest hooks path mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.command === '/bin/bash', 'installed plugin MCP launcher mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.default_tools_approval_mode === 'approve', 'installed plugin MCP approval mode mismatch');
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'hooks-codex.json'), 'installed Codex hook manifest');
+  assertExists(path.join(resolvedInstalledPath, 'hooks', 'launch-agent-bridge.sh'), 'installed Codex bridge launcher');
   assertExists(path.join(resolvedInstalledPath, 'templates', 'agent-companion.toml'), 'installed Codex agent template');
   assertExists(path.join(resolvedInstalledPath, 'bridge-server', 'server.mjs'), 'installed bridge server');
   assertExists(path.join(resolvedInstalledPath, 'assets', 'readme', 'hero.png'), 'installed README assets');
@@ -173,6 +189,23 @@ function main() {
   assert(addPlugin.marketplaceName === PLUGIN_NAME, 'unexpected installed marketplace name');
   assert(addPlugin.installedPath, 'codex plugin add did not report installedPath');
   validateInstalledTree(codexHome, addPlugin.installedPath);
+
+  const mcpServers = parseJson(
+    'codex mcp list',
+    run(codexBin, ['mcp', 'list', '--json'], { env: codexEnv }).stdout,
+  );
+  const bridge = mcpServers.find((server) => server.name === 'agent-bridge');
+  assert(bridge, 'installed Codex plugin did not register agent-bridge');
+  assert(bridge.enabled === true, 'installed agent-bridge is not enabled');
+  assert(bridge.transport?.type === 'stdio', 'installed agent-bridge is not stdio');
+  assert(bridge.transport?.command === '/bin/bash', 'installed agent-bridge launcher command mismatch');
+  assert(bridge.transport?.args?.length === 1 && bridge.transport.args[0] === 'hooks/launch-agent-bridge.sh', 'installed agent-bridge launcher arguments mismatch');
+  assert(bridge.transport?.env?.AGENT_COMPANION_HOST === 'codex', 'installed agent-bridge host environment mismatch');
+  assert(bridge.transport?.env?.CODEX_RUNTIME_ADAPTER === 'appserver', 'installed agent-bridge adapter environment mismatch');
+  assert(Array.isArray(bridge.transport?.env_vars) && bridge.transport.env_vars.length === 0, 'installed agent-bridge must not inherit host environment variables');
+  assert(realpathSync(bridge.transport?.cwd) === realpathSync(addPlugin.installedPath), 'installed agent-bridge cwd is not the plugin root');
+  assert(bridge.startup_timeout_sec === 120, 'installed agent-bridge startup timeout mismatch');
+  assert(bridge.tool_timeout_sec === 1320, 'installed agent-bridge tool timeout mismatch');
 
   console.log('[OK] Codex marketplace release validated');
   console.log(`Marketplace: ${marketplaceRoot}`);

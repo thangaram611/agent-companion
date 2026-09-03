@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 // install-codex-hooks.mjs — idempotently install the agent-companion
-// hook entries into ~/.codex/hooks.json for source-checkout development.
-// A finalized marketplace package can move these hooks into plugin scope; this
-// script exists so a local checkout can exercise the same lifecycle without
-// requiring a publish/install round trip.
+// hook entries into $CODEX_HOME/hooks.json (default ~/.codex/hooks.json).
+// Current setup uses this script only to remove managed entries left by older
+// source installs; the installed Codex plugin owns the live hook registration.
 //
 // Why a script instead of just shipping hooks/hooks-codex.json: the user
 // almost certainly has other hooks already in place (their own
@@ -42,7 +41,11 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
-const HOOKS_FILE = path.join(homedir(), '.codex', 'hooks.json');
+const configuredCodexHome = String(process.env.CODEX_HOME || '').trim();
+const CODEX_HOME = configuredCodexHome
+  ? path.resolve(configuredCodexHome)
+  : path.join(homedir(), '.codex');
+const HOOKS_FILE = path.join(CODEX_HOME, 'hooks.json');
 const SENTINEL_KEY = '_managed_by';
 const SENTINEL_VALUE = 'agent-companion';
 const STABLE_HOOK_PATH_DIRS = [
@@ -199,21 +202,30 @@ if (!cfg.hooks || typeof cfg.hooks !== 'object' || Array.isArray(cfg.hooks)) {
 // Drop every entry whose top-level _managed_by === SENTINEL_VALUE.
 function dropManaged(eventName) {
   const list = cfg.hooks[eventName];
-  if (!Array.isArray(list)) return;
+  if (!Array.isArray(list)) return false;
   const filtered = list.filter((entry) => {
     return !entry || entry[SENTINEL_KEY] !== SENTINEL_VALUE;
   });
+  if (filtered.length === list.length) return false;
   if (filtered.length === 0) {
     delete cfg.hooks[eventName];
   } else {
     cfg.hooks[eventName] = filtered;
   }
+  return true;
 }
 
 const ALL_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PreToolUse', 'Stop'];
 
 if (uninstall) {
-  for (const ev of ALL_EVENTS) dropManaged(ev);
+  let removed = false;
+  for (const ev of ALL_EVENTS) {
+    if (dropManaged(ev)) removed = true;
+  }
+  if (!removed) {
+    ok(`no agent-companion hooks present in ${HOOKS_FILE}`);
+    process.exit(0);
+  }
   if (Object.keys(cfg.hooks).length === 0) delete cfg.hooks;
   writeAtomic(cfg);
   ok(`removed agent-companion hooks from ${HOOKS_FILE}`);

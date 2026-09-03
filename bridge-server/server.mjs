@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-// agent-bridge MCP server (subagent-isolated, target-generic architecture)
+// agent-bridge MCP server (subagent-oriented, target-generic architecture)
 //
 // MCP tools: agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
 // agent_send takes an optional `target` (opencode | copilot | codex); omitting
 // it uses the configured default target, and there is no silent fallback.
-// No start/stop/pause/session-gate — this server is spawned inline per invocation
-// from the agent-companion subagent's frontmatter, so there is no separate
-// activation lifecycle. Model selection and rubber-duck critique are internal
-// server concerns and never exposed through the public schema.
+// No start/stop/pause/session-gate. Claude owns this server through the
+// standalone subagent's frontmatter; Codex registers it at plugin/session scope
+// because agent roles cannot add MCP authority. The subagent is the only
+// supported caller on both hosts. Model selection and rubber-duck critique are
+// internal server concerns and never exposed through the public schema.
 //
 // `send` enqueues the task and returns `status=still_running` with the job_id
 // immediately (no blocking — the worker keeps running in the background). The
@@ -29,11 +30,11 @@
 // a per-server `timeout` on the MCP server entry — the `env: MCP_TOOL_TIMEOUT`
 // form is a host no-op (it reaches only this child). Codex's own per-tool-call
 // budget is 120 s (`codex-rs/codex-mcp/src/rmcp_client.rs:79`); Codex callers
-// raise tool_timeout_sec.
+// raise tool_timeout_sec in the Codex plugin manifest.
 //
 // Completion surfacing: each terminal/alert event is appended to a JSONL queue
-// file with `consumed:false`; the drain script (invoked from the subagent's
-// frontmatter hooks) filters out `consumed:true` and injects unconsumed orphans
+// file with `consumed:false`; the drain script (invoked from host lifecycle
+// hooks) filters out `consumed:true` and injects unconsumed orphans
 // into the subagent's context. Wait-terminal responses mark the job's entries
 // consumed so the subagent never sees the same event twice.
 
@@ -132,7 +133,8 @@ import {
   ensureCodexBroker,
   connectCodexBroker,
   probeCodexBrokerHealth,
-  startCodexThread,
+  startCodexThreadWithBrokerRecovery,
+  codexBrokerErrorNeedsRespawn,
   resumeCodexThread,
   readCodexThread,
   startCodexTurn,
@@ -396,8 +398,8 @@ function persistJob(jobId) {
 // (stdio default 1,800,000 ms), satisfied by each agent_wait RETURNING, not by
 // any mid-call emission. That leaves this cap 600s of headroom. Codex's per-tool MCP timeout defaults to 120s
 // (`codex-rs/codex-mcp/src/rmcp_client.rs:79`) but is user-configurable
-// via `[mcp_servers.X].tool_timeout_sec` in the agent TOML — see README's
-// Codex install section. A NON-NUMERIC value never reaches here — validateSend
+// via `tool_timeout_sec` in the Codex plugin manifest — see README's Codex
+// install section. A NON-NUMERIC value never reaches here — validateSend
 // and validateWait reject it with `agent: max_wait_sec must be a number` before
 // dispatch. What reaches here is CLAMPED, not defaulted: 3000 -> 1200, -100 -> 1.
 // Only a missing value, 0, or NaN falls back to 480. Floor 1s avoids no-wait races.
@@ -474,6 +476,53 @@ function isEmptyCompletedSummary(summary) {
     isBlankText(summary.thoughts) &&
     (!Array.isArray(summary.toolCalls) || summary.toolCalls.length === 0) &&
     !summary.plan;
+}
+
+// Codex can finish the conversational turn normally after its subordinate
+// command runner failed before executing anything. That is a protocol-level
+// completion, but it is not a task verdict. Keep this deliberately narrower
+// than a generic error-message detector: zero tool calls alone is valid for a
+// conversational turn and thread/read recovery has no tool history, while an
+// assistant may legitimately quote a missing-command error in a useful answer.
+export function isCodexCommandRunnerBlocker({ target, status, summary } = {}) {
+  if (target !== 'codex' || status !== 'completed') return false;
+  const stopReason = summary?.stopReason;
+  const liveZeroToolTurn = stopReason === 'turn/completed' &&
+    Array.isArray(summary?.toolCalls) && summary.toolCalls.length === 0;
+  // thread/read is a complete answer salvage but explicitly carries no tool
+  // history. It therefore cannot support the generic zero-tool inference below;
+  // only the assistant naming the unavailable runner itself is strong enough on
+  // that recovery path. This closes restart recovery without relabelling an
+  // ordinary salvaged answer whose original tool history is simply absent.
+  const recoveredTranscript = stopReason === 'thread/read';
+  if (!liveZeroToolTurn && !recoveredTranscript) return false;
+  const message = typeof summary?.message === 'string' ? summary.message.trim() : '';
+  if (!message) return false;
+
+  // Runtime evidence must be the assistant's assertion, not a quoted example
+  // embedded in an otherwise self-reported documentation or wording task.
+  const evidenceMessage = message
+    .replace(/"[^"\n]*"/g, ' ')
+    .replace(/“[^”\n]*”/g, ' ');
+  const selfReportedBlocker = /^(?:unable to (?:complete|run|execute)\b|i\s+(?:cannot|can't|am unable to)\s+(?:complete|run|execute)\b|cannot\s+(?:complete|run|execute)\b|(?:every|all)\b[^\n.]{0,120}\bcommands?\b[^\n.]{0,120}\bfailed before execution\b)/i;
+  const runnerEvidence = /\b(?:codex-code-mode-host|code[- ]mode host|command runner|tool access)\b/i;
+  const unavailableEvidence = /\b(?:missing|unavailable|not found|does not exist|failed before execution|failed to spawn)\b/i;
+  // A bare runtime diagnostic is also an explicit self-report. Require the
+  // runner/access subject at the start and an unavailable predicate ending its
+  // clause; this admits literal errors without matching explanatory prose such
+  // as "tool access is unavailable in the hypothetical environment".
+  const directRunnerUnavailable = /^(?:the\s+(?:configured\s+)?)?(?:(?:\S*\/)?codex-code-mode-host|code[- ]mode host|command runner|tool access)\b[^\n.!?]{0,120}\b(?:is unavailable|is missing|was not found|does not exist|failed before execution|failed to spawn)\b(?=\s*(?:[.!?]|$))/i;
+  if (directRunnerUnavailable.test(evidenceMessage)) return true;
+  if (!selfReportedBlocker.test(evidenceMessage)) return false;
+  if (runnerEvidence.test(evidenceMessage) && unavailableEvidence.test(evidenceMessage)) return true;
+
+  // On the live edge, the accumulator's empty tool list is real evidence. A
+  // universal pre-execution failure statement is then specific enough even if
+  // the assistant omitted the runner's binary name. Keep its clauses bounded
+  // and ignore quoted examples so unrelated prose does not become runtime
+  // failure evidence.
+  const universalPreExecutionFailure = /\b(?:every|all)\b[^\n.!?]{0,160}\bcommands?\b[^\n.!?]{0,120}\bfailed before execution\b/i;
+  return liveZeroToolTurn && universalPreExecutionFailure.test(evidenceMessage);
 }
 
 function iso(ts) { return ts ? new Date(ts).toISOString() : null; }
@@ -965,6 +1014,8 @@ export function buildJobResponse(job, inspect = null, { includeTimeline = false 
     session_reborn:     Boolean(job.sessionReborn),
     session_retired:    Boolean(job.sessionRetired),
   };
+  const failureClass = terminalFailureClass({ ...job, status });
+  if (failureClass) response.failure_class = failureClass;
   addDigestReference(response, { jobId: job.jobId, promptId: job.promptId });
   return response;
 }
@@ -1069,6 +1120,9 @@ function buildWaitResponse(outcome) {
     stuck_reason: job.stuckReason || null,
   };
   if (job.detail) meta.detail = String(job.detail).slice(0, 80);
+  if (job.summary?.stopReason) meta.stop_reason = String(job.summary.stopReason);
+  const failureClass = terminalFailureClass(job);
+  if (failureClass) meta.failure_class = failureClass;
   if (job.sessionReborn) meta.session_reborn = 'true';
   if (job.sessionRetired) meta.session_retired = 'true';
   if (job.reattached) meta.reattached = 'true';
@@ -1158,6 +1212,14 @@ const BRIDGE_LIFECYCLE_DETAILS = new Set([
 // Target-prefix-stripped details that mean "the socket/stream carrying this job
 // closed", e.g. `opencode_server_gone` → `server_gone`.
 const TRANSPORT_DETAILS = new Set(['server_gone', 'server_unreachable', 'server_watch_error']);
+
+// The app-server itself answered, but a required subordinate runtime could not
+// be started. This is definitive bridge-owned evidence, unlike assistant prose.
+const RUNTIME_UNAVAILABLE_DETAILS = new Set([
+  'bridge_daemon_unreachable',
+  'codex_code_mode_host_unavailable',
+  'codex_runtime_unavailable',
+]);
 
 // The runtime is not there to be run: spawn could not find/exec it, or the
 // shell reported the 127 "command not found" exit.
@@ -1252,7 +1314,7 @@ export function classifyUnreachable(detail, target, evidence = '') {
   if (BRIDGE_LIFECYCLE_DETAILS.has(raw)) return 'bridge_lifecycle';
   if (raw === 'thread_not_resumable') return 'thread_not_resumable';
   // The only class permitted to name `descriptor.binaryEnv`.
-  if (raw === 'bridge_daemon_unreachable') return 'runtime_unavailable';
+  if (RUNTIME_UNAVAILABLE_DETAILS.has(raw)) return 'runtime_unavailable';
   if (raw === 'bridge_timeout' || TRANSPORT_DETAILS.has(key)) return 'runtime_transport';
 
   // --- heuristic: signature over the failure text, only when no detail spoke ---
@@ -1261,6 +1323,21 @@ export function classifyUnreachable(detail, target, evidence = '') {
   if (TRANSPORT_RE.test(text)) return 'runtime_transport';
   // Honest fallback: no signature matched, so do not guess a cause.
   return 'unknown';
+}
+
+// One derivation for every machine-readable surface and the human formatter.
+// stdout is intentionally excluded: for server adapters it is assistant prose,
+// and a quoted missing-command example must not become infrastructure evidence.
+export function terminalFailureClass({
+  status, detail, target, error, stderr = null, adapterResult = null,
+} = {}) {
+  if (status !== 'unreachable') return null;
+  const errText = typeof stderr === 'string' ? stderr
+    : (typeof adapterResult?.stderr === 'string' ? adapterResult.stderr : '');
+  const evidence = [error, errText]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n');
+  return classifyUnreachable(detail, target, evidence);
 }
 
 // Unwrap exactly one level of JSON from an error message. codex delivers
@@ -1415,8 +1492,7 @@ export function formatTerminalContent({
     // excluded: on the opencode server adapter it carries the assistant's own
     // prose, so a model quoting `command not found` would otherwise be read as
     // a missing binary. stdout is still rendered below in `channels`.
-    const evidence = [error, errText].filter((s) => typeof s === 'string' && s.trim()).join('\n');
-    const failureClass = classifyUnreachable(detail, target, evidence);
+    const failureClass = terminalFailureClass({ status, detail, target, error, stderr: errText });
     const classLine = `\n\n**Failure class:** \`${failureClass}\``;
     const digestPointer = digestUri
       ? `the digest resource \`${digestUri}\``
@@ -1457,6 +1533,22 @@ export function formatTerminalContent({
     }
 
     if (failureClass === 'runtime_unavailable') {
+      if (detail === 'codex_code_mode_host_unavailable') {
+        const partialEvidence = channels || channelExcerpt('assistant output', summary?.message);
+        return taskHeader +
+          `The Codex app-server was reachable, but its command runner was unavailable${detailLine}.\n\n` +
+          'The assistant output below is partial runtime evidence only, not a task verdict. ' +
+          'Do not accept it as a review, build, or test conclusion; repair the command runner ' +
+          `and re-send after restarting the Codex runtime. Read ${digestPointer} for the captured turn.` +
+          classLine + partialEvidence;
+      }
+      if (detail === 'codex_runtime_unavailable') {
+        return taskHeader +
+          `The Codex app-server runtime was unavailable before a task turn could start${detailLine}.\n\n` +
+          'The bridge made at most one guarded broker restart attempt. Run `node scripts/doctor.mjs` ' +
+          'to inspect the selected Codex/helper pair, quarantine state, and running-versus-installed broker identity; ' +
+          'then re-send after the runtime is healthy.' + classLine + channels;
+      }
       // The one class where the binary really is the suspect, and therefore
       // the only one allowed to name `descriptor.binaryEnv`. Wording unchanged.
       let runtimeHint;
@@ -1526,6 +1618,15 @@ export function emitNotification({
     status = 'failed';
     if (!detail) detail = 'copilot_capi_failure';
   }
+  // The worker normally persists this remap before notifying. Keep the same
+  // guard here as a defensive boundary for reconciled/direct notifications so
+  // no terminal queue row can promote a command-runner blocker to a verdict.
+  if (isCodexCommandRunnerBlocker({ target, status, summary })) {
+    status = 'unreachable';
+    error = error ||
+      'Codex app-server completed the turn only after reporting that its command runner was unavailable; no task verdict was produced.';
+    detail = 'codex_code_mode_host_unavailable';
+  }
   if (status === 'completed' && isEmptyCompletedSummary(summary)) {
     status = 'failed';
     error = `${label} returned completed without any assistant message, tool calls, or plan updates.`;
@@ -1548,6 +1649,11 @@ export function emitNotification({
   if (summary?.stopReason) meta.stop_reason = String(summary.stopReason);
   if (stuckReason)         meta.stuck_reason = String(stuckReason).slice(0, 80);
   if (detail)              meta.detail = String(detail).slice(0, 80);
+  const failureClass = terminalFailureClass({
+    status, detail, target, error,
+    adapterResult: jobs.get(jobId)?.adapterResult ?? null,
+  });
+  if (failureClass) meta.failure_class = failureClass;
   if (Array.isArray(failedTools) && failedTools.length) meta.failed_tools = failedTools.join(',').slice(0, 80);
   if (reconciled)   meta.reconciled = 'true';
   if (bridgeReason) meta.bridge_reason = String(bridgeReason).slice(0, 40);
@@ -2165,9 +2271,9 @@ async function runCodexAppServerWorker({ jobId, reqId, task, mode, template, tem
   log('INFO', 'codex-appserver worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} model=${model || '-'}`);
   let conn = null;
   try {
-    const broker = await ensureCodexBroker();
-    conn = await connectCodexBroker({ socketPath: broker.socketPath });
-    const { threadId, rolloutPath } = await startCodexThread({ conn, cwd, model });
+    const opened = await startCodexThreadWithBrokerRecovery({ cwd, model });
+    const { broker, threadId, rolloutPath, brokerRestarted } = opened;
+    conn = opened.conn;
     const promptId = codexAppServerPromptId(jobId);
     // W1.1's guarantee, and the reason this write happens HERE rather than
     // after the turn: `thread/start` answers with the thread id before the
@@ -2189,8 +2295,15 @@ async function runCodexAppServerWorker({ jobId, reqId, task, mode, template, tem
       inspectAvailable: false,
     });
     writeJobDigest(jobs.get(jobId), null);
-    rlog.info('worker.thread_started', { thread_id: threadId, rollout_path: rolloutPath || null, broker_pid: broker.pid, broker_reused: broker.reused });
-    log('INFO', 'codex-appserver thread:', jobId, `thread=${threadId} rollout=${rolloutPath || '-'} broker=${broker.pid} reused=${broker.reused}`);
+    rlog.info('worker.thread_started', {
+      thread_id: threadId,
+      rollout_path: rolloutPath || null,
+      broker_pid: broker.pid,
+      broker_reused: broker.reused,
+      broker_restarted: brokerRestarted,
+    });
+    log('INFO', 'codex-appserver thread:', jobId,
+      `thread=${threadId} rollout=${rolloutPath || '-'} broker=${broker.pid} reused=${broker.reused} restarted=${brokerRestarted}`);
 
     const formatted = formatPrompt({ template, task, mode, template_args, parallel: 'never' });
     await runCodexAppServerWatch({
@@ -2199,6 +2312,11 @@ async function runCodexAppServerWorker({ jobId, reqId, task, mode, template, tem
     });
   } catch (err) {
     const duration = Date.now() - startedAt;
+    const runtimeUnavailable = err.code === 'CODEX_APP_SERVER_INSTALL_UNAVAILABLE'
+      || err.code === 'CODEX_BROKER_RESTART_DEFERRED'
+      || codexBrokerErrorNeedsRespawn(err);
+    const terminalStatus = runtimeUnavailable ? 'unreachable' : 'failed';
+    const terminalDetail = runtimeUnavailable ? 'codex_runtime_unavailable' : 'codex_server_worker_error';
     // The failure text has to live on `adapterResult`, not just in the digest
     // write below: emitNotification's own refresh re-renders the body from
     // `adapterResult`, so a digest written straight from `err.message` would be
@@ -2206,15 +2324,15 @@ async function runCodexAppServerWorker({ jobId, reqId, task, mode, template, tem
     // where the operator is sent to find out why the job failed.
     const failure = { stdout: '', stderr: err.message, summary: null };
     retainTerminalJob(jobId, {
-      status: 'failed', summary: null, error: err.message,
-      stuckReason: null, detail: 'codex_server_worker_error',
+      status: terminalStatus, summary: null, error: err.message,
+      stuckReason: null, detail: terminalDetail,
       failedTools: [], durationMs: duration, terminalAt: Date.now(),
       adapterResult: failure,
     });
     writeJobDigest(jobs.get(jobId), failure);
     emitNotification({
-      jobId, status: 'failed', summary: null, error: err.message,
-      stuckReason: null, detail: 'codex_server_worker_error',
+      jobId, status: terminalStatus, summary: null, error: err.message,
+      stuckReason: null, detail: terminalDetail,
       duration, task, mode, cwd, thread,
       promptId: jobs.get(jobId)?.promptId || null, sessionId: jobs.get(jobId)?.sessionId || null,
       failedTools: [], reqId, target, fleet: false,
@@ -2302,6 +2420,18 @@ async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, 
       result.status = 'cancelled';
       result.error = null;
       result.detail = 'cancelled';
+    }
+
+    // A conversational turn can complete even though Codex never acquired its
+    // command runner. Normalize that protocol completion before retaining it:
+    // the assistant message and turn/completed stop reason remain evidence,
+    // while every persisted/status/wait/notification surface gets the honest
+    // runtime verdict. Cancellation above deliberately wins this race.
+    if (isCodexCommandRunnerBlocker({ target: 'codex', status: result.status, summary: result.summary })) {
+      result.status = 'unreachable';
+      result.error =
+        'Codex app-server completed the turn only after reporting that its command runner was unavailable; no task verdict was produced.';
+      result.detail = 'codex_code_mode_host_unavailable';
     }
 
     // Empty-completed remap, matching emitNotification's own remap so the
@@ -3413,12 +3543,14 @@ function codexRuntimeStatus() {
   return {
     ...base,
     ...appserver,
-    // There is NO protocol version field on this transport, so a pinned-vs-
-    // installed mismatch is the only early warning that the vendored contract
-    // has drifted from the CLI that is actually running. `null` means no broker
-    // has told us its version yet — which is not the same as "no skew".
-    version_skew: appserver.installed_version
-      ? appserver.installed_version !== appserver.pinned_version
+    // Protocol drift and cask-upgrade drift are different axes. The former is
+    // advisory until the live schema comparison finishes; the latter is the
+    // stale executable that must be safely restarted before a new send.
+    contract_version_skew: appserver.running_version
+      ? appserver.running_version !== appserver.pinned_version
+      : null,
+    upgrade_version_skew: appserver.running_version && appserver.selected_version
+      ? appserver.running_version !== appserver.selected_version
       : null,
     // The shared-runtime-registry entry for the one broker on this host home
     // (`broker` above is the broker SCRIPT path, not its state).
@@ -3500,8 +3632,10 @@ const mcp = new Server(
   {
     capabilities: { tools: {}, resources: {} },
     instructions:
-      'Internal MCP server for the agent-companion subagent. Spawned inline ' +
-      'per invocation by the companion agent. Tools: agent_send (returns ' +
+      'Internal transport for the agent-companion subagent; parent harnesses ' +
+      'must spawn that subagent rather than call these tools directly. Claude ' +
+      'scopes it to the agent; Codex registers it at plugin/session scope so ' +
+      'the role can inherit it. Tools: agent_send (returns ' +
       'still_running synchronously), agent_wait (blocks until terminal), ' +
       'agent_status, agent_reply, and agent_cancel. The companion uses ' +
       'agent_send for kickoff then loops on agent_wait until terminal. ' +
@@ -3587,10 +3721,14 @@ const TOOL_ACTIONS = {
   agent_cancel: 'cancel',
 };
 
+const INTERNAL_TOOL_NOTE =
+  'Internal transport for the agent-companion subagent; parent harnesses should spawn that subagent. ';
+
 const AGENT_TOOLS = [
   {
     name: 'agent_send',
     description:
+      INTERNAL_TOOL_NOTE +
       'Enqueue a task on the selected/default companion target and return still_running ' +
       'immediately with job_id. The companion should then loop on agent_wait until terminal.',
     inputSchema: {
@@ -3657,7 +3795,8 @@ const AGENT_TOOLS = [
   },
   {
     name: 'agent_wait',
-    description: 'Block on an existing agent job until terminal or until max_wait_sec elapses.',
+    description: INTERNAL_TOOL_NOTE +
+      'Block on an existing agent job until terminal or until max_wait_sec elapses.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -3672,7 +3811,8 @@ const AGENT_TOOLS = [
   },
   {
     name: 'agent_status',
-    description: 'Return bridge/target state, or diagnostics for a specific agent job when job_id is provided.',
+    description: INTERNAL_TOOL_NOTE +
+      'Return bridge/target state, or diagnostics for a specific agent job when job_id is provided.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -3687,7 +3827,8 @@ const AGENT_TOOLS = [
   },
   {
     name: 'agent_reply',
-    description: 'Re-steer an in-flight agent job with a follow-up message when the companion adapter supports replies.',
+    description: INTERNAL_TOOL_NOTE +
+      'Re-steer an in-flight agent job with a follow-up message when the companion adapter supports replies.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -3707,7 +3848,7 @@ const AGENT_TOOLS = [
   },
   {
     name: 'agent_cancel',
-    description: 'Cancel a specific running agent job.',
+    description: INTERNAL_TOOL_NOTE + 'Cancel a specific running agent job.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,

@@ -1,6 +1,6 @@
 <svg width="3200" height="2220" viewBox="0 0 1600 1110" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">Agent Companion architecture</title>
-  <desc id="desc">An architecture diagram: a parent host (Claude Code or Codex CLI) spawns a private Agent Companion subagent, which alone can see the agent-bridge MCP server. Inside the bridge, resolveRouting maps a strength or profile from profiles.json onto exactly one companion. One adapter per companion and transport then drives the work, and three of those transports hand off to detached runtimes — one per host home — that outlive the bridge process. Everything is recorded in host-routed runtime state.</desc>
+  <desc id="desc">An architecture diagram: a parent host (Claude Code or Codex CLI) delegates through an Agent Companion subagent, which is the supported caller of the internal agent-bridge MCP server. Claude scopes that server to the subagent; Codex registers it at plugin scope so the role can inherit it. Inside the bridge, resolveRouting maps a strength or profile from profiles.json onto exactly one companion. One adapter per companion and transport then drives the work, and three of those transports hand off to detached runtimes — one per host home — that outlive the bridge process. Everything is recorded in host-routed runtime state.</desc>
   <defs>
     <linearGradient id="page" x1="0" y1="0" x2="1600" y2="1110" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#F8FAFC"/>
@@ -50,8 +50,8 @@
   </g>
   <path d="M124 116H1476" stroke="url(#brand)" stroke-width="7" stroke-linecap="round"/>
   <text x="124" y="193" class="sans eyebrow">ARCHITECTURE</text>
-  <text x="124" y="254" class="sans title">Subagent-isolated delegation</text>
-  <text x="124" y="296" class="sans subtitle">The parent spawns one companion. Only that companion sees the private MCP bridge.</text>
+  <text x="124" y="254" class="sans title">Subagent-routed delegation</text>
+  <text x="124" y="296" class="sans subtitle">The parent delegates through one companion. MCP scope follows each host's security model.</text>
 
   <!-- parent host -->
   <g filter="url(#softShadow)">
@@ -62,7 +62,7 @@
   <text x="176" y="509" class="mono tiny">Claude</text>
   <rect x="274" y="486" width="88" height="34" rx="17" fill="#E0E7FF"/>
   <text x="294" y="509" class="mono tiny">Codex</text>
-  <text x="158" y="560" class="sans body">No direct MCP visibility</text>
+  <text x="158" y="560" class="sans body">Spawns the routing subagent</text>
 
   <path d="M412 502H518" stroke="#64748B" stroke-width="4" stroke-linecap="round"/>
   <path d="M504 487L524 502L504 517" stroke="#64748B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
@@ -73,7 +73,7 @@
   </g>
   <rect x="566" y="376" width="424" height="252" rx="24" fill="#0E1A2B" stroke="#2DD4BF" stroke-opacity="0.45" stroke-dasharray="9 9"/>
   <text x="596" y="426" class="sans labelDark">Agent Companion</text>
-  <text x="596" y="457" class="sans bodyDark">Private subagent boundary</text>
+  <text x="596" y="457" class="sans bodyDark">Routing subagent boundary</text>
 
   <rect x="596" y="480" width="180" height="42" rx="21" fill="#0F766E" fill-opacity="0.28" stroke="#2DD4BF" stroke-opacity="0.68"/>
   <text x="620" y="507" class="mono codeDark">agent_send</text>
@@ -151,6 +151,6 @@
   <rect x="152" y="998" width="206" height="28" rx="14" fill="#17243A"/>
   <text x="255" y="1018" text-anchor="middle" class="mono codeDark">no silent fallback</text>
   <rect x="374" y="998" width="226" height="28" rx="14" fill="#17243A"/>
-  <text x="487" y="1018" text-anchor="middle" class="mono codeDark">subagent-only MCP</text>
+  <text x="487" y="1018" text-anchor="middle" class="mono codeDark">subagent-routed MCP</text>
   <text x="664" y="1019" class="sans body">A strength resolves to exactly one profile, or the send returns a named error.</text>
 </svg>

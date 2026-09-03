@@ -1,16 +1,8 @@
 // Schema/structural sanity tests for templates/agent-companion.toml.
 //
-// We don't pull in a TOML parser dep just for this — but a TOML key=value
-// pair declared after a `[table.section]` header is parsed as part of
-// that table, not as a top-level key. That single foot-gun caused the
-// developer_instructions key to silently disappear into the
-// `[mcp_servers.agent-bridge]` table during initial drafting. These
-// regex checks lock the structural invariants that matter:
-//   - the three required fields are at the top level (declared before
-//     any `[...]` table header)
-//   - the bridge MCP table declares the right command/args/env
-//   - the AGENT_COMPANION_HOST literal is "codex" (the route signal
-//     that lib/host.mjs reads on startup)
+// Current Codex deliberately rejects role-local MCP authority. This file must
+// therefore contain only role fields; the Codex-only plugin manifest owns the
+// operative bridge registration and its separate marketplace tests.
 //
 // If a future edit ever pulls @iarna/toml or a built-in TOML parser into
 // scope, replace these checks with a real parse + structural assertions.
@@ -26,26 +18,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const TOML_PATH = join(HERE, 'agent-companion.toml');
 const text = readFileSync(TOML_PATH, 'utf8');
 
-// Slice out everything that comes BEFORE the first [table] header — that
-// is where TOML expects top-level keys.
-const firstTableIdx = text.search(/^\[[a-zA-Z_]/m);
-assert.notEqual(firstTableIdx, -1, 'TOML must declare at least one table');
-const topLevel = text.slice(0, firstTableIdx);
+const topLevel = text;
 
-function tableBody(headerPattern) {
-  const match = text.match(new RegExp(`^\\[${headerPattern}\\]\\s*$`, 'm'));
-  assert.ok(match, `table [${headerPattern}] present`);
-  const rest = text.slice(match.index + match[0].length);
-  const nextTable = rest.search(/^\[[^\]]+\]\s*$/m);
-  return match[0] + (nextTable === -1 ? rest : rest.slice(0, nextTable));
-}
-
-test('top-level TOML fields stay before the first table and use an allowlisted model', async () => {
+test('role fields stay top-level and use an allowlisted model', async () => {
   assert.match(topLevel, /^name\s*=\s*"agent-companion"\s*$/m);
   assert.match(topLevel, /^description\s*=\s*"""/m);
-  // This is the one most likely to drift below a [table] section by
-  // accident. Keeping it strictly above the first table header guards
-  // against silent misparse.
+  // Keep this as a role-level field; moving it into a table silently changes
+  // its meaning in TOML.
   assert.match(topLevel, /^developer_instructions\s*=\s*"""/m);
 
   const match = topLevel.match(/^model\s*=\s*"([^"]+)"\s*$/m);
@@ -74,33 +53,28 @@ test('top-level TOML fields stay before the first table and use an allowlisted m
   assert.doesNotMatch(body, /canonical place to look up structured per-job progress/);
 });
 
-test('mcp_servers.agent-bridge declares the Codex-specific command, args, env, and timeout', () => {
-  assert.match(text, /^\[mcp_servers\.agent-bridge\]\s*$/m);
-  const bridgeTable = tableBody('mcp_servers\\.agent-bridge');
-  assert.match(bridgeTable, /^command\s*=\s*"node"\s*$/m);
-  assert.match(bridgeTable,
-    /^args\s*=\s*\[\s*"\$\{CLAUDE_PLUGIN_ROOT\}\/bridge-server\/server\.mjs"\s*\]\s*$/m,
-    'args[0] must reference ${CLAUDE_PLUGIN_ROOT}/bridge-server/server.mjs — the install hook substitutes this at materialization time');
-  // The literal env value is what lib/host.mjs reads on startup to route
-  // paths under ~/.codex/. If this drifts to "claude" or gets dropped,
-  // the Codex install will write into the Claude state directory.
-  assert.match(bridgeTable, /AGENT_COMPANION_HOST\s*=\s*"codex"/);
-  // Widened from the bridge table to the whole document: MCP_TOOL_TIMEOUT is
-  // inert on BOTH hosts (measured — the variable reaches the bridge child and
-  // the host ignores it), so it must not reappear anywhere, env block or not.
+test('role does not attempt to add MCP authority', () => {
+  assert.doesNotMatch(text, /^\[mcp_servers(?:\.|\])/m);
+  assert.doesNotMatch(text, /\$\{CLAUDE_PLUGIN_ROOT\}/);
   assert.doesNotMatch(text, /MCP_TOOL_TIMEOUT/);
-  // Codex owns the deadline through this table-level field, in SECONDS. The
-  // Claude template expresses the same budget as a per-server `timeout` in
-  // milliseconds — different host, different honoured field and unit, so do
-  // not port the YAML form here.
-  assert.match(bridgeTable, /^tool_timeout_sec\s*=\s*1320\s*$/m);
-  assert.doesNotMatch(bridgeTable, /^\s*timeout\s*=/m,
-    'Codex honours tool_timeout_sec, not a bare `timeout` key');
   // The Claude template tells the agent to forward CLAUDE_CODE_SESSION_ID
   // by hand. The Codex template must NOT carry that instruction, since
   // session id is read server-side from MCP _meta.
   assert.doesNotMatch(text, /CLAUDE_CODE_SESSION_ID/,
     'Codex template should not mention CLAUDE_CODE_SESSION_ID');
+});
+
+test('role uses the Codex-normalized bridge tool namespace', () => {
+  assert.match(text, /mcp__agent_bridge__agent_send/);
+  assert.match(text, /mcp__agent_bridge__agent_wait/);
+  assert.match(text, /mcp__agent_bridge__agent_status/);
+  assert.match(text, /mcp__agent_bridge__agent_reply/);
+  assert.match(text, /mcp__agent_bridge__agent_cancel/);
+  assert.match(text, /tools\.mcp__agent_bridge__agent_status/);
+  assert.match(text, /ALL_TOOLS/);
+  assert.match(text, /Absence from the top-level schema is expected/);
+  assert.doesNotMatch(text, /mcp__agent-bridge__/,
+    'Codex replaces the raw server-name hyphen with an underscore in model-visible tool names');
 });
 
 test('template documents strength/profile routing without hardcoding ids', () => {

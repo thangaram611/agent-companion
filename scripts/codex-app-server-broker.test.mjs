@@ -19,6 +19,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -97,6 +98,16 @@ const {
 
 const BROKER_PATH = fileURLToPath(new URL('./codex-app-server-broker.mjs', import.meta.url));
 
+function fakeCodexPair(dir) {
+  const codexPath = fakeCodexBin(dir);
+  const helperPath = join(dir, 'codex-code-mode-host');
+  // The installation inspector requires a real executable pair. The helper is
+  // never invoked by these broker tests, but copying the executable fixture
+  // gives it the same version and executable mode without a second fake.
+  cpSync(codexPath, helperPath);
+  return { codexPath, helperPath };
+}
+
 test.after(() => {
   rmSync(RUNTIME_SANDBOX, { recursive: true, force: true });
   // The redirect env vars are deliberately NOT unset. Clearing them re-points
@@ -115,6 +126,68 @@ test('module import does not require a codex binary on PATH', async () => {
   );
   assert.equal(result.status, 0,
     `importing the broker must not resolve or spawn codex\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+});
+
+test('AppServerConnection refuses an unready Codex/helper pair before spawning', () => {
+  _setForTest({
+    inspectInstallation: () => ({
+      ready: false,
+      blocker: 'matching codex-code-mode-host is missing',
+      selected: null,
+    }),
+  });
+  try {
+    const connection = new AppServerConnection({ env: {} });
+    assert.throws(
+      () => connection.spawn(),
+      /Codex app-server installation is not ready: matching codex-code-mode-host is missing/,
+    );
+    assert.equal(connection.child, null, 'inspection must fail before child_process.spawn');
+  } finally {
+    _resetForTest();
+  }
+});
+
+test('AppServerConnection inspects once, spawns the selected path, and retains its launch identity', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'cxi-'));
+  const { codexPath: bin } = fakeCodexPair(dir);
+  const helper = join(dir, 'codex-code-mode-host');
+  let inspections = 0;
+  _setForTest({
+    inspectInstallation: ({ env }) => {
+      inspections += 1;
+      assert.equal(env.CODEX_BIN, bin);
+      return {
+        ready: true,
+        blocker: null,
+        selected: {
+          path: bin,
+          realPath: `/canonical${bin}`,
+          version: CODEX_PINNED_VERSION,
+          helperPath: helper,
+          source: 'configured',
+          identity: 'dev:ino:size:mtime',
+          quarantined: false,
+        },
+      };
+    },
+  });
+  t.after(() => {
+    _resetForTest();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const connection = new AppServerConnection({ env: { ...process.env, CODEX_BIN: bin } });
+  connection.spawn();
+  t.after(() => connection.kill());
+
+  assert.equal(inspections, 1);
+  assert.equal(connection.codexPath, bin);
+  assert.equal(connection.codexRealPath, `/canonical${bin}`);
+  assert.equal(connection.codexHelperPath, helper);
+  assert.equal(connection.codexSource, 'configured');
+  assert.equal(connection.codexIdentity, 'dev:ino:size:mtime');
+  assert.equal(connection.codexQuarantined, false);
 });
 
 // --- fixtures ----------------------------------------------------------------
@@ -140,7 +213,7 @@ class FakeSocket extends EventEmitter {
   methods() { return this.frames.map((f) => f.method).filter(Boolean); }
 }
 
-function fakeConnection({ initialized = true, loadedThreads = [] } = {}) {
+function fakeConnection({ initialized = true, loadedThreads = [], threadReads = {} } = {}) {
   return {
     pid: 4242,
     initialized,
@@ -148,14 +221,26 @@ function fakeConnection({ initialized = true, loadedThreads = [] } = {}) {
     codexVersion: '0.147.0',
     versionProbed: true,
     contractStatus: 'match',
+    codexPath: '/fake/bin/codex',
+    codexRealPath: '/fake/store/codex',
+    codexHelperPath: '/fake/store/codex-code-mode-host',
+    codexSource: 'configured',
+    codexIdentity: '/fake/store/codex:1:2:3:4',
+    codexQuarantined: false,
     killed: false,
     sent: [],
     _nextId: 1,
     nextId() { return this._nextId++; },
     isAlive() { return true; },
     send(msg) { this.sent.push(msg); return true; },
-    async request(method) {
+    async request(method, params) {
       if (method === 'thread/loaded/list') return { data: loadedThreads };
+      if (method === 'thread/read') {
+        const answer = threadReads[params?.threadId];
+        if (answer instanceof Error) throw answer;
+        if (typeof answer === 'function') return answer(params);
+        return answer ?? { thread: { id: params?.threadId, turns: [] } };
+      }
       throw new Error(`unstubbed request ${method}`);
     },
     kill() { this.killed = true; },
@@ -267,6 +352,12 @@ test('initialize is answered locally for every client and never forwarded upstre
       codexVersion: '0.147.0',
       codexVersionProbed: true,
       contractStatus: 'match',
+      codexPath: '/fake/bin/codex',
+      codexRealPath: '/fake/store/codex',
+      codexHelperPath: '/fake/store/codex-code-mode-host',
+      codexSource: 'configured',
+      codexIdentity: '/fake/store/codex:1:2:3:4',
+      codexQuarantined: false,
     });
   }
   // Not one initialize reached the app-server: the broker did that once, at boot.
@@ -290,6 +381,12 @@ test('broker/status reports the liveness fields the client probes on', () => {
   assert.equal(status.clients, 1);
   assert.equal(status.subscriptions, 1);
   assert.equal(typeof status.uptimeMs, 'number');
+  assert.equal(status.codexPath, '/fake/bin/codex');
+  assert.equal(status.codexRealPath, '/fake/store/codex');
+  assert.equal(status.codexHelperPath, '/fake/store/codex-code-mode-host');
+  assert.equal(status.codexSource, 'configured');
+  assert.equal(status.codexIdentity, '/fake/store/codex:1:2:3:4');
+  assert.equal(status.codexQuarantined, false);
 });
 
 // --- id remapping ------------------------------------------------------------
@@ -651,7 +748,7 @@ function heartbeatFile(name) {
   return join(process.env.AGENT_HEARTBEAT_DIR, name);
 }
 
-test('the reaper refuses to exit while a client, a loaded thread, or a live host remains', async () => {
+test('the reaper refuses to exit while a client, an active thread, or a live host remains', async () => {
   const exits = [];
   _setForTest({ exit: (code) => exits.push(code) });
   try {
@@ -662,9 +759,13 @@ test('the reaper refuses to exit while a client, a loaded thread, or a live host
       assert.equal(await broker._onInactivityTick(), false);
       broker.shutdown();
     }
-    // A thread is still loaded — the case that would destroy a live turn.
+    // A loaded thread is genuinely active — the case that would destroy a live
+    // turn. Loaded by itself is deliberately not enough.
     {
-      const { broker } = makeBroker({ loadedThreads: ['T1'] });
+      const { broker } = makeBroker({
+        loadedThreads: ['T1'],
+        threadReads: { T1: { thread: { id: 'T1', status: { type: 'active' }, turns: [] } } },
+      });
       assert.equal(await broker._onInactivityTick(), false);
       broker.shutdown();
     }
@@ -696,21 +797,82 @@ test('the reaper refuses to exit while a client, a loaded thread, or a live host
   }
 });
 
-test('the reaper re-reads the cheap gates after the loaded-thread RPC, not before it', async () => {
+test('the reaper exits when every loaded thread is positively completed or idle', async () => {
   const exits = [];
   _setForTest({ exit: (code) => exits.push(code) });
   try {
-    // `thread/loaded/list` is allowed 10 s. Hold it open and let a bridge
+    const { broker, connection } = makeBroker({
+      loadedThreads: ['T-completed', 'T-interrupted', 'T-failed', 'T-idle'],
+      threadReads: {
+        'T-completed': { thread: { id: 'T-completed', turns: [{ id: 'TURN1', status: 'completed' }] } },
+        'T-interrupted': { thread: { id: 'T-interrupted', turns: [{ id: 'TURN2', status: 'interrupted' }] } },
+        'T-failed': { thread: { id: 'T-failed', turns: [{ id: 'TURN3', status: 'failed' }] } },
+        'T-idle': { thread: { id: 'T-idle', status: { type: 'idle' }, turns: [] } },
+      },
+    });
+
+    assert.equal(await broker._onInactivityTick(), true);
+    assert.deepEqual(exits, [0]);
+    assert.equal(connection.killed, true);
+  } finally {
+    _resetForTest();
+  }
+});
+
+test('the reaper fails safe on an in-progress turn, system error, unknown shape, or read failure', async () => {
+  const exits = [];
+  _setForTest({ exit: (code) => exits.push(code) });
+  try {
+    const seen = [];
+    const { broker } = makeBroker({
+      loadedThreads: ['T-turn', 'T-system', 'T-unknown', 'T-error'],
+      threadReads: {
+        'T-turn': (params) => {
+          seen.push(params.threadId);
+          assert.equal(params.includeTurns, true);
+          return { thread: { id: params.threadId, status: { type: 'idle' }, turns: [{ id: 'TURN1', status: 'inProgress' }] } };
+        },
+        'T-system': (params) => {
+          seen.push(params.threadId);
+          return { thread: { id: params.threadId, status: { type: 'systemError' }, turns: [] } };
+        },
+        'T-unknown': (params) => {
+          seen.push(params.threadId);
+          return { thread: { id: params.threadId, turns: [] } };
+        },
+        'T-error': (params) => {
+          seen.push(params.threadId);
+          throw new Error('read denied');
+        },
+      },
+    });
+
+    assert.equal(await broker._onInactivityTick(), false);
+    assert.deepEqual(seen.sort(), ['T-error', 'T-system', 'T-turn', 'T-unknown'], 'every loaded id is inspected');
+    assert.deepEqual(exits, []);
+    broker.shutdown();
+  } finally {
+    _resetForTest();
+  }
+});
+
+test('the reaper re-reads the cheap gates after every loaded-thread status read, not before it', async () => {
+  const exits = [];
+  _setForTest({ exit: (code) => exits.push(code) });
+  try {
+    // Each `thread/read` is allowed 10 s. Hold it open and let a bridge
     // connect inside that window — it connect-probed a LIVE socket, so no
     // replacement broker was spawned, and exiting on the pre-await snapshot
     // would kill the app-server under the turn it is about to start.
     const connection = fakeConnection();
     let release;
     const held = new Promise((resolve) => { release = resolve; });
-    connection.request = async (method) => {
-      assert.equal(method, 'thread/loaded/list');
+    connection.request = async (method, params) => {
+      if (method === 'thread/loaded/list') return { data: ['T-complete'] };
+      assert.equal(method, 'thread/read');
+      assert.deepEqual(params, { threadId: 'T-complete', includeTurns: true });
       await held;
-      return { data: [] };
+      return { thread: { id: 'T-complete', turns: [{ id: 'TURN1', status: 'completed' }] } };
     };
     const broker = new Broker({ connection });
     const tick = broker._onInactivityTick();
@@ -727,7 +889,11 @@ test('the reaper re-reads the cheap gates after the loaded-thread RPC, not befor
     const other = fakeConnection();
     let releaseHb;
     const heldHb = new Promise((resolve) => { releaseHb = resolve; });
-    other.request = async () => { await heldHb; return { data: [] }; };
+    other.request = async (method) => {
+      if (method === 'thread/loaded/list') return { data: ['T-idle'] };
+      await heldHb;
+      return { thread: { id: 'T-idle', status: { type: 'idle' }, turns: [] } };
+    };
     const hbBroker = new Broker({ connection: other });
     const hbTick = hbBroker._onInactivityTick();
     writeFileSync(heartbeatFile('sid-late.heartbeat'), '');
@@ -736,6 +902,44 @@ test('the reaper re-reads the cheap gates after the loaded-thread RPC, not befor
     assert.deepEqual(exits, []);
     hbBroker.shutdown();
     rmSync(heartbeatFile('sid-late.heartbeat'));
+  } finally {
+    _resetForTest();
+  }
+});
+
+test('the reaper preserves transient bridge activity that starts a turn during its stale thread snapshot', async () => {
+  const exits = [];
+  _setForTest({ exit: (code) => exits.push(code) });
+  try {
+    const connection = fakeConnection();
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    connection.request = async (method, params) => {
+      if (method === 'thread/loaded/list') return { data: ['T-old-complete'] };
+      assert.equal(method, 'thread/read');
+      assert.deepEqual(params, { threadId: 'T-old-complete', includeTurns: true });
+      await held;
+      return { thread: { id: 'T-old-complete', turns: [{ id: 'TURN-old', status: 'completed' }] } };
+    };
+
+    const broker = new Broker({ connection });
+    const tick = broker._onInactivityTick();
+
+    // The loaded list above is now stale. Reproduce the bridge-crash window:
+    // another bridge finds this broker, starts a new turn, then disappears
+    // before the held thread/read returns. Both cheap gates are false again,
+    // but the new turn is live upstream and must survive.
+    const transient = attach(broker);
+    transient.feed(rpc(1, 'thread/start', { threadId: 'T-new', approvalPolicy: 'never' }));
+    transient.close();
+    assert.equal(broker.clients.size, 0, 'the final client-count gate alone cannot see the activity');
+    assert.equal(connection.sent.at(-1)?.method, 'thread/start', 'the new turn reached the app-server');
+    release();
+
+    assert.equal(await tick, false, 'transient activity during the snapshot must veto shutdown');
+    assert.deepEqual(exits, []);
+    assert.equal(connection.killed, false, 'the newly-started turn must keep its app-server');
+    broker.shutdown();
   } finally {
     _resetForTest();
   }
@@ -1008,6 +1212,7 @@ async function startRealBroker(t, extraEnv = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cxr-'));
   const socketPath = join(dir, 'b.sock');
   const tracePath = join(dir, 'trace.jsonl');
+  const { codexPath, helperPath } = fakeCodexPair(dir);
   const child = spawn(process.execPath, [BROKER_PATH], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
@@ -1020,7 +1225,7 @@ async function startRealBroker(t, extraEnv = {}) {
       CODEX_BROKER_LOG_FILE: join(dir, 'codex-app-server-broker.log'),
       CODEX_BROKER_SOCKET_PATH: socketPath,
       CODEX_BROKER_LOG_LEVEL: 'DEBUG',
-      CODEX_BIN: fakeCodexBin(dir),
+      CODEX_BIN: codexPath,
       CODEX_FAKE_TRACE: tracePath,
       ...extraEnv,
     },
@@ -1036,7 +1241,16 @@ async function startRealBroker(t, extraEnv = {}) {
   const upstream = () => (existsSync(tracePath)
     ? readFileSync(tracePath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
     : []);
-  return { child, dir, socketPath, tracePath, upstream, logPath: join(dir, 'codex-app-server-broker.log') };
+  return {
+    child,
+    dir,
+    socketPath,
+    tracePath,
+    upstream,
+    logPath: join(dir, 'codex-app-server-broker.log'),
+    codexPath,
+    helperPath,
+  };
 }
 
 test('end to end: one upstream handshake, brokered initialize, implicit subscription, no cross-talk', async (t) => {
@@ -1066,6 +1280,13 @@ test('end to end: one upstream handshake, brokered initialize, implicit subscrip
     assert.equal(init.codexVersion, CODEX_PINNED_VERSION);
     assert.equal(init.contractStatus, 'match');
     assert.ok(init.appServerPid > 0);
+    assert.equal(init.codexPath, broker.codexPath);
+    assert.equal(init.codexRealPath, realpathSync(broker.codexPath));
+    assert.equal(init.codexHelperPath, realpathSync(broker.helperPath));
+    assert.equal(init.codexSource, 'configured');
+    assert.equal(typeof init.codexIdentity, 'string');
+    assert.ok(init.codexIdentity.length > 0);
+    assert.equal(init.codexQuarantined, false);
   }
   // The one handshake declines every connection-scoped notification up front —
   // read from the contract, so a regeneration that classifies a new one
@@ -1137,6 +1358,12 @@ test('end to end: one upstream handshake, brokered initialize, implicit subscrip
   const status = await a.call('broker/status');
   assert.equal(status.ok, true);
   assert.equal(status.clients, 1);
+  assert.equal(status.codexPath, initA.codexPath);
+  assert.equal(status.codexRealPath, initA.codexRealPath);
+  assert.equal(status.codexHelperPath, initA.codexHelperPath);
+  assert.equal(status.codexSource, initA.codexSource);
+  assert.equal(status.codexIdentity, initA.codexIdentity);
+  assert.equal(status.codexQuarantined, initA.codexQuarantined);
 });
 
 test('end to end: the app-server dying tells every client and takes the broker down non-zero', async (t) => {
@@ -1267,36 +1494,57 @@ test('end to end: a request sent before the handshake lands is queued and answer
   await waitFor(() => a.notifications.some((n) => n.params?.delta === 'queued-ok'), { label: 'the queued thread\'s events' });
 });
 
-test('a codex whose --version probe fails still reports itself ready', async (t) => {
+test('a selected codex whose asynchronous --version re-probe fails still reports itself ready', async (t) => {
   // The readiness gate B2 polls is `appServerInitialized && codexVersionProbed`.
   // If it were `codexVersion` instead, a broker that is serving perfectly would
   // look permanently un-ready — and the symptom (every delegation blocks until
   // the client's own timeout) points nowhere near `codex --version`.
-  const broker = await startRealBroker(t, { CODEX_FAKE_VERSION_FAIL: '1' });
-  const a = new TestClient(broker.socketPath);
-  await a.ready;
-  t.after(() => a.close());
+  // Installation selection has already read and validated the pair's version.
+  // Stub that one synchronous inspection so CODEX_FAKE_VERSION_FAIL applies
+  // only to the existing advisory async re-probe performed after spawn.
+  const dir = mkdtempSync(join(tmpdir(), 'cxv-'));
+  const { codexPath, helperPath } = fakeCodexPair(dir);
+  _setForTest({
+    inspectInstallation: () => ({
+      ready: true,
+      blocker: null,
+      selected: {
+        path: codexPath,
+        realPath: realpathSync(codexPath),
+        version: CODEX_PINNED_VERSION,
+        helperPath: realpathSync(helperPath),
+        source: 'configured',
+        identity: 'selected-before-reprobe',
+        quarantined: false,
+      },
+    }),
+  });
+  t.after(() => {
+    _resetForTest();
+    rmSync(dir, { recursive: true, force: true });
+  });
 
-  const init = await waitFor(async () => {
-    const r = await a.call('initialize', { clientInfo: { name: 'bridge-a', version: '1' } });
-    return r.codexVersionProbed && r.appServerInitialized ? r : false;
-  }, { label: 'the broker to finish booting without a version' });
-  assert.equal(init.codexVersion, null, 'unknown stays honestly unknown');
-  assert.equal(init.brokered, true);
+  const connection = new AppServerConnection({
+    env: { ...process.env, CODEX_BIN: codexPath, CODEX_FAKE_VERSION_FAIL: '1' },
+  });
+  connection.spawn();
+  t.after(() => connection.kill());
+  await connection.initialize();
+  await waitFor(
+    () => connection.versionProbed && connection.contractStatus !== 'pending',
+    { label: 'the asynchronous version and contract probes to settle' },
+  );
+  assert.equal(connection.codexVersion, null, 'unknown stays honestly unknown');
+  assert.equal(connection.initialized, true);
 
   // An unreadable version still gets its schema compared — a wrapper binary
   // that mangles `--version` can dump a schema fine. The fake cannot, so the
   // verdict is `unverified`, and it arrives after readiness, not as part of it.
-  const settled = await waitFor(async () => {
-    const r = await a.call('initialize', { clientInfo: { name: 'bridge-a', version: '1' } });
-    return r.contractStatus !== 'pending' ? r : false;
-  }, { label: 'the contract probe to settle without a version' });
-  assert.equal(settled.contractStatus, 'unverified');
-  assert.match(readFileSync(broker.logPath, 'utf8'), /could not verify the app-server wire contract against an unrecognised codex version/);
+  assert.equal(connection.contractStatus, 'unverified');
 
   // Ready means ready: it serves.
-  const started = await a.call('thread/start', { threadId: 'TV', cwd: '/tmp', approvalPolicy: 'never' });
-  assert.equal(started.thread.id, 'TV');
+  const loaded = await connection.request('thread/loaded/list', {});
+  assert.deepEqual(loaded, { data: [] });
 });
 
 // AppServerConnection is exported so the spawn + handshake can be driven
@@ -1306,8 +1554,9 @@ test('AppServerConnection performs exactly one handshake against a real child pr
   const tracePath = join(dir, 'trace.jsonl');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
+  const { codexPath } = fakeCodexPair(dir);
   const connection = new AppServerConnection({
-    env: { ...process.env, CODEX_BIN: fakeCodexBin(dir), CODEX_FAKE_TRACE: tracePath },
+    env: { ...process.env, CODEX_BIN: codexPath, CODEX_FAKE_TRACE: tracePath },
   });
   connection.spawn();
   t.after(() => connection.kill());

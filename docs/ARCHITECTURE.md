@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-08-13
+Last updated: 2026-09-03
 
 ## Goal
 
@@ -8,14 +8,15 @@ Agent Companion is organized around a harness + companion model:
 
 - **Harnesses outward:** Claude Code and Codex CLI install surfaces today; future
   harnesses should plug in at the host/template/hook/session-routing boundary.
-- **MCP middle:** one subagent-only MCP server with generic `agent_*` tools.
+- **MCP middle:** one subagent-oriented MCP server with generic `agent_*` tools.
 - **Companion adapters inward:** OpenCode, Copilot, Codex, and future companions
   behind a small runtime boundary.
 - **Strength routing:** installs can expose strengths to the harness while the
   bridge maps each strength to one configured companion profile (see
   `profiles.json` and `resolveRouting`).
-- **Harness isolation unchanged:** main Claude/main Codex never see the bridge
-  tools directly.
+- **Harness scope is explicit:** Claude keeps the bridge agent-local. Codex
+  registers it at plugin/session scope so its agent role can inherit it; direct
+  parent use is unsupported even though main Codex can see the tool schemas.
 
 ## Product Vocabulary
 
@@ -55,6 +56,23 @@ flowchart LR
 
 The dotted edges are the ones that survive a bridge replacement. Everything else in this
 diagram dies with the bridge process, which is the whole reason the broker exists.
+
+### MCP registration boundary
+
+Claude's materialized Markdown agent owns an inline MCP server, so main Claude
+does not receive the bridge tools. Codex applies a bounded role overlay and
+intentionally rejects `mcp_servers` from a custom agent role: a child may
+inherit its parent's authority but may not expand it. The Codex-only plugin
+manifest therefore registers `agent-bridge` at session scope, and the
+`agent-companion` child inherits it. This makes the schemas visible to main
+Codex; the role remains the only supported caller. A root `.mcp.json` is not
+used because this repository is also a Claude plugin root. Codex sanitizes the
+raw hyphenated server id into the model-visible namespace
+`mcp__agent_bridge__*`, exposed as a deferred tool through `functions.exec`;
+Claude's agent-local registration retains
+`mcp__agent-bridge__*`. The Codex manifest declares the internal tools
+pre-approved so an inherited call works under headless approval policy
+`never`; user and managed plugin policy may still restrict it.
 
 ## Public MCP Surface
 
@@ -116,8 +134,25 @@ salvage is `thread/read` over RPC. `approvalPolicy` is pinned to `never` and is
 not configurable — a client that accepts one approval escalates past the sandbox
 (measured) — so the sandbox is the hard boundary. Two reapers stop the broker
 when nothing is using it: its own inactivity timer and the bridge-side lease
-reaper in `lib/shared-runtime-registry.mjs`, both gated on `thread/loaded/list`
-rather than on a pid.
+reaper in `lib/shared-runtime-registry.mjs`. `thread/loaded/list` supplies the
+candidate ids, but is not itself an activity signal: each reaper reads those
+threads with turns included and proceeds only when every one is positively idle
+or terminal. Active and unrecognised/unreadable states fail safe and keep the
+broker alive.
+
+The app-server executable is selected as a pair before spawn. The configured
+`CODEX_BIN`/PATH binary anchors the desired version; `lib/codex-install.mjs`
+retains its invoked path, canonical path and stat identity, follows Codex's
+resource/canonical-bin/invoked-sibling helper order, and may select the
+same-version unquarantined pair extracted under
+`$CODEX_HOME/plugins/.plugin-appserver/`. It never alters `/opt/homebrew/bin` or
+xattrs; a failed xattr read remains an explicit indeterminate verdict rather
+than being collapsed to attribute absence. The broker publishes the selected launch identity on `initialize` and
+`broker/status`. Before each send the bridge compares that identity with a
+fresh selection; a mismatch or deleted running image is replaced only through
+the existing client/lease/active-turn disposal guards. A `thread/start`
+configuration `EPERM` or dead-broker signature gets the same guarded replacement
+and exactly one retry.
 
 The one capability the transport does **not** change is the sandbox: both codex
 adapters resolve it from the same `AGENT_COMPANION_CODEX_SANDBOX_MODE`, and the
@@ -204,6 +239,13 @@ Current MVP adapters are not yet formal classes. The stable contract is visible 
   `thread`, `mode`, `template`, `parallelStrategy`, `status`, and `startedAt`.
 - Terminal adapters call `retainTerminalJob` with `status`, `summary`, `error`, `detail`, `durationMs`, and `terminalAt`.
 - `summary.message` is the user-visible terminal message. `summary.toolCalls` is optional.
+- Every `unreachable` result derives one `failure_class` for job status, wait
+  metadata and completion notifications. A live Codex `turn/completed` with
+  zero observed tool calls is remapped only when its assistant message reports
+  a universal pre-execution command blocker. A recovered `thread/read` history
+  has no tool record, so only an explicit named-runner-unavailable message is
+  remapped. Both become `codex_code_mode_host_unavailable` /
+  `runtime_unavailable`; ordinary zero-tool answers stay completed.
 - Adapters should write or refresh a digest before terminal notification when they have transcript/output material.
 
 ## State
@@ -230,11 +272,11 @@ State lives under the host-routed companion home `~/.{claude,codex}/agent-compan
   file left at the path). Any other code, such as `EMFILE` under a wide fan-out
   or `EACCES`, is a probe that failed rather than an answer, and the start
   refuses with `BROKER_SOCKET_INDETERMINATE` instead of guessing.
-- `runtime/codex-broker.json`: leases, `lastUsedAt` and the two-phase disposal
-  claim for that broker. Unlike the OpenCode registry — which holds the only
-  record of an ephemeral `--port 0` address — this file is bookkeeping, not an
-  address book: the socket path above is a constant, so a bridge that loses it
-  simply re-adopts the broker by probing.
+- `runtime/codex-broker.json`: running launch metadata, leases, `lastUsedAt`
+  and the two-phase disposal claim for that broker. Unlike the OpenCode registry
+  — which holds the only record of an ephemeral `--port 0` address — this file
+  is bookkeeping, not an address book: the socket path above is a constant, so
+  a bridge that loses it simply re-adopts the broker by probing.
 
 ## Negative Results
 
@@ -272,6 +314,25 @@ because the cost of re-deriving them is a day each.
   structural: resume before interrupting or steering a thread this connection did not start.
 - **`turn/start` on a busy thread does not reject.** It succeeds and returns a *second*
   turn id: two turns, two bills, two sets of edits. Status must be checked first.
+- **A thread being loaded does not mean it is active.** Completed and interrupted
+  threads remain in `thread/loaded/list` for reuse. Treating list length as a
+  busy bit kept the 2026-09-02 pre-upgrade broker alive indefinitely. Both
+  reapers now read each thread and protect active or unknown state, but allow a
+  positively idle/terminal set to retire.
+- **An alive broker is not necessarily the installed broker.** A detached
+  app-server can keep a deleted Homebrew Caskroom image mapped across
+  `brew upgrade codex`. Socket readiness therefore proves transport liveness,
+  not executable freshness; version, canonical path and stat identity are
+  compared separately before a send.
+- **`--code-mode-host` is not a local helper-path override.** In Codex 0.152.x it
+  selects a remote HTTP(S)/gRPC endpoint ([source](https://github.com/openai/codex/blob/rust-v0.152.0/codex-rs/app-server/src/code_mode_host.rs#L8-L78)).
+  No supported key in the [Codex configuration reference](https://developers.openai.com/codex/config-reference)
+  or environment variable redirects a local helper. The
+  [local resolver](https://github.com/openai/codex/blob/rust-v0.152.0/codex-rs/install-context/src/lib.rs#L172-L202)
+  checks packaged
+  resources, the canonical package `bin` directory, then the invoked executable
+  directory; selecting a colocated complete Codex/helper pair is the supported
+  local mechanism.
 
 **Host budgets and observability**
 
@@ -282,7 +343,7 @@ because the cost of re-deriving them is a day each.
   has 600 s of headroom — never raise it past 1500 s without a per-server `timeout`.
 - **`env: { MCP_TOOL_TIMEOUT }` in agent frontmatter is inert.** The variable reaches the
   bridge child; the host ignores it. The fields that work are a sibling `timeout` (Claude,
-  milliseconds) and `tool_timeout_sec` (Codex, seconds).
+  milliseconds) and `tool_timeout_sec` in the Codex plugin manifest (seconds).
 - **MCP progress notifications are not a model channel.** They *do* reset the idle watchdog
   (a 70 s silent call aborts; the same call with progress completes), but on this host the
   payload lands in the TUI spinner and the model never sees it.
@@ -290,6 +351,14 @@ because the cost of re-deriving them is a day each.
   one atomic message at turn end; an aborted job's digest holds ~0.2 % of the work product.
   On the app-server transport `thread/read` is the salvage channel — and it returns
   **messages only**, no tool activity, though the rollout for the same thread has both.
+- **Protocol completion is not always a task verdict.** Codex can emit
+  `turn/completed` after its subordinate command runner failed before any command
+  executed. Conversely, many valid conversational turns use zero tools and
+  restart recovery has no tool history. The bridge therefore requires a live
+  `turn/completed`, zero observed tool calls, and a universal pre-execution
+  command blocker; for recovered `thread/read`, it requires an explicit
+  named-runner-unavailable message instead. Prose merely quoting such an error
+  is not enough.
 - **`--output-last-message` is not a salvage channel.** It is never written on SIGTERM or
   `turn.failed`. The ThreadEvent stream likewise emits **no abort marker** on SIGTERM, and
   `codex exec --json` silently omits some `command_execution` items the rollout records.
@@ -305,9 +374,11 @@ because the cost of re-deriving them is a day each.
   `git status` rewrites `.git/index` to refresh the stat cache.)
 - **`handleStatus` performs no lifecycle mutation.** Both hydrate and host-sid adoption are
   latched, so a status call on an already-adopted bridge re-runs nothing. Status was blamed
-  for killing jobs; what kills them is a *companion subagent returning*, because overlapping
-  subagents share one bridge process that is SIGINT'd when the first of them finishes.
-  Status is only special because it is the fastest thing that can finish.
+  for killing jobs. On Claude's agent-local MCP lifecycle, overlapping subagents can share one
+  bridge process that is SIGINT'd when the first of them finishes; Status is only special
+  because it is the fastest thing that can finish. Codex's plugin/session-scoped registration
+  does not use that agent-local teardown boundary. Detached companion runtimes remain the
+  durability boundary on both hosts.
 - **"No thread id" does not mean "broadcast".** The distiller classified every notification
   without a thread id as `global`, and the broker fanned those out to every bridge. Read against
   the codex source (rust-v0.150.1, 2026-08-28): codex has three delivery paths, not two — thread
@@ -368,6 +439,45 @@ because the cost of re-deriving them is a day each.
 - **Config inheritance works — do not pin the model.** With no `model`, `turn_context` records
   exactly `~/.codex/config.toml`'s model and effort. Passing `model: null` is *not* the same
   as omitting the key.
+
+## Codex Upgrade Incident Evidence (2026-09-02)
+
+Root-caused from process/file inspection, persisted jobs and upstream Codex
+source:
+
+- The detached broker deliberately outlived its launching terminal and still
+  had the removed 0.151.0 Caskroom image mapped after the upgrade. Its previous
+  health check proved only socket/app-server readiness, and terminal loaded
+  threads prevented the old reaper from retiring it. The replacement logic now
+  checks executable identity and actual turn activity.
+- The affected local 0.152.0 payload had no `codex-code-mode-host`. Codex's
+  resolver consequently reached its final invoked-directory candidate,
+  `/opt/homebrew/bin/codex-code-mode-host`, which Homebrew had not installed.
+  There is no local helper-path setting to inject instead.
+- Job `codex-mtjptuj4-89gw` persisted `completed` even though its terminal text
+  said every command failed before execution and explicitly withheld a review
+  verdict. The bridge had accepted protocol completion without interpreting the
+  narrowly identifiable runtime blocker; that propagation defect is now
+  normalized before persistence and notification.
+
+Evidence boundaries retained as inference or unknown:
+
+- The configuration `EPERM` is consistent with macOS Files-and-Folders/TCC's
+  [responsible-code model](https://developer.apple.com/forums/thread/125438)
+  losing its original process context after a detached broker
+  outlives the terminal, but the incident's responsible audit token was not
+  recoverable. The bridge treats that exact `thread/start` signature as
+  recoverable once; it does not claim the OS mechanism was proven.
+- The user's controlled A/B established that removing quarantine from the cask
+  parent and restarting stopped the Gatekeeper dialog, while changing the helper
+  did not. The exact Gatekeeper responsibility/inheritance mechanism remains an
+  inference, so quarantine is detected and surfaced rather than rewritten.
+- The currently published [0.152.0](https://github.com/openai/codex/releases/tag/rust-v0.152.0)
+  and [0.152.1](https://github.com/openai/codex/releases/tag/rust-v0.152.1)
+  package archives both contain the helper and use the same lookup
+  implementation. Why the historical local
+  0.152.0 payload lacked it is not established; 0.152.1 must not be described as
+  an upstream helper-lookup fix.
 
 ## Naming
 

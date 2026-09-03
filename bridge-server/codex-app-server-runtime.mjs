@@ -73,6 +73,7 @@ import {
   disposalClaimedBy,
   pidAlive,
 } from '../lib/shared-runtime-registry.mjs';
+import { inspectCodexAppServerInstallation } from '../lib/codex-install.mjs';
 import { truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -119,6 +120,7 @@ const CONNECT_CLASS_CODES = new Set(['ECONNREFUSED', 'ENOENT', 'ENOTSOCK']);
 // cover the winner's bind — readiness after that is covered by the full boot
 // budget.
 const SPAWN_RACE_GRACE_MS = 2_000;
+const BROKER_STOP_TIMEOUT_MS = 5_000;
 
 // A single `aggregated_output` can be a whole build log; the toolCalls entry is
 // a digest-facing artifact, not a transcript. Same cap as codex-runtime.mjs.
@@ -139,6 +141,7 @@ const INTERNAL = Symbol('codex app-server internal call');
 const ATTACH_BEFORE_METHODS = new Set(['turn/interrupt', 'turn/steer']);
 
 const JSONRPC_METHOD_NOT_FOUND = -32601;
+const TERMINAL_TURN_STATUSES = new Set(['completed', 'interrupted', 'failed']);
 
 // ---------------------------------------------------------------------------
 // Adapter selection
@@ -288,10 +291,22 @@ export function codexAppServerRuntimeInfo(env = process.env) {
     steer_confirm_ms: resolveSteerConfirmMs(env),
     pinned_version: CODEX_PINNED_VERSION,
   };
-  // Only present once a broker has actually told us. The protocol carries no
-  // version field, so this is the sole runtime source, and an absent key is more
-  // honest than a guess from `codex --version` we never made.
-  if (_lastKnownCodexVersion) info.installed_version = _lastKnownCodexVersion;
+  // Running and selected are deliberately separate. Before this split the
+  // broker-reported value was named `installed_version`, so an app-server that
+  // survived a cask upgrade looked current even while it still had the deleted
+  // old executable mapped. The broker owns the running facts; the installation
+  // inspector owns what a fresh broker would select now.
+  if (_lastKnownCodexVersion) info.running_version = _lastKnownCodexVersion;
+  if (_lastKnownCodexPath) info.running_path = _lastKnownCodexPath;
+  if (_lastKnownCodexRealPath) info.running_real_path = _lastKnownCodexRealPath;
+  if (_lastKnownCodexSource) info.running_source = _lastKnownCodexSource;
+  if (_lastKnownCodexIdentity) info.running_identity = _lastKnownCodexIdentity;
+  if (_lastKnownSelectedInstall?.selected) {
+    info.selected_version = _lastKnownSelectedInstall.selected.version || null;
+    info.selected_path = _lastKnownSelectedInstall.selected.path || null;
+    info.selected_source = _lastKnownSelectedInstall.selected.source || null;
+    info.selected_quarantined = !!_lastKnownSelectedInstall.selected.quarantined;
+  }
   // The broker's verdict on whether that installed codex still speaks the
   // pinned wire contract: match | drift | unverified | pending. Same rule as the
   // version — only present once a broker has reported it.
@@ -366,6 +381,8 @@ const realImpl = () => ({
   spawnBroker: realSpawnBroker,
   kill: (pid, signal) => process.kill(pid, signal),
   delay: realDelay,
+  inspectCodexInstall: (opts = {}) => inspectCodexAppServerInstallation(opts),
+  pathExists: (path) => existsSync(path),
   logEvent,
 });
 
@@ -378,10 +395,16 @@ export function _setForTest(overrides = {}) {
 export function _resetForTest() {
   _impl = realImpl();
   _spawnPromise = null;
+  _restartPromise = null;
   _reapPromise = null;
   _lastKnownCodexVersion = null;
   _lastKnownContractStatus = null;
-  _lastDisposal = null;
+  _lastKnownCodexPath = null;
+  _lastKnownCodexRealPath = null;
+  _lastKnownCodexSource = null;
+  _lastKnownCodexIdentity = null;
+  _lastKnownSelectedInstall = null;
+  _reapDisposalContext = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,17 +1050,32 @@ const brokerRegistry = createSharedRuntimeRegistry({
   registryPath: codexBrokerRegistryPath,
   key: SHARED_BROKER_KEY,
   identity: (entry) => (entry?.socketPath && entry?.pid ? `${entry.socketPath}#${entry.pid}` : null),
-  dispose: (entry, ctx) => disposeBroker(entry, ctx),
+  dispose: async (entry, ctx) => {
+    const result = await disposeBroker(entry, ctx);
+    // createSharedRuntimeRegistry intentionally exposes only whether it claimed
+    // an entry, not the adapter-specific disposal verdict. Keep that verdict on
+    // this one reap invocation. On-demand restarts call disposeBroker directly
+    // and therefore cannot overwrite or consume it.
+    if (_reapDisposalContext) _reapDisposalContext.result = result;
+    return result;
+  },
 });
 
 let _spawnPromise = null;
+let _restartPromise = null;
 let _reapPromise = null;
 let _lastKnownCodexVersion = null;
 let _lastKnownContractStatus = null;
-// What `dispose` actually did. The registry's reapIdle reports "the entry was
-// claimed and disposed"; ours must report "the broker was stopped", and those
-// differ exactly when dispose refuses (see disposeBroker).
-let _lastDisposal = null;
+let _lastKnownCodexPath = null;
+let _lastKnownCodexRealPath = null;
+let _lastKnownCodexSource = null;
+let _lastKnownCodexIdentity = null;
+let _lastKnownSelectedInstall = null;
+// The registry's reapIdle reports "the entry was claimed and dispose was
+// invoked"; this per-invocation context carries whether our adapter actually
+// stopped the broker. `_reapPromise` guarantees there is only one such context,
+// while an overlapping on-demand restart receives its own return value.
+let _reapDisposalContext = null;
 
 // How long the broker may sit unused before this side reaps it. Derived from the
 // codex job budget for the same reason opencode's is: two independently chosen
@@ -1078,6 +1116,12 @@ export async function probeCodexBrokerHealth(socketPath = null) {
       brokerPid: info.brokerPid ?? status?.brokerPid ?? null,
       appServerPid: info.appServerPid ?? status?.appServerPid ?? null,
       codexVersion: info.codexVersion ?? null,
+      codexPath: info.codexPath ?? status?.codexPath ?? null,
+      codexRealPath: info.codexRealPath ?? status?.codexRealPath ?? null,
+      codexHelperPath: info.codexHelperPath ?? status?.codexHelperPath ?? null,
+      codexSource: info.codexSource ?? status?.codexSource ?? null,
+      codexIdentity: info.codexIdentity ?? status?.codexIdentity ?? null,
+      codexQuarantined: info.codexQuarantined ?? status?.codexQuarantined ?? null,
       contractStatus: status?.contractStatus ?? info.contractStatus ?? null,
       clients: status?.clients ?? null,
       uptimeMs: status?.uptimeMs ?? null,
@@ -1098,12 +1142,61 @@ export async function probeCodexBrokerHealth(socketPath = null) {
 // the cross-process half of that race is handled where it actually lands:
 // `waitForReady` re-probes instead of treating our own child's exit as a verdict
 // on the socket.
+export function codexBrokerStaleReasons(health, installation, { pathExists = (path) => existsSync(path) } = {}) {
+  if (!health?.alive || !installation?.ready || !installation?.selected) return [];
+  const selected = installation.selected;
+  const reasons = [];
+
+  if (health.codexVersion && selected.version && health.codexVersion !== selected.version) {
+    reasons.push(`running version ${health.codexVersion} differs from selected version ${selected.version}`);
+  }
+  if (health.codexRealPath && selected.realPath && health.codexRealPath !== selected.realPath) {
+    reasons.push(`running executable ${health.codexRealPath} differs from selected executable ${selected.realPath}`);
+  }
+  if (health.codexIdentity && selected.identity && health.codexIdentity !== selected.identity) {
+    reasons.push('the selected Codex executable was replaced in place');
+  }
+  if (health.codexRealPath && !pathExists(health.codexRealPath)) {
+    reasons.push(`running executable no longer exists: ${health.codexRealPath}`);
+  }
+  // A broker started by the pre-upgrade implementation cannot report which
+  // file it actually mapped. Treat that as stale once, rather than blessing an
+  // unknowable process forever; replacement is still guarded by active-turn
+  // inspection and the shared-registry disposal claim.
+  if (!health.codexPath && !health.codexRealPath && !health.codexIdentity) {
+    reasons.push('running broker predates executable-identity reporting');
+  }
+  return [...new Set(reasons)];
+}
+
+function inspectSelectedCodex(env) {
+  const installation = _impl.inspectCodexInstall({ env });
+  _lastKnownSelectedInstall = installation;
+  if (installation?.ready && installation.selected) return installation;
+  const message = installation?.blocker?.message || 'no complete Codex app-server/code-mode-host pair is available';
+  const err = new Error(`Codex app-server runtime is unavailable: ${message}`);
+  err.code = 'CODEX_APP_SERVER_INSTALL_UNAVAILABLE';
+  err.detail = installation?.blocker?.code || 'no_complete_pair';
+  throw err;
+}
+
 export async function ensureCodexBroker({ env = process.env } = {}) {
   const socketPath = codexBrokerSocketPath();
+  const installation = inspectSelectedCodex(env);
 
   const health = await probeCodexBrokerHealth(socketPath);
   if (health.alive) {
     const ready = health.ready ? health : await waitForReady(socketPath, BROKER_BOOT_TIMEOUT_MS);
+    const staleReasons = codexBrokerStaleReasons(ready, installation, { pathExists: _impl.pathExists });
+    if (staleReasons.length > 0) {
+      const stopped = await restartCodexBrokerIfIdle({ health: ready, reason: staleReasons.join('; ') });
+      if (stopped) return spawnBrokerShared(env, socketPath);
+      _impl.logEvent('warn', 'codex_appserver_upgrade_restart_deferred', {
+        pid: ready.brokerPid,
+        reasons: staleReasons,
+        clients: ready.clients,
+      });
+    }
     // A broker under a live disposal claim is adopted, not waited out: the
     // adoption itself is what makes the claimer stand down (see adopt()).
     const broker = adopt(ready, { reused: true });
@@ -1132,6 +1225,10 @@ export async function ensureCodexBroker({ env = process.env } = {}) {
     throw new Error(`could not reach the codex broker at ${socketPath}: ${health.error}`);
   }
 
+  return spawnBrokerShared(env, socketPath);
+}
+
+async function spawnBrokerShared(env, socketPath) {
   if (_spawnPromise) return _spawnPromise;
   _spawnPromise = spawnAndAdoptBroker(env, socketPath);
   try { return await _spawnPromise; }
@@ -1168,7 +1265,22 @@ export async function ensureCodexBroker({ env = process.env } = {}) {
 function adopt(health, { reused }) {
   if (health.codexVersion) _lastKnownCodexVersion = health.codexVersion;
   if (health.contractStatus) _lastKnownContractStatus = health.contractStatus;
-  const entry = { socketPath: health.socketPath, pid: health.brokerPid, appServerPid: health.appServerPid };
+  if (health.codexPath) _lastKnownCodexPath = health.codexPath;
+  if (health.codexRealPath) _lastKnownCodexRealPath = health.codexRealPath;
+  if (health.codexSource) _lastKnownCodexSource = health.codexSource;
+  if (health.codexIdentity) _lastKnownCodexIdentity = health.codexIdentity;
+  const entry = {
+    socketPath: health.socketPath,
+    pid: health.brokerPid,
+    appServerPid: health.appServerPid,
+    codexVersion: health.codexVersion ?? null,
+    codexPath: health.codexPath ?? null,
+    codexRealPath: health.codexRealPath ?? null,
+    codexHelperPath: health.codexHelperPath ?? null,
+    codexSource: health.codexSource ?? null,
+    codexIdentity: health.codexIdentity ?? null,
+    codexQuarantined: health.codexQuarantined ?? null,
+  };
 
   // Merge only into the SAME broker. A recorded entry with a different pid
   // describes the broker this one replaced, and its `disposing` claim and its
@@ -1287,15 +1399,24 @@ async function waitForReady(socketPath, budgetMs, exitedProbe = null) {
 // ephemeral port: the next ensureCodexBroker connect-probes, finds it and
 // re-records it.
 async function disposeBroker(entry, { confirmDisposal }) {
-  _lastDisposal = null;
   let conn = null;
   let brokerPid = null;
   try {
     conn = await connectCodexBroker({ socketPath: entry.socketPath, connectTimeoutMs: HEALTH_PROBE_TIMEOUT_MS, timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
-    const loaded = await listLoadedCodexThreads({ conn, timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
-    if (loaded.length > 0) {
-      _lastDisposal = 'refused';
-      return;
+    const status = await conn.call('broker/status', {}, { timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
+    // This disposal connection counts as one. Anything beyond it is another
+    // bridge actively talking to the broker; let that bridge finish/adopt and
+    // make the final claim check see its registry bump.
+    if (Number(status?.clients) > 1) {
+      return 'refused';
+    }
+    const activity = await inspectLoadedCodexThreadActivity({ conn, timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
+    if (activity.active.length > 0) {
+      _impl.logEvent('info', 'codex_appserver_dispose_active_turns', {
+        pid: entry.pid ?? null,
+        threads: activity.active.map((state) => state.threadId),
+      });
+      return 'refused';
     }
     // The live broker's own account of who it is. The registry entry is a
     // RECORD, and a record can outlive its process; this is the only thing here
@@ -1305,16 +1426,14 @@ async function disposeBroker(entry, { confirmDisposal }) {
     if (probeSocketVerdictForError(err) !== 'absent') {
       // A probe that FAILED says nothing about liveness — refuse rather than
       // SIGTERM a broker we could not interrogate.
-      _lastDisposal = 'refused';
-      return;
+      return 'refused';
     }
     // ECONNREFUSED/ENOENT: nothing is listening, so the broker this entry
     // describes is already gone and there is nothing to stop. Signalling the
     // recorded pid HERE would be a pure pid-reuse hazard — no evidence on this
     // path says that pid is still a broker, and the OS recycles pids. The entry
     // is cleaned up; that is the whole reap.
-    _lastDisposal = 'stopped';
-    return;
+    return 'stopped';
   } finally {
     try { conn?.close(); } catch { /* best effort */ }
   }
@@ -1324,8 +1443,7 @@ async function disposeBroker(entry, { confirmDisposal }) {
   // against a process that no longer exists, and the pid may now be anyone's.
   if (brokerPid == null || brokerPid !== entry.pid) {
     _impl.logEvent('warn', 'codex_appserver_dispose_pid_mismatch', { entryPid: entry.pid ?? null, brokerPid });
-    _lastDisposal = 'refused';
-    return;
+    return 'refused';
   }
 
   // The last look before the signal, and as late as it can be taken. Everything
@@ -1334,8 +1452,7 @@ async function disposeBroker(entry, { confirmDisposal }) {
   // leaves its mark in the registry (`lastUsedAt`), not on this connection.
   if (!confirmDisposal()) {
     _impl.logEvent('warn', 'codex_appserver_dispose_stood_down', { pid: entry.pid ?? null });
-    _lastDisposal = 'refused';
-    return;
+    return 'refused';
   }
 
   // SIGTERM, not SIGKILL: the broker's handler stops its app-server child and
@@ -1344,7 +1461,93 @@ async function disposeBroker(entry, { confirmDisposal }) {
   if (pidAlive(entry.pid)) {
     try { _impl.kill(entry.pid, 'SIGTERM'); } catch { /* already gone */ }
   }
-  _lastDisposal = 'stopped';
+  return 'stopped';
+}
+
+async function waitForBrokerGone(socketPath, brokerPid, budgetMs = BROKER_STOP_TIMEOUT_MS) {
+  const startedAt = _impl.now();
+  for (;;) {
+    const health = await probeCodexBrokerHealth(socketPath);
+    if (!health.alive && CONNECT_CLASS_CODES.has(health.code)) return true;
+    // The socket path is fixed, so another bridge can win the replacement race
+    // before this disposer observes an absent path. A ready broker with a
+    // different positive pid proves the broker we signalled is gone just as
+    // strongly as ENOENT does. An incomplete handshake, missing/malformed pid,
+    // or indeterminate failed probe proves nothing and must keep waiting.
+    if (
+      health.alive &&
+      health.ready &&
+      Number.isInteger(health.brokerPid) &&
+      health.brokerPid > 0 &&
+      health.brokerPid !== brokerPid
+    ) return true;
+    if (_impl.now() - startedAt >= budgetMs) return false;
+    await _impl.delay(50);
+  }
+}
+
+// On-demand counterpart to the TTL reaper. Cask replacement is discovered on
+// the next send, not thirty minutes later, so it needs the same two-phase claim
+// immediately. The destructive decision still has all of the normal guards:
+// no other connected bridge, no live lease, no active turn, matching live pid,
+// and a final registry confirmation immediately before SIGTERM.
+export async function restartCodexBrokerIfIdle({ health = null, reason = 'runtime refresh' } = {}) {
+  if (_restartPromise) return _restartPromise;
+  _restartPromise = (async () => {
+    const live = health || await probeCodexBrokerHealth();
+    if (!live.alive) {
+      if (!CONNECT_CLASS_CODES.has(live.code)) return false;
+      const recorded = brokerRegistry.read();
+      if (recorded && (!health?.brokerPid || recorded.pid === health.brokerPid)) brokerRegistry.forget();
+      return true;
+    }
+    // The health-probe connection itself was included while broker/status ran.
+    // More than one means somebody else was connected at that instant.
+    if (Number(live.clients) > 1) return false;
+
+    let entry = brokerRegistry.read();
+    if (entry?.socketPath !== live.socketPath || entry?.pid !== live.brokerPid) {
+      brokerRegistry.record({
+        socketPath: live.socketPath,
+        pid: live.brokerPid,
+        appServerPid: live.appServerPid,
+        codexVersion: live.codexVersion ?? null,
+        codexPath: live.codexPath ?? null,
+        codexRealPath: live.codexRealPath ?? null,
+        codexHelperPath: live.codexHelperPath ?? null,
+        codexSource: live.codexSource ?? null,
+        codexIdentity: live.codexIdentity ?? null,
+        codexQuarantined: live.codexQuarantined ?? null,
+      });
+      entry = brokerRegistry.read();
+    }
+    if (!entry || !brokerRegistry.claimDisposal(entry)) return false;
+
+    const confirmDisposal = () => brokerRegistry.confirmDisposal(entry);
+    let disposal = 'refused';
+    try {
+      disposal = await disposeBroker(entry, { confirmDisposal });
+    } catch (err) {
+      _impl.logEvent('warn', 'codex_appserver_upgrade_restart_error', { pid: entry.pid, reason, error: err.message });
+    }
+
+    if (disposal !== 'stopped') {
+      brokerRegistry.releaseDisposalClaim(entry);
+      return false;
+    }
+    if (brokerRegistry.confirmDisposal(entry)) brokerRegistry.forget();
+    const gone = await waitForBrokerGone(entry.socketPath, entry.pid);
+    if (!gone) {
+      const err = new Error(`the stale Codex broker ${entry.pid} did not stop within ${BROKER_STOP_TIMEOUT_MS}ms`);
+      err.code = 'CODEX_BROKER_RESTART_DEFERRED';
+      err.detail = 'codex_broker_stop_timeout';
+      throw err;
+    }
+    _impl.logEvent('info', 'codex_appserver_broker_restarted', { pid: entry.pid, reason });
+    return true;
+  })();
+  try { return await _restartPromise; }
+  finally { _restartPromise = null; }
 }
 
 // Snapshot of the shared broker for status/observability.
@@ -1360,20 +1563,25 @@ export function syncCodexBrokerLeases(jobIds = [], opts = {}) {
 
 // Best-effort idle reaper. Returns true only when the broker is genuinely off
 // the machine afterwards — either we signalled it, or the socket already said
-// nobody is listening. It returns FALSE whenever `dispose` refused (threads
-// loaded, an uninterrogable broker, a pid the live broker does not claim),
+// nobody is listening. It returns FALSE whenever `dispose` refused (another
+// client, an active/unknown thread, an uninterrogable broker, or a pid the live
+// broker does not claim),
 // because reporting a refusal as a reap would tell an operator work was cleaned
 // up while it is still running.
 export async function reapIdleCodexBroker({ idleMs, hasLiveJobs = false, now = Date.now() } = {}) {
-  // Serialised for the same reason the spawn is: `_lastDisposal` is how the
-  // dispose action reports back, and two overlapping reaps in one process would
-  // read each other's answer. The reaper runs on a GC tick, so sharing the
+  // Serialised because the registry's disposal callback reports into the one
+  // per-invocation context below. The reaper runs on a GC tick, so sharing the
   // in-flight result is the correct answer for a second caller, not a compromise.
   if (_reapPromise) return _reapPromise;
   _reapPromise = (async () => {
-    _lastDisposal = null;
-    const claimed = await brokerRegistry.reapIdle({ idleMs, hasLiveJobs, now });
-    return claimed && _lastDisposal === 'stopped';
+    const context = { result: null };
+    _reapDisposalContext = context;
+    try {
+      const claimed = await brokerRegistry.reapIdle({ idleMs, hasLiveJobs, now });
+      return claimed && context.result === 'stopped';
+    } finally {
+      if (_reapDisposalContext === context) _reapDisposalContext = null;
+    }
   })();
   try { return await _reapPromise; }
   finally { _reapPromise = null; }
@@ -1397,6 +1605,64 @@ export async function startCodexThread({ conn, cwd, env = process.env, model = n
   if (!threadId) throw new Error('codex thread/start returned no thread id');
   conn._noteFreshThread(threadId);
   return { threadId, rolloutPath: result.thread.path ?? null };
+}
+
+const CONFIG_EPERM_RE = /failed to load configuration[\s\S]*operation not permitted\s*\(os error 1\)/i;
+const DEAD_BROKER_RE = /broker(?:\/appServerDied|[^\n]*(?:gone|died))|codex app-server (?:is not (?:running|alive)|exited)|connection (?:closed|reset)|\b(?:ECONNRESET|ECONNREFUSED|EPIPE)\b/i;
+
+export function codexBrokerErrorNeedsRespawn(error) {
+  const text = String(error?.message || error || '');
+  // ENOENT/ENOTSOCK are normal unix-socket outcomes when the broker disappears
+  // in the gap after ensure's successful probe. They need not occur in a JSON-
+  // RPC message, so keep the structured connect-class verdict alongside the
+  // message signatures used for app-server failures.
+  return CONNECT_CLASS_CODES.has(error?.code) || CONFIG_EPERM_RE.test(text) || DEAD_BROKER_RE.test(text);
+}
+
+// Open a fresh thread with one bounded runtime recovery. The incident EPERM is
+// returned by an app-server that is still perfectly alive at the socket layer,
+// so `ensureCodexBroker` cannot discover it before the first real `thread/start`.
+// Retrying that call forever would hide a machine problem and can produce
+// duplicate work; retrying once after the same active-turn-safe broker disposal
+// closes the stale-TCC/dead-process window without changing the verdict twice.
+export async function startCodexThreadWithBrokerRecovery({
+  cwd,
+  env = process.env,
+  model = null,
+  timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
+} = {}) {
+  let firstError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const broker = await ensureCodexBroker({ env });
+    let conn = null;
+    try {
+      // A broker can die after ensure's health probe but before this job opens
+      // its own socket. Keep connection setup inside the same one-retry guard as
+      // thread/start; connectCodexBroker closes a socket whose handshake fails,
+      // and the optional close below covers every successfully-created conn.
+      conn = await connectCodexBroker({ socketPath: broker.socketPath, env });
+      const thread = await startCodexThread({ conn, cwd, env, model, timeoutMs });
+      return { broker, conn, ...thread, brokerRestarted: attempt > 0 };
+    } catch (err) {
+      try { conn?.close(); } catch { /* best effort */ }
+      if (attempt > 0 || !codexBrokerErrorNeedsRespawn(err)) throw err;
+      firstError = err;
+      const health = await probeCodexBrokerHealth(broker.socketPath);
+      const stopped = await restartCodexBrokerIfIdle({
+        health,
+        reason: `thread/start failed before execution: ${err.message}`,
+      });
+      if (!stopped) {
+        const deferred = new Error(
+          `${err.message}; the broker could not be restarted because another client, lease, or active turn still uses it`,
+        );
+        deferred.code = err.code || 'CODEX_BROKER_RESTART_DEFERRED';
+        deferred.cause = err;
+        throw deferred;
+      }
+    }
+  }
+  throw firstError || new Error('Codex broker recovery exhausted without starting a thread');
 }
 
 // The turn a `Thread` payload ends on, or null. `turns` is carried by the
@@ -1504,6 +1770,57 @@ function collectAgentMessages(node, out = [], depth = 0) {
 export async function listLoadedCodexThreads({ conn, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
   const result = await conn.call('thread/loaded/list', {}, { timeoutMs });
   return Array.isArray(result?.data) ? result.data : [];
+}
+
+// `thread/loaded/list` means resident in this app-server, not running. Codex
+// keeps completed threads loaded, so using the list length as an activity bit
+// pins a detached broker forever. A turn is protected unless the richer read
+// proves the thread idle and its last turn terminal; unknown/error is busy in
+// the fail-safe direction.
+export async function inspectLoadedCodexThreadActivity({ conn, timeoutMs = DEFAULT_CALL_TIMEOUT_MS }) {
+  const loaded = await listLoadedCodexThreads({ conn, timeoutMs });
+  const states = await Promise.all(loaded.map(async (threadId) => {
+    try {
+      const result = await conn.call('thread/read', { threadId, includeTurns: true }, { timeoutMs });
+      const thread = result?.thread;
+      if (!thread || typeof thread !== 'object') {
+        return { threadId, status: 'unknown', lastTurnStatus: null, active: true, error: null };
+      }
+
+      const status = typeof thread.status?.type === 'string'
+        ? thread.status.type
+        : typeof thread.status === 'string'
+          ? thread.status
+          : 'unknown';
+      if (thread.status != null && status === 'unknown') {
+        return { threadId, status, lastTurnStatus: null, active: true, error: null };
+      }
+      if (thread.turns != null && !Array.isArray(thread.turns)) {
+        return { threadId, status, lastTurnStatus: null, active: true, error: null };
+      }
+
+      const turns = Array.isArray(thread.turns) ? thread.turns : [];
+      const lastTurn = turns.at(-1) || null;
+      const lastTurnStatus = typeof lastTurn?.status === 'string' ? lastTurn.status : null;
+      if (lastTurn && lastTurnStatus === null) {
+        return { threadId, status, lastTurnStatus, active: true, error: null };
+      }
+
+      let active = true;
+      if (status === 'active' || lastTurnStatus === 'inProgress') active = true;
+      else if (status !== 'unknown' && status !== 'idle') active = true;
+      else if (lastTurnStatus && !TERMINAL_TURN_STATUSES.has(lastTurnStatus)) active = true;
+      else if (status === 'idle' || TERMINAL_TURN_STATUSES.has(lastTurnStatus)) active = false;
+      return { threadId, status, lastTurnStatus, active, error: null };
+    } catch (err) {
+      return { threadId, status: 'unknown', lastTurnStatus: null, active: true, error: err.message };
+    }
+  }));
+  return {
+    loaded,
+    states,
+    active: states.filter((state) => state.active),
+  };
 }
 
 // THE ONLY path that may send `turn/start` — the connection refuses a raw one.

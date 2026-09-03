@@ -20,10 +20,10 @@ import { dirname, join, relative } from 'node:path';
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCAN_DIRS = ['lib', 'bridge-server', 'scripts', 'hooks'];
 // probeCommand is the sanctioned definition for anything the BRIDGE runs, since
-// only there does a hang stall other people's jobs. The two exceptions are
+// only there does a hang stall other people's jobs. The exceptions are
 // standalone processes with their own lifecycle, so they may call out directly —
 // but they must still bound the call, which the second test enforces.
-const ALLOWED = new Set(['lib/target-diagnostics.mjs']);
+const ALLOWED = new Set(['lib/command-probe.mjs']);
 const BOUNDED_EXCEPTIONS = new Set([
   'scripts/onboard.mjs',
   'scripts/copilot-acp-daemon.mjs',
@@ -58,7 +58,7 @@ test('synchronous shell-outs go through the shared probe', () => {
       const src = readFileSync(file, 'utf8');
       for (const token of ['execFileSync', 'execSync', 'spawnSync']) {
         if (src.includes(token)) {
-          offenders.push(`${rel} calls ${token} directly — route it through probeCommand (lib/target-diagnostics.mjs) so it inherits the timeout`);
+          offenders.push(`${rel} calls ${token} directly — route it through probeCommand (lib/command-probe.mjs) so it inherits the timeout`);
         }
       }
     }
@@ -67,7 +67,7 @@ test('synchronous shell-outs go through the shared probe', () => {
 });
 
 test('the shared probe passes a timeout to every synchronous exec it makes', () => {
-  const src = readFileSync(join(REPO_ROOT, 'lib/target-diagnostics.mjs'), 'utf8');
+  const src = readFileSync(join(REPO_ROOT, 'lib/command-probe.mjs'), 'utf8');
   const calls = src.split('execFileSync(').slice(1);
   assert.ok(calls.length > 0, 'expected at least one execFileSync in the shared probe');
   for (const call of calls) {
@@ -107,6 +107,6 @@ test('the shared probe kills with an uncatchable signal', () => {
   // catchable killSignal leaves the hang unbounded while still reporting a
   // timeout. This is the difference between the fix working and only looking
   // like it works.
-  const src = readFileSync(join(REPO_ROOT, 'lib/target-diagnostics.mjs'), 'utf8');
+  const src = readFileSync(join(REPO_ROOT, 'lib/command-probe.mjs'), 'utf8');
   assert.match(src, /killSignal:\s*'SIGKILL'/);
 });

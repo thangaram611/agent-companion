@@ -41,7 +41,6 @@ import { tmpdir } from 'node:os';
 import { join as joinPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { resolveCodexBin } from '../bridge-server/codex-runtime.mjs';
 import {
   CODEX_PINNED_VERSION,
   SCHEMA_GENERATOR_ARGS,
@@ -61,6 +60,7 @@ import {
   // interrupt or steer, and the two must not drift apart.
   THREAD_OWNERSHIP_METHODS as IMPLICIT_SUBSCRIBE_METHODS,
 } from '../lib/codex-app-server-contract.mjs';
+import { inspectCodexAppServerInstallation } from '../lib/codex-install.mjs';
 import { HEARTBEAT_STALE_AFTER_MS, HOST_LIVENESS_TTL_MS, scanLiveHeartbeat } from '../lib/heartbeat.mjs';
 // `pidAlive`, not a local `process.kill(pid, 0)` wrapper: it is the repo's one
 // definition of the predicate (EPERM means alive, and a pid <= 0 is not a pid —
@@ -121,6 +121,7 @@ const PREINIT_QUEUE_CAP = 512;
 
 const APP_SERVER_INIT_TIMEOUT_MS = 30_000;
 const LOADED_LIST_TIMEOUT_MS = 10_000;
+const TERMINAL_TURN_STATUSES = new Set(['completed', 'interrupted', 'failed']);
 const VERSION_PROBE_TIMEOUT_MS = 10_000;
 // `codex app-server generate-json-schema` writes ~4 MB in ~90 ms (measured on
 // 0.150.1); the budget is generous because a hang here must still end.
@@ -153,14 +154,24 @@ const realExit = (code) => process.exit(code);
 // `probeSocket` is in here because the interesting verdicts are the ones a test
 // cannot provoke on demand: fd exhaustion, EACCES, EAGAIN. Those are exactly the
 // verdicts on which the broker must refuse instead of unlinking.
-let _impl = { now: realNow, exit: realExit, probeSocket };
+let _impl = {
+  now: realNow,
+  exit: realExit,
+  probeSocket,
+  inspectInstallation: inspectCodexAppServerInstallation,
+};
 
 export function _setForTest(overrides = {}) {
   _impl = { ..._impl, ...overrides };
 }
 
 export function _resetForTest() {
-  _impl = { now: realNow, exit: realExit, probeSocket };
+  _impl = {
+    now: realNow,
+    exit: realExit,
+    probeSocket,
+    inspectInstallation: inspectCodexAppServerInstallation,
+  };
 }
 
 function now() {
@@ -400,6 +411,17 @@ export class AppServerConnection {
     // Advisory, like the version — reported in `initialize` and `broker/status`
     // so a bridge or `doctor` can show it, never gated on.
     this.contractStatus = 'pending';
+    // Immutable provenance for the exact Codex/helper pair this process
+    // launched. `codexVersion` above is intentionally still learned by the
+    // existing bounded async probe; these fields answer the different question
+    // needed after an in-place package-manager upgrade: WHICH executable is
+    // this long-lived app-server actually running?
+    this.codexPath = null;
+    this.codexRealPath = null;
+    this.codexHelperPath = null;
+    this.codexSource = null;
+    this.codexIdentity = null;
+    this.codexQuarantined = null;
     this.reader = new LineReader();
     this._nextId = 1;
     this._own = new Map(); // upstream id -> { resolve, reject, timer } for the broker's own calls
@@ -417,7 +439,31 @@ export class AppServerConnection {
   }
 
   spawn() {
-    const bin = resolveCodexBin(this.env);
+    let inspection;
+    try {
+      inspection = _impl.inspectInstallation({ env: this.env });
+    } catch (err) {
+      throw new Error(`could not inspect the Codex app-server installation: ${err.message}`);
+    }
+    const selected = inspection?.selected;
+    if (!inspection?.ready || !selected?.path || !selected?.helperPath) {
+      let blocker = 'no compatible Codex CLI and codex-code-mode-host pair was found';
+      if (typeof inspection?.blocker === 'string') blocker = inspection.blocker;
+      else if (typeof inspection?.blocker?.message === 'string') blocker = inspection.blocker.message;
+      else if (inspection?.blocker) {
+        try { blocker = JSON.stringify(inspection.blocker); } catch { /* keep the fallback */ }
+      }
+      throw new Error(`Codex app-server installation is not ready: ${blocker}`);
+    }
+
+    this.codexPath = selected.path;
+    this.codexRealPath = selected.realPath ?? null;
+    this.codexHelperPath = selected.helperPath;
+    this.codexSource = selected.source ?? null;
+    this.codexIdentity = selected.identity ?? null;
+    this.codexQuarantined = selected.quarantined ?? null;
+
+    const bin = selected.path;
     log('INFO', 'spawning codex app-server:', bin);
     this.child = spawn(bin, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], env: this.env });
     this.pid = this.child.pid || null;
@@ -452,7 +498,11 @@ export class AppServerConnection {
   // outcome — a different version, or no readable version at all — runs the
   // real check: dump the live schema and compare it to the pin, classified.
   _probeVersion(bin) {
-    execFile(bin, ['--version'], { timeout: VERSION_PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' }, (err, stdout) => {
+    execFile(bin, ['--version'], {
+      env: this.env,
+      timeout: VERSION_PROBE_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    }, (err, stdout) => {
       // Set on BOTH paths: the probe is over either way, and a client waiting
       // for the broker to finish booting must not wait on an answer that is
       // never coming.
@@ -507,6 +557,7 @@ export class AppServerConnection {
     };
     process.once('exit', reap);
     child = execFile(bin, [...SCHEMA_GENERATOR_ARGS, schemaDir], {
+      env: this.env,
       timeout: CONTRACT_PROBE_TIMEOUT_MS,
       killSignal: 'SIGKILL',
     }, (err, _stdout, stderr) => {
@@ -630,6 +681,20 @@ export class AppServerConnection {
 
 // --- Broker ------------------------------------------------------------------
 
+// One producer for the immutable launch identity carried by both local broker
+// responses. Duplicating this object in `initialize` and `broker/status` would
+// make an upgrade detector depend on which of the two it happened to ask.
+function codexLaunchMetadata(connection) {
+  return {
+    codexPath: connection?.codexPath ?? null,
+    codexRealPath: connection?.codexRealPath ?? null,
+    codexHelperPath: connection?.codexHelperPath ?? null,
+    codexSource: connection?.codexSource ?? null,
+    codexIdentity: connection?.codexIdentity ?? null,
+    codexQuarantined: connection?.codexQuarantined ?? null,
+  };
+}
+
 export class Broker {
   // No `subscriptions` injection point: this module's one test seam is the
   // `_impl` record above, and a second, parallel one that no caller ever
@@ -653,6 +718,12 @@ export class Broker {
     this._preInitQueue = [];
     this.idleTimer = null;
     this.shuttingDown = false;
+    // Monotonic evidence that a bridge appeared while an inactivity decision
+    // was awaiting app-server RPCs. A client may start a turn and then vanish
+    // before the final client-count check; the generation preserves that
+    // otherwise-transient activity so a stale loaded-thread snapshot cannot
+    // authorize shutdown underneath the new turn.
+    this._activityGeneration = 0;
 
     if (connection) {
       connection.onMessage = (msg) => this._onUpstreamMessage(msg);
@@ -670,6 +741,7 @@ export class Broker {
       connectedAt: now(),
       closed: false,
     };
+    this._activityGeneration += 1;
     this.clients.set(client.id, client);
     log('INFO', 'client connected:', String(client.id), 'total', String(this.clients.size));
     sock.setEncoding?.('utf8');
@@ -799,6 +871,7 @@ export class Broker {
           codexVersion: this.connection?.codexVersion ?? null,
           codexVersionProbed: !!this.connection?.versionProbed,
           contractStatus: this.connection?.contractStatus ?? 'pending',
+          ...codexLaunchMetadata(this.connection),
         });
         return;
       case 'broker/status':
@@ -826,6 +899,7 @@ export class Broker {
       subscriptions: this.subscriptions.threadCount(),
       codexVersion: this.connection?.codexVersion ?? null,
       contractStatus: this.connection?.contractStatus ?? 'pending',
+      ...codexLaunchMetadata(this.connection),
       droppedConnectionScoped: this.droppedConnectionScoped,
     };
   }
@@ -1148,11 +1222,11 @@ export class Broker {
   }
 
   // Exit only when ALL THREE hold: no connected client, no host session still
-  // beating, and no thread loaded in the app-server. Any one of them false — or
-  // simply unknown, which is why a failed `thread/loaded/list` reschedules —
-  // means reschedule, never exit. A broker that exits under a live turn
-  // destroys exactly the work this transport exists to protect, and the cost of
-  // being wrong the other way is one idle process for another minute.
+  // beating, and no ACTIVE thread in the app-server. `thread/loaded/list` is not
+  // an activity list: completed and idle threads remain loaded for later reuse.
+  // Each id therefore gets a bounded `thread/read{includeTurns:true}`. Any
+  // unreadable or unrecognised state fails safe as active; only a positive idle
+  // status or terminal last turn permits reaping.
   //
   // Order is cheapest-first: the client count is in memory, the heartbeat scan
   // is a readdir, and only then do we spend an RPC on the app-server.
@@ -1160,6 +1234,7 @@ export class Broker {
     if (this.shuttingDown) return false;
 
     if (this._cheapGatesHold()) return false;
+    const activityGeneration = this._activityGeneration;
 
     let loaded;
     try {
@@ -1170,8 +1245,11 @@ export class Broker {
       this._resetIdleTimer(INACTIVITY_RECHECK_MS);
       return false;
     }
-    if (loaded.length > 0) {
-      log('INFO', 'idle tick:', String(loaded.length), 'thread(s) still loaded — extending');
+    const activity = await Promise.all(loaded.map((threadId) => this._loadedThreadActivity(threadId)));
+    const active = activity.filter((entry) => entry.active);
+    if (active.length > 0) {
+      log('INFO', 'idle tick:', String(active.length), 'active or unknown thread(s) — extending',
+        JSON.stringify(active.map((entry) => ({ threadId: entry.threadId, reason: entry.reason }))));
       this._resetIdleTimer(INACTIVITY_RECHECK_MS);
       return false;
     }
@@ -1185,11 +1263,76 @@ export class Broker {
     // this whole transport exists to prevent.
     if (this.shuttingDown) return false;
     if (this._cheapGatesHold()) return false;
+    if (this._activityGeneration !== activityGeneration) {
+      log('INFO', 'idle tick: bridge activity changed during thread inspection — extending');
+      this._resetIdleTimer(INACTIVITY_RECHECK_MS);
+      return false;
+    }
 
-    log('INFO', 'idle: no clients, no live host, no loaded threads — shutting down');
+    log('INFO', 'idle: no clients, no live host, no active threads — shutting down');
     this.shutdown();
     _impl.exit(0);
     return true;
+  }
+
+  async _loadedThreadActivity(threadId) {
+    if (typeof threadId !== 'string' || !threadId) {
+      return { threadId: threadId ?? null, active: true, reason: 'invalid loaded-thread id' };
+    }
+
+    let result;
+    try {
+      result = await this.connection.request(
+        'thread/read',
+        { threadId, includeTurns: true },
+        LOADED_LIST_TIMEOUT_MS,
+      );
+    } catch (err) {
+      return { threadId, active: true, reason: `thread/read failed: ${err.message}` };
+    }
+
+    const thread = result?.thread;
+    if (!thread || typeof thread !== 'object') {
+      return { threadId, active: true, reason: 'thread/read returned no thread' };
+    }
+
+    const status = typeof thread.status?.type === 'string'
+      ? thread.status.type
+      : typeof thread.status === 'string'
+        ? thread.status
+        : null;
+    if (thread.status != null && status === null) {
+      return { threadId, active: true, reason: 'thread status shape unknown' };
+    }
+    if (thread.turns != null && !Array.isArray(thread.turns)) {
+      return { threadId, active: true, reason: 'thread turns shape unknown' };
+    }
+    const turns = Array.isArray(thread.turns) ? thread.turns : [];
+    const lastTurn = turns[turns.length - 1] || null;
+    const lastTurnStatus = typeof lastTurn?.status === 'string' ? lastTurn.status : null;
+
+    if (lastTurn && lastTurnStatus === null) {
+      return { threadId, active: true, reason: 'last turn status unknown' };
+    }
+
+    if (status === 'active') return { threadId, active: true, reason: 'thread status active' };
+    if (lastTurnStatus === 'inProgress') return { threadId, active: true, reason: 'last turn inProgress' };
+
+    // `systemError`, `notLoaded`, the adapter's synthetic `unknown`, and any
+    // future status all mean the read did not prove inactivity. Likewise an
+    // unrecognised last-turn status must not become permission to kill work.
+    if (status && status !== 'idle') {
+      return { threadId, active: true, reason: `thread status ${status}` };
+    }
+    if (lastTurnStatus && !TERMINAL_TURN_STATUSES.has(lastTurnStatus)) {
+      return { threadId, active: true, reason: `last turn status ${lastTurnStatus}` };
+    }
+
+    if (status === 'idle') return { threadId, active: false, reason: 'thread status idle' };
+    if (lastTurnStatus && TERMINAL_TURN_STATUSES.has(lastTurnStatus)) {
+      return { threadId, active: false, reason: `last turn ${lastTurnStatus}` };
+    }
+    return { threadId, active: true, reason: 'thread activity unknown' };
   }
 
   // The two in-memory/readdir gates. `true` means something says "not idle" and

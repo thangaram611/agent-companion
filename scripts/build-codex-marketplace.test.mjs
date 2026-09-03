@@ -27,17 +27,33 @@ test('builds a Codex marketplace root with a nested plugin package', () => {
     const architecturePath = path.join(pluginRoot, 'assets', 'readme', 'architecture.png');
     const targetMatrixPath = path.join(pluginRoot, 'assets', 'readme', 'target-matrix.png');
     const hookPath = path.join(pluginRoot, 'hooks', 'hooks-codex.json');
+    const bridgeLauncherPath = path.join(pluginRoot, 'hooks', 'launch-agent-bridge.sh');
     const marketplacePath = path.join(out, '.agents', 'plugins', 'marketplace.json');
 
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
     assert.equal(manifest.name, 'agent-companion');
     assert.ok(existsSync(markerPath));
     assert.equal(manifest.hooks, './hooks/hooks-codex.json');
+    assert.deepEqual(manifest.mcpServers?.['agent-bridge'], {
+      command: '/bin/bash',
+      args: ['hooks/launch-agent-bridge.sh'],
+      cwd: '.',
+      env: {
+        AGENT_COMPANION_HOST: 'codex',
+        CODEX_RUNTIME_ADAPTER: 'appserver',
+      },
+      default_tools_approval_mode: 'approve',
+      startup_timeout_sec: 120,
+      tool_timeout_sec: 1320,
+    });
     assert.equal(manifest.interface.displayName, 'Agent Companion');
     assert.ok(existsSync(heroPath));
     assert.ok(existsSync(architecturePath));
     assert.ok(existsSync(targetMatrixPath));
     assert.ok(existsSync(hookPath));
+    assert.ok(existsSync(bridgeLauncherPath));
+    assert.equal(existsSync(path.join(pluginRoot, '.mcp.json')), false,
+      'Codex MCP registration must stay in the Codex-only manifest so Claude does not load it twice');
 
     const marketplace = JSON.parse(readFileSync(marketplacePath, 'utf8'));
     assert.equal(marketplace.name, 'agent-companion');
@@ -64,4 +80,10 @@ test('builds a Codex marketplace root with a nested plugin package', () => {
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('documents the generated marketplace as an explicit local path', () => {
+  const readme = readFileSync(path.join(REPO_ROOT, 'README.md'), 'utf8');
+  assert.match(readme, /codex plugin marketplace add \.\/dist\/codex-marketplace/);
+  assert.doesNotMatch(readme, /codex plugin marketplace add dist\/codex-marketplace/);
 });

@@ -109,6 +109,18 @@ if (manifest.name !== PLUGIN_NAME) {
 if (manifest.hooks !== './hooks/hooks-codex.json') {
   fail('plugin manifest must point hooks to ./hooks/hooks-codex.json');
 }
+const bridge = manifest.mcpServers?.['agent-bridge'];
+if (bridge?.command !== '/bin/bash'
+    || bridge?.args?.length !== 1
+    || bridge.args[0] !== 'hooks/launch-agent-bridge.sh'
+    || bridge?.cwd !== '.'
+    || bridge?.env?.AGENT_COMPANION_HOST !== 'codex'
+    || bridge?.env?.CODEX_RUNTIME_ADAPTER !== 'appserver'
+    || bridge?.default_tools_approval_mode !== 'approve'
+    || bridge?.startup_timeout_sec !== 120
+    || bridge?.tool_timeout_sec !== 1320) {
+  fail('plugin manifest must declare the Codex agent-bridge MCP launcher');
+}
 
 mkdirSync(path.dirname(marketplacePath), { recursive: true });
 writeFileSync(marketplacePath, JSON.stringify({

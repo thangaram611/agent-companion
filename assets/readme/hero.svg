@@ -1,6 +1,6 @@
 <svg width="3200" height="1800" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">Agent Companion</title>
-  <desc id="desc">Title banner. Come with any harness and attach any companion of your choice to it. A harness — Claude Code or Codex CLI — connects through the private agent-bridge MCP server to a companion: OpenCode, GitHub Copilot CLI, or Codex CLI. The bridge exposes five tools: agent_send, agent_wait, agent_status, agent_reply and agent_cancel.</desc>
+  <desc id="desc">Title banner. Come with any harness and attach any companion of your choice to it. A harness — Claude Code or Codex CLI — delegates through the Agent Companion subagent and its internal agent-bridge MCP transport to a companion: OpenCode, GitHub Copilot CLI, or Codex CLI. The bridge exposes five tools: agent_send, agent_wait, agent_status, agent_reply and agent_cancel.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="900" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#07111F"/>
@@ -78,9 +78,9 @@
     <rect x="580" y="420" width="330" height="240" rx="28" fill="#08211F" stroke="#2DD4BF" stroke-width="2"/>
   </g>
   <rect x="604" y="444" width="282" height="192" rx="20" fill="none" stroke="#2DD4BF" stroke-opacity="0.36" stroke-dasharray="9 9"/>
-  <text x="745" y="500" text-anchor="middle" class="sans eyebrow">PRIVATE BRIDGE</text>
+  <text x="745" y="500" text-anchor="middle" class="sans eyebrow">INTERNAL BRIDGE</text>
   <text x="745" y="546" text-anchor="middle" class="mono bridgeTxt">agent-bridge</text>
-  <text x="745" y="578" text-anchor="middle" class="sans bridgeSub">subagent-only MCP server</text>
+  <text x="745" y="578" text-anchor="middle" class="sans bridgeSub">subagent-routed MCP transport</text>
   <rect x="646" y="596" width="198" height="30" rx="15" fill="#0F766E" fill-opacity="0.30"/>
   <text x="745" y="617" text-anchor="middle" class="mono chip">no silent fallback</text>
 

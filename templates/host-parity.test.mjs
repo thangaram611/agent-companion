@@ -10,7 +10,7 @@
 //
 //   Claude  templates/agent-companion.md    YAML frontmatter, `env:` mapping,
 //                                           per-server `timeout:` in MILLISECONDS
-//   Codex   templates/agent-companion.toml  TOML, `env = {}` inline table,
+//   Codex   .codex-plugin/plugin.json       native plugin MCP declaration,
 //                                           `tool_timeout_sec` in SECONDS
 //
 // MECHANISM may diverge; CAPABILITY may not. This file asserts the second half.
@@ -31,7 +31,10 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const md = readFileSync(join(HERE, 'agent-companion.md'), 'utf8');
-const toml = readFileSync(join(HERE, 'agent-companion.toml'), 'utf8');
+const codexManifest = JSON.parse(readFileSync(
+  join(HERE, '..', '.codex-plugin', 'plugin.json'),
+  'utf8',
+));
 
 // Keys that name WHICH host the file is, so they cannot have a twin by
 // construction. Everything else in an env block is a capability knob.
@@ -55,17 +58,10 @@ function claudeEnv() {
   return env;
 }
 
-// The Codex host's `env = { ... }` inline table on [mcp_servers.agent-bridge].
+// Current Codex roles cannot add MCP authority. The operative Codex env is
+// therefore the plugin-scoped native MCP declaration that the role inherits.
 function codexEnv() {
-  const active = toml.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
-  const m = active.match(/^env\s*=\s*\{([^}]*)\}\s*$/m);
-  if (!m) return {};
-  const env = {};
-  for (const pair of m[1].split(',')) {
-    const kv = pair.match(/\s*([A-Z0-9_]+)\s*=\s*"([^"]*)"\s*/);
-    if (kv) env[kv[1]] = kv[2];
-  }
-  return env;
+  return codexManifest.mcpServers?.['agent-bridge']?.env || {};
 }
 
 const capabilityKeys = (env) => Object.keys(env).filter((k) => !HOST_IDENTITY_KEYS.has(k)).sort();

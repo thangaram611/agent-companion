@@ -27,6 +27,36 @@ process.env.AGENT_RUNTIME_DIR = RUNTIME_SANDBOX;
 process.env.AGENT_HEARTBEAT_DIR = join(RUNTIME_SANDBOX, 'heartbeats');
 test.after(() => rmSync(RUNTIME_SANDBOX, { recursive: true, force: true }));
 
+test('Codex default runtime follows CODEX_HOME when no explicit runtime override exists', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drain-codex-home-'));
+  try {
+    const codexHome = join(dir, 'custom codex home');
+    const {
+      AGENT_RUNTIME_DIR: _runtime,
+      AGENT_HEARTBEAT_DIR: _heartbeat,
+      ...baseEnv
+    } = process.env;
+    execFileSync('bash', [SCRIPT], {
+      input: JSON.stringify({ session_id: 'codex-home-probe' }),
+      env: {
+        ...baseEnv,
+        AGENT_COMPANION_HOST: 'codex',
+        CODEX_HOME: codexHome,
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(existsSync(join(
+      codexHome,
+      'agent-companion',
+      'runtime',
+      'heartbeats',
+      'codex-home-probe.heartbeat',
+    )), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function makeQueueFile(rows) {
   const dir = mkdtempSync(join(tmpdir(), 'drain-test-'));
   const path = join(dir, 'completions.jsonl');

@@ -27,8 +27,10 @@ The product posture is deliberately companion-neutral:
   or both.
 - **Attach your companion.** Choose `opencode`, `copilot`, or `codex` on each
   send, route by strength or profile, or persist one bridge default.
-- **Keep the parent clean.** Main Claude and main Codex never see the bridge MCP
-  server directly.
+- **Keep the parent workflow clean.** Delegated work runs through the isolated
+  subagent. Claude scopes the bridge to that agent; Codex must register the
+  internal bridge at plugin/session scope so the role can inherit it, but the
+  subagent remains its only supported caller.
 - **Use one public surface.** The subagent owns the generic `agent_*` tools:
   `agent_send`, `agent_wait`, `agent_status`, `agent_reply`, and
   `agent_cancel`.
@@ -55,7 +57,8 @@ Agent Companion turns a natural-language delegation request into a background
 job owned by an isolated subagent:
 
 1. The parent harness decides to spawn the `agent-companion` subagent.
-2. The subagent calls its private `agent-bridge` MCP server.
+2. The subagent calls the internal `agent-bridge` MCP server (agent-local on
+   Claude, inherited from the installed plugin on Codex).
 3. The bridge resolves the selected companion, creates a job, and returns
    quickly.
 4. The companion runtime runs the work in the requested `cwd`.
@@ -132,7 +135,28 @@ Notes:
     and shared by every bridge on the machine that resolves to the same host
     home — its socket lives under `~/.{claude,codex}/agent-companion/runtime/`,
     so the two harnesses get one broker each — and it is reaped once it has been
-    idle with no live job on that host.
+    idle with no live job on that host. A loaded completed thread is history,
+    not activity: both reapers read the thread state and refuse to stop only for
+    an active turn or a state they cannot prove idle.
+  - Before starting or reusing that broker, the bridge inspects Codex as an
+    executable pair. `CODEX_BIN` (or `codex` on `PATH`) remains the desired
+    installed version; the inspector retains its invoked and canonical paths,
+    version and file identity, and requires an executable
+    `codex-code-mode-host` from the package resources, canonical binary
+    directory, or final invoked-directory fallback. If that pair is incomplete
+    or its parent is quarantined, a complete, same-version, unquarantined pair
+    under `$CODEX_HOME/plugins/.plugin-appserver/` (default
+    `~/.codex/plugins/.plugin-appserver/`) is preferred. A complete quarantined
+    configured pair remains usable with an advisory when no such fallback is
+    available. A failed xattr probe is reported as indeterminate, never silently
+    treated as “not quarantined.” Agent Companion creates no helper symlink and
+    removes no xattr.
+  - Every send compares the running app-server's path, version and file identity
+    with the pair a fresh broker would select. A stale broker is replaced only
+    after the client, lease and active-turn guards all prove it idle; otherwise
+    replacement is deferred rather than risking live work. A dead-broker or
+    configuration-`EPERM` failure during `thread/start` gets one guarded restart
+    and one retry, never a retry loop.
 - Both codex adapters resolve the sandbox mode and network flag the same way,
     with one exception: `bypass` is an exec-only escape hatch. On `exec` it
     swaps `--sandbox` for `--dangerously-bypass-approvals-and-sandbox`, removing
@@ -346,11 +370,11 @@ materializing `templates/agent-companion.md` to:
 ~/.claude/agents/agent-companion.md
 ```
 
-The standalone materialized agent owns the private MCP bridge.
+The standalone materialized Claude agent owns its private MCP bridge.
 
-The agent's MCP call deadline is set per host, on the server entry itself:
+The MCP call deadline is set per host, on the server entry itself:
 `timeout: 1320000` (milliseconds) in the Claude frontmatter, `tool_timeout_sec =
-1320` in the Codex TOML. Both clear the bridge's own 1200s wait cap
+1320` in the Codex plugin manifest. Both clear the bridge's own 1200s wait cap
 (`clampWaitSec`) so the bridge always answers before the host abandons the call.
 On the Claude side this must be a **sibling of `command`/`args`**, not an `env:`
 entry — an `MCP_TOOL_TIMEOUT` environment variable reaches the bridge child
@@ -409,13 +433,29 @@ flag with effects well beyond this plugin, so opting in is your call.
 
 ## Install For Codex CLI
 
-Build a local Codex marketplace package:
+The one-step source install is recommended:
+
+```bash
+bash setup.sh --host codex
+```
+
+It builds the local marketplace, registers it, atomically refreshes the
+installed plugin even at the same version, verifies the effective MCP registry,
+and eagerly materializes the custom agent before reporting success. Start a
+fresh Codex session after it finishes.
+
+For package/release debugging, the underlying marketplace commands are:
 
 ```bash
 node scripts/build-codex-marketplace.mjs --out dist/codex-marketplace
-codex plugin marketplace add dist/codex-marketplace
+codex plugin marketplace add ./dist/codex-marketplace
 codex plugin add agent-companion@agent-companion --json
 ```
+
+On a completely clean manual install, the first new session loads the plugin
+and its SessionStart hook materializes the custom agent after role discovery;
+open one further session before delegating. `setup.sh` avoids that two-session
+bootstrap by materializing the role eagerly.
 
 Validate the package end to end in an isolated `CODEX_HOME`:
 
@@ -423,23 +463,35 @@ Validate the package end to end in an isolated `CODEX_HOME`:
 node scripts/validate-codex-release.mjs
 ```
 
-The generated package uses plugin-scoped Codex hooks from
-`hooks/hooks-codex.json`; it does not mutate live `~/.codex/hooks.json`.
+The generated package registers `agent-bridge` and the lifecycle hooks at
+Codex plugin scope. Its `/bin/bash` launcher resolves Node and installs bridge
+dependencies without relying on the GUI process's `PATH`. It has no root
+`.mcp.json`, so the Codex registration is not discovered by Claude.
 
-For source-checkout development:
+Codex normalizes the raw server id for its model-visible tool namespace:
+`agent-bridge` becomes `mcp__agent_bridge__agent_*`. The Codex role uses that
+underscore form through Codex's `functions.exec` deferred-tool wrapper; Claude
+keeps its native `mcp__agent-bridge__agent_*` names.
+The plugin declares its internal bridge tools pre-approved so they remain
+usable in headless `codex exec` sessions whose approval policy is `never`.
+A user or managed plugin policy can still tighten that approval mode.
 
-```bash
-bash setup.sh --host codex
-```
+Current Codex intentionally prevents an agent role from adding MCP authority.
+The custom TOML role therefore contains behavior only; it inherits the bridge
+registered by `.codex-plugin/plugin.json`. That registration is technically
+visible to main Codex as well as the child. Direct parent calls remain
+unsupported—the prescribed path is to spawn the `agent-companion` subagent.
 
-That path materializes:
+The materialized role lives at:
 
 ```text
 ~/.codex/agents/agent-companion.toml
 ```
 
-and merges managed dev hook entries into `~/.codex/hooks.json`. Managed entries
-carry `_managed_by: "agent-companion"` and can be removed with:
+It uses plugin-scoped hooks. If an older source install left managed entries in
+`$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), setup removes only
+entries carrying `_managed_by: "agent-companion"` so events are not delivered
+twice. The cleanup can also be run directly with:
 
 ```bash
 node scripts/install-codex-hooks.mjs --plugin-root "$(pwd)" --uninstall --yes
@@ -499,7 +551,17 @@ Important rules:
   `node scripts/doctor.mjs --json`.
 
 Terminal statuses are `completed`, `failed`, `cancelled`, `stuck`, `timeout`,
-and `unreachable`.
+and `unreachable`. An unreachable status also carries a machine-readable
+`failure_class` on job/status responses and terminal metadata. In particular,
+Codex may emit protocol `turn/completed` after its command runner failed before
+execution. A live, known-zero-tool turn is remapped only for an explicit
+universal command-execution blocker; a recovered `thread/read` transcript has
+no tool history, so it is remapped only when it explicitly names the unavailable
+runner. The bridge records `unreachable`, detail
+`codex_code_mode_host_unavailable`, and `failure_class: runtime_unavailable`.
+The assistant text is retained as partial runtime evidence, not presented as a
+review/build/test verdict. Zero tool calls alone are valid and never trigger
+this remap.
 
 ## Templates, Modes, And Parallelism
 
@@ -573,7 +635,7 @@ copilot-acp-daemon.log                  Copilot ACP daemon log
 copilot-otel-traces.jsonl               Copilot OTEL traces
 codex-app-server.sock                   codex app-server broker socket
 codex-app-server-broker.log             codex app-server broker log
-codex-broker.json                       codex broker leases and disposal claim
+codex-broker.json                       codex running identity, leases and disposal claim
 opencode-servers.json                   pooled `opencode serve` registry
 heartbeats/                             host-liveness files the daemons reap against
 prompts/copilot-acp-<promptId>.jsonl    per-prompt event stream
@@ -586,9 +648,9 @@ Both shared-runtime registries survive bridge restarts, for different reasons.
 address, so it is how a respawned bridge reattaches to a still-listening
 `opencode serve` instead of spawning a duplicate. The broker's address is the
 fixed socket above, so a bridge finds it by connect-probing the socket and
-re-records what it adopted; `codex-broker.json` is bookkeeping — the leases,
-`lastUsedAt` and disposal claim that keep a broker still in use from being
-reaped.
+re-records what it adopted; `codex-broker.json` is bookkeeping — the running
+launch metadata, leases, `lastUsedAt` and disposal claim that keep a broker
+still in use from being reaped and expose a stale executable after an upgrade.
 
 The bridge surfaces progress as:
 
@@ -609,6 +671,18 @@ node scripts/doctor.mjs --json
 node scripts/onboard.mjs --doctor
 node scripts/onboard.mjs --list-targets
 ```
+
+With `CODEX_RUNTIME_ADAPTER=appserver`, doctor reports the configured and
+selected Codex version/path, helper path, selection source and tri-state
+quarantine verdict (present, absent, or indeterminate),
+then compares them with the running broker/app-server PIDs, path, version and
+file identity. A stale or uninspectable broker makes doctor require attention;
+a broker that is simply not running is healthy when the selected installation
+pair is ready, because the next send starts it lazily. Doctor is read-only and
+never removes quarantine or creates a helper link.
+`agent_status` keeps fixture-provenance version skew
+(`contract_version_skew`) separate from selected-versus-running version skew
+(`upgrade_version_skew`).
 
 Install markers:
 
@@ -658,9 +732,12 @@ claude plugin validate .
 
 ## Design Invariants
 
-- The `agent-bridge` MCP server is subagent-only.
-- Main Claude and main Codex never call the bridge directly.
-- The bridge is spawned per invocation; there is no activation lifecycle.
+- The `agent-companion` subagent is the supported bridge caller on both hosts.
+- Claude enforces agent-local MCP visibility. Codex registers the bridge at
+  plugin/session scope because roles may inherit MCP authority but may not add
+  it; main Codex can see the schemas but must delegate through the subagent.
+- Bridge process lifetime belongs to the host; detached companion runtimes own
+  any state that must survive a bridge replacement.
 - Sends are non-blocking — the one exception is reattaching to an in-flight job
   on the same thread, which blocks like a wait — and every wait is bounded.
 - Orphan completions are stored in `completions.jsonl` and drained by hooks.
@@ -670,7 +747,8 @@ claude plugin validate .
 
 ## Not Supported
 
-- Direct parent-agent calls to the bridge.
+- Direct parent-agent use of the bridge, including on Codex where plugin-scope
+  registration necessarily exposes its schemas to main.
 - Slash commands or skills as the public surface.
 - Session opt-in or pause.
 - OpenCode CLI in-flight reply/re-steer (server mode supports it).

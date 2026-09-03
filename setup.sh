@@ -77,9 +77,10 @@ esac
 
 echo "=== agent-companion setup (host=$HOST) ==="
 echo ""
-echo "This directory is a dual-harness plugin (Claude Code + Codex CLI). The"
-echo "subagent-scoped MCP architecture stays the same on both sides — only"
-echo "the agent file format and per-host install location differ."
+echo "This directory is a dual-harness plugin (Claude Code + Codex CLI)."
+echo "The same subagent drives delegation on both sides. Claude scopes its MCP"
+echo "bridge to that agent; Codex registers the bridge in the plugin so the"
+echo "subagent can inherit it."
 echo ""
 echo "Terminology: setup uses --host for the harness selector and --target for"
 echo "the companion selector. Strength routing is live: define companion profiles"
@@ -95,7 +96,7 @@ if [ "$DO_CODEX" = 1 ]; then
   echo "    .codex-plugin/plugin.json        Codex plugin manifest"
   echo "    templates/agent-companion.toml subagent template (TOML)"
   echo "    hooks/hooks-codex.json           plugin-scoped hooks for marketplace packages"
-  echo "    scripts/install-codex-hooks.mjs  source-checkout dev hook materialization"
+  echo "    scripts/install-codex-hooks.mjs  legacy managed-hook migration cleanup"
 fi
 echo ""
 
@@ -142,8 +143,9 @@ fi
 if [ "$DO_CODEX" = 1 ]; then
   if command -v codex >/dev/null 2>&1; then
     ok "codex $(codex --version 2>/dev/null | head -1 || echo 'found')"
-    if codex plugin add --help >/dev/null 2>&1; then
-      ok "codex plugin add available"
+    if codex plugin marketplace add --help >/dev/null 2>&1 \
+        && codex plugin add --help >/dev/null 2>&1; then
+      ok "codex plugin marketplace/add commands available"
     else
       fail "codex plugin add is unavailable; install a current Codex CLI."
       exit 1
@@ -198,7 +200,9 @@ if [ "$DO_CODEX" = 1 ]; then
   SURFACE_PATHS+=(
     "$SCRIPT_DIR/.codex-plugin/plugin.json"
     "$SCRIPT_DIR/templates/agent-companion.toml"
+    "$SCRIPT_DIR/hooks/launch-agent-bridge.sh"
     "$SCRIPT_DIR/hooks/install-agent-codex.sh"
+    "$SCRIPT_DIR/scripts/build-codex-marketplace.mjs"
     "$SCRIPT_DIR/scripts/install-codex-hooks.mjs"
   )
 fi
@@ -272,35 +276,116 @@ if [ "$DO_CLAUDE" = 1 ]; then
   echo ""
 fi
 
-# --- Step 6: Codex-host install (subagent TOML + dev hook materialization) ---
+# --- Step 6: Codex-host install (local marketplace plugin + subagent TOML) ---
 #
-# Codex has first-class plugin marketplace commands now. Published packages use
-# hooks/hooks-codex.json in plugin scope. For this source checkout, setup
-# materializes the custom TOML agent and dev hooks directly so local iteration
-# does not require a package/install round trip.
+# Current Codex deliberately ignores mcp_servers added by an agent role: a
+# child may inherit its parent's MCP authority but may not expand it. Installing
+# the Codex-only plugin manifest is therefore required even for source-checkout
+# development. Re-adding the same local plugin atomically refreshes its cached
+# package, so this path remains idempotent during iteration.
 
 if [ "$DO_CODEX" = 1 ]; then
   printf "=== Codex CLI host install ===\n"
+  CODEX_DATA_ROOT="${CODEX_HOME:-$HOME/.codex}"
 
-  # 6a. Eagerly materialize the TOML subagent. Idempotent.
-  printf "Materializing subagent at ~/.codex/agents/agent-companion.toml...\n"
-  CLAUDE_PLUGIN_ROOT="$SCRIPT_DIR" bash "$SCRIPT_DIR/hooks/install-agent-codex.sh"
-  if [ -f "$HOME/.codex/agents/agent-companion.toml" ]; then
-    ok "subagent installed at ~/.codex/agents/agent-companion.toml"
+  # 6a. Build and install/refresh the local Codex plugin. The manifest owns the
+  # MCP registration and plugin-scoped hooks; no root .mcp.json is installed,
+  # so this does not alter Claude's MCP discovery.
+  CODEX_MARKETPLACE_DIR="$SCRIPT_DIR/dist/codex-marketplace"
+  printf "Building and registering the local Codex marketplace...\n"
+  if node "$SCRIPT_DIR/scripts/build-codex-marketplace.mjs" \
+      --out "$CODEX_MARKETPLACE_DIR"; then
+    ok "Codex marketplace package built"
   else
-    warn "subagent install hook ran but file not found — check $SCRIPT_DIR/hooks/install-agent-codex.sh"
-  fi
-
-  # 6b. Hook entries — read-merge-backup-write into ~/.codex/hooks.json.
-  printf "Merging hook entries into ~/.codex/hooks.json...\n"
-  if node "$SCRIPT_DIR/scripts/install-codex-hooks.mjs" --plugin-root "$SCRIPT_DIR" --yes; then
-    ok "hook entries present"
-  else
-    fail "hook merge failed — see error above; re-run \`node scripts/install-codex-hooks.mjs --plugin-root \"$SCRIPT_DIR\" --yes\` after fixing"
+    fail "Codex marketplace build failed"
     exit 1
   fi
 
-  # 6c. Permission injection — explicit no-op so future Codex permission
+  if codex plugin marketplace add "$CODEX_MARKETPLACE_DIR" --json >/dev/null; then
+    ok "Codex marketplace registered"
+  else
+    fail "Codex marketplace registration failed — remove or rename any different marketplace already named agent-companion"
+    exit 1
+  fi
+
+  PLUGIN_RESULT=""
+  if PLUGIN_RESULT="$(codex plugin add agent-companion@agent-companion --json)"; then
+    ok "Codex plugin installed/refreshed"
+  else
+    fail "Codex plugin install failed"
+    exit 1
+  fi
+  INSTALLED_PLUGIN_ROOT="$(printf '%s\n' "$PLUGIN_RESULT" | jq -er \
+    '.installedPath | select(type == "string" and length > 0)' 2>/dev/null || true)"
+  if [ -z "$INSTALLED_PLUGIN_ROOT" ] || [ ! -d "$INSTALLED_PLUGIN_ROOT" ]; then
+    fail "Codex plugin add returned no usable installedPath"
+    exit 1
+  fi
+
+  # Plugin installation alone does not prove Codex accepted the MCP manifest.
+  # Ask a fresh CLI process for its effective registry and validate the exact
+  # bridge transport before changing the user's legacy hook state.
+  MCP_RESULT=""
+  if MCP_RESULT="$(codex mcp list --json)"; then
+    MCP_BRIDGE_CWD="$(printf '%s\n' "$MCP_RESULT" | jq -er '
+      .[] | select(.name == "agent-bridge"
+        and .enabled == true
+        and .transport.type == "stdio"
+        and .transport.command == "/bin/bash"
+        and (.transport.args | length) == 1
+        and .transport.args[0] == "hooks/launch-agent-bridge.sh"
+        and .transport.env.AGENT_COMPANION_HOST == "codex"
+        and .transport.env.CODEX_RUNTIME_ADAPTER == "appserver"
+        and (.transport.env_vars | type) == "array"
+        and (.transport.env_vars | length) == 0
+        and .startup_timeout_sec == 120
+        and .tool_timeout_sec == 1320)
+      | .transport.cwd' 2>/dev/null || true)"
+  else
+    MCP_BRIDGE_CWD=""
+  fi
+  if [ -z "$MCP_BRIDGE_CWD" ] || [ ! -d "$MCP_BRIDGE_CWD" ] \
+      || ! [ "$MCP_BRIDGE_CWD" -ef "$INSTALLED_PLUGIN_ROOT" ]; then
+    fail "Codex installed the plugin but did not register its agent-bridge MCP transport"
+    exit 1
+  fi
+  ok "Codex agent-bridge MCP registration verified"
+
+  # 6b. Eagerly materialize the TOML subagent from the installed package.
+  # SessionStart repeats this after upgrades, but doing it now makes the next
+  # fresh Codex session usable even before any hook has run.
+  printf "Materializing subagent at %s/agents/agent-companion.toml...\n" "$CODEX_DATA_ROOT"
+  CLAUDE_PLUGIN_ROOT="$INSTALLED_PLUGIN_ROOT" \
+    /bin/bash "$INSTALLED_PLUGIN_ROOT/hooks/install-agent-codex.sh"
+  AGENT_DEST="$CODEX_DATA_ROOT/agents/agent-companion.toml"
+  AGENT_SENTINEL="# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent-codex.sh) — edits will be overwritten on next session"
+  AGENT_EXPECTED="$(mktemp)"
+  {
+    printf '%s\n' "$AGENT_SENTINEL"
+    /bin/cat "$INSTALLED_PLUGIN_ROOT/templates/agent-companion.toml"
+  } > "$AGENT_EXPECTED"
+  if [ -f "$AGENT_DEST" ] && cmp -s "$AGENT_DEST" "$AGENT_EXPECTED"; then
+    ok "subagent installed at $AGENT_DEST"
+    rm -f "$AGENT_EXPECTED"
+  else
+    rm -f "$AGENT_EXPECTED"
+    fail "cannot verify $AGENT_DEST; a user-owned file at that path is preserved and must be moved or reconciled manually"
+    exit 1
+  fi
+
+  # 6c. Remove only this project's pre-plugin managed global hook entries.
+  # Current installs use hooks/hooks-codex.json from plugin scope; leaving the
+  # old copies in $CODEX_HOME/hooks.json would deliver every event twice.
+  printf "Removing legacy managed Codex hook entries, if present...\n"
+  if node "$SCRIPT_DIR/scripts/install-codex-hooks.mjs" \
+      --plugin-root "$SCRIPT_DIR" --uninstall --yes; then
+    ok "legacy managed hook entries absent"
+  else
+    fail "legacy managed hook cleanup failed — see error above"
+    exit 1
+  fi
+
+  # 6d. Permission injection — explicit no-op so future Codex permission
   # work has an obvious place to plug in. Keeps the flow uniform across
   # hosts.
   printf "Permission injection (Codex)...\n"
@@ -311,10 +396,10 @@ if [ "$DO_CODEX" = 1 ]; then
     exit 1
   fi
 
-  # 6d. Diagnostic marker.
-  mkdir -p "$HOME/.codex/agent-companion"
-  printf "codex\n" > "$HOME/.codex/agent-companion/.host"
-  ok "diagnostic marker: ~/.codex/agent-companion/.host"
+  # 6e. Diagnostic marker.
+  mkdir -p "$CODEX_DATA_ROOT/agent-companion"
+  printf "codex\n" > "$CODEX_DATA_ROOT/agent-companion/.host"
+  ok "diagnostic marker: $CODEX_DATA_ROOT/agent-companion/.host"
 
   echo ""
 fi
@@ -416,10 +501,11 @@ if [ "$DO_CLAUDE" = 1 ]; then
 fi
 if [ "$DO_CODEX" = 1 ]; then
   echo "Codex CLI:"
-  echo "  codex   # subagent + hooks are now wired into ~/.codex/"
+  echo "  codex   # start a fresh session so the installed plugin is loaded"
+  echo "  Approve the agent-companion plugin hooks if Codex asks on first use."
   echo "  Then ask main Codex to delegate (e.g. \"have the agent companion audit the auth module\")."
   echo ""
 fi
 echo "Describe what you want in natural language and the host will spawn the"
-echo "agent-companion subagent automatically. The bridge is spawned inline"
-echo "per invocation."
+echo "agent-companion subagent automatically. Claude owns the bridge through"
+echo "that agent; Codex loads it from the installed plugin for the agent to use."

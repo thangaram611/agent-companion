@@ -25,7 +25,11 @@ set -e
 umask 077
 
 HOST_NAME="${AGENT_COMPANION_HOST:-claude}"
-RUNTIME_DIR="${AGENT_RUNTIME_DIR:-$HOME/.$HOST_NAME/agent-companion/runtime}"
+HOST_DATA_ROOT="$HOME/.$HOST_NAME"
+if [ "$HOST_NAME" = "codex" ]; then
+  HOST_DATA_ROOT="${CODEX_HOME:-$HOME/.codex}"
+fi
+RUNTIME_DIR="${AGENT_RUNTIME_DIR:-$HOST_DATA_ROOT/agent-companion/runtime}"
 
 QUEUE="${AGENT_QUEUE_PATH:-$RUNTIME_DIR/completions.jsonl}"
 LOCK="${QUEUE}.lock"
