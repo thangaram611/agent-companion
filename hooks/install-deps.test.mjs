@@ -111,7 +111,7 @@ test('lock wait budget stays under this hook\'s timeout in every hooks manifest'
 
 test('the lock names the npm process, and survives the hook shell being killed', async () => {
   // npm records its own pid, then stays busy long enough for us to inspect.
-  const ctx = makeRoot({ npmBody: `#!/bin/bash\necho $$ > "$NPM_PID_FILE"\nsleep 20\nmkdir -p node_modules\n` });
+  const ctx = makeRoot({ npmBody: `#!/bin/bash\necho $$ > "$NPM_PID_FILE"\nsleep 20\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n` });
   const pidFile = join(ctx.dir, 'npm.pid');
   const child = spawn('bash', [SCRIPT], { env: envFor(ctx, { NPM_PID_FILE: pidFile }), stdio: 'ignore' });
   try {
@@ -154,7 +154,7 @@ test('SIGTERM leaves the lock with the live npm, not released', async () => {
   // ownership guard — the actual core of this fix. SIGTERM does run the trap,
   // and the pre-fix trap (`rm -rf "$LOCK_DIR"` unconditionally) released a lock
   // that npm was still holding while it wrote node_modules.
-  const ctx = makeRoot({ npmBody: `#!/bin/bash\necho $$ > "$NPM_PID_FILE"\nsleep 20\nmkdir -p node_modules\n` });
+  const ctx = makeRoot({ npmBody: `#!/bin/bash\necho $$ > "$NPM_PID_FILE"\nsleep 20\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n` });
   const pidFile = join(ctx.dir, 'npm.pid');
   const child = spawn('bash', [SCRIPT], { env: envFor(ctx, { NPM_PID_FILE: pidFile }), stdio: 'ignore' });
   try {
@@ -182,7 +182,7 @@ test('a killed waiter never disturbs the lock it was waiting on', async () => {
   // A waiter has not armed the trap yet — it acquires the lock and the trap in
   // the same branch — so it owns nothing and must leave the holder's lock
   // exactly as it found it, however it dies.
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   try {
     mkdirSync(ctx.lock, { recursive: true });
     writeFileSync(join(ctx.lock, 'pid'), String(process.pid));
@@ -202,7 +202,7 @@ test('a lock with no recorded holder is reclaimed once it is clearly orphaned', 
   // The shell died between `mkdir` and the pid write. Pre-fix, HOLDER was empty
   // so the stale branch never fired and this lock was immortal: deps silently
   // never install, on every future session, forever.
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   try {
     mkdirSync(ctx.lock, { recursive: true });
     // Age it past LOCK_ORPHAN_MIN (1 min) without waiting a real minute.
@@ -219,7 +219,7 @@ test('a lock with no recorded holder is reclaimed once it is clearly orphaned', 
 test('a fresh pid-less lock is respected, not stolen', async () => {
   // The counterpart: within the mkdir→pid-write window the lock is legitimate
   // and must be left alone, or the reclaim would itself become a race.
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   const runs = join(ctx.dir, 'runs');
   try {
     mkdirSync(ctx.lock, { recursive: true });
@@ -232,7 +232,7 @@ test('a fresh pid-less lock is respected, not stolen', async () => {
 });
 
 test('strict callers receive EX_TEMPFAIL while another installer owns the lock', () => {
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   try {
     mkdirSync(ctx.lock, { recursive: true });
     writeFileSync(join(ctx.lock, 'pid'), String(process.pid));
@@ -252,7 +252,7 @@ test('strict callers receive EX_TEMPFAIL while another installer owns the lock',
 });
 
 test('a malformed lock-wait override is ignored without erroring', () => {
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   try {
     for (const bad of ['abc', '0', '-5', '999']) {
       const r = runSync(ctx, { AGENT_COMPANION_LOCK_WAIT_SEC: bad });
@@ -265,7 +265,7 @@ test('a malformed lock-wait override is ignored without erroring', () => {
 });
 
 test('a lock whose holder died is reclaimed', async () => {
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   try {
     // A provably-dead pid: spawn, await the exit (which also reaps it, so it is
     // not left a zombie that `kill -0` still reports alive), then reuse the number.
@@ -288,7 +288,7 @@ test('a lock whose holder died is reclaimed', async () => {
 // --- happy path -------------------------------------------------------------
 
 test('installs once, links node_modules, then no-ops on an unchanged manifest', () => {
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho run >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho run >> "$NPM_RUNS"\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   const runs = join(ctx.dir, 'runs');
   try {
     const first = runSync(ctx, { NPM_RUNS: runs });
@@ -333,10 +333,16 @@ test('a failing npm reports the failure, clears the hash, and releases the lock'
 // The second half of the fix is that a broken link no longer costs a full
 // `npm ci`: deps-current and link-correct are now separate questions.
 
+// The one file that means "installed": the launcher (launch-agent-bridge.sh)
+// refuses to start the bridge without it, and the hook now asks the same
+// question — a `node_modules` directory alone proves nothing (see below).
+const SDK_MARKER = join('node_modules', '@modelcontextprotocol', 'sdk', 'package.json');
+
 // Seed a completed, manifest-current managed install so DEPS_OK is 1 and only
 // the link is in question.
 function seedInstalled(ctx) {
-  mkdirSync(join(ctx.persist, 'node_modules', 'some-pkg'), { recursive: true });
+  mkdirSync(join(ctx.persist, 'node_modules', '@modelcontextprotocol', 'sdk'), { recursive: true });
+  writeFileSync(join(ctx.persist, SDK_MARKER), '{}');
   const pkg = readFileSync(join(ctx.root, 'bridge-server', 'package.json'));
   writeFileSync(join(ctx.persist, 'package.json'), pkg);
   const hash = execFileSync('bash', ['-c',
@@ -404,7 +410,7 @@ const BROKEN_SLOTS = [
 
 for (const slot of BROKEN_SLOTS) {
   test(`link repair: ${slot.name} is repaired without reinstalling`, () => {
-    const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+    const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
     const runs = join(ctx.dir, 'runs');
     try {
       seedInstalled(ctx);
@@ -431,7 +437,7 @@ test('link repair: a populated real directory is converged to the managed link',
   // setup.sh:164 does an in-tree `npm ci` at exactly this path, and the slot is
   // gitignored and regenerable, so converging it is correct — and it is what
   // this hook has done since v0.0.1. It must be announced, not silent.
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   const runs = join(ctx.dir, 'runs');
   try {
     seedInstalled(ctx);
@@ -448,7 +454,7 @@ test('link repair: a populated real directory is converged to the managed link',
 });
 
 test('link repair: a correct link is left completely alone', () => {
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   const runs = join(ctx.dir, 'runs');
   try {
     const managed = seedInstalled(ctx);
@@ -468,7 +474,7 @@ test('link repair: a correct link is left completely alone', () => {
 test('link repair: a relative link that resolves correctly is accepted', () => {
   // `-ef` compares inodes after resolution, so link shape is irrelevant. A
   // readlink string compare would have rejected this and churned the link.
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   const runs = join(ctx.dir, 'runs');
   try {
     seedInstalled(ctx);
@@ -488,7 +494,7 @@ test('link repair: a relative link that resolves correctly is accepted', () => {
 test('link repair: an unlinkable slot fails loudly instead of claiming success', () => {
   // The old code discarded ln's exit status and printed "deps ready" over a
   // bridge that could not resolve a single import.
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   const bridgeDir = join(ctx.root, 'bridge-server');
   try {
     seedInstalled(ctx);
@@ -504,7 +510,7 @@ test('link repair: an unlinkable slot fails loudly instead of claiming success',
 });
 
 test('a stale manifest still reinstalls, and the link is made after', () => {
-  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules\n' });
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
   const runs = join(ctx.dir, 'runs');
   try {
     seedInstalled(ctx);
@@ -514,6 +520,58 @@ test('a stale manifest still reinstalls, and the link is made after', () => {
     assert.match(r.stdout, /deps ready/);
     assert.equal(readFileSync(runs, 'utf8').trim().split('\n').length, 1, 'a manifest change must reinstall');
     assert.ok(slotReachesManaged(ctx));
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+// --- what "installed" means ---------------------------------------------------
+//
+// Measured 2026-09-10 on the operator's machine: the managed dir held an EMPTY
+// `node_modules` (0 entries, empty install.log) beside a manifest hash that
+// matched the current package files. `DEPS_OK` was `-d node_modules && hash
+// matches`, so every SessionStart took the silent fast path, re-pointed the
+// plugin root's link at the empty tree and exited 0 — while the bridge could
+// not resolve a single bare import. Three repairs by hand in one day, each
+// undone by the next session start. "Installed" is now the launcher's own
+// question: is the SDK's package.json there.
+
+test('an empty managed node_modules with a current manifest hash is reinstalled, never linked as ready', () => {
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\necho ran >> "$NPM_RUNS"\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
+  const runs = join(ctx.dir, 'runs');
+  try {
+    seedInstalled(ctx);
+    rmSync(join(ctx.persist, 'node_modules'), { recursive: true, force: true });
+    mkdirSync(join(ctx.persist, 'node_modules'), { recursive: true }); // exists, empty, hash current
+
+    const r = runSync(ctx, { NPM_RUNS: runs });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /deps ready/);
+    assert.equal(readFileSync(runs, 'utf8').trim().split('\n').length, 1, 'the empty tree must be reinstalled');
+    assert.ok(existsSync(join(ctx.persist, SDK_MARKER)), 'the reinstall leaves a real install behind');
+    assert.ok(slotReachesManaged(ctx));
+
+    const again = runSync(ctx, { NPM_RUNS: runs });
+    assert.equal(again.code, 0);
+    assert.equal(again.stdout.trim(), '', 'a real install then takes the silent fast path');
+    assert.equal(readFileSync(runs, 'utf8').trim().split('\n').length, 1);
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('an npm that exits 0 but leaves no usable install is a hard failure, and the hash is not recorded', () => {
+  // A killed or hollow install that reports success used to be written down
+  // as current — which is exactly the state the previous test finds.
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules\n' });
+  try {
+    const r = runSync(ctx);
+    assert.equal(r.code, 1, 'success with nothing installed must not read as success');
+    assert.match(r.stderr, /no usable install/);
+    assert.match(r.stderr, /@modelcontextprotocol\/sdk\/package\.json/);
+    assert.doesNotMatch(r.stdout, /deps ready/);
+    assert.equal(existsSync(join(ctx.persist, '.manifest.sha256')), false, 'nothing current was installed, so nothing is recorded as current');
+    assert.equal(existsSync(ctx.lock), false);
   } finally {
     rmSync(ctx.dir, { recursive: true, force: true });
   }

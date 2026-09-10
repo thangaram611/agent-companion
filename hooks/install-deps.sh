@@ -187,6 +187,19 @@ link_ok() {
   [ -d "$PERSIST_DIR/node_modules" ] && [ "$SYMLINK" -ef "$PERSIST_DIR/node_modules" ]
 }
 
+# Is the managed install REAL? The same file the launcher refuses to start the
+# bridge without (hooks/launch-agent-bridge.sh, SDK_PACKAGE): the one dependency
+# server.mjs cannot import its way around. `-d node_modules` used to stand in
+# for this, and measured 2026-09-10 it was a directory with 0 entries beside a
+# manifest hash that matched — a killed or hollow install that had been written
+# down as current — so every SessionStart took the silent fast path below,
+# re-pointed the plugin root's link at the empty tree and exited 0. Three hand
+# repairs in one day, each undone by the next session start.
+SDK_PACKAGE="$PERSIST_DIR/node_modules/@modelcontextprotocol/sdk/package.json"
+installed_ok() {
+  [ -r "$SDK_PACKAGE" ]
+}
+
 # Two independent questions, asked separately.
 #   "are the managed deps installed and manifest-current?"  → repaired by npm
 #   "does the plugin root's node_modules reach them?"       → repaired by one ln
@@ -195,7 +208,7 @@ link_ok() {
 # or the host relocates plugin data, while PERSIST_DIR's install stays perfectly
 # valid.
 DEPS_OK=0
-if [ -d "$PERSIST_DIR/node_modules" ] && [ "$EXPECT_HASH" = "$STORED_HASH" ]; then
+if installed_ok && [ "$EXPECT_HASH" = "$STORED_HASH" ]; then
   DEPS_OK=1
 fi
 
@@ -254,10 +267,12 @@ if [ "$DEPS_OK" = 0 ]; then
     exit 1
   fi
 
-  if [ ! -d "$PERSIST_DIR/node_modules" ]; then
-    # npm reported success and produced nothing. Say what actually happened,
-    # rather than letting the link step below report a misleading link failure.
-    echo "agent-companion: npm reported success but left no $PERSIST_DIR/node_modules (see $LOG)" >&2
+  if ! installed_ok; then
+    # npm reported success and produced nothing usable. Say what actually
+    # happened, rather than letting the link step below report a misleading
+    # link failure — and record nothing as current, or the next session takes
+    # the fast path over the hollow tree (the bug above).
+    echo "agent-companion: npm reported success but left no usable install at $PERSIST_DIR (missing $SDK_PACKAGE; see $LOG)" >&2
     exit 1
   fi
 

@@ -38,6 +38,8 @@ for _attempt in 1 2; do
   if [ "$INSTALL_STATUS" -ne 0 ]; then
     exit 1
   fi
+  # The same file install-deps.sh's `installed_ok` requires before it calls the
+  # managed install current: keep the two spelled identically.
   SDK_PACKAGE="$PLUGIN_PACKAGE_ROOT/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
   if [ -r "$SDK_PACKAGE" ]; then
     DEPS_READY=1
