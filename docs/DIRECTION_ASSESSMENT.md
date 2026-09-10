@@ -318,10 +318,10 @@ in the bridge; it is a documented protocol for the parent.
 - Does the `review` template need a structured findings list, or is a single
   verdict line plus free-form findings enough for the parent's loop? Start
   with the line; add structure only if the parent needs to branch on findings.
-- Should thread reuse be the default for every codex send on an existing
-  thread, or only for `review`? The template already promises continuity on
-  daemon-backed adapters, so default it for all codex/appserver sends and let
-  a fresh thread opt out by omitting `thread`.
+- **Decided 2026-09-10: thread reuse applies to every codex/appserver send
+  on an existing thread, not only `review`.** The template already promises
+  continuity on daemon-backed adapters; a fresh thread opts out by omitting
+  `thread`. The exec adapter is unchanged.
 
 ## 6. Doc corrections carried by this assessment
 
