@@ -66,11 +66,12 @@ instruction would satisfy a substring test.
 protocol, and subscribing *drains* the broker's pre-subscription ring, which would swallow the
 events bridge B is about to hydrate on. `appserver-control.mjs` does resume, and may: by the
 time it asks, the job it is asking about is already terminal and nothing is watching that
-thread. Its `thread/read` history check is timing-sensitive: the cancel lands ~2 s after
-`turn/start`, and codex writes the turn's user message to the rollout after `task_started`, so
-an interrupt that wins that race leaves a turn with no input text to find (measured 2026-09-10
-on 0.154.0: the rollout held `session_meta`, `task_started`, the developer message and
-`turn_aborted`, nothing else). Re-run before reading a lone failure there as a regression. It asserts the interrupt's turn id against the bridge's own
+thread. Before interrupting, it waits (on a connection of its own, via `thread/read`) until
+the turn's user message is readable off the thread: codex writes that message to the rollout
+after `task_started`, and an interrupt ~2 s after `turn/start` can win that race and leave a
+turn with no input text for the history check to find (measured 2026-09-10 on 0.154.0: the
+rollout held `session_meta`, `task_started`, the developer message and `turn_aborted`, nothing
+else). The turn is two 15 s sleeps, so the interrupt still lands mid-turn. It asserts the interrupt's turn id against the bridge's own
 `agent:cancel codex-appserver interrupt` log line for the same reason `appserver.mjs` reads B's
 resume line — the ledger's `turnId` only proves the *worker* banked one, not that the interrupt
 sent it. (`agent_cancel` waits up to 5 s for the job to settle and then answers with the

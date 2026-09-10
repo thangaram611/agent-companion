@@ -130,6 +130,29 @@ async function untilTurnBanked(jobId, seconds = 40) {
   return row;
 }
 
+// Wait until the turn's INPUT is readable off the thread. Codex writes the
+// user message to the rollout AFTER `task_started`, so an interrupt that beats
+// that write leaves a turn with nothing to read back — measured 2026-09-10 on
+// 0.154.0: the rollout held `session_meta`, `task_started`, the developer
+// message and `turn_aborted`, and the history check below failed on a turn
+// that had genuinely never recorded its prompt. The turn is two 15 s sleeps,
+// so the interrupt still lands mid-turn after this. On a connection of its
+// own: `thread/read` neither resumes nor subscribes, so it cannot drain the
+// ring the bridge's watcher is reading.
+async function untilInputReadable(threadId, turnId, socketPath, seconds = 20) {
+  for (let i = 0; i < seconds; i++) {
+    let turns = [];
+    try {
+      const conn = await connectCodexBroker({ socketPath });
+      try { turns = (await readCodexThread({ conn, threadId }))?.raw?.thread?.turns || []; }
+      finally { conn.close(); }
+    } catch { /* the broker may still be settling; ask again */ }
+    if (turns.some((t) => t.id === turnId && JSON.stringify(t).includes('sleep 15'))) return i;
+    await sleep(1000);
+  }
+  return -1;
+}
+
 let A = null;
 let brokerPid = null;
 let steerThreadId = null;
@@ -230,6 +253,8 @@ try {
   check('the second job banked its own turn id on its own thread',
     !!row2?.turnId && cancelThreadId !== steerThreadId,
     `thread=${cancelThreadId} turn=${row2?.turnId}`);
+  const inputAfter = await untilInputReadable(cancelThreadId, row2?.turnId, row2?.brokerSocket || null);
+  log(inputAfter >= 0 ? `turn input readable off thread/read after ${inputAfter}s` : 'turn input never became readable; interrupting anyway');
 
   const cancel = await A.tool('agent_cancel', { job_id: cancelJob });
   // Two shapes are both correct here, and which one arrives is a race: cancel
