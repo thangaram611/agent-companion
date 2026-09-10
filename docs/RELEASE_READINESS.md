@@ -108,10 +108,10 @@ GitHub Copilot CLI companion:
 
 Codex CLI companion:
 
-- **Wire contract generated from codex-cli 0.152.1** (`lib/codex-app-server-contract.json`
+- **Wire contract generated from codex-cli 0.154.0** (`lib/codex-app-server-contract.json`
   records that `codexVersion` as provenance; the `exec` stream census in
   `bridge-server/codex-runtime.mjs` was taken on 0.147.0, and the historical
-  0.147.0 → 0.150.1 app-server delta was purely additive). The version is
+  0.147.0 → 0.150.1 and 0.152.1 → 0.154.0 app-server deltas were purely additive). The version is
   **not** the gate: the drift test compares the configured CLI's live schema and
   the broker boot probe compares its selected binary's schema to the fixture, so
   a version-only bump passes and only a real schema change fails the test —

@@ -79,7 +79,8 @@ terminal envelope, which does not carry the cancel metadata at all.)
 ## `codex-app-server/` — transport and architecture validation
 
 Everything here targets `codex app-server` (first measured on codex-cli 0.147.0; the wire
-contract is generated from 0.152.1). The transport behavior was last fully re-measured on
+contract is generated from 0.154.0 — the 0.152.1 → 0.154.0 delta was purely additive: one
+client request, optional fields on `agentMessage` and `Thread`, nothing moved). The transport behavior was last fully re-measured on
 0.150.1 on 2026-08-28 with identical results: all four `smoke/` scripts (12/12, 8/8, 17/17,
 18/18), `unloaded.mjs`, `errs.mjs` (through the prototype broker), and `probe.mjs`'s `approval`
 matrix (workspace-write/on-request wrote with 0 approvals; read-only + one accepted approval

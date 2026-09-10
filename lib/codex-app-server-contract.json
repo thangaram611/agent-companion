@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.152.1",
+  "codexVersion": "0.154.0",
   "clientRequests": [
     {
       "method": "account/login/cancel",
@@ -345,6 +345,11 @@
       "required": [
         "pluginName"
       ]
+    },
+    {
+      "method": "plugin/reconcile",
+      "paramsRequired": true,
+      "required": []
     },
     {
       "method": "plugin/share/checkout",
@@ -1613,6 +1618,7 @@
       "id": "string",
       "memoryCitation": "MemoryCitation?",
       "phase": "enum:commentary|final_answer?",
+      "questions": "AsyncUserInputQuestion[]?",
       "text": "string",
       "type": "enum:agentMessage"
     },
@@ -1939,12 +1945,15 @@
       "gitInfo": "GitInfo?",
       "historyMode": "enum:legacy|paginated?",
       "id": "string",
+      "model": "string?",
       "modelProvider": "string",
       "name": "string?",
+      "originator": "string?",
       "parentThreadId": "string?",
       "path": "string?",
       "preview": "string",
       "projectId": "string",
+      "reasoningEffort": "string?",
       "recencyAt": "integer?",
       "section": "ThreadSection?",
       "sectionEnteredAt": "integer?",
