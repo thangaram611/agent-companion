@@ -63,7 +63,7 @@ export function log(level, ...args) {
 
 export const VALID_ACTIONS   = new Set(['send', 'wait', 'status', 'reply', 'cancel']);
 export const VALID_MODES     = new Set(['PLAN', 'ANALYZE', 'EXECUTE']);
-export const VALID_TEMPLATES = new Set(['general', 'research', 'plan_review']);
+export const VALID_TEMPLATES = new Set(['general', 'research', 'plan_review', 'review']);
 export const VALID_PARALLEL_STRATEGIES = new Set(['auto', 'always', 'never']);
 export const VALID_TARGETS = new Set(['opencode', 'copilot', 'codex']);
 export const DEFAULT_MODE    = 'EXECUTE';
@@ -87,14 +87,21 @@ const ALLOWED_FIELDS = {
 };
 
 // Per-template allowed keys. Plan_review and general have disjoint key sets;
-// research currently has none. Validating per template (instead of one global
-// set) prevents `scope_hint` from being silently accepted on plan_review and
-// vice-versa.
+// research and review have none. Validating per template (instead of one
+// global set) prevents `scope_hint` from being silently accepted on plan_review
+// and vice-versa.
 const VALID_TEMPLATE_ARGS_KEYS_BY_TEMPLATE = {
   general:     new Set(['scope_hint']),
   research:    new Set(),
   plan_review: new Set(['plan_path', 'focus_directive']),
+  review:      new Set(),
 };
+
+// Templates whose prompt already carries its own critique instructions and a
+// verdict contract. The always-on rubber-duck wrapper is not layered on top of
+// these: it doubles the prompt without changing the output, and its
+// `RUBBER-DUCK:` footer would compete with the verdict line the parent reads.
+export const RUBBER_DUCK_EXEMPT_TEMPLATES = new Set(['plan_review', 'review']);
 const SCOPE_HINT_MAX_CHARS = 500;
 
 // --- Prompt templates -------------------------------------------------------
@@ -104,6 +111,10 @@ export function shouldUseFleet({ parallel = DEFAULT_PARALLEL, template = 'genera
   if (parallel === 'never') return false;
   if (parallel !== 'auto') return false;
   if (template === 'plan_review') return true;
+  // One reviewer, one verdict line. A fleet of sub-reviewers concatenates N
+  // verdicts into one message, and two that disagree parse to no verdict at
+  // all — so `auto` never fans a review out, whatever the task looks like.
+  if (template === 'review') return false;
   const text = String(task || '');
   if (template === 'research') {
     return text.length > 80 || /\b(compare|survey|latest|recent|sources|research|across|multiple)\b/i.test(text);
@@ -208,13 +219,84 @@ export function formatPlanReviewTemplate({ template_args, parallel }) {
   return maybeFleetPrefix(body, shouldUseFleet({ parallel, template: 'plan_review' }));
 }
 
+// The review loop's prompt. The subject is the task itself — a change, a
+// claim, a plan, a diff — and the contract is the LAST line: `VERDICT: agree`
+// or `VERDICT: disagree`, which `classifyReviewVerdict` reads into the terminal
+// envelope's `meta.verdict` so the parent can branch without parsing prose.
+// Read-only by construction, whatever `mode` the caller passed: a review that
+// edits is not a review (that is `general` in EXECUTE). The closing line is the
+// continuity hook — on a daemon-backed adapter a follow-up send lands on the
+// same conversation, so round two can say "finding 1" and be understood.
+export function formatReviewTemplate({ task, parallel }) {
+  const body = [
+    'You are a senior engineer reviewing work produced by another AI coding assistant. The subject under',
+    'review — a change, a plan, a claim, or a diff — is:',
+    '',
+    `  ${task}`,
+    '',
+    'Read the code it touches with your read-only tools (`view`, `grep`, `glob`) and verify every claim',
+    "against the codebase before judging it. Do not trust the subject's own description of what it does.",
+    '',
+    'Review priorities (in order):',
+    '1. Correctness — Does it do what it claims? Wrong assumptions, misunderstood APIs, logic errors?',
+    '2. Completeness — Missing cases, unhandled errors, call sites that also needed the change?',
+    '3. Safety — Could it break existing behaviour or cause regressions?',
+    "4. Consistency — Does it follow the codebase's own patterns? Internal contradictions?",
+    '5. Verification — Is it covered by a check that would catch its own defect?',
+    '',
+    'DO NOT flag: style preferences, equivalent alternatives, theoretical concerns without evidence,',
+    "or pre-existing issues outside the subject's scope.",
+    '',
+    'DO NOT modify any files — no `edit`, `write`, or file-mutating `shell` commands. Report findings;',
+    'do not fix them.',
+    '',
+    'Respond with:',
+    '- A numbered list of concrete findings, each with a file path (and line where possible) and the',
+    '  specific issue. Write "No findings." if there are none.',
+    '- A brief overall assessment (2-3 sentences).',
+    '- Exactly one verdict line as the LAST line of your message, with nothing after it:',
+    '    VERDICT: agree — <one line: why the subject holds as stated>',
+    '    VERDICT: disagree — <one line: the finding that must be addressed first>',
+    '  "agree" means the subject is correct, complete and safe as stated; "disagree" means at least',
+    '  one finding must be addressed before it is. A message without that line counts as no verdict.',
+    '',
+    'On a follow-up turn in this conversation, re-read what changed since your last verdict and',
+    're-verdict; refer to your earlier findings by number.',
+  ].join('\n');
+  return maybeFleetPrefix(body, shouldUseFleet({ parallel, template: 'review', task }));
+}
+
 export function formatPrompt({ template, task, mode, template_args, parallel }) {
   switch (template || 'general') {
     case 'general':     return formatGeneralTemplate({ task, mode, scope_hint: template_args?.scope_hint, parallel });
     case 'research':    return formatResearchTemplate({ task, parallel });
     case 'plan_review': return formatPlanReviewTemplate({ template_args, parallel });
+    case 'review':      return formatReviewTemplate({ task, parallel });
     default: throw new Error(`unknown template: ${template}`);
   }
+}
+
+// The review template's terminal contract, read the way classifyRubberDuck
+// reads the rubber-duck line: every `VERDICT:` line in the message counts, and
+// the answer is pessimistic. A value the contract does not define (plan_review's
+// `approve`, a hedged `agreed`), or two lines that disagree with each other, is
+// no verdict at all. `null` is the honest answer there — the bridge never
+// guesses one — and the job stays `completed`, because the turn did finish; it
+// is the REVIEW that did not conclude, and `reason` says which way.
+//
+// Markdown-tolerant on purpose: models bold the label, quote the value, or
+// bullet the line. Position is not checked — the prompt asks for the last line
+// so the parse is unambiguous, but a well-formed line anywhere is still the
+// model's verdict, and a second one that agrees is a fleet of sub-reviewers
+// agreeing.
+const VERDICT_LINE_RE = /(?:^|\n)[ \t]*(?:[-*]\s+)?[*_`]*VERDICT[*_`]*:[*_`\s"']*([A-Za-z]+)/gi;
+export function classifyReviewVerdict(message) {
+  if (!message) return { verdict: null, reason: 'missing' };
+  const values = [...String(message).matchAll(VERDICT_LINE_RE)].map((m) => m[1].toLowerCase());
+  if (values.length === 0) return { verdict: null, reason: 'missing' };
+  if (values.some((v) => v !== 'agree' && v !== 'disagree')) return { verdict: null, reason: 'malformed' };
+  if (new Set(values).size > 1) return { verdict: null, reason: 'conflicting' };
+  return { verdict: values[0], reason: null };
 }
 
 // Helper: prepend `/fleet ` to a multi-line template body so the slash
@@ -423,9 +505,9 @@ function validateSend(args) {
     throw new Error(`agent: mode must be one of ${[...VALID_MODES].join('|')}, got "${mode}"`);
   }
 
-  // `task` is required for general/research; plan_review drives its prompt
-  // from plan_path and ignores task.
-  const needsTask = template === 'general' || template === 'research';
+  // `task` is required for every template but plan_review, which drives its
+  // prompt from plan_path and ignores task.
+  const needsTask = template !== 'plan_review';
   if (needsTask) assertString('task', args.task);
   if (!needsTask && args.task) {
     log('WARN', 'agent: task ignored for template="plan_review"');

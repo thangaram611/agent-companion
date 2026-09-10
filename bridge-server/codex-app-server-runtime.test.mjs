@@ -34,7 +34,7 @@ import {
   reapIdleCodexBroker,
   codexBrokerIdleTtlMs,
   startCodexThread,
-  startCodexThreadWithBrokerRecovery,
+  openCodexThreadWithBrokerRecovery,
   codexBrokerErrorNeedsRespawn,
   resumeCodexThread,
   readCodexThread,
@@ -1372,7 +1372,7 @@ test('thread/start configuration EPERM retires an idle broker and retries exactl
     },
   });
 
-  const opened = await startCodexThreadWithBrokerRecovery({ cwd: '/workspace', env: {} });
+  const opened = await openCodexThreadWithBrokerRecovery({ cwd: '/workspace', env: {} });
   try {
     assert.equal(opened.threadId, 'T-after-restart');
     assert.equal(opened.brokerRestarted, true);
@@ -1426,7 +1426,7 @@ test('a broker lost between ensure and connect is retired and connected exactly 
     },
   });
 
-  const opened = await startCodexThreadWithBrokerRecovery({ cwd: '/workspace', env: {} });
+  const opened = await openCodexThreadWithBrokerRecovery({ cwd: '/workspace', env: {} });
   try {
     assert.equal(opened.threadId, 'T-after-connect-race');
     assert.equal(opened.brokerRestarted, true);
@@ -1434,6 +1434,80 @@ test('a broker lost between ensure and connect is retired and connected exactly 
     assert.equal(connects, 6, 'one failed connection is followed by exactly one ensure/connect attempt');
     assert.equal(failingSocket.destroyed, true, 'the failed initialize connection must not leak');
     assert.ok(intermediateSockets.every((sock) => sock.destroyed), 'health-probe connections must be closed too');
+  } finally {
+    opened.conn.close();
+  }
+});
+
+test('a prior thread id is resumed through the recovery helper, never restarted', async () => {
+  const sock = fakeBrokerSocket({ statuses: { 'T-prior': 'idle' } });
+  _setForTest({ connect: async () => sock, spawnBroker: () => { throw new Error('a live broker must not be respawned'); } });
+  const opened = await openCodexThreadWithBrokerRecovery({ threadId: 'T-prior', env: {} });
+  try {
+    assert.equal(opened.threadId, 'T-prior');
+    assert.equal(opened.resumed, true);
+    assert.equal(opened.status, 'idle');
+    assert.equal(opened.brokerRestarted, false);
+    // One socket answers both ensure's health probe and the thread call here.
+    const threadWire = () => sock.wire().filter((m) => m !== 'broker/status');
+    assert.deepEqual(threadWire(), ['thread/resume']);
+    const params = sock.paramsFor('thread/resume')[0];
+    assert.equal(params.threadId, 'T-prior');
+    assert.equal(params.approvalPolicy, 'never');
+    assert.ok(params.sandbox, 'the sandbox rides the resume, or a resumed turn silently de-escalates');
+    // The connection now owns the thread: the next turn checks status and starts.
+    const turn = await startCodexTurn({ conn: opened.conn, threadId: 'T-prior', prompt: 'again', env: {} });
+    assert.equal(turn.attached, false);
+    assert.deepEqual(threadWire(), ['thread/resume', 'thread/resume', 'turn/start']);
+  } finally {
+    opened.conn.close();
+  }
+  // Without a prior id it is the start it always was.
+  const fresh = fakeBrokerSocket();
+  _setForTest({ connect: async () => fresh, spawnBroker: () => { throw new Error('a live broker must not be respawned'); } });
+  const started = await openCodexThreadWithBrokerRecovery({ cwd: '/workspace', env: {} });
+  try {
+    assert.equal(started.resumed, false);
+    assert.equal(started.threadId, 'T1');
+    assert.deepEqual(fresh.wire().filter((m) => m !== 'broker/status'), ['thread/start']);
+  } finally {
+    started.conn.close();
+  }
+});
+
+test('a dead-broker signature on resume gets the same bounded recovery as thread/start', async () => {
+  let up = true;
+  let resumes = 0;
+  let spawns = 0;
+  const kills = [];
+  const makeSocket = () => fakeBrokerSocket({
+    brokerPid: process.pid,
+    handlers: {
+      'thread/resume': (p) => {
+        resumes += 1;
+        if (resumes === 1) return { __error: { code: -32603, message: 'codex app-server exited' } };
+        return { thread: { id: p.threadId, status: { type: 'idle' }, turns: [] } };
+      },
+    },
+  });
+  _setForTest({
+    connect: async () => {
+      if (up) return makeSocket();
+      const err = new Error('connect ENOENT');
+      err.code = 'ENOENT';
+      throw err;
+    },
+    kill: (pid, signal) => { kills.push({ pid, signal }); up = false; },
+    spawnBroker: () => { spawns += 1; up = true; return new EventEmitter(); },
+  });
+  const opened = await openCodexThreadWithBrokerRecovery({ threadId: 'T-prior', env: {} });
+  try {
+    assert.equal(opened.threadId, 'T-prior');
+    assert.equal(opened.resumed, true);
+    assert.equal(opened.brokerRestarted, true);
+    assert.equal(resumes, 2);
+    assert.equal(spawns, 1);
+    assert.deepEqual(kills, [{ pid: process.pid, signal: 'SIGTERM' }]);
   } finally {
     opened.conn.close();
   }
@@ -2275,4 +2349,60 @@ test('end to end: a turn streams through the real broker to a terminal summary',
     .filter((m) => m === 'thread/read' || m === 'thread/resume' || m === 'turn/interrupt');
   assert.deepEqual(tail, ['thread/read', 'thread/resume', 'turn/interrupt']);
   assert.deepEqual(trace.find((m) => m.method === 'turn/interrupt').params, { threadId, turnId: 'TURN1' });
+});
+
+test('end to end: a follow-up send resumes the thread through the real broker, and the fake app-server sees thread/resume, not a second thread/start', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'cxr-'));
+  const socketPath = join(dir, 'b.sock');
+  const tracePath = join(dir, 'trace.jsonl');
+  const prevSocket = process.env.CODEX_BROKER_SOCKET_PATH;
+  const prevRuntime = process.env.AGENT_RUNTIME_DIR;
+  const prevHb = process.env.AGENT_HEARTBEAT_DIR;
+  process.env.CODEX_BROKER_SOCKET_PATH = socketPath;
+  process.env.AGENT_RUNTIME_DIR = dir;
+  process.env.AGENT_HEARTBEAT_DIR = join(dir, 'hb');
+  mkdirSync(process.env.AGENT_HEARTBEAT_DIR, { recursive: true });
+  const codexPath = fakeCodexBin(dir);
+  fakeCodexBin(dir, 'codex-code-mode-host');
+  const env = { ...process.env, CODEX_BIN: codexPath, CODEX_FAKE_TRACE: tracePath, CODEX_BROKER_LOG_LEVEL: 'ERROR' };
+  _resetForTest();
+  const broker = await ensureCodexBroker({ env });
+  t.after(() => {
+    try { process.kill(broker.pid, 'SIGKILL'); } catch { /* already gone */ }
+    if (prevSocket === undefined) delete process.env.CODEX_BROKER_SOCKET_PATH; else process.env.CODEX_BROKER_SOCKET_PATH = prevSocket;
+    if (prevRuntime === undefined) delete process.env.AGENT_RUNTIME_DIR; else process.env.AGENT_RUNTIME_DIR = prevRuntime;
+    if (prevHb === undefined) delete process.env.AGENT_HEARTBEAT_DIR; else process.env.AGENT_HEARTBEAT_DIR = prevHb;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Round one: the bridge that opens the thread, then goes away.
+  const first = await openCodexThreadWithBrokerRecovery({ cwd: dir, env });
+  assert.equal(first.resumed, false);
+  assert.equal(first.threadId, 'T1');
+  first.conn.close();
+
+  // Round two: a LATER bridge with nothing but the recorded id.
+  const second = await openCodexThreadWithBrokerRecovery({ threadId: 'T1', env });
+  t.after(() => second.conn.close());
+  assert.equal(second.resumed, true);
+  assert.equal(second.threadId, 'T1');
+  assert.equal(second.status, 'idle');
+  const turn = await startCodexTurn({ conn: second.conn, threadId: 'T1', prompt: 're-verdict', env });
+  assert.equal(turn.attached, false);
+  assert.equal(turn.turnId, 'TURN1');
+
+  // What the app-server actually received, off its own trace: one start, the
+  // resumes carrying the id and the policy, and the turn after them.
+  const upstream = readFileSync(tracePath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const methods = upstream.map((m) => m.method).filter((m) => m && m.startsWith('thread/') || m === 'turn/start');
+  assert.equal(methods.filter((m) => m === 'thread/start').length, 1, 'the thread was started exactly once');
+  const resumes = upstream.filter((m) => m.method === 'thread/resume');
+  assert.ok(resumes.length >= 1, 'the follow-up resumed');
+  for (const r of resumes) {
+    assert.equal(r.params.threadId, 'T1');
+    assert.equal(r.params.approvalPolicy, 'never');
+    assert.equal(r.params.sandbox, 'workspace-write');
+    assert.equal('model' in r.params, false, 'no pin, so config.toml stays authoritative on resume too');
+  }
+  assert.ok(methods.lastIndexOf('turn/start') > methods.indexOf('thread/resume'), 'the turn started on the resumed thread');
 });

@@ -128,7 +128,16 @@ Notes:
     resume (`thread/resume` rejoins a *running* thread; if the broker itself
     died, the rollout on disk still yields the transcript and only the in-flight
     turn is lost) and real sub-turn streamed digests. Cancel becomes
-    `turn/interrupt`, which ends the turn and leaves the thread live.
+    `turn/interrupt`, which ends the turn and leaves the thread live. A
+    follow-up send on the same `thread` resumes the codex thread the last job
+    on it recorded (its id is the thread's `.sid`, exactly as Copilot's ACP
+    session id is), so the conversation continues instead of restarting cold.
+    A thread name with no recorded id is what opens fresh — note that omitting
+    `thread` on a host session that already has a thread mapped continues that
+    thread, as it always has for Copilot. A
+    recorded id that no longer resumes on a healthy broker fails that send
+    explicitly and retires the sid — there is no silent fallback to a fresh
+    thread.
   - Under `appserver` the approval policy is pinned to `never` and is not
     configurable: a client that accepts one approval escalates past the sandbox
     (measured), so the sandbox stays the hard boundary. The broker is detached
@@ -572,14 +581,43 @@ Templates:
 | `general` | Default implementation, review, and analysis work. |
 | `research` | Multi-source research. |
 | `plan_review` | Plan verification with a required `plan_path`. |
+| `review` | Read-only review of the task as its subject, ending in a parsed `VERDICT: agree|disagree` line. |
+
+### Review loop
+
+`review` is the template for the loop the ledger shows in use: the parent
+asks a companion to judge a change, a claim, a plan or a diff, acts on the
+findings, and asks again. The task is the subject under review; the prompt is
+read-only whatever `mode` says, never auto-fleets on Copilot (one reviewer,
+one verdict), and requires the reply to end with one line:
+
+```text
+VERDICT: agree — <why the subject holds as stated>
+VERDICT: disagree — <the finding that must be addressed first>
+```
+
+The bridge parses that line so the parent can branch without reading prose.
+Terminal `meta.verdict` is `"agree"`, `"disagree"`, or `null` with
+`meta.verdict_reason` set to `missing`, `malformed` (a value the contract
+does not define, such as `approve`) or `conflicting` (two lines that
+disagree). A null verdict is never guessed and never remaps the job: the turn
+`completed`; the review did not conclude. The same verdict lands in the digest
+header (`**Verdict:**`) and as a footer on the terminal body.
+
+On a daemon-backed adapter — Codex app-server today — a follow-up send on the
+same `thread` continues the same conversation, so round two can be "finding 1
+is addressed; re-verdict" and be understood. The protocol the parent is
+expected to follow is blind commitment: record your own verdict on the subject
+before reading the companion's, so agreement is evidence rather than
+anchoring. The bridge does not enforce that; it is documented, not policed.
 
 ### Output wrapper
 
 Copilot-target output for the `general` and `research` templates carries a
 server-appended `RUBBER-DUCK: clean|revised` verdict line. It is not
-configurable and there is no payload field controlling it. `plan_review` has
-its own critique built in and skips the wrapper, and OpenCode MVP output is
-relay-only so it never carries one.
+configurable and there is no payload field controlling it. `plan_review` and
+`review` have their own critique built in and skip the wrapper, and OpenCode
+MVP output is relay-only so it never carries one.
 
 This lives here rather than in the subagent descriptions because it describes
 what the caller *receives*, not how to construct a call — and the server

@@ -43,6 +43,14 @@ const {
 const { pidAlive } = await import(join(REPO, 'lib/shared-runtime-registry.mjs'));
 
 const SID = `appserver-control-${Date.now().toString(36)}`;
+// Two jobs, two threads, named explicitly. Without a `thread` the bridge maps
+// every send on one host session to the same thread, and since a codex
+// app-server send on an existing thread RESUMES the codex thread its last job
+// recorded (the `.sid`, as for Copilot), the cancel job would otherwise land on
+// the steer job's thread — and this probe's assertions hang off them being
+// two threads. A thread name with no recorded id is what opens fresh.
+const STEER_THREAD = `${SID}-steer`;
+const CANCEL_THREAD = `${SID}-cancel`;
 const STEER_WORD = 'PINEAPPLE';
 const ORIGINAL_WORD = 'BANANA';
 const t0 = Date.now();
@@ -135,6 +143,7 @@ try {
   // ======================================================================
   const send1 = await A.tool('agent_send', {
     task: task(ORIGINAL_WORD), cwd: work, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    thread: STEER_THREAD,
   });
   const steerJob = send1.job_id || send1.jobId;
   check('a codex job dispatched on the app-server adapter', !!steerJob, `job=${steerJob}`);
@@ -210,6 +219,7 @@ try {
   // ======================================================================
   const send2 = await A.tool('agent_send', {
     task: task(ORIGINAL_WORD), cwd: work, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    thread: CANCEL_THREAD,
   });
   const cancelJob = send2.job_id || send2.jobId;
   check('a second codex job dispatched for the cancel case', !!cancelJob, `job=${cancelJob}`);

@@ -246,15 +246,35 @@ primary companion:
    - Keep adapters capability-driven: read reply/resume/parallel support from
      the descriptor, which the selected adapter may upgrade.
 
-5. Make the review loop first-class — NEXT (assessed 2026-09-09, not started).
-   The Claude-host ledger shows the product is used as one cell of the matrix:
-   Claude → Codex read-only reviews with a verdict, chained by hand over
-   several rounds that restart a cold Codex thread each time. Codex thread
-   continuity on follow-up sends plus a `review` template with a parsed
-   verdict, with success criteria, code anchors and non-goals in
-   [docs/DIRECTION_ASSESSMENT.md](DIRECTION_ASSESSMENT.md) §5. The same
-   document ranks what follows (usage ledger, generic ACP transport) and
-   demotes the Codex-host → Claude companion until that host is in use.
+5. Make the review loop first-class — DONE (2026-09-10). The Claude-host
+   ledger showed the product used as one cell of the matrix: Claude → Codex
+   read-only reviews with a verdict, chained by hand over rounds that restarted
+   a cold Codex thread each time. Built per
+   [docs/DIRECTION_ASSESSMENT.md](DIRECTION_ASSESSMENT.md) §5:
+   - Codex thread continuity on follow-up sends: a codex/app-server send on a
+     thread whose last job recorded a thread id resumes it (`thread/resume`,
+     via the generalized `openCodexThreadWithBrokerRecovery`) and `turn/start`s
+     on it; `thread/start` opens only a thread with no recorded id. The id is
+     persisted as the thread's `.sid` the way Copilot's is, restored on
+     hydrate, and retired — with the job failing explicitly — when it no longer
+     resumes on a healthy broker. Applies to every app-server send on an
+     existing thread, not only `review`; the exec adapter is unchanged.
+   - A `review` template (`bridge-server/validation.mjs`): read-only, never
+     auto-fleets, skips the rubber-duck wrapper, and requires a final
+     `VERDICT: agree|disagree` line that `classifyReviewVerdict` parses into
+     the job at `retainTerminalJob` and from there into wait `meta.verdict`,
+     the queue event, the body footer and both digest writers — `null` with
+     `verdict_reason` (`missing` | `malformed` | `conflicting`) when it cannot
+     be read, never guessed, never remapping `completed`.
+   - Proof: `probes/smoke/review-loop.mjs` (14 checks against the real bridge,
+     broker and codex: a planted defect parses to `disagree`; bridge SIGKILLed
+     between rounds; round two resumes the same thread, names round one's
+     finding without the task restating it, and `thread/read` shows both turns
+     on one thread) plus unit coverage in the server, runtime, validation and
+     both template suites. The four existing smokes stay 12/12, 8/8, 17/17,
+     18/18. The same assessment ranks what follows (usage ledger, generic ACP
+     transport) and demotes the Codex-host → Claude companion until that host
+     is in use.
 
 ## Validation Commands
 

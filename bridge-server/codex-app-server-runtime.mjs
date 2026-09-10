@@ -1623,18 +1623,30 @@ export function codexBrokerErrorNeedsRespawn(error) {
   return CONNECT_CLASS_CODES.has(error?.code) || CONFIG_EPERM_RE.test(text) || DEAD_BROKER_RE.test(text);
 }
 
-// Open a fresh thread with one bounded runtime recovery. The incident EPERM is
-// returned by an app-server that is still perfectly alive at the socket layer,
-// so `ensureCodexBroker` cannot discover it before the first real `thread/start`.
-// Retrying that call forever would hide a machine problem and can produce
-// duplicate work; retrying once after the same active-turn-safe broker disposal
-// closes the stale-TCC/dead-process window without changing the verdict twice.
-export async function startCodexThreadWithBrokerRecovery({
+// Open the thread a job will run on, with one bounded runtime recovery. With a
+// `threadId` this is a `thread/resume` — a follow-up send continuing the
+// conversation the last job on that thread had — and without one it is a
+// fresh `thread/start`. One loop for both because the recovery is about the
+// BROKER, not the method: the incident EPERM is returned by an app-server that
+// is still perfectly alive at the socket layer, so `ensureCodexBroker` cannot
+// discover it before the first real thread call. Retrying that call forever
+// would hide a machine problem and can produce duplicate work; retrying once
+// after the same active-turn-safe broker disposal closes the stale-TCC/
+// dead-process window without changing the verdict twice.
+//
+// A resume that fails for any OTHER reason — a rollout gone from
+// `$CODEX_HOME/sessions`, typically — is thrown as-is. Falling back to
+// `thread/start` here would silently hand the caller a cold thread in place of
+// the conversation it asked to continue; the caller decides what a stale id
+// means (bridge-server/server.mjs retires it and fails the job, saying so).
+export async function openCodexThreadWithBrokerRecovery({
   cwd,
+  threadId = null,
   env = process.env,
   model = null,
   timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
 } = {}) {
+  const method = threadId ? 'thread/resume' : 'thread/start';
   let firstError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const broker = await ensureCodexBroker({ env });
@@ -1642,11 +1654,23 @@ export async function startCodexThreadWithBrokerRecovery({
     try {
       // A broker can die after ensure's health probe but before this job opens
       // its own socket. Keep connection setup inside the same one-retry guard as
-      // thread/start; connectCodexBroker closes a socket whose handshake fails,
-      // and the optional close below covers every successfully-created conn.
+      // the thread call; connectCodexBroker closes a socket whose handshake
+      // fails, and the optional close below covers every successfully-created conn.
       conn = await connectCodexBroker({ socketPath: broker.socketPath, env });
-      const thread = await startCodexThread({ conn, cwd, env, model, timeoutMs });
-      return { broker, conn, ...thread, brokerRestarted: attempt > 0 };
+      const thread = threadId
+        ? await resumeCodexThread({ conn, threadId, env, model, timeoutMs })
+        : await startCodexThread({ conn, cwd, env, model, timeoutMs });
+      return {
+        broker,
+        conn,
+        threadId: thread.threadId,
+        rolloutPath: thread.rolloutPath ?? null,
+        brokerRestarted: attempt > 0,
+        resumed: Boolean(threadId),
+        // A thread started here has had no turn, so it is idle by construction;
+        // a resumed one reports what it was doing when this bridge arrived.
+        status: threadId ? thread.status : 'idle',
+      };
     } catch (err) {
       try { conn?.close(); } catch { /* best effort */ }
       if (attempt > 0 || !codexBrokerErrorNeedsRespawn(err)) throw err;
@@ -1654,7 +1678,7 @@ export async function startCodexThreadWithBrokerRecovery({
       const health = await probeCodexBrokerHealth(broker.socketPath);
       const stopped = await restartCodexBrokerIfIdle({
         health,
-        reason: `thread/start failed before execution: ${err.message}`,
+        reason: `${method} failed before execution: ${err.message}`,
       });
       if (!stopped) {
         const deferred = new Error(
@@ -1666,7 +1690,7 @@ export async function startCodexThreadWithBrokerRecovery({
       }
     }
   }
-  throw firstError || new Error('Codex broker recovery exhausted without starting a thread');
+  throw firstError || new Error(`Codex broker recovery exhausted without a ${method}`);
 }
 
 // The turn a `Thread` payload ends on, or null. `turns` is carried by the
@@ -1715,6 +1739,9 @@ export async function resumeCodexThread({ conn, threadId, env = process.env, mod
   return {
     threadId: thread.id || threadId,
     status: String(thread.status?.type || thread.status || 'unknown'),
+    // The rollout the thread was loaded from — the same field `thread/start`
+    // answers with, and null when the server omits it.
+    rolloutPath: thread.path ?? null,
     // Free with the answer we already asked for: resume carries the thread's
     // turns, so the caller that just learned "this thread is active" also
     // learns WHICH turn is active, without a second round trip.

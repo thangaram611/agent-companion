@@ -1766,6 +1766,26 @@ function _cxLiveJob(jobs, jobId, sid, extra = {}) {
   return jobs.get(jobId);
 }
 
+// A `codex exec` stand-in that emits one D10 thread: enough for the exec worker
+// to bank a thread id and settle `completed`. It refuses anything but `exec`,
+// so a `resume` or an app-server argv is a loud failure rather than a green run.
+function _cxExecFakeBin(dir, threadId = 'th-exec-default') {
+  const fakeBin = join(dir, 'codex-fake.mjs');
+  writeFileSync(fakeBin, [
+    '#!/usr/bin/env node',
+    'if (process.argv[2] !== "exec") { console.error("not exec"); process.exit(2); }',
+    'process.stdin.on("data", () => {});',
+    'process.stdin.on("end", () => {',
+    `  console.log(JSON.stringify({ type: "thread.started", thread_id: ${JSON.stringify(threadId)} }));`,
+    '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "exec path ran" } }));',
+    '  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));',
+    '});',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  chmodSync(fakeBin, 0o700);
+  return fakeBin;
+}
+
 test('Codex dispatch stays on the exec adapter when CODEX_RUNTIME_ADAPTER is unset', async () => {
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
@@ -1773,19 +1793,7 @@ test('Codex dispatch stays on the exec adapter when CODEX_RUNTIME_ADAPTER is uns
   _resetForTest();
 
   const tmp = mkdtempSync(join(tmpdir(), 'codex-exec-default-'));
-  const fakeBin = join(tmp, 'codex-fake.mjs');
-  writeFileSync(fakeBin, [
-    '#!/usr/bin/env node',
-    'if (process.argv[2] !== "exec") { console.error("not exec"); process.exit(2); }',
-    'process.stdin.on("data", () => {});',
-    'process.stdin.on("end", () => {',
-    '  console.log(JSON.stringify({ type: "thread.started", thread_id: "th-exec-default" }));',
-    '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "exec path ran" } }));',
-    '  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));',
-    '});',
-    '',
-  ].join('\n'), { mode: 0o700 });
-  chmodSync(fakeBin, 0o700);
+  const fakeBin = _cxExecFakeBin(tmp);
 
   const oldS = process.env.CLAUDE_CODE_SESSION_ID;
   const oldBin = process.env.CODEX_BIN;
@@ -2079,6 +2087,254 @@ test('Codex app-server mode: end to end through the REAL broker and the shared f
   const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-e2e', max_wait_sec: 10 }));
   assert.equal(terminal.status, 'completed');
   assert.match(terminal.content, /through the real broker/);
+});
+
+test('Codex app-server mode: a follow-up send on a thread resumes the recorded codex thread instead of starting one, and the id is the thread sid', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-follow';
+  const THREAD = 'cx-follow-up';
+  const FRESH = 'cx-follow-up-fresh';
+  try {
+    await withCodexAppServer({}, async ({ live, sockets }) => {
+      const send = (thread, task) => dispatch({
+        action: 'send', target: 'codex', task, mode: 'ANALYZE', template: 'general',
+        cwd: TEST_CWD, host_session_id: 'sid-cx-follow', parallel: 'never', max_wait_sec: 5, thread,
+      });
+      const finish = async (sock, text) => {
+        sock.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text, phase: 'final_answer' } });
+        sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+      };
+
+      // Round one: no sid for this thread yet, so it opens fresh.
+      const first = parse(await send(THREAD, 'round one'));
+      assert.equal(first.ok, true);
+      assert.ok(await _cxUntil(() => jobs.get(first.job_id)?.sessionId === 'T1'), 'thread id captured');
+      const sock1 = live();
+      assert.ok(await _cxUntil(() => sock1.wire().includes('turn/start')), 'turn started');
+      assert.deepEqual(sock1.wire(), ['thread/start', 'broker/subscribe', 'turn/start']);
+      // Persisted the way Copilot's ACP session id is — while the job is still
+      // running, so a bridge that dies now still leaves the next send its thread.
+      assert.equal(state.readThreadSid(THREAD, null), 'T1');
+      assert.equal(jobs.get(first.job_id).terminalAt, undefined);
+      await finish(sock1, 'round one done');
+      const terminal1 = parse(await dispatch({ action: 'wait', job_id: first.job_id, host_session_id: 'sid-cx-follow', max_wait_sec: 5 }));
+      assert.equal(terminal1.status, 'completed');
+
+      // Round two on the SAME thread: thread/resume on the recorded id, never
+      // thread/start. The second resume is startCodexTurn's own status probe —
+      // `turn/start` on a busy thread does not reject, so the check is not
+      // optional, and it is the same shape the reply path puts on the wire.
+      const second = parse(await send(THREAD, 'round two'));
+      assert.equal(second.ok, true);
+      assert.notEqual(second.job_id, first.job_id);
+      assert.equal(second.thread, THREAD);
+      assert.ok(await _cxUntil(() => sockets.length >= 2 && live().wire().includes('turn/start')), 'second turn started');
+      const sock2 = live();
+      assert.deepEqual(sock2.wire(), ['thread/resume', 'broker/subscribe', 'thread/resume', 'turn/start']);
+      const resumeParams = sock2.paramsFor('thread/resume')[0];
+      assert.equal(resumeParams.threadId, 'T1');
+      // Resume re-derives its context from config when these are omitted —
+      // measured de-escalating the sandbox — so they ride the resume too.
+      assert.equal(resumeParams.approvalPolicy, 'never');
+      assert.ok(resumeParams.sandbox);
+      assert.equal(jobs.get(second.job_id).sessionId, 'T1');
+      assert.equal(jobs.get(second.job_id).codexAdapter, 'appserver');
+      assert.equal(state.readJob(second.job_id).companionSessionId, 'T1');
+      assert.equal(state.readThreadSid(THREAD, null), 'T1');
+      await finish(sock2, 'round two done');
+      const terminal2 = parse(await dispatch({ action: 'wait', job_id: second.job_id, host_session_id: 'sid-cx-follow', max_wait_sec: 5 }));
+      assert.equal(terminal2.status, 'completed');
+      assert.equal(terminal2.meta.session_id, 'T1');
+      assert.equal(terminal2.meta.thread, THREAD);
+
+      // A fresh thread name opts out: no sid, so thread/start as before.
+      const third = parse(await send(FRESH, 'fresh thread'));
+      assert.ok(await _cxUntil(() => sockets.length >= 3 && live().wire().includes('turn/start')), 'third turn started');
+      assert.deepEqual(live().wire(), ['thread/start', 'broker/subscribe', 'turn/start']);
+      await finish(live(), 'fresh done');
+      assert.equal(parse(await dispatch({ action: 'wait', job_id: third.job_id, host_session_id: 'sid-cx-follow', max_wait_sec: 5 })).status, 'completed');
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-follow') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    for (const thread of [THREAD, FRESH]) state.clearThread(thread, null);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('Codex app-server mode: a recorded thread id that no longer resumes fails the send explicitly and retires the sid — no fallback to thread/start', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-stale';
+  const THREAD = 'cx-stale-sid';
+  state.writeThreadSid(THREAD, null, 'T-gone');
+  try {
+    await withCodexAppServer({
+      handlers: {
+        // The rollout under $CODEX_HOME/sessions was removed: the broker is
+        // healthy and answers, but the thread cannot be loaded.
+        'thread/resume': () => ({ __error: { code: -32600, message: 'no rollout found for thread T-gone' } }),
+      },
+    }, async ({ live }) => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'codex', task: 'continue', mode: 'ANALYZE', template: 'general',
+        cwd: TEST_CWD, host_session_id: 'sid-cx-stale', parallel: 'never', max_wait_sec: 5, thread: THREAD,
+      }));
+      assert.equal(send.ok, true);
+      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-stale', max_wait_sec: 5 }));
+      assert.equal(terminal.status, 'failed');
+      assert.equal(terminal.meta.detail, 'codex_server_worker_error');
+      assert.match(terminal.content, /T-gone/);
+      assert.match(terminal.content, /cx-stale-sid/);
+      assert.match(terminal.content, /retired/);
+      assert.deepEqual(live().wire(), ['thread/resume'], 'no silent fallback to a fresh thread');
+      // The next send on this thread opens fresh instead of failing the same way forever.
+      assert.equal(state.readThreadSid(THREAD, null), null);
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-stale') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    state.clearThread(THREAD, null);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('Codex exec adapter ignores a recorded thread sid: single-shot, nothing to resume, nothing written', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const cx = await import('./codex-app-server-runtime.mjs');
+  const state = await import('../lib/state.mjs');
+  _resetForTest();
+  const tmp = mkdtempSync(join(tmpdir(), 'codex-exec-sid-'));
+  const fakeBin = _cxExecFakeBin(tmp, 'th-exec-second');
+  const THREAD = 'cx-exec-thread';
+  state.writeThreadSid(THREAD, null, 'T-prior-appserver');
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  const oldBin = process.env.CODEX_BIN;
+  const oldAdapter = process.env.CODEX_RUNTIME_ADAPTER;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-exec-sid';
+  process.env.CODEX_BIN = fakeBin;
+  delete process.env.CODEX_RUNTIME_ADAPTER;
+  cx._resetForTest();
+  cx._setForTest({
+    connect: async () => { throw new Error('exec dispatch must not open a broker connection'); },
+    spawnBroker: () => { throw new Error('exec dispatch must not spawn a broker'); },
+  });
+  try {
+    const send = parse(await dispatch({
+      action: 'send', target: 'codex', task: 'exec on a thread with a sid', mode: 'EXECUTE',
+      template: 'general', cwd: TEST_CWD, host_session_id: 'sid-cx-exec-sid', parallel: 'never', max_wait_sec: 5, thread: THREAD,
+    }));
+    const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-exec-sid', max_wait_sec: 5 }));
+    assert.equal(terminal.status, 'completed');
+    assert.equal(jobs.get(send.job_id).sessionId, 'th-exec-second', 'the exec run\'s own thread, not the recorded one');
+    assert.equal(jobs.get(send.job_id).codexAdapter, undefined);
+    assert.equal(state.readThreadSid(THREAD, null), 'T-prior-appserver', 'exec neither reads nor rewrites the sid');
+  } finally {
+    cx._resetForTest();
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-exec-sid') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    state.clearThread(THREAD, null);
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    if (oldBin === undefined) delete process.env.CODEX_BIN; else process.env.CODEX_BIN = oldBin;
+    if (oldAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER; else process.env.CODEX_RUNTIME_ADAPTER = oldAdapter;
+    rmSync(tmp, { recursive: true, force: true });
+    _resetForTest();
+  }
+});
+
+test('review template: the verdict is parsed into wait meta, the queue event, the footer and the digest; a missing line is null with a reason and completed is not remapped', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-review';
+  try {
+    await withQueue(async (queueFile) => {
+      await withCodexAppServer({}, async ({ live, sockets }) => {
+        const review = async (template, text, task = 'Review the claim that sum() adds') => {
+          const send = parse(await dispatch({
+            action: 'send', target: 'codex', task, mode: 'ANALYZE', template,
+            cwd: TEST_CWD, host_session_id: 'sid-cx-review', parallel: 'never', max_wait_sec: 5,
+          }));
+          assert.equal(send.ok, true, send.error);
+          const n = sockets.length;
+          assert.ok(await _cxUntil(() => sockets.length >= n && live().wire().includes('turn/start')), 'turn started');
+          const sock = live();
+          sock.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text, phase: 'final_answer' } });
+          sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+          const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-review', max_wait_sec: 5 }));
+          const event = readQueue(queueFile).find((row) => row.jobId === send.job_id && row.kind === 'terminal');
+          return { send, sock, terminal, event, job: jobs.get(send.job_id), digest: readFileSync(digestPath(send.job_id), 'utf8') };
+        };
+
+        // The prompt on the wire is the review contract, not the general one.
+        const disagree = await review('review', '1. sum.mjs returns a - b, not a + b.\n\nOverall: the claim is false.\n\nVERDICT: disagree — sum() subtracts');
+        const prompt = disagree.sock.paramsFor('turn/start')[0].input[0].text;
+        assert.match(prompt, /Review the claim that sum\(\) adds/);
+        assert.match(prompt, /VERDICT: disagree/);
+        assert.doesNotMatch(prompt, /RUBBER-DUCK/);
+        assert.equal(disagree.terminal.status, 'completed');
+        assert.equal(disagree.terminal.meta.verdict, 'disagree');
+        assert.equal(disagree.terminal.meta.verdict_reason, undefined);
+        assert.match(disagree.terminal.content, /_Verdict: disagree_/);
+        assert.equal(disagree.event.meta.status, 'completed');
+        assert.equal(disagree.event.meta.verdict, 'disagree');
+        assert.equal(disagree.event.meta.verdict_reason, undefined);
+        assert.match(disagree.event.content, /_Verdict: disagree_/);
+        assert.equal(disagree.job.verdict, 'disagree');
+        assert.equal(state.readJob(disagree.send.job_id).verdict, 'disagree');
+        assert.match(disagree.digest, /\*\*Verdict:\*\* disagree/);
+        assert.match(disagree.digest, /\*\*Template:\*\* review/);
+
+        const agree = await review('review', 'No findings.\n\nVERDICT: agree — sum() now adds');
+        assert.equal(agree.terminal.meta.verdict, 'agree');
+        assert.equal(agree.event.meta.verdict, 'agree');
+        assert.match(agree.digest, /\*\*Verdict:\*\* agree/);
+
+        // A verdict the parser cannot read is NOT guessed and NOT a failure:
+        // the turn completed; the review did not conclude.
+        const missing = await review('review', 'Looks fine to me, ship it.');
+        assert.equal(missing.terminal.status, 'completed');
+        assert.equal(missing.terminal.meta.verdict, null);
+        assert.equal(missing.terminal.meta.verdict_reason, 'missing');
+        assert.match(missing.terminal.content, /Verdict: none/);
+        assert.match(missing.terminal.content, /missing/);
+        assert.equal(missing.event.meta.status, 'completed');
+        assert.equal(missing.event.meta.verdict, null);
+        assert.equal(missing.event.meta.verdict_reason, 'missing');
+        assert.equal(missing.job.verdict, null);
+        assert.equal(missing.job.verdictReason, 'missing');
+        assert.match(missing.digest, /\*\*Verdict:\*\* none \(missing\)/);
+
+        const malformed = await review('review', 'VERDICT: approve');
+        assert.equal(malformed.terminal.status, 'completed');
+        assert.equal(malformed.terminal.meta.verdict, null);
+        assert.equal(malformed.terminal.meta.verdict_reason, 'malformed');
+
+        // Other templates carry no verdict fields at all — plan_review's own
+        // VERDICT: approve|revise line is not this parser's business.
+        const general = await review('general', 'All done.\nVERDICT: approve', 'do a thing');
+        assert.equal(general.terminal.status, 'completed');
+        assert.equal('verdict' in general.terminal.meta, false);
+        assert.equal('verdict' in general.event.meta, false);
+        assert.equal('verdict' in general.job, false);
+        assert.doesNotMatch(general.digest, /\*\*Verdict:/);
+      });
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-review') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
 });
 
 test('Codex app-server mode: cancel maps to turn/interrupt and settles cancelled although the stream says interrupted', async () => {

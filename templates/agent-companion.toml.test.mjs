@@ -14,9 +14,21 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+import { VALID_TEMPLATES } from '../bridge-server/validation.mjs';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOML_PATH = join(HERE, 'agent-companion.toml');
 const text = readFileSync(TOML_PATH, 'utf8');
+
+// Same pin as templates/agent-companion.md.test.mjs: the payload doc lists
+// exactly the templates the bridge accepts, in the bridge's own order.
+const TEMPLATE_ENUM = [...VALID_TEMPLATES].map((t) => JSON.stringify(t)).join(' | ');
+
+test('Codex template lists every prompt template the bridge accepts, and the review verdict the parent reads', () => {
+  assert.ok(VALID_TEMPLATES.has('review'), 'the bridge ships the review template');
+  assert.ok(text.includes(`"template":      ${TEMPLATE_ENUM},`), `payload doc lists ${TEMPLATE_ENUM}`);
+  assert.match(text, /meta\.verdict/);
+});
 
 const topLevel = text;
 

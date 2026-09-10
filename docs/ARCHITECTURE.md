@@ -130,7 +130,11 @@ transport buys nothing on its own, so the survival property comes from the broke
 being long-lived and detached from every bridge. Reply is `turn/steer` (real
 mid-flight injection, no restart), cancel is `turn/interrupt` (the thread stays
 live), restart resume is `thread/resume` (which rejoins a *running* thread), and
-salvage is `thread/read` over RPC. `approvalPolicy` is pinned to `never` and is
+salvage is `thread/read` over RPC. A follow-up send on a thread whose last job
+recorded a thread id also goes through `thread/resume` — every app-server send
+on an existing thread, not only `review` — and `thread/start` opens only a
+thread with no recorded id; a recorded id that fails to resume on a healthy
+broker fails the job explicitly and retires the sid rather than opening fresh. `approvalPolicy` is pinned to `never` and is
 not configurable — a client that accepts one approval escalates past the sandbox
 (measured) — so the sandbox is the hard boundary. Two reapers stop the broker
 when nothing is using it: its own inactivity timer and the bridge-side lease
@@ -239,6 +243,13 @@ Current MVP adapters are not yet formal classes. The stable contract is visible 
   `thread`, `mode`, `template`, `parallelStrategy`, `status`, and `startedAt`.
 - Terminal adapters call `retainTerminalJob` with `status`, `summary`, `error`, `detail`, `durationMs`, and `terminalAt`.
 - `summary.message` is the user-visible terminal message. `summary.toolCalls` is optional.
+- A completed `review` job also carries `verdict` (`agree` | `disagree` | `null`)
+  and `verdictReason` (`missing` | `malformed` | `conflicting` when the verdict
+  is null), read once at `retainTerminalJob` from the message's `VERDICT:` line
+  (`classifyReviewVerdict`, beside the template in `bridge-server/validation.mjs`)
+  and rendered from the job into wait `meta`, the queue event, the body footer
+  and the digest. A null verdict never remaps the status: the turn completed;
+  the review did not conclude.
 - Every `unreachable` result derives one `failure_class` for job status, wait
   metadata and completion notifications. A live Codex `turn/completed` with
   zero observed tool calls is remapped only when its assistant message reports
@@ -254,7 +265,10 @@ State lives under the host-routed companion home `~/.{claude,codex}/agent-compan
 
 - `default-model`: Copilot model config.
 - `default-target`: configured default target (written by onboarding).
-- `threads/`: logical companion thread names.
+- `threads/`: logical companion thread names, each holding the companion
+  session the last job on that thread recorded — a Copilot ACP session id, or a
+  codex app-server thread id — namespaced by profile. It is what a follow-up
+  send resumes. The exec adapter never reads or writes it.
 - `threads/by-host-session/`: Codex host-session to companion-thread mapping.
 - `jobs/`: persisted in-flight/recent jobs for restart recovery. OpenCode
   server jobs persist their `ses_` session id (under the target-neutral

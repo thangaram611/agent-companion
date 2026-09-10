@@ -180,6 +180,10 @@ export function writeOpenCodeDigest(job, result = null, { carriedForward = null 
   if (job?.status) lines.push(`**Status:** \`${job.status}\``);
   if (job?.mode) lines.push(`**Mode:** ${job.mode}`);
   if (job?.template) lines.push(`**Template:** ${job.template}`);
+  // Set only on a completed `review` job (see retainTerminalJob in server.mjs):
+  // the parsed verdict, or `none` with the parser's reason when the line was
+  // missing, malformed or conflicting.
+  if (job?.verdict !== undefined) lines.push(`**Verdict:** ${job.verdict ?? `none (${job.verdictReason || 'unknown'})`}`);
   if (job?.thread) lines.push(`**Thread:** \`${job.thread}\``);
   if (job?.promptId) lines.push(`**Prompt:** \`${job.promptId}\``);
   if (job?.cwd) lines.push(`**CWD:** \`${job.cwd}\``);

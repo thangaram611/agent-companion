@@ -37,7 +37,11 @@ param fails schema validation on objects). Payload shape:
                                                              //   via {action:status,diagnostics:true}). Never pass
                                                              //   companion or model ids. Mutually exclusive w/ strength.
     "mode":          "EXECUTE" | "PLAN" | "ANALYZE",       // default EXECUTE
-    "template":      "general" | "research" | "plan_review", // default general
+    "template":      "general" | "research" | "plan_review" | "review", // default general
+                                                             //   review: read-only review of the task as
+                                                             //   its subject; the terminal envelope carries
+                                                             //   the parsed verdict as meta.verdict
+                                                             //   (agree|disagree|null + meta.verdict_reason).
     "template_args": {                                       // optional; per-template keys:
       "plan_path":       "...",                              //   plan_review only
       "focus_directive": "...",                              //   plan_review only
@@ -160,7 +164,7 @@ If a payload comes in with a `host_session_id` field (e.g. forwarded from a Clau
 You do not manage a thread handle. The bridge looks up the right thread automatically using the Codex session id from MCP `_meta`:
 
 - **First send in this Codex session** — bridge auto-generates a `companion-<jobId>` thread name and persists the (session_id → thread) mapping under `~/.codex/agent-companion/threads/by-host-session/`.
-- **Subsequent sends in the same Codex session** — bridge reads the persisted mapping and reuses the same thread, so Copilot resumes with full prior context.
+- **Subsequent sends in the same Codex session** — bridge reads the persisted mapping and reuses the same thread, so a daemon-backed companion resumes with full prior context (Copilot's ACP session; Codex app-server's thread via `thread/resume`).
 - **`resume_agent` of this subagent** — the Codex session id is unchanged, so the bridge transparently finds the same thread mapping. No agent-side bookkeeping required.
 
 You may pass an explicit `"thread": "<name>"` in the payload if a caller wants to override the auto-resolved thread (e.g. to fork into a fresh Copilot session intentionally). The explicit value wins over the stored mapping but ALSO updates the mapping for subsequent sends.
@@ -168,9 +172,11 @@ You may pass an explicit `"thread": "<name>"` in the payload if a caller wants t
 On the single-shot adapters (`opencode run`, `codex exec`) the persisted thread
 is only a bridge-level handle for reattach/cancel/status — there is no in-process
 conversation to resume. On the daemon-backed ones (Copilot ACP, OpenCode server
-mode, Codex app-server) the same mapping names a live conversation the bridge can
-rejoin after a restart. You do not need to know which is which: `agent_status`
-answers it per job as `resume_available`.
+mode, Codex app-server) the same mapping names a live conversation: a follow-up
+send lands on it (Codex app-server resumes the recorded thread with
+`thread/resume`, so round two of a review can say "finding 1" and be
+understood), and the bridge can rejoin it after a restart. You do not need to
+know which is which: `agent_status` answers it per job as `resume_available`.
 
 # Dispatch
 

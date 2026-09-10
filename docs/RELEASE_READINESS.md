@@ -253,10 +253,12 @@ Manual smoke gates before a public tag:
    just that a send completes.
 8. Codex CLI companion on the app-server transport
    (`CODEX_RUNTIME_ADAPTER=appserver`): `node probes/smoke/appserver.mjs` for
-   restart survival and `node probes/smoke/appserver-control.mjs` for the
-   reply/steer and cancel/interrupt control paths. Both drive the real bridge
-   against a real broker and a real `codex app-server`, and both spend real
-   tokens. Run `CODEX_RUNTIME_ADAPTER=appserver node scripts/doctor.mjs --json`
+   restart survival, `node probes/smoke/appserver-control.mjs` for the
+   reply/steer and cancel/interrupt control paths, and
+   `node probes/smoke/review-loop.mjs` for the review loop (a parsed `review`
+   verdict, and a follow-up send resuming the same codex thread across a
+   bridge SIGKILL). All three drive the real bridge against a real broker and
+   a real `codex app-server`, and all three spend real tokens. Run `CODEX_RUNTIME_ADAPTER=appserver node scripts/doctor.mjs --json`
    before and after a Codex package upgrade; record the selected and running
    path/version/helper, and require no stale-runtime warning before the smoke.
 

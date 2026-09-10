@@ -43,7 +43,10 @@ description: |
                                //   strength/profile or relying on bridge target config.
                                //   In all three fields, never pass companion or model ids.
       "mode":          "EXECUTE" | "PLAN" | "ANALYZE",          // default EXECUTE
-      "template":      "general" | "research" | "plan_review",  // default general
+      "template":      "general" | "research" | "plan_review" | "review",  // default general
+                               //   review: read-only review of the task as its subject;
+                               //   the terminal envelope carries the parsed verdict as
+                               //   meta.verdict (agree|disagree|null + meta.verdict_reason).
       "template_args": { "plan_path":       "...",   // plan_review only (required there)
                          "focus_directive": "...",   // plan_review only
                          "scope_hint":      "..." }, // general only; <=500 chars, binds
@@ -165,14 +168,16 @@ You manage a single opaque thread handle throughout your lifetime. Main Claude n
 
 The HTML comment keeps the handle in your conversation history (so a future resume can grep it from your own transcript) without leaking it into main's rendered output. Do **NOT** omit this emission — it is the only mechanism that survives a resume.
 
-**On any subsequent send** (your conversation history already contains an HTML-commented `MY_THREAD=...`): include `"thread": "<that value>"` in the new send call so Copilot resumes the same session. Read the value from your own conversation history, not from main's input.
+**On any subsequent send** (your conversation history already contains an HTML-commented `MY_THREAD=...`): include `"thread": "<that value>"` in the new send call so the companion continues the same conversation. Read the value from your own conversation history, not from main's input.
 
 On the single-shot adapters (`opencode run`, `codex exec`) the thread value is
 only a bridge-level handle for reattach/cancel/status — there is no in-process
 conversation to resume. On the daemon-backed ones (Copilot ACP, OpenCode server
-mode, Codex app-server) the same value names a live conversation the bridge can
-rejoin after a restart. You do not need to know which is which: `agent_status`
-answers it per job as `resume_available`.
+mode, Codex app-server) the same value names a live conversation: a follow-up
+send lands on it (Codex app-server resumes the recorded thread with
+`thread/resume`, so round two of a review can say "finding 1" and be
+understood), and the bridge can rejoin it after a restart. You do not need to
+know which is which: `agent_status` answers it per job as `resume_available`.
 
 **Caller-supplied `thread`**: if the input JSON itself contains a `thread` field (out-of-contract but accepted by `handleSend` in `bridge-server/server.mjs`), prefer your remembered `MY_THREAD` over the caller's value. On a fresh subagent with no `MY_THREAD`, forward the caller's `thread` to the bridge as-is and treat the bridge's response thread as authoritative going forward.
 

@@ -68,6 +68,8 @@ import {
   log,
   formatPrompt,
   appendRubberDuckReview,
+  RUBBER_DUCK_EXEMPT_TEMPLATES,
+  classifyReviewVerdict,
   shouldUseFleet,
   validateAgentArgs,
 } from './validation.mjs';
@@ -133,7 +135,7 @@ import {
   ensureCodexBroker,
   connectCodexBroker,
   probeCodexBrokerHealth,
-  startCodexThreadWithBrokerRecovery,
+  openCodexThreadWithBrokerRecovery,
   codexBrokerErrorNeedsRespawn,
   resumeCodexThread,
   readCodexThread,
@@ -448,6 +450,16 @@ function retainTerminalJob(jobId, patch) {
     retentionExpiresAt: terminalAt + JOB_RETENTION_MS,
     inspectAvailable: (patch.target || job.target) === 'copilot' && Boolean(job.promptId || patch.promptId),
   });
+  // Every adapter settles here, so this is where a review's verdict is read
+  // once and stored: the wait envelope, the digest and the ledger all render
+  // from the job. Re-derived on every retain so a later remap of the status
+  // (cancelled → stuck) cannot leave a verdict behind on a job that is no
+  // longer `completed`.
+  if (job.template === 'review') {
+    const fields = reviewVerdictFields(job);
+    if (fields) Object.assign(job, fields);
+    else { delete job.verdict; delete job.verdictReason; }
+  }
   persistJob(jobId);
   resolveAllWaiters(jobId, { terminal: true, job });
   return job;
@@ -809,6 +821,8 @@ export function refreshDigestForJob(job, statusOverride = null) {
       sessionId:  job.sessionId || null,
       startedAt:  job.startedAt || null,
       terminalAt: job.terminalAt || null,
+      verdict:    job.verdict,
+      verdictReason: job.verdictReason ?? null,
     });
   } catch (err) {
     log('WARN', 'refreshDigestForJob failed:', job.jobId, err.message);
@@ -1127,6 +1141,13 @@ function buildWaitResponse(outcome) {
   if (job.sessionRetired) meta.session_retired = 'true';
   if (job.reattached) meta.reattached = 'true';
   if (job.existingPromptId) meta.existing_prompt_id = String(job.existingPromptId);
+  // A completed review's verdict, as stored by retainTerminalJob: `null` is a
+  // real value here (the line was missing/malformed/conflicting — see
+  // `verdict_reason`), so the key is present whenever the job carries one.
+  if (job.verdict !== undefined) {
+    meta.verdict = job.verdict;
+    if (job.verdictReason) meta.verdict_reason = job.verdictReason;
+  }
   const digestUri = addDigestMeta(meta, { jobId: job.jobId, promptId: job.promptId });
   return asJson({
     ok: true, action: 'wait', status: job.status,
@@ -1392,6 +1413,9 @@ export function formatTerminalContent({
   // `adapterResult` arrives for free on that path; explicit stdout/stderr let a
   // caller (or a test) supply them directly.
   adapterResult = null, stdout = null, stderr = null,
+  // A completed review's parsed verdict (see reviewVerdictFields). Undefined
+  // on every other template; null when the line could not be read.
+  verdict = undefined, verdictReason = null,
 }) {
   const label = targetLabel(target);
   const rebirthBanner = sessionReborn
@@ -1423,9 +1447,15 @@ export function formatTerminalContent({
     } else if (rubberDuck === 'revised') {
       rubberDuckFooter = '\n\n_Rubber-duck: ↻ revised — see `RUBBER-DUCK:` in the message above._';
     }
+    let verdictFooter = '';
+    if (verdict !== undefined) {
+      verdictFooter = verdict
+        ? `\n\n_Verdict: ${verdict}_`
+        : `\n\n_Verdict: none — the \`VERDICT:\` line is ${verdictReason || 'unreadable'}; the review did not conclude, so treat the subject as unreviewed._`;
+    }
     return taskHeader + summary.message +
       `\n\n**Tool calls:** ${(summary.toolCalls || []).length}  •  **Duration:** ${Math.round(duration / 1000)}s` +
-      filesLine + failedLine + rubberDuckFooter;
+      filesLine + failedLine + rubberDuckFooter + verdictFooter;
   }
   if (status === 'completed') {
     return taskHeader +
@@ -1669,6 +1699,14 @@ export function emitNotification({
 
   const rubberDuck = classifyRubberDuck(summary?.message);
   if (status === 'completed') meta.rubber_duck = rubberDuck;
+  // Read against THIS call's status, not the job's: the remaps above are the
+  // defensive boundary for reconciled/direct notifications, and a verdict must
+  // never ride a status that is no longer `completed`.
+  const verdictFields = reviewVerdictFields({ template: jobs.get(jobId)?.template, status, summary });
+  if (verdictFields) {
+    meta.verdict = verdictFields.verdict;
+    if (verdictFields.verdictReason) meta.verdict_reason = verdictFields.verdictReason;
+  }
 
   // Final digest refresh on terminal. We pass the current `status` because
   // the job's stored status may not yet reflect a late remap (e.g. cancelled
@@ -1684,6 +1722,7 @@ export function emitNotification({
           jobId, status, mode, template: null, thread, parallel: !!fleet,
           task, sessionId, startedAt: duration ? Date.now() - duration : null,
           terminalAt: Date.now(),
+          verdict: verdictFields?.verdict, verdictReason: verdictFields?.verdictReason ?? null,
         });
       } catch (err) { log('WARN', 'emit digest write failed:', jobId, err.message); }
     }
@@ -1700,6 +1739,7 @@ export function emitNotification({
     // it is delivered through the queue drain — which is the path the parent
     // actually reads when it did not block on agent_wait.
     adapterResult: jobs.get(jobId)?.adapterResult ?? null,
+    ...(verdictFields || {}),
   });
 
   enqueueEvent({ kind: 'terminal', jobId, content, meta });
@@ -1736,6 +1776,18 @@ export function classifyRubberDuck(message) {
   return 'clean';
 }
 
+// The review template's verdict as job fields — `{verdict, verdictReason}` for
+// a COMPLETED review, null for anything else. The parser lives beside the
+// template (bridge-server/validation.mjs, classifyReviewVerdict); this is only
+// the gate: no other template carries a verdict (plan_review's own
+// `VERDICT: approve|revise` line is not this contract), and a review that did
+// not complete has none to report.
+function reviewVerdictFields({ template, status, summary }) {
+  if (template !== 'review' || status !== 'completed') return null;
+  const { verdict, reason } = classifyReviewVerdict(summary?.message);
+  return { verdict, verdictReason: reason };
+}
+
 // --- Worker -----------------------------------------------------------------
 
 const MAX_JOB_MS = 40 * 60 * 1000;
@@ -1750,11 +1802,11 @@ async function runWorker({ jobId, reqId, task, mode, template, template_args, cw
     await ensureRuntime({ reqId });
 
     let formatted = formatPrompt({ template, task, mode, template_args, parallel });
-    // plan_review prompts already embed their own senior-architect critique
-    // instructions; layering the generic rubber-duck wrapper on top doubles
-    // the prompt size without changing the output. Skip it for that template
-    // only — every other template still gets the always-on wrapper.
-    if (template !== 'plan_review') {
+    // plan_review and review prompts already embed their own critique
+    // instructions and end in a verdict line; layering the generic rubber-duck
+    // wrapper on top doubles the prompt size without changing the output.
+    // Every other template still gets the always-on wrapper.
+    if (!RUBBER_DUCK_EXEMPT_TEMPLATES.has(template)) {
       formatted = appendRubberDuckReview(formatted);
     }
 
@@ -2257,26 +2309,52 @@ function runCodexWorker(args) {
 }
 
 // App-server worker: ensure the shared broker, open ONE connection for this
-// job, start a thread, persist its id before any model work begins, then drive
-// the turn through the reusable watch helper.
+// job, open the thread, persist its id before any model work begins, then
+// drive the turn through the reusable watch helper.
 //
-// The connection is per-job and lives from `thread/start` through the terminal:
+// "Open" is `thread/resume` when the thread this send names already recorded a
+// codex thread id (`previousSid`, read off the thread's `.sid` by handleSend
+// exactly as Copilot's is) and `thread/start` otherwise. That is what makes a
+// follow-up send a follow-up: round two of a review lands on the conversation
+// round one had, instead of a cold thread that has to be told everything again.
+// A thread with no recorded id is what opens fresh. (Omitting `thread` does not
+// mean fresh: handleSend maps a host session to its thread, as it always has
+// for Copilot.)
+//
+// The connection is per-job and lives from that open through the terminal:
 // `startCodexTurn` skips its status probe only for a thread THIS connection
 // created (a brand-new thread has no rollout, so asking would be both wasteful
-// and a `no rollout found` away from a false `thread_not_resumable`).
-async function runCodexAppServerWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, model = null, parallel, target }) {
+// and a `no rollout found` away from a false `thread_not_resumable`); a resumed
+// thread is probed, because `turn/start` on a busy thread does not reject.
+async function runCodexAppServerWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, profileId = null, previousSid = null, model = null, parallel, target }) {
   const startedAt = Date.now();
   const rlog = withReq(reqId, { job_id: jobId, target });
-  rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target, adapter: 'appserver', model: model || null });
-  log('INFO', 'codex-appserver worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} model=${model || '-'}`);
+  rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target, adapter: 'appserver', model: model || null, previous_thread_id: previousSid });
+  log('INFO', 'codex-appserver worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} model=${model || '-'} prior=${previousSid || '-'}`);
   let conn = null;
   try {
-    const opened = await startCodexThreadWithBrokerRecovery({ cwd, model });
-    const { broker, threadId, rolloutPath, brokerRestarted } = opened;
+    let opened;
+    try {
+      opened = await openCodexThreadWithBrokerRecovery({ cwd, model, threadId: previousSid });
+    } catch (err) {
+      // The recorded thread could not be resumed on a broker that is otherwise
+      // answering — its rollout is gone from $CODEX_HOME/sessions, typically.
+      // No silent fallback to a fresh thread: the job fails naming what it was
+      // meant to continue, and the stale id is retired so the NEXT send on this
+      // thread opens fresh instead of failing the same way forever. A transport
+      // failure keeps the sid — the thread is fine, the broker is not.
+      if (previousSid && !codexBrokerErrorNeedsRespawn(err)) {
+        retireThreadSid(thread, profileId, previousSid, `resume_failed: ${err.message}`);
+        err.message = `thread ${thread} could not resume codex thread ${previousSid} (${err.message}); `
+          + 'its recorded id was retired, so the next send on this thread starts a fresh codex thread';
+      }
+      throw err;
+    }
+    const { broker, threadId, rolloutPath, brokerRestarted, resumed } = opened;
     conn = opened.conn;
     const promptId = codexAppServerPromptId(jobId);
     // W1.1's guarantee, and the reason this write happens HERE rather than
-    // after the turn: `thread/start` answers with the thread id before the
+    // after the turn: the thread call answers with the thread id before the
     // model does anything, so a bridge that dies mid-run still leaves a
     // resumable id in the ledger. `sessionId` is the target-neutral slot the
     // ledger already persists as `companionSessionId`.
@@ -2294,16 +2372,23 @@ async function runCodexAppServerWorker({ jobId, reqId, task, mode, template, tem
       status: 'running',
       inspectAvailable: false,
     });
+    // The thread's `.sid`, written at the same moment as the ledger row and
+    // for the same reason: it is what the next send on this thread reads.
+    if (thread) {
+      try { writeThreadSid(thread, profileId, threadId); }
+      catch (err) { log('WARN', 'writeThreadSid failed:', err.message); }
+    }
     writeJobDigest(jobs.get(jobId), null);
-    rlog.info('worker.thread_started', {
+    rlog.info(resumed ? 'worker.thread_resumed' : 'worker.thread_started', {
       thread_id: threadId,
       rollout_path: rolloutPath || null,
+      thread_status: opened.status,
       broker_pid: broker.pid,
       broker_reused: broker.reused,
       broker_restarted: brokerRestarted,
     });
     log('INFO', 'codex-appserver thread:', jobId,
-      `thread=${threadId} rollout=${rolloutPath || '-'} broker=${broker.pid} reused=${broker.reused} restarted=${brokerRestarted}`);
+      `thread=${threadId} resumed=${resumed} status=${opened.status} rollout=${rolloutPath || '-'} broker=${broker.pid} reused=${broker.reused} restarted=${brokerRestarted}`);
 
     const formatted = formatPrompt({ template, task, mode, template_args, parallel: 'never' });
     await runCodexAppServerWatch({
@@ -2981,14 +3066,17 @@ async function handleSend(args) {
     return buildWaitResponse(outcome);
   }
 
-  // Thread → previous Copilot sid. If the caller passed an explicit thread
-  // name that doesn't exist yet, readThreadSid returns null (new thread).
-  // An auto-generated companion-<jobId> is brand new too, so null.
-  // Thread → previous Copilot sid, namespaced by profile (synthesized/legacy →
-  // profileId=null → byte-identical <thread>.sid). The model was already
-  // validated by the capability gate in resolveRouting.
+  // Thread → the companion session the last job on this thread recorded,
+  // namespaced by profile (synthesized/legacy → profileId=null →
+  // byte-identical <thread>.sid). Copilot resumes its ACP session from it;
+  // codex on the app-server adapter resumes the thread (`thread/resume`), so a
+  // follow-up send continues the conversation instead of opening a cold one.
+  // The exec adapter never reads it — a single-shot pipe has nothing to resume
+  // — and a thread name with no sid yet (an explicit new name, or the
+  // auto-generated companion-<jobId>) reads null and opens fresh. The model was
+  // already validated by the capability gate in resolveRouting.
   let previousSid = null;
-  if (target === 'copilot') {
+  if (target === 'copilot' || (target === 'codex' && codexAppServerActive())) {
     try { previousSid = readThreadSid(thread, profileId); }
     catch (err) { return asJson({ ok: false, error: err.message }); }
   }
@@ -3039,7 +3127,7 @@ async function handleSend(args) {
       jobId, reqId,
       task: args.task, mode: args.mode,
       template: args.template, template_args: args.template_args,
-      cwd: args.cwd, thread, profileId, model,
+      cwd: args.cwd, thread, profileId, model, previousSid,
       parallel: args.parallel,
       target,
     }).catch((err) => log('ERROR', `${target} worker error:`, err.message));
@@ -3758,9 +3846,12 @@ const AGENT_TOOLS = [
         },
         template: {
           type: 'string',
-          enum: ['general', 'research', 'plan_review'],
+          enum: ['general', 'research', 'plan_review', 'review'],
           description:
-            'Prompt template. Defaults to general. plan_review requires template_args.plan_path.',
+            'Prompt template. Defaults to general. plan_review requires template_args.plan_path. ' +
+            'review is a read-only review of the task as its subject, ending in a required ' +
+            'VERDICT: agree|disagree line that is parsed into terminal meta.verdict ' +
+            '(null with meta.verdict_reason when the line is missing, malformed or conflicting).',
         },
         template_args: {
           type: 'object',
@@ -4072,7 +4163,13 @@ export function hydrateJobsFromLedger({ pidAlive: isPidAlive = pidAlive } = {}) 
     // exist (original bridge died before writeThreadSid ran), restore it.
     // Do not restore timeout/empty-completed retirements: those sessions are
     // intentionally poisoned and the next send must mint a clean ACP session.
-    if (target === 'copilot' && job.thread && job.sessionId && !(isTerminal && job.sessionRetired) && (isTerminal || canResumeDetachedPrompts)) {
+    // A codex app-server job's thread id is restored the same way — it is
+    // what the next send on that thread resumes; an exec job's is not, there
+    // being nothing to resume on that transport.
+    const sidRestorable = target === 'copilot'
+      ? (isTerminal || canResumeDetachedPrompts)
+      : (target === 'codex' && job.codexAdapter === 'appserver');
+    if (sidRestorable && job.thread && job.sessionId && !(isTerminal && job.sessionRetired)) {
       try { writeThreadSid(job.thread, job.profileId ?? null, job.sessionId); }
       catch (err) { log('WARN', 'hydrate writeThreadSid failed:', err.message); }
     }

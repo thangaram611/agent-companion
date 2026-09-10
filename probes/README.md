@@ -12,7 +12,7 @@ They spawn real `codex` runs and therefore cost tokens. None of them touch the r
 
 ## `smoke/` — end-to-end against the real bridge
 
-All four drive `bridge-server/server.mjs` over MCP stdio as a real client would, and dispatch
+All five drive `bridge-server/server.mjs` over MCP stdio as a real client would, and dispatch
 real Codex jobs. The repo root is derived from the script location; override with
 `AGENT_COMPANION_REPO`.
 
@@ -21,6 +21,7 @@ real Codex jobs. The repo root is derived from the script location; override wit
 | `smoke.mjs` | 12 checks: the five `agent_*` tools are the whole surface; an unconfigured `strength` hard-fails with `STRENGTH_UNCONFIGURED` and no silent fallback; an empty `candidates` list is withheld rather than shipped; a real Codex job completes end to end and actually does the work; **W1.1** — the thread id is persisted to the ledger *while the job is still running*; the digest carries content; the rollout is deterministically correlatable from the captured thread id. |
 | `orphan.mjs` | 8 checks reproducing the original incident on the **exec** transport: bridge A starts a job, is SIGKILLed mid-run, bridge B hydrates on the same host session. Asserts hydrate does **not** clobber the digest, the detail is `target_child_orphaned_by_bridge_restart` rather than `target_adapter_non_resumable_after_restart`, the message never mentions `CODEX_BIN`, it names the salvage pointers, and the retirement note is a sibling file. |
 | `appserver.mjs` | 17 checks running that same incident on the **app-server** transport (`CODEX_RUNTIME_ADAPTER=appserver`), where it should not be an incident at all. Bridge A dispatches a job whose turn is three sequential shell sleeps, banks the thread id (**W1.1**) and streams sub-turn text into the digest (**F7** — the exec stream emits no deltas; the task *asks* for a one-line opening message, because a preamble is the model's choice and a terse turn would fail F7 and W1.4′ on chattiness rather than on transport), then is SIGKILLed mid-turn. Asserts the broker and its `codex app-server` outlive it, the thread stays in `thread/loaded/list`, and a shell descendant of the app-server is **still running the turn with zero bridges alive**. Bridge B then hydrates on the same host session, resumes the *same* thread, and the job reaches `completed` with the expected answer ~70 s after the kill — zero work lost, no re-prompting. Also asserts the verdict is **not** the exec transport's `target_child_orphaned_by_bridge_restart`, that B's hydrate did not clobber A's streamed digest (**W1.4′** — A's text survives under "Carried forward from the previous bridge"), and that `reply_available`/`resume_available` are truthful both mid-turn and at terminal. The last two of the 17 are not part of that incident: they read the turn's sandbox back off the rollout — that `turn/start`'s `sandboxPolicy` was **applied** (`turn_context.sandbox_policy` = workspace-write with network access, not merely accepted by the server), and that applying it did not pin the model or the effort, which stay inherited from `~/.codex/config.toml`. |
+| `review-loop.mjs` | 14 checks that the **review loop** is first-class on the same transport (docs/DIRECTION_ASSESSMENT.md §5): a `template: "review"` send over a three-line repository with a planted defect settles `completed` with a **parsed** `meta.verdict = "disagree"` and the defect named in the body; the codex thread id is persisted as the thread's `.sid` and the thread was opened with `thread/start` (`resumed=false` on the bridge's own log line). The defect is then fixed, the bridge is **SIGKILLed**, and a fresh bridge sends "Finding 1 has been addressed in the working tree; re-verdict." on the same `thread` — asserting the new job's `companionSessionId` equals round one's, the fresh bridge logged `resumed=true`, the body refers to round one's subject although the task never restated it, `thread/read` shows both rounds as turns of one codex thread, and `agent_status` stays truthful at terminal. Round two's verdict is asserted parsed (`agree` or `disagree`), not for its value — the model's judgment is not what is under test. |
 | `appserver-control.mjs` | 18 checks on the **control** surface of the same transport, which `appserver.mjs` never touched: `agent_reply` steering a RUNNING turn (`turn/steer` with the `expectedTurnId` the protocol requires) and the turn obeying the injected instruction instead of the one it started with, and `agent_cancel` interrupting a running turn (`turn/interrupt` with `turnId`) with the job settling `cancelled` and **the thread surviving** — still in `thread/loaded/list`, `thread/resume` → `idle` with its last turn recorded `interrupted`, and `thread/read` still returning the history. Also asserts the steer confirmation is an *observation*: `steered` (the server accepted it) and `steer_confirmed` (the injected `userMessage` was seen coming back) are separate fields. And it exercises **both** turn-id sources against the real server: the banked one from `turn/started`, and — with the id deliberately withheld, mid-turn — the restarted-bridge fallback that reads the running turn off `thread/read {includeTurns:true}`, whose response shape nothing but the fakes asserted before. |
 
 ```sh
@@ -28,6 +29,7 @@ node probes/smoke/smoke.mjs             # expect 12/12
 node probes/smoke/orphan.mjs            # expect 8/8
 node probes/smoke/appserver.mjs         # expect 17/17  (~90 s; spawns the shared broker)
 node probes/smoke/appserver-control.mjs # expect 18/18  (~35 s; spawns the shared broker)
+node probes/smoke/review-loop.mjs       # expect 14/14  (two short review turns; spawns the shared broker)
 ```
 
 After a Codex/Homebrew upgrade, first capture the read-only installation and
@@ -44,7 +46,7 @@ the app-server smokes are treated as evidence for the new installation.
 `orphan.mjs` deliberately leaves one orphaned `codex exec` child alive for a few seconds —
 that is the condition under test. It dies at its next stdout write.
 
-Both app-server probes reap the broker they used with **SIGTERM** on the way out (never SIGKILL, which
+All three app-server probes reap the broker they used with **SIGTERM** on the way out (never SIGKILL, which
 skips the unlink handler and leaves the stale socket every later start has to probe around).
 It skips the reap if another client is connected or any loaded thread is active or cannot be
 proved idle. A completed/idle thread may remain loaded and no longer pins the broker. The client
@@ -64,7 +66,11 @@ instruction would satisfy a substring test.
 protocol, and subscribing *drains* the broker's pre-subscription ring, which would swallow the
 events bridge B is about to hydrate on. `appserver-control.mjs` does resume, and may: by the
 time it asks, the job it is asking about is already terminal and nothing is watching that
-thread. It asserts the interrupt's turn id against the bridge's own
+thread. Its `thread/read` history check is timing-sensitive: the cancel lands ~2 s after
+`turn/start`, and codex writes the turn's user message to the rollout after `task_started`, so
+an interrupt that wins that race leaves a turn with no input text to find (measured 2026-09-10
+on 0.154.0: the rollout held `session_meta`, `task_started`, the developer message and
+`turn_aborted`, nothing else). Re-run before reading a lone failure there as a regression. It asserts the interrupt's turn id against the bridge's own
 `agent:cancel codex-appserver interrupt` log line for the same reason `appserver.mjs` reads B's
 resume line — the ledger's `turnId` only proves the *worker* banked one, not that the interrupt
 sent it. (`agent_cancel` waits up to 5 s for the job to settle and then answers with the

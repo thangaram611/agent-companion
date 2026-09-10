@@ -26,6 +26,9 @@ import {
   DEFAULT_MODE,
   formatPrompt,
   appendRubberDuckReview,
+  classifyReviewVerdict,
+  RUBBER_DUCK_EXEMPT_TEMPLATES,
+  shouldUseFleet,
 } from './validation.mjs';
 
 const TEST_CWD = tmpdir();
@@ -99,7 +102,7 @@ test('action schemas reject malformed inputs and normalize valid cancel/wait/sta
 });
 
 test('send validation covers defaults, modes, unknown fields, thread names, cwd, and base template_args shape', () => {
-  assert.deepEqual([...VALID_TEMPLATES].sort(), ['general', 'plan_review', 'research']);
+  assert.deepEqual([...VALID_TEMPLATES].sort(), ['general', 'plan_review', 'research', 'review']);
 
   const basic = validateAgentArgs(sendArgs());
   assert.equal(basic.mode, DEFAULT_MODE);
@@ -360,4 +363,67 @@ test('host_session_id normalizes across actions and rejects invalid values', () 
   // claude_session_id was collapsed into host_session_id — it is now an unknown key.
   assert.throws(() => validateAgentArgs({ action: 'status', claude_session_id: 'x' }),
     /unknown field "claude_session_id"/);
+});
+
+test('review template: read-only reviewer prompt with a required verdict line, task-driven, no template_args, no wrapper, no auto-fleet', () => {
+  assert.ok(VALID_TEMPLATES.has('review'));
+  const accepted = validateAgentArgs(sendArgs({ task: 'Check that sum() adds', template: 'review' }));
+  assert.equal(accepted.template, 'review');
+  assert.equal(accepted.task, 'Check that sum() adds');
+  // Task-driven like general/research: the subject under review IS the task.
+  assert.throws(() => validateAgentArgs({ action: 'send', template: 'review', cwd: TEST_CWD }), /task/);
+  assert.throws(() => validateAgentArgs(sendArgs({ task: 'X', template: 'review', template_args: { scope_hint: 'x' } })),
+    /unknown template_args key "scope_hint" for template="review"/);
+  assert.throws(() => validateAgentArgs(sendArgs({ task: 'X', template: 'review', template_args: { plan_path: '/tmp/x.md' } })),
+    /unknown template_args key "plan_path" for template="review"/);
+
+  const prompt = formatPrompt({ template: 'review', task: 'Check that sum() adds', mode: 'EXECUTE', parallel: 'never' });
+  assert.match(prompt, /Check that sum\(\) adds/);
+  // Read-only by construction, whatever mode the caller passed.
+  assert.match(prompt, /DO NOT modify any files/);
+  // The contract the parser below reads — both spellings, as the LAST line.
+  assert.match(prompt, /VERDICT: agree/);
+  assert.match(prompt, /VERDICT: disagree/);
+  assert.match(prompt, /LAST line/);
+  // The follow-up hook: round two refers back to round one by finding number.
+  assert.match(prompt, /earlier findings by number/);
+  // Its critique is its own — the rubber-duck wrapper is not layered on top.
+  assert.doesNotMatch(prompt, /RUBBER-DUCK/);
+  assert.ok(RUBBER_DUCK_EXEMPT_TEMPLATES.has('review'));
+  assert.ok(RUBBER_DUCK_EXEMPT_TEMPLATES.has('plan_review'));
+  assert.ok(!RUBBER_DUCK_EXEMPT_TEMPLATES.has('general'));
+  // One reviewer, one verdict line: `auto` never fans a review out, even when
+  // the task reads broad; an explicit `always` still can.
+  assert.equal(shouldUseFleet({ parallel: 'auto', template: 'review', task: 'review and audit the auth, billing and API routes across multiple files' }), false);
+  assert.doesNotMatch(formatPrompt({ template: 'review', task: 'review everything across multiple files', mode: 'ANALYZE', parallel: 'auto' }), /^\/fleet/);
+  assert.match(formatPrompt({ template: 'review', task: 'X', mode: 'ANALYZE', parallel: 'always' }), /^\/fleet /);
+});
+
+test('the review verdict parser never guesses: missing, malformed and conflicting lines are null with a reason', () => {
+  const cases = [
+    ['1. sum.mjs returns a - b.\n\nVERDICT: disagree — sum() subtracts', { verdict: 'disagree', reason: null }],
+    ['No findings.\n\nVERDICT: agree — the claim holds', { verdict: 'agree', reason: null }],
+    ['**VERDICT:** agree', { verdict: 'agree', reason: null }],
+    ['VERDICT: "agree"', { verdict: 'agree', reason: null }],
+    ['- VERDICT: disagree', { verdict: 'disagree', reason: null }],
+    ['body\n verdict: Agree.', { verdict: 'agree', reason: null }],
+    // The same value twice (a fleet of reviewers agreeing) is that value.
+    ['VERDICT: agree\nmore\nVERDICT: agree — still', { verdict: 'agree', reason: null }],
+    // Nothing to read.
+    ['looks fine to me', { verdict: null, reason: 'missing' }],
+    ['', { verdict: null, reason: 'missing' }],
+    [null, { verdict: null, reason: 'missing' }],
+    [undefined, { verdict: null, reason: 'missing' }],
+    // A value the contract does not define — plan_review's vocabulary included.
+    ['VERDICT: approve', { verdict: null, reason: 'malformed' }],
+    ['VERDICT: agreed', { verdict: null, reason: 'malformed' }],
+    ['VERDICT: maybe\nVERDICT: agree', { verdict: null, reason: 'malformed' }],
+    // Two lines that disagree with each other.
+    ['VERDICT: agree\n…\nVERDICT: disagree — actually no', { verdict: null, reason: 'conflicting' }],
+    // Prose mentioning the word is not a verdict line.
+    ['My verdict: it is fine.', { verdict: null, reason: 'missing' }],
+  ];
+  for (const [input, expected] of cases) {
+    assert.deepEqual(classifyReviewVerdict(input), expected, `input=${JSON.stringify(input)}`);
+  }
 });

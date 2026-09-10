@@ -1,11 +1,27 @@
+import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { VALID_TEMPLATES } from '../bridge-server/validation.mjs';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const text = readFileSync(join(HERE, 'agent-companion.md'), 'utf8');
+
+// The payload doc must list exactly the templates the bridge accepts, in the
+// bridge's own order — a template the subagent cannot see is one the parent
+// never dispatches, and one it lists that the bridge rejects is a bounced send.
+const TEMPLATE_ENUM = [...VALID_TEMPLATES].map((t) => JSON.stringify(t)).join(' | ');
+
+test('Claude template lists every prompt template the bridge accepts, and the review verdict the parent reads', () => {
+  assert.ok(VALID_TEMPLATES.has('review'), 'the bridge ships the review template');
+  assert.ok(text.includes(`"template":      ${TEMPLATE_ENUM},`), `payload doc lists ${TEMPLATE_ENUM}`);
+  // The verdict is a meta field the parent branches on; the subagent relays
+  // the terminal envelope verbatim, so the doc names where it lands.
+  assert.match(text, /meta\.verdict/);
+});
 
 test('Claude template documents status response rendering explicitly', () => {
   assert.match(text, /Status \/ acknowledgement envelope/);
