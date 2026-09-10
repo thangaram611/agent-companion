@@ -1,6 +1,6 @@
 # MVP Tracker
 
-Last updated: 2026-08-13
+Last updated: 2026-09-10
 
 ## MVP Definition
 
@@ -245,6 +245,16 @@ primary companion:
    - Aider second candidate for git-native terminal workflows.
    - Keep adapters capability-driven: read reply/resume/parallel support from
      the descriptor, which the selected adapter may upgrade.
+
+5. Make the review loop first-class — NEXT (assessed 2026-09-09, not started).
+   The Claude-host ledger shows the product is used as one cell of the matrix:
+   Claude → Codex read-only reviews with a verdict, chained by hand over
+   several rounds that restart a cold Codex thread each time. Codex thread
+   continuity on follow-up sends plus a `review` template with a parsed
+   verdict, with success criteria, code anchors and non-goals in
+   [docs/DIRECTION_ASSESSMENT.md](DIRECTION_ASSESSMENT.md) §5. The same
+   document ranks what follows (usage ledger, generic ACP transport) and
+   demotes the Codex-host → Claude companion until that host is in use.
 
 ## Validation Commands
 

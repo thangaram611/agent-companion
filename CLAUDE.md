@@ -208,6 +208,7 @@ second reader/definition is how these break.
 | `docs/MVP_TRACKER.md` | What is done, what the current limitations are, what is next. |
 | `docs/RELEASE_READINESS.md` | Release gates and source-backed vendor compatibility notes. |
 | `docs/STRENGTH_ROUTING_HANDOFF.md`, `docs/ONBOARDING_HANDOFF.md` | Design records for the profile/strength router and onboarding. |
+| `docs/DIRECTION_ASSESSMENT.md` | 2026-09 direction verdict: ledger usage evidence, external research, ranked improvements, and the handoff for the next item (§5). |
 | `probes/README.md` | What each probe proves, and the dead ends already ruled out. |
 
 Commit subjects follow `type(scope): lowercase description of what changed and why`, often with

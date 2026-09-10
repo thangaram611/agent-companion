@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-09-03
+Last updated: 2026-09-10
 
 ## Goal
 
@@ -439,6 +439,17 @@ because the cost of re-deriving them is a day each.
 - **Config inheritance works — do not pin the model.** With no `model`, `turn_context` records
   exactly `~/.codex/config.toml`'s model and effort. Passing `model: null` is *not* the same
   as omitting the key.
+- **A codex role file accepting `mcp_servers` does not mean the child gets it.** The Codex
+  subagents docs say a custom agent file may declare `mcp_servers`. Read against rust-v0.153.4
+  (2026-09-09): the role parser (`codex-rs/agent-roles/src/agent_role_config.rs`) flattens the
+  whole `ConfigToml` into the role file, so `[mcp_servers.x]` is accepted without error — and
+  `codex-rs/core/src/agent/role.rs`'s `apply_role_to_config_inner` then copies a closed list
+  (developer_instructions, model, reasoning effort/summary/verbosity, personality,
+  service_tier, features, skills) and drops `mcp_servers` on the floor. A role-local bridge
+  registration would be a silent no-op, which is worse than the rejection it replaced. The
+  plugin-manifest session-scope registration stays; `templates/agent-companion.toml.test.mjs`
+  asserts the role carries no `[mcp_servers]`. Re-check `apply_role_to_config_inner` on every
+  codex upgrade — the day it honours the key, the Codex host can go agent-local like Claude.
 
 ## Codex Upgrade Incident Evidence (2026-09-02)
 
