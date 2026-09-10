@@ -284,8 +284,10 @@ function createOpenCodeCollector() {
     const type = eventType(entry);
     // A `step-finish` part carries the step's `tokens` and `cost` in the same
     // shape as an assistant message's info (OpenCode's OpenAPI
-    // `StepFinishPart`). Schema-derived, not live-measured: no provider on the
-    // machine that wrote this. Read off the part, or off the event itself.
+    // `StepFinishPart`). Measured on opencode 1.18.30 (2026-09-10): `opencode
+    // run --format json` emits `{type:'step_finish', part:{type:'step-finish',
+    // tokens, cost, reason}}` once per step, and names no model. Read off the
+    // part, or off the event itself.
     const usageCarrier = entry.part?.tokens ? entry.part : entry.tokens ? entry : null;
     if (usageCarrier) {
       const usage = usageFromOpenCodeInfo(usageCarrier, 'opencode-cli');

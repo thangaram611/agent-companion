@@ -635,8 +635,8 @@ reported nothing has no `usage` key at all, never zeros. Where it comes from:
 | Codex app-server | `thread/tokenUsage/updated`, baselined so a follow-up send on a resumed thread reports its own turn, not the thread. Streams into the digest mid-turn. |
 | Codex exec | `turn.completed.usage` (no total, no model on that stream). |
 | Copilot | The `invoke_agent` span in the OTEL file exporter the daemon enables, keyed by the ACP session id: tokens, cache read/write, reasoning, model and `cost` in premium requests. The ACP stream itself carries no usage. |
-| OpenCode server | The assistant message's `tokens`, `cost` (USD) and `modelID`, live and from the transcript on resume. |
-| OpenCode CLI | `step-finish` parts on the JSON stream when present; schema-derived, not live-measured. |
+| OpenCode server | The assistant message's `tokens`, `cost` (USD) and `modelID`, live and from the transcript on resume. OpenCode's `total` counts cached input too and is carried as reported. |
+| OpenCode CLI | The `step-finish` part on the `--format json` stream: tokens and cost, no model on that stream. |
 
 A codex app-server turn resumed mid-flight by a fresh bridge reports only the
 model calls it observed, flagged `"partial": true`; a `thread/read` salvage and

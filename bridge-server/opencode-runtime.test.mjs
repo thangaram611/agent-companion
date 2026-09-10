@@ -241,8 +241,9 @@ test('writeOpenCodeDigest replaces the file atomically - a concurrent reader nev
 });
 
 test('startOpenCodeRun reads usage off a step_finish part when the JSON stream carries one', async () => {
-  // Schema-derived (OpenCode's OpenAPI `StepFinishPart`: tokens + cost), not
-  // live-measured — no provider is configured on the machine that wrote this.
+  // The shape `opencode run --format json` emits on 1.18.30 (measured
+  // 2026-09-10 against ollama-cloud/gpt-oss:120b): `step_finish` with a
+  // `step-finish` part carrying `tokens` and `cost`, and no model.
   const { dir, bin } = fakeBin(`
     console.log(JSON.stringify({ type: 'text', part: { type: 'text', text: 'answer' } }));
     console.log(JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', reason: 'stop', cost: 0.01, tokens: { input: 10, output: 5, reasoning: 1, cache: { read: 2, write: 3 } } } }));

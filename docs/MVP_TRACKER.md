@@ -283,9 +283,11 @@ primary companion:
    exec collector, the Copilot daemon's OTEL read, both OpenCode adapters, the
    `retainTerminalJob` move to `job.usage`, and every surface. Verified live:
    `smoke.mjs` 13/13 (exec usage), `review-loop.mjs` 16/16 (app-server usage on
-   a fresh and a resumed thread), and the OpenCode shapes against both its
-   OpenAPI document (opencode 1.18.30) and its SDK types. Success criteria, as
-   written before code:
+   a fresh and a resumed thread), and both OpenCode adapters through the bridge
+   on opencode 1.18.30 + `ollama-cloud/gpt-oss:120b` (server: model, cost,
+   cached input; CLI: tokens and cost, no model on that stream), after
+   verifying the shapes against its OpenAPI document and SDK types. Success
+   criteria, as written before code:
    - **One shape, defined once** in `lib/usage.mjs`: `usage` is an object with
      six integer-or-null counters that every transport fills under the same
      keys — `input_tokens`, `output_tokens`, `cached_input_tokens`,
@@ -307,9 +309,11 @@ primary companion:
      landed 0.00 s after the result in the measurement) — attached by the
      daemon to the prompt summary; OpenCode server mode from the assistant
      `message.updated` info (`tokens`, `cost`, `modelID`, per its OpenAPI
-     document) and the transcript loader; OpenCode CLI from `step_finish`
-     parts when the JSON stream carries them (schema-derived, not live-measured
-     — no provider on this machine — and said so in the registry notes).
+     document) and the transcript loader; OpenCode CLI from the `step_finish`
+     event's part on `opencode run --format json` — both measured through the
+     bridge the same day on opencode 1.18.30 with `ollama-cloud/gpt-oss:120b`
+     at $0, once an Ollama Cloud key was configured (`cost: 0`, model on the
+     server path only, OpenCode's cache-inclusive `total` carried as reported).
    - **One path to every surface:** adapters put `usage` on the summary they
      already build; `retainTerminalJob` moves it to `job.usage` (the ledger),
      and wait `meta.usage`, the queue event's `meta.usage`, `agent_status`
