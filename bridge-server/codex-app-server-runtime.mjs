@@ -75,6 +75,7 @@ import {
 } from '../lib/shared-runtime-registry.mjs';
 import { inspectCodexAppServerInstallation } from '../lib/codex-install.mjs';
 import { truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
+import { codexTurnBaseline, usageFromCodexTokenUsage } from '../lib/usage.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -481,6 +482,17 @@ export function createCodexTurnAccumulator(threadId) {
   let errorText = null;
   let terminal = null;
   let sawEvent = false;
+  // `thread/tokenUsage/updated` reports the THREAD's cumulative total. This
+  // turn's usage is that total minus what the thread had spent before this
+  // turn's first model call — the first notification's `total − last` — so a
+  // follow-up send on a resumed thread reports its own spend, not the
+  // conversation's. `usagePartial` is set by a watcher that attached mid-turn
+  // (a bridge restart, or a send that found the turn already running): the
+  // notifications it missed are not in this baseline, and the number it
+  // reports says so rather than passing as the whole turn.
+  let usageBaseline = null;
+  let usage = null;
+  let usagePartial = false;
 
   // Does this frame belong to the thread we are watching? Resolved through the
   // pinned contract, never by reading `params.threadId` directly: 58 of 79
@@ -669,6 +681,13 @@ export function createCodexTurnAccumulator(threadId) {
         // `{threadId, turn}` — there is no flat `turnId` on this notification.
         turnId = params?.turn?.id ?? turnId;
         return;
+      case 'thread/tokenUsage/updated': {
+        const tokenUsage = params?.tokenUsage;
+        if (!tokenUsage?.total) return;
+        if (usageBaseline === null) usageBaseline = codexTurnBaseline(tokenUsage) ?? {};
+        usage = usageFromCodexTokenUsage(tokenUsage, usageBaseline) ?? usage;
+        return;
+      }
       case 'turn/completed': {
         const turn = params?.turn || {};
         turnId = turn.id ?? turnId;
@@ -706,8 +725,8 @@ export function createCodexTurnAccumulator(threadId) {
         settle('failed', { reason: 'error', error: params?.error?.message || 'codex reported a fatal error' });
         return;
       default:
-        // thread/status/changed, tokenUsage, mcpServer/startupStatus and the rest
-        // are observability only.
+        // thread/status/changed, mcpServer/startupStatus and the rest are
+        // observability only.
     }
   }
 
@@ -747,6 +766,7 @@ export function createCodexTurnAccumulator(threadId) {
     get terminal() { return terminal; },
     get sawEvent() { return sawEvent; },
     get turnId() { return turnId; },
+    markUsagePartial() { usagePartial = true; },
     snapshot() {
       const snap = {
         message: truncateChars(resolvedMessage(), MAX_SUMMARY_CHARS),
@@ -755,6 +775,8 @@ export function createCodexTurnAccumulator(threadId) {
         error: errorText,
       };
       if (plan != null) snap.plan = plan;
+      // Absent, not zeroed, until the app-server has reported something.
+      if (usage) snap.usage = usagePartial ? { ...usage, partial: true } : usage;
       return snap;
     },
   };
@@ -2160,6 +2182,9 @@ export async function openCodexTurnWatcher({
   return {
     done,
     close() { closedByCaller = true; settle(); },
+    // The caller knows whether this watch saw the turn from its start; the
+    // accumulator cannot. Say so on the usage it reports (see the accumulator).
+    markUsagePartial() { acc.markUsagePartial(); },
   };
 }
 
@@ -2216,6 +2241,7 @@ function finalize(acc, { status, reason, error = null }) {
     error: error || snap.error || null,
   };
   if (snap.plan != null) summary.plan = snap.plan;
+  if (snap.usage) summary.usage = snap.usage;
   return {
     status,
     summary,

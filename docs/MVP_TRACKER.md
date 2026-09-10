@@ -276,6 +276,56 @@ primary companion:
      transport) and demotes the Codex-host → Claude companion until that host
      is in use.
 
+6. Per-job usage ledger — DONE (2026-09-10; criteria written first, then the
+   failing reproduction, then the code —
+   [docs/DIRECTION_ASSESSMENT.md](DIRECTION_ASSESSMENT.md) §4 item 3). Shipped:
+   `lib/usage.mjs` (the shape and the four readers), the codex accumulator and
+   exec collector, the Copilot daemon's OTEL read, both OpenCode adapters, the
+   `retainTerminalJob` move to `job.usage`, and every surface. Verified live:
+   `smoke.mjs` 13/13 (exec usage), `review-loop.mjs` 16/16 (app-server usage on
+   a fresh and a resumed thread), and the OpenCode shapes against both its
+   OpenAPI document (opencode 1.18.30) and its SDK types. Success criteria, as
+   written before code:
+   - **One shape, defined once** in `lib/usage.mjs`: `usage` is an object with
+     six integer-or-null counters that every transport fills under the same
+     keys — `input_tokens`, `output_tokens`, `cached_input_tokens`,
+     `cache_write_input_tokens`, `reasoning_output_tokens`, `total_tokens` —
+     plus `source` (which transport signal it came from), and `model`, `cost`,
+     `cost_unit` only when the transport reports them. A counter the transport
+     does not report is `null`; a job whose transport reported nothing has NO
+     `usage` key at all, never zeros.
+   - **Captured where each transport already emits it, measured 2026-09-10:**
+     codex app-server from `thread/tokenUsage/updated` through the accumulator,
+     as THIS turn's usage on a resumed thread (`total` is thread-cumulative,
+     so the first notification's `total − last` is the baseline); codex exec
+     from `turn.completed.usage` (five snake_case counters, no total, no model,
+     codex-cli 0.154.0); Copilot from the OTEL file exporter the daemon already
+     enables — one `invoke_agent` span per prompt keyed by
+     `gen_ai.conversation.id` = the ACP session id, with tokens, cache read and
+     write, reasoning, model and `github.copilot.cost` (the ACP stream carries
+     no usage kind and `session/prompt` answers only `{stopReason}`; the span
+     landed 0.00 s after the result in the measurement) — attached by the
+     daemon to the prompt summary; OpenCode server mode from the assistant
+     `message.updated` info (`tokens`, `cost`, `modelID`, per its OpenAPI
+     document) and the transcript loader; OpenCode CLI from `step_finish`
+     parts when the JSON stream carries them (schema-derived, not live-measured
+     — no provider on this machine — and said so in the registry notes).
+   - **One path to every surface:** adapters put `usage` on the summary they
+     already build; `retainTerminalJob` moves it to `job.usage` (the ledger),
+     and wait `meta.usage`, the queue event's `meta.usage`, `agent_status`
+     `usage` and both digest writers' `**Usage:**` line render from the job.
+     A live codex app-server digest shows usage mid-turn from the snapshot.
+   - **A restart-resumed job is honest about what it saw:** a codex app-server
+     turn resumed mid-flight by a fresh bridge reports only the calls observed
+     after the resume, flagged `partial: true`; a tier-2 `thread/read` salvage
+     and a Copilot prompt that did not complete carry no usage.
+   - **Smokes:** `smoke.mjs` (exec) asserts `meta.usage` with input and output
+     tokens above zero and `source: codex-exec`; `review-loop.mjs` asserts the
+     same for the app-server on both rounds, the second on the resumed
+     thread. The other three stay 8/8, 17/17, 18/18.
+   - Non-goals: no routing, strengths, profiles or currency estimation; no
+     new companion; no change to the review loop.
+
 ## Validation Commands
 
 ```bash

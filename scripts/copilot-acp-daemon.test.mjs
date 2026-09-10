@@ -13,6 +13,9 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { otelTracesPath } from '../lib/runtime-paths.mjs';
+import { writeFileSync as writeOtel, mkdirSync as mkdirOtel } from 'node:fs';
+import { dirname as dirnameOtel } from 'node:path';
 import {
   AcpConnection,
   IpcServer,
@@ -413,4 +416,60 @@ test('replyPrompt returns drain-timeout error and does NOT call startPromptBg wh
   // anyone else from racing in on this session.
   const state = manager.inFlightPrompts.get(first.promptId);
   assert.equal(state.status, 'cancelling');
+});
+
+// The Copilot usage source, measured 2026-09-10 against Copilot CLI 1.0.77: the
+// ACP stream carries no usage kind and `session/prompt` answers `{stopReason}`
+// only, but the OTEL file exporter the daemon already enables writes one
+// `invoke_agent` span per prompt keyed by `gen_ai.conversation.id` = the ACP
+// session id — and it landed 0.00 s after the prompt result.
+function otelInvokeAgentSpan({ conversationId, atMs, input = 24869, output = 4 }) {
+  return JSON.stringify({
+    type: 'span', traceId: 't', spanId: 's', name: 'invoke_agent', kind: 1,
+    // Ends when it started, as far as this fixture cares: the real span ends
+    // at the prompt's result, which is before the NEXT prompt can begin.
+    startTime: [Math.floor(atMs / 1000), (atMs % 1000) * 1e6], endTime: [Math.floor(atMs / 1000), (atMs % 1000) * 1e6],
+    attributes: {
+      'gen_ai.operation.name': 'invoke_agent', 'gen_ai.conversation.id': conversationId,
+      'gen_ai.request.model': 'claude-sonnet-5', 'gen_ai.usage.input_tokens': input,
+      'gen_ai.usage.output_tokens': output, 'gen_ai.usage.cache_creation.input_tokens': 24867,
+      'gen_ai.response.model': 'claude-sonnet-5', 'github.copilot.cost': 1,
+    },
+  }) + '\n';
+}
+
+test('a completed prompt carries the usage its invoke_agent span reports; a prompt with no span carries none', async (t) => {
+  const { manager, conn, teardown } = makeManager('sid-usage');
+  t.after(teardown);
+  const otel = otelTracesPath();
+  mkdirOtel(dirnameOtel(otel), { recursive: true });
+  // An older prompt's span on the same conversation, and another conversation's.
+  writeOtel(otel, otelInvokeAgentSpan({ conversationId: 'sid-usage', atMs: Date.now() - 600_000, input: 999999 })
+    + otelInvokeAgentSpan({ conversationId: 'someone-else', atMs: Date.now(), input: 999999 }));
+
+  const first = await manager.startPromptBg('sid-usage', 'hello');
+  const state = manager.inFlightPrompts.get(first.promptId);
+  // The span lands (here: is appended) before the prompt resolves, as measured.
+  writeOtel(otel, otelInvokeAgentSpan({ conversationId: 'sid-usage', atMs: Date.now() }), { flag: 'a' });
+  conn.resolveSend({ stopReason: 'end_turn', message: 'hi', thoughts: '', toolCalls: [], plan: null });
+  for (let i = 0; i < 200 && state.status === 'running'; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(state.status, 'completed');
+  assert.deepEqual(state.summary.usage, {
+    source: 'copilot-otel',
+    input_tokens: 24869, output_tokens: 4, cached_input_tokens: null,
+    cache_write_input_tokens: 24867, reasoning_output_tokens: null, total_tokens: 24873,
+    model: 'claude-sonnet-5', cost: 1, cost_unit: 'copilot_premium_requests',
+  });
+  const watched = await manager.watchPrompt(first.promptId, 0, { summaryOnly: true });
+  assert.equal(watched.summary.usage.input_tokens, 24869, 'the bridge reads it off the same summary');
+
+  // Second prompt, nothing written for it: absent, never zeroed. The first
+  // prompt's span ended before this one starts, as it does live.
+  await new Promise((r) => setTimeout(r, 20));
+  const second = await manager.startPromptBg('sid-usage', 'again');
+  const state2 = manager.inFlightPrompts.get(second.promptId);
+  conn.resolveSend({ stopReason: 'end_turn', message: 'hi again', thoughts: '', toolCalls: [], plan: null });
+  for (let i = 0; i < 400 && state2.status === 'running'; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(state2.status, 'completed');
+  assert.equal('usage' in state2.summary, false);
 });

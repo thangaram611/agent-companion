@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { digestPath } from '../lib/prompt-digest.mjs';
 import { writePrivateFileAtomic } from '../lib/runtime-paths.mjs';
 import { appendCapped, truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
+import { usageFromOpenCodeInfo, sumUsage, formatUsage } from '../lib/usage.mjs';
 
 const running = new Map();
 const cancelRequested = new Set();
@@ -180,6 +181,11 @@ export function writeOpenCodeDigest(job, result = null, { carriedForward = null 
   if (job?.status) lines.push(`**Status:** \`${job.status}\``);
   if (job?.mode) lines.push(`**Mode:** ${job.mode}`);
   if (job?.template) lines.push(`**Template:** ${job.template}`);
+  // The job's usage once it has settled, or the streamed snapshot's while it
+  // runs (the codex app-server reports token usage mid-turn). Absent when the
+  // transport reported nothing.
+  const usage = job?.usage ?? result?.summary?.usage;
+  if (usage) lines.push(`**Usage:** ${formatUsage(usage)}`);
   // Set only on a completed `review` job (see retainTerminalJob in server.mjs):
   // the parsed verdict, or `none` with the parser's reason when the line was
   // missing, malformed or conflicting.
@@ -231,13 +237,15 @@ function summarizeOpenCodeOutput(stdout, stderr, collected = null) {
     : parsed
       .filter((entry) => entry && typeof entry === 'object' && /tool/i.test(String(entry.type || entry.event || entry.kind || '')))
       .map((entry) => ({ input: entry.input || entry.args || {}, name: entry.name || entry.tool || entry.type || entry.event }));
-  return {
+  const summary = {
     message: truncateChars(message, MAX_SUMMARY_CHARS),
     thoughts: '',
     toolCalls,
     stopReason: parsed.length > 0 ? 'json' : 'text',
     error: collected?.error || stderr.trim() || null,
   };
+  if (collected?.usage) summary.usage = collected.usage;
+  return summary;
 }
 
 function createOpenCodeCollector() {
@@ -245,6 +253,7 @@ function createOpenCodeCollector() {
   const events = [];
   const messageParts = [];
   const toolCalls = [];
+  const usages = [];
   let error = null;
   return {
     push(text) {
@@ -260,6 +269,7 @@ function createOpenCodeCollector() {
         message: messageParts.map((part) => part.trim()).filter(Boolean).join('\n'),
         toolCalls,
         error,
+        usage: sumUsage(usages),
       };
     },
   };
@@ -272,6 +282,16 @@ function createOpenCodeCollector() {
     catch { return; }
     events.push(entry);
     const type = eventType(entry);
+    // A `step-finish` part carries the step's `tokens` and `cost` in the same
+    // shape as an assistant message's info (OpenCode's OpenAPI
+    // `StepFinishPart`). Schema-derived, not live-measured: no provider on the
+    // machine that wrote this. Read off the part, or off the event itself.
+    const usageCarrier = entry.part?.tokens ? entry.part : entry.tokens ? entry : null;
+    if (usageCarrier) {
+      const usage = usageFromOpenCodeInfo(usageCarrier, 'opencode-cli');
+      if (usage) usages.push(usage);
+    }
+    if (/step[_-]?(start|finish)/i.test(type)) return;
     if (/tool/i.test(type)) {
       toolCalls.push({ input: entry.input || entry.args || {}, name: entry.name || entry.tool || entry.type || entry.event || 'tool' });
       return;

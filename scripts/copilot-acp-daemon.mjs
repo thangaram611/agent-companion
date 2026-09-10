@@ -29,6 +29,7 @@ import {
 } from '../lib/prompt-inspect.mjs';
 import { HEARTBEAT_STALE_AFTER_MS, HOST_LIVENESS_TTL_MS, scanLiveHeartbeat } from '../lib/heartbeat.mjs';
 import { DEFAULT_MODEL, readDefaultModel } from '../lib/state.mjs';
+import { usageFromCopilotOtel } from '../lib/usage.mjs';
 
 // --- Constants ---------------------------------------------------------------
 
@@ -702,6 +703,24 @@ class SessionManager {
     return null;
   }
 
+  // Copilot's usage source. Measured 2026-09-10 against Copilot CLI 1.0.77:
+  // the ACP stream has no usage kind and `session/prompt` answers only
+  // `{stopReason}`, but the OTEL file exporter (`COPILOT_OTEL_FILE_EXPORTER_PATH`,
+  // set at spawn) writes one `invoke_agent` span per prompt keyed by
+  // `gen_ai.conversation.id` = the ACP session id, with tokens, cache
+  // read/write, reasoning, model and `github.copilot.cost` — and it landed
+  // 0.00 s after the prompt result, i.e. it is on disk before this daemon
+  // sees the `session/prompt` answer. So this is ONE read, synchronous, in the
+  // prompt's own window: no wait, no retry — a wait here would hold every
+  // terminal (and every test that watches one) for a span that either landed
+  // already or is not coming. The answer is `null` (no key on the summary)
+  // when none is there: a prompt that spent nothing measurable reports nothing.
+  _readPromptUsage(sessionId, sinceMs) {
+    let text = '';
+    try { text = readFileSync(otelTracesPath(), 'utf8'); } catch { /* no exporter output yet */ }
+    return usageFromCopilotOtel(text, { conversationId: sessionId, sinceMs });
+  }
+
   _markTerminalState(state, patch = {}) {
     const terminalAt = patch.terminalAt || Date.now();
     Object.assign(state, patch, {
@@ -1076,6 +1095,14 @@ class SessionManager {
     this.connection
       .sendPrompt(sessionId, text, writeEvent)
       .then((result) => {
+        // The prompt's usage, read off the OTEL file exporter this daemon
+        // enabled at spawn (see `_readPromptUsage`). On the summary, so it
+        // rides the same `done` event and `watch` answer the bridge already
+        // reads; absent when no span landed, never zeroed.
+        if (state.status === 'running' && result && typeof result === 'object') {
+          const usage = this._readPromptUsage(sessionId, state.startedAt);
+          if (usage) result.usage = usage;
+        }
         // The daemon may have already moved this prompt to a terminal state
         // (e.g., the supervisor trip transitioned to "stuck" and called
         // cancelSession). If so, don't overwrite the status — but DO drain

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 
 import { appendCapped, truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
+import { usageFromCodexExecUsage } from '../lib/usage.mjs';
 
 // No digest writer here — codex reuses `writeOpenCodeDigest` from
 // opencode-runtime.mjs (its header is already target-neutral: `# ${job.target
@@ -295,13 +296,17 @@ export function cancelCodexRun(jobId, pid = null) {
 // unconditional (not gated on overall status) so any captured stderr noise
 // surfaces even on a completed run — mirrors summarizeOpenCodeOutput.
 function summarizeCodexOutput(stderr, collected) {
-  return {
+  const summary = {
     message: truncateChars(collected.message, MAX_SUMMARY_CHARS),
     thoughts: collected.thoughts,
     toolCalls: collected.toolCalls,
     stopReason: collected.eventCount > 0 ? 'json' : 'text',
     error: collected.fatalError || collected.turnFailedReason || stderr.trim() || null,
   };
+  // Absent when no turn.completed arrived — a run killed mid-turn reports
+  // nothing rather than zeros.
+  if (collected.usage) summary.usage = collected.usage;
+  return summary;
 }
 
 // Line-buffered parser for the `codex exec --json` ThreadEvent stream (typed
@@ -341,9 +346,12 @@ function summarizeCodexOutput(stderr, collected) {
 //   item.completed{error}       → NON-fatal (tolerated; does not fail the
 //                                 turn) — only the top-level `error` type and
 //                                 `turn.failed` do that.
-//   turn.completed              → recognized and ignored (usage stats have no
-//                                 consumer here). Note its
-//                                 usage.reasoning_output_tokens is non-zero on
+//   turn.completed              → its `usage` is the run's token usage
+//                                 (0.154.0: input, cached_input,
+//                                 cache_write_input, output and
+//                                 reasoning_output tokens; no total, no
+//                                 model), read into the shared shape. Its
+//                                 reasoning_output_tokens is non-zero on
 //                                 reasoning turns, which PROVES reasoning
 //                                 happens even though no reasoning item ever
 //                                 streams on this transport.
@@ -365,6 +373,7 @@ export function createCodexCollector({ onSession = () => {} } = {}) {
   const toolCalls = [];
   let fatalError = null;
   let turnFailedReason = null;
+  let usage = null;
   // Turn counter + in-flight command index. `item.id` alone is not a key: it
   // restarts at `item_0` every turn, so `${turnSeq}:${item.id}` is the
   // narrowest scope in which an item.started can be matched to its
@@ -389,6 +398,7 @@ export function createCodexCollector({ onSession = () => {} } = {}) {
         toolCalls,
         fatalError,
         turnFailedReason,
+        usage,
       };
     },
   };
@@ -417,7 +427,10 @@ export function createCodexCollector({ onSession = () => {} } = {}) {
       turnSeq++;
       return;
     }
-    if (type === 'turn.completed') return;
+    if (type === 'turn.completed') {
+      usage = usageFromCodexExecUsage(event.usage) ?? usage;
+      return;
+    }
     if (type === 'turn.failed') {
       turnFailedReason = event.error?.message || event.error || event.reason || event.message || 'codex turn failed';
       return;

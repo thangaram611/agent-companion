@@ -97,6 +97,29 @@ test('accumulator assembles assistant text and resolves completed on session.idl
   assert.equal(acc.snapshot().message, 'Hello world');
 });
 
+test('accumulator reads the assistant message info\'s tokens, cost and model as the turn\'s usage', () => {
+  const acc = createTurnAccumulator(SID);
+  const info = (extra) => ({ role: 'assistant', id: 'msg1', modelID: 'gpt-oss:120b', providerID: 'ollama', ...extra });
+  feed(acc, [
+    frame({ type: 'message.updated', properties: { sessionID: SID, info: info({}) } }),
+    frame({ type: 'message.part.updated', properties: { sessionID: SID, part: { id: 'p1', messageID: 'msg1', type: 'text', text: 'answer' } } }),
+  ]);
+  assert.equal('usage' in acc.snapshot(), false, 'no tokens yet is no usage key');
+  feed(acc, [
+    // OpenCode re-sends the info as the message completes, tokens now filled.
+    frame({ type: 'message.updated', properties: { sessionID: SID, info: info({ cost: 0.0123, tokens: { input: 900, output: 120, reasoning: 30, cache: { read: 400, write: 50 } }, time: { created: 1, completed: 2 } }) } }),
+    // Another session's usage never lands here.
+    frame({ type: 'message.updated', properties: { sessionID: 'other', info: info({ id: 'x', tokens: { input: 99999, output: 99999 } }) } }),
+    frame({ type: 'session.idle', properties: { sessionID: SID } }),
+  ]);
+  assert.deepEqual(acc.snapshot().usage, {
+    source: 'opencode-server',
+    input_tokens: 900, output_tokens: 120, cached_input_tokens: 400,
+    cache_write_input_tokens: 50, reasoning_output_tokens: 30, total_tokens: 1020,
+    model: 'gpt-oss:120b', cost: 0.0123, cost_unit: 'usd',
+  });
+});
+
 test('accumulator keeps tool-only turn non-empty via toolCalls', () => {
   const acc = createTurnAccumulator(SID);
   feed(acc, [
@@ -251,6 +274,19 @@ test('loadOpenCodeTranscript extracts completed assistant text and tools', async
   assert.equal(t.summary.message, 'final answer');
   assert.equal(t.summary.thoughts, 'hmm');
   assert.equal(t.summary.toolCalls.length, 1);
+  assert.equal('usage' in t.summary, false, 'a transcript whose message carries no tokens has no usage');
+
+  _setForTest({
+    fetchJson: async () => ({ ok: true, data: [
+      { info: { role: 'assistant', time: { created: 2, completed: 3 }, modelID: 'm', cost: 0.5, tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } } }, parts: [
+        { type: 'text', text: 'final answer' },
+      ] },
+    ] }),
+  });
+  const withUsage = await loadOpenCodeTranscript({ baseUrl: 'http://h', sessionId: SID, directory: '/w' });
+  assert.equal(withUsage.summary.usage.source, 'opencode-server');
+  assert.equal(withUsage.summary.usage.input_tokens, 10);
+  assert.equal(withUsage.summary.usage.cost, 0.5);
 });
 
 // --- watcher: edge / level / drop ------------------------------------------

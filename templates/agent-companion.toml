@@ -274,7 +274,7 @@ For `status: "timeout"`: on Copilot the body lists decomposition / `scope_hint` 
 
 For `status: "unreachable"`: surface `meta.detail` if present. The body itself already directs main to check the relevant companion runtime/configuration and logs.
 
-The `meta.digest_uri` field is also present on `completed`, `failed`, `stuck`, and `cancelled` envelopes whenever the job got far enough to register a prompt. Always relay it verbatim — it is the canonical handle for structured per-job progress without another bridge round-trip. If `meta.debug_digest_path` is present, relay it only as debug metadata; the resource URI is the normal UX.
+The `meta.digest_uri` field is also present on `completed`, `failed`, `stuck`, and `cancelled` envelopes whenever the job got far enough to register a prompt. Always relay it verbatim — it is the canonical handle for structured per-job progress without another bridge round-trip. If `meta.debug_digest_path` is present, relay it only as debug metadata; the resource URI is the normal UX. `meta.usage`, when present, is the job's token usage in one shape for every companion (`input_tokens`, `output_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `reasoning_output_tokens`, `total_tokens`, `source`, and `model`/`cost` when reported) — relay it verbatim inside `meta`; its absence means the transport reported nothing.
 
 ### Error envelope — `response.ok !== true` (this covers `status ∈ { unknown_job, cancel-skipped, mcp_unreachable, validation-error }`)
 

@@ -460,6 +460,15 @@ function retainTerminalJob(jobId, patch) {
     if (fields) Object.assign(job, fields);
     else { delete job.verdict; delete job.verdictReason; }
   }
+  // Usage travels on the summary every adapter builds (lib/usage.mjs, one
+  // shape for all of them) and lives on the job from here — one home for the
+  // ledger, wait meta, status, the queue event and both digests, not a copy
+  // under `summary` as well. Nothing reads `summary.usage` after this point;
+  // the live digest read it off the streamed snapshot while the turn ran.
+  if (job.summary?.usage) {
+    job.usage = job.summary.usage;
+    delete job.summary.usage;
+  }
   persistJob(jobId);
   resolveAllWaiters(jobId, { terminal: true, job });
   return job;
@@ -823,6 +832,7 @@ export function refreshDigestForJob(job, statusOverride = null) {
       terminalAt: job.terminalAt || null,
       verdict:    job.verdict,
       verdictReason: job.verdictReason ?? null,
+      usage:      job.usage ?? null,
     });
   } catch (err) {
     log('WARN', 'refreshDigestForJob failed:', job.jobId, err.message);
@@ -1030,6 +1040,8 @@ export function buildJobResponse(job, inspect = null, { includeTimeline = false 
   };
   const failureClass = terminalFailureClass({ ...job, status });
   if (failureClass) response.failure_class = failureClass;
+  // Present only when the transport reported it; see lib/usage.mjs.
+  if (job.usage) response.usage = job.usage;
   addDigestReference(response, { jobId: job.jobId, promptId: job.promptId });
   return response;
 }
@@ -1148,6 +1160,7 @@ function buildWaitResponse(outcome) {
     meta.verdict = job.verdict;
     if (job.verdictReason) meta.verdict_reason = job.verdictReason;
   }
+  if (job.usage) meta.usage = job.usage;
   const digestUri = addDigestMeta(meta, { jobId: job.jobId, promptId: job.promptId });
   return asJson({
     ok: true, action: 'wait', status: job.status,
@@ -1707,6 +1720,11 @@ export function emitNotification({
     meta.verdict = verdictFields.verdict;
     if (verdictFields.verdictReason) meta.verdict_reason = verdictFields.verdictReason;
   }
+  // From the job once retained (its one home), or straight off the summary for
+  // a notification that never went through retainTerminalJob. Assigned whole,
+  // not through extraMeta, whose values are strings sliced to 80 chars.
+  const usage = jobs.get(jobId)?.usage ?? summary?.usage ?? null;
+  if (usage) meta.usage = usage;
 
   // Final digest refresh on terminal. We pass the current `status` because
   // the job's stored status may not yet reflect a late remap (e.g. cancelled
@@ -1723,6 +1741,7 @@ export function emitNotification({
           task, sessionId, startedAt: duration ? Date.now() - duration : null,
           terminalAt: Date.now(),
           verdict: verdictFields?.verdict, verdictReason: verdictFields?.verdictReason ?? null,
+          usage,
         });
       } catch (err) { log('WARN', 'emit digest write failed:', jobId, err.message); }
     }
@@ -2467,6 +2486,9 @@ async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, 
         refreshDigestForJob(job);
       },
     });
+    // A watch that did not see this turn from its start — a restart resume, or
+    // a turn found already running below — cannot have counted all of it.
+    if (!fresh && !reply) watcher.markUsagePartial();
     if (fresh || reply) {
       const started = await startCodexTurn({ conn, threadId, prompt, model });
       // Assigned unconditionally, including to null. A turn id is only valid
@@ -2481,6 +2503,7 @@ async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, 
       // instead. Say so out loud: a job silently riding another turn looks
       // exactly like one that started its own.
       if (started.attached) {
+        watcher.markUsagePartial();
         rlog.warn('worker.turn_already_active', { thread_id: threadId });
         log('WARN', 'codex-appserver turn already active:', jobId, `thread=${threadId} — attached instead of double-dispatching`);
       }

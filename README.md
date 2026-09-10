@@ -611,6 +611,37 @@ expected to follow is blind commitment: record your own verdict on the subject
 before reading the companion's, so agreement is evidence rather than
 anchoring. The bridge does not enforce that; it is documented, not policed.
 
+### Usage
+
+Every job that its transport can meter carries a `usage` object — on the
+terminal `meta`, the wait envelope, `agent_status`, the ledger row and both
+digests (`**Usage:**`). It is one shape for every companion, defined once in
+`lib/usage.mjs`:
+
+```jsonc
+{ "source": "codex-app-server",       // which transport signal it came from
+  "input_tokens": 1000, "output_tokens": 100,
+  "cached_input_tokens": 900, "cache_write_input_tokens": null,
+  "reasoning_output_tokens": 10, "total_tokens": 1100,
+  "model": "…", "cost": 1, "cost_unit": "copilot_premium_requests"  // only when reported
+}
+```
+
+A counter the transport does not report is `null`; a job whose transport
+reported nothing has no `usage` key at all, never zeros. Where it comes from:
+
+| Transport | Signal |
+| --- | --- |
+| Codex app-server | `thread/tokenUsage/updated`, baselined so a follow-up send on a resumed thread reports its own turn, not the thread. Streams into the digest mid-turn. |
+| Codex exec | `turn.completed.usage` (no total, no model on that stream). |
+| Copilot | The `invoke_agent` span in the OTEL file exporter the daemon enables, keyed by the ACP session id: tokens, cache read/write, reasoning, model and `cost` in premium requests. The ACP stream itself carries no usage. |
+| OpenCode server | The assistant message's `tokens`, `cost` (USD) and `modelID`, live and from the transcript on resume. |
+| OpenCode CLI | `step-finish` parts on the JSON stream when present; schema-derived, not live-measured. |
+
+A codex app-server turn resumed mid-flight by a fresh bridge reports only the
+model calls it observed, flagged `"partial": true`; a `thread/read` salvage and
+a Copilot prompt that did not complete carry none.
+
 ### Output wrapper
 
 Copilot-target output for the `general` and `research` templates carries a

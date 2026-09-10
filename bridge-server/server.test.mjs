@@ -1093,7 +1093,7 @@ test('Codex companion adapter runs a fake CLI and surfaces terminal job state', 
     'process.stdin.on("end", () => {',
     '  console.log(JSON.stringify({ type: "thread.started", thread_id: "th-fake-codex" }));',
     '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Codex fake completed" } }));',
-    '  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));',
+    '  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 21219, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 0 } }));',
     '});',
     '',
   ].join('\n'), { mode: 0o700 });
@@ -1778,7 +1778,7 @@ function _cxExecFakeBin(dir, threadId = 'th-exec-default') {
     'process.stdin.on("end", () => {',
     `  console.log(JSON.stringify({ type: "thread.started", thread_id: ${JSON.stringify(threadId)} }));`,
     '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "exec path ran" } }));',
-    '  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));',
+    '  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 21219, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 0 } }));',
     '});',
     '',
   ].join('\n'), { mode: 0o700 });
@@ -2236,6 +2236,12 @@ test('Codex exec adapter ignores a recorded thread sid: single-shot, nothing to 
     assert.equal(terminal.status, 'completed');
     assert.equal(jobs.get(send.job_id).sessionId, 'th-exec-second', 'the exec run\'s own thread, not the recorded one');
     assert.equal(jobs.get(send.job_id).codexAdapter, undefined);
+    // The exec stream's turn.completed usage rides the same path as every
+    // other transport's: onto the job, into the ledger, out on wait meta.
+    assert.equal(jobs.get(send.job_id).usage.source, 'codex-exec');
+    assert.equal(jobs.get(send.job_id).usage.input_tokens, 21219);
+    assert.equal(terminal.meta.usage.total_tokens, 21224);
+    assert.equal(state.readJob(send.job_id).usage.source, 'codex-exec');
     assert.equal(state.readThreadSid(THREAD, null), 'T-prior-appserver', 'exec neither reads nor rewrites the sid');
   } finally {
     cx._resetForTest();
@@ -2332,6 +2338,187 @@ test('review template: the verdict is parsed into wait meta, the queue event, th
     });
   } finally {
     for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-review') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+const _cxTokens = (input, output, cached, reasoning, total) => ({
+  inputTokens: input, outputTokens: output, cachedInputTokens: cached, reasoningOutputTokens: reasoning, totalTokens: total,
+});
+
+test('usage: a codex app-server turn\'s token usage lands on the job, the ledger, wait meta, status, the queue event and the digest — and moves off the summary', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-usage';
+  try {
+    await withQueue(async (queueFile) => {
+      await withCodexAppServer({}, async ({ live }) => {
+        const send = parse(await dispatch({
+          action: 'send', target: 'codex', task: 'count tokens', mode: 'ANALYZE', template: 'general',
+          cwd: TEST_CWD, host_session_id: 'sid-cx-usage', parallel: 'never', max_wait_sec: 5,
+        }));
+        assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.sessionId === 'T1'), 'thread id captured');
+        const sock = live();
+        assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'turn started');
+
+        // Mid-turn: the live digest already shows what has been spent.
+        sock.notify('thread/tokenUsage/updated', { turnId: 'TURN1', tokenUsage: {
+          total: _cxTokens(120, 30, 100, 5, 150), last: _cxTokens(120, 30, 100, 5, 150),
+        } });
+        assert.ok(await _cxUntil(() => /\*\*Usage:\*\* in=120 out=30/.test(readFileSync(digestPath(send.job_id), 'utf8'))),
+          'the live digest carries the streamed usage');
+        assert.equal(jobs.get(send.job_id).terminalAt, undefined);
+
+        sock.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text: 'DONE', phase: 'final_answer' } });
+        sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+        const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-usage', max_wait_sec: 5 }));
+        const expected = {
+          source: 'codex-app-server',
+          input_tokens: 120, output_tokens: 30, cached_input_tokens: 100,
+          cache_write_input_tokens: null, reasoning_output_tokens: 5, total_tokens: 150,
+        };
+        assert.equal(terminal.status, 'completed');
+        assert.deepEqual(terminal.meta.usage, expected);
+        const job = jobs.get(send.job_id);
+        assert.deepEqual(job.usage, expected);
+        assert.equal('usage' in job.summary, false, 'one home on the job, not a second copy under summary');
+        assert.deepEqual(state.readJob(send.job_id).usage, expected);
+        const status = parse(await dispatch({ action: 'status', job_id: send.job_id, host_session_id: 'sid-cx-usage' }));
+        assert.deepEqual(status.usage, expected);
+        const event = readQueue(queueFile).find((row) => row.jobId === send.job_id && row.kind === 'terminal');
+        assert.deepEqual(event.meta.usage, expected);
+        assert.match(readFileSync(digestPath(send.job_id), 'utf8'), /\*\*Usage:\*\* in=120 out=30 cached=100 reasoning=5 total=150 \(codex-app-server\)/);
+      });
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-usage') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('usage: a job whose transport reported nothing carries no usage key anywhere', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  const { digestPath } = await import('../lib/prompt-digest.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-nousage';
+  try {
+    await withQueue(async (queueFile) => {
+      await withCodexAppServer({}, async ({ live }) => {
+        const send = parse(await dispatch({
+          action: 'send', target: 'codex', task: 'no usage frames', mode: 'ANALYZE', template: 'general',
+          cwd: TEST_CWD, host_session_id: 'sid-cx-nousage', parallel: 'never', max_wait_sec: 5,
+        }));
+        assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.sessionId === 'T1'), 'thread id captured');
+        const sock = live();
+        assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'turn started');
+        sock.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text: 'DONE', phase: 'final_answer' } });
+        sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+        const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cx-nousage', max_wait_sec: 5 }));
+        assert.equal(terminal.status, 'completed');
+        assert.equal('usage' in terminal.meta, false);
+        assert.equal('usage' in jobs.get(send.job_id), false);
+        assert.equal('usage' in state.readJob(send.job_id), false);
+        const status = parse(await dispatch({ action: 'status', job_id: send.job_id, host_session_id: 'sid-cx-nousage' }));
+        assert.equal('usage' in status, false);
+        const event = readQueue(queueFile).find((row) => row.jobId === send.job_id && row.kind === 'terminal');
+        assert.equal('usage' in event.meta, false);
+        assert.doesNotMatch(readFileSync(digestPath(send.job_id), 'utf8'), /\*\*Usage:/);
+      });
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-nousage') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('usage: Copilot\'s OTEL-derived usage rides the daemon summary onto the job and out on wait meta', async () => {
+  const mod = await bridge();
+  const { dispatch, jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cop-usage';
+  const usage = {
+    source: 'copilot-otel',
+    input_tokens: 24869, output_tokens: 4, cached_input_tokens: null,
+    cache_write_input_tokens: 24867, reasoning_output_tokens: null, total_tokens: 24873,
+    model: 'claude-sonnet-5', cost: 1, cost_unit: 'copilot_premium_requests',
+  };
+  try {
+    await withDaemonStubs({
+      ensureDaemon: async () => {},
+      sendToSocket: async (msg) => {
+        if (msg.command === 'prompt-bg') return { ok: true, data: { promptId: 'prompt-usage-1', sessionId: 'cop-sid-usage' } };
+        if (msg.command === 'watch') {
+          return { ok: true, data: { status: 'completed', summary: { message: 'done', thoughts: '', toolCalls: [], plan: null, stopReason: 'end_turn', usage } } };
+        }
+        return { ok: true, data: {} };
+      },
+    }, async () => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'copilot', task: 'spend some premium requests', mode: 'EXECUTE', template: 'general',
+        cwd: TEST_CWD, host_session_id: 'sid-cop-usage', parallel: 'never', max_wait_sec: 5,
+      }));
+      assert.equal(send.status, 'still_running');
+      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cop-usage', max_wait_sec: 5 }));
+      assert.equal(terminal.status, 'completed');
+      assert.deepEqual(terminal.meta.usage, usage);
+      assert.deepEqual(jobs.get(send.job_id).usage, usage);
+      assert.equal('usage' in jobs.get(send.job_id).summary, false);
+      assert.deepEqual(state.readJob(send.job_id).usage, usage);
+      const status = parse(await dispatch({ action: 'status', job_id: send.job_id, host_session_id: 'sid-cop-usage' }));
+      assert.deepEqual(status.usage, usage);
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cop-usage') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    _resetForTest();
+  }
+});
+
+test('usage: a turn resumed mid-flight by a fresh bridge reports only what it observed, flagged partial', async () => {
+  const mod = await bridge();
+  const { jobs, _resetForTest } = mod;
+  const state = await import('../lib/state.mjs');
+  _resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-partial';
+  try {
+    await withCodexAppServer({ statuses: { T1: 'active' } }, async ({ sockets }) => {
+      _cxLiveJob(jobs, 'codex-partial', 'sid-cx-partial');
+      mod.persistJob('codex-partial');
+      jobs.delete('codex-partial');
+      mod._resetForTest();
+      mod.hydrateJobsFromLedger();
+      assert.ok(await _cxUntil(() => sockets.length > 0 && sockets.at(-1).wire().includes('broker/subscribe')), 'the resumed watcher subscribed');
+      const sock = sockets.at(-1);
+      // The thread had already spent 4000/500 before this bridge arrived, and
+      // this notification is the first model call it sees.
+      sock.notify('thread/tokenUsage/updated', { turnId: 'TURN1', tokenUsage: {
+        total: _cxTokens(4300, 540, 3200, 54, 4840), last: _cxTokens(300, 40, 200, 4, 340),
+      } });
+      sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [
+        { id: 'm2', type: 'agentMessage', text: 'tail', phase: 'final_answer' },
+      ] } });
+      assert.ok(await _cxUntil(() => jobs.get('codex-partial')?.terminalAt), 'the resumed turn settles');
+      const job = jobs.get('codex-partial');
+      assert.equal(job.status, 'completed');
+      assert.equal(job.usage.partial, true);
+      assert.equal(job.usage.input_tokens, 300);
+      assert.equal(state.readJob('codex-partial').usage.partial, true);
+    });
+  } finally {
+    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-partial') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
     if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
     _resetForTest();
   }

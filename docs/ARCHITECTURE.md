@@ -243,6 +243,14 @@ Current MVP adapters are not yet formal classes. The stable contract is visible 
   `thread`, `mode`, `template`, `parallelStrategy`, `status`, and `startedAt`.
 - Terminal adapters call `retainTerminalJob` with `status`, `summary`, `error`, `detail`, `durationMs`, and `terminalAt`.
 - `summary.message` is the user-visible terminal message. `summary.toolCalls` is optional.
+- Every adapter puts the turn's token usage, when its transport reports one,
+  on the summary it builds, in the one shape `lib/usage.mjs` defines (six
+  counters, `source`, optional `model`/`cost`/`cost_unit`, `partial` for a
+  watch that did not see the turn from its start). `retainTerminalJob` moves it
+  to `job.usage` — the ledger, wait `meta.usage`, the queue event,
+  `agent_status` and both digests read it from there; nothing reads
+  `summary.usage` after the terminal. Absent, never zeroed, when the transport
+  reported nothing.
 - A completed `review` job also carries `verdict` (`agree` | `disagree` | `null`)
   and `verdictReason` (`missing` | `malformed` | `conflicting` when the verdict
   is null), read once at `retainTerminalJob` from the message's `VERDICT:` line
@@ -273,7 +281,8 @@ State lives under the host-routed companion home `~/.{claude,codex}/agent-compan
 - `jobs/`: persisted in-flight/recent jobs for restart recovery. OpenCode
   server jobs persist their `ses_` session id (under the target-neutral
   `companionSessionId` key) and the server `baseUrl` so a respawned bridge can
-  resume them.
+  resume them. A settled job carries `usage` (see the adapter contract) — the
+  per-job ledger that routing and cost decisions can be judged against.
 - `runtime/`: logs, queue, prompt streams, and digests.
 - `runtime/opencode-servers.json`: registry of the shared detached
   `opencode serve` process so a respawned bridge reattaches instead of

@@ -189,11 +189,18 @@ test('createCodexCollector: last completed agent_message wins, reasoning/toolCal
     { type: 'item.completed', item: { type: 'todo_list', items: [] } },
     // Unrecognized top-level and item types: ignored, not thrown.
     { type: 'some.future.event.type', payload: 'ignored' },
-    { type: 'turn.completed', usage: { input_tokens: 5 } },
+    { type: 'turn.completed', usage: { input_tokens: 5, cached_input_tokens: 2, cache_write_input_tokens: 0, output_tokens: 3, reasoning_output_tokens: 1 } },
   ];
   for (const line of lines) collector.push(JSON.stringify(line) + '\n');
   const result = collector.finish();
   assert.equal(result.sessionId, 'th-collect');
+  // turn.completed's usage is READ now, not ignored: the five counters codex-cli
+  // 0.154.0 puts on that event (measured 2026-09-10), in the one shared shape.
+  assert.deepEqual(result.usage, {
+    source: 'codex-exec',
+    input_tokens: 5, output_tokens: 3, cached_input_tokens: 2,
+    cache_write_input_tokens: 0, reasoning_output_tokens: 1, total_tokens: 8,
+  });
   assert.equal(result.message, 'final answer');
   assert.equal(result.thoughts, 'thinking about it');
   // A command_execution entry now carries its outcome alongside the
@@ -544,4 +551,32 @@ test('command_execution carries in-flight state, status, exit_code and truncated
   // formatTerminalContent's `tc.input.path` extraction (file_change entries)
   // collision-free.
   assert.deepEqual(Object.keys(ok.input), ['command']);
+});
+
+test('startCodexRun puts the turn\'s usage on the summary, and a run without a turn.completed carries none', async () => {
+  const withUsage = completingBin([
+    { type: 'thread.started', thread_id: 'th-usage' },
+    { type: 'item.completed', item: { type: 'agent_message', text: 'OK' } },
+    { type: 'turn.completed', usage: { input_tokens: 21219, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 0 } },
+  ]);
+  try {
+    const result = await startCodexRun({ jobId: 'j-usage', cwd: withUsage.dir, prompt: 'hi', env: { ...process.env, CODEX_BIN: withUsage.bin } });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.summary.usage.source, 'codex-exec');
+    assert.equal(result.summary.usage.input_tokens, 21219);
+    assert.equal(result.summary.usage.total_tokens, 21224);
+  } finally {
+    rmSync(withUsage.dir, { recursive: true, force: true });
+  }
+  const without = completingBin([
+    { type: 'thread.started', thread_id: 'th-no-usage' },
+    { type: 'item.completed', item: { type: 'agent_message', text: 'OK' } },
+  ]);
+  try {
+    const result = await startCodexRun({ jobId: 'j-no-usage', cwd: without.dir, prompt: 'hi', env: { ...process.env, CODEX_BIN: without.bin } });
+    assert.equal(result.status, 'completed');
+    assert.equal('usage' in result.summary, false, 'nothing reported is no key, not zeros');
+  } finally {
+    rmSync(without.dir, { recursive: true, force: true });
+  }
 });

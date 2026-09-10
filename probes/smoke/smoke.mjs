@@ -121,6 +121,12 @@ try {
   const body = JSON.stringify(final?.content ?? final ?? '');
   check('the companion actually did the work (found BANANA in README.md)', /BANANA/i.test(body),
     body.slice(0, 200));
+  // The exec stream's turn.completed usage, read off the real codex, in the one
+  // shared shape every transport fills.
+  const usage = final?.meta?.usage;
+  check('terminal meta carries the turn\'s usage from the exec stream',
+    usage?.source === 'codex-exec' && usage.input_tokens > 0 && usage.output_tokens > 0 && usage.total_tokens === usage.input_tokens + usage.output_tokens,
+    JSON.stringify(usage));
 
   // --- 6. Digest is real, non-stub, and atomically written.
   const dpath = join(digestDir, `agent-digest-${jobId}.md`);

@@ -32,6 +32,7 @@ import {
   deriveIdleTtlMs,
 } from '../lib/shared-runtime-registry.mjs';
 import { truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
+import { usageFromOpenCodeInfo, sumUsage } from '../lib/usage.mjs';
 
 const MAX_TRANSCRIPT_CHARS = 12_000;
 const SERVER_BOOT_TIMEOUT_MS = 15_000;
@@ -177,6 +178,8 @@ export function createTurnAccumulator(sessionId) {
     };
   }
 
+  const usageByMessage = new Map(); // messageID -> usage, latest info wins
+
   function ensureMessage(id) {
     if (!messages.has(id)) messages.set(id, { textParts: new Map(), reasoning: new Map(), tools: new Map() });
     return messages.get(id);
@@ -195,6 +198,10 @@ export function createTurnAccumulator(sessionId) {
       if (info.role === 'assistant') {
         latestAssistantId = info.id || latestAssistantId;
         if (info.id) ensureMessage(info.id);
+        // OpenCode re-sends the info as the message completes, tokens and cost
+        // filled in; the latest per message wins, and the turn is their sum.
+        const usage = usageFromOpenCodeInfo(info, 'opencode-server');
+        if (usage && info.id) usageByMessage.set(info.id, usage);
         if (info.error) {
           const name = info.error.name || info.error.type || 'error';
           messageError = { name, message: info.error.message || info.error.data?.message || name };
@@ -267,12 +274,15 @@ export function createTurnAccumulator(sessionId) {
     get sawEvent() { return sawEvent; },
     snapshot() {
       const snap = latestAssistantId ? snapshotMessage(latestAssistantId) : { text: '', thoughts: '', tools: [] };
-      return {
+      const out = {
         message: truncateChars(snap.text, MAX_SUMMARY_CHARS),
         thoughts: truncateChars(snap.thoughts, MAX_SUMMARY_CHARS),
         toolCalls: snap.tools.map((t) => ({ name: t.name, input: t.input })),
         error: messageError ? messageError.message : null,
       };
+      const usage = sumUsage([...usageByMessage.values()]);
+      if (usage) out.usage = usage;
+      return out;
     },
   };
 
@@ -516,18 +526,22 @@ export async function loadOpenCodeTranscript({ baseUrl, sessionId, directory = n
   const thoughts = parts.filter((p) => p.type === 'reasoning').map((p) => p.text).join('');
   const tools = parts.filter((p) => p.type === 'tool').map((p) => ({ name: p.tool || p.name || 'tool', input: p.state?.input || p.input || {} }));
   const err = assistant.info.error;
+  const summary = {
+    message: truncateChars(text, MAX_SUMMARY_CHARS),
+    thoughts: truncateChars(thoughts, MAX_SUMMARY_CHARS),
+    toolCalls: tools,
+    stopReason: 'idle',
+    error: err ? (err.message || err.name || 'error') : null,
+  };
+  // The message's own tokens and cost, when the transcript carries them.
+  const usage = usageFromOpenCodeInfo(assistant.info, 'opencode-server');
+  if (usage) summary.usage = usage;
   return {
     found: true,
     completed: !!assistant.info?.time?.completed || !!err,
     aborted: !!(err && /abort/i.test(err.name || err.type || '')),
     error: err ? (err.message || err.name || 'error') : null,
-    summary: {
-      message: truncateChars(text, MAX_SUMMARY_CHARS),
-      thoughts: truncateChars(thoughts, MAX_SUMMARY_CHARS),
-      toolCalls: tools,
-      stopReason: 'idle',
-      error: err ? (err.message || err.name || 'error') : null,
-    },
+    summary,
   };
 }
 
@@ -649,6 +663,7 @@ function finalize(acc, { status, error = null, stopReason }) {
     stopReason,
     error: error || snap.error || null,
   };
+  if (snap.usage) summary.usage = snap.usage;
   return {
     status,
     summary,

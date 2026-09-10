@@ -239,3 +239,33 @@ test('writeOpenCodeDigest replaces the file atomically - a concurrent reader nev
     rmSync(digestDir, { recursive: true, force: true });
   }
 });
+
+test('startOpenCodeRun reads usage off a step_finish part when the JSON stream carries one', async () => {
+  // Schema-derived (OpenCode's OpenAPI `StepFinishPart`: tokens + cost), not
+  // live-measured — no provider is configured on the machine that wrote this.
+  const { dir, bin } = fakeBin(`
+    console.log(JSON.stringify({ type: 'text', part: { type: 'text', text: 'answer' } }));
+    console.log(JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', reason: 'stop', cost: 0.01, tokens: { input: 10, output: 5, reasoning: 1, cache: { read: 2, write: 3 } } } }));
+  `);
+  try {
+    const result = await startOpenCodeRun({ jobId: 'j-usage', cwd: dir, prompt: 'hello', env: { ...process.env, OPENCODE_BIN: bin } });
+    assert.equal(result.status, 'completed');
+    assert.deepEqual(result.summary.usage, {
+      source: 'opencode-cli',
+      input_tokens: 10, output_tokens: 5, cached_input_tokens: 2,
+      cache_write_input_tokens: 3, reasoning_output_tokens: 1, total_tokens: 15,
+      cost: 0.01, cost_unit: 'usd',
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const { dir: dir2, bin: bin2 } = fakeBin(`
+    console.log(JSON.stringify({ type: 'text', part: { type: 'text', text: 'answer' } }));
+  `);
+  try {
+    const result = await startOpenCodeRun({ jobId: 'j-no-usage', cwd: dir2, prompt: 'hello', env: { ...process.env, OPENCODE_BIN: bin2 } });
+    assert.equal('usage' in result.summary, false);
+  } finally {
+    rmSync(dir2, { recursive: true, force: true });
+  }
+});

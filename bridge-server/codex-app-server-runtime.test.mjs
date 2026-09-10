@@ -316,6 +316,85 @@ test('the accumulator streams deltas, folds a command, and completes on turn/com
   });
 });
 
+const tokenBreakdown = (input, output, cached, reasoning, total) => ({
+  inputTokens: input, outputTokens: output, cachedInputTokens: cached, reasoningOutputTokens: reasoning, totalTokens: total,
+});
+
+test('the accumulator reads thread/tokenUsage/updated as THIS turn\'s usage, baselined against the thread total', () => {
+  const acc = createCodexTurnAccumulator(TID);
+  assert.equal('usage' in acc.snapshot(), false, 'nothing reported yet is no usage key, not zeros');
+  // A resumed thread that already spent 5000/800 before this turn.
+  acc.push(note('thread/tokenUsage/updated', { threadId: TID, turnId: 'TURN2', tokenUsage: {
+    total: tokenBreakdown(6000, 900, 4900, 110, 6900), last: tokenBreakdown(1000, 100, 900, 10, 1100),
+  } }));
+  assert.deepEqual(acc.snapshot().usage, {
+    source: 'codex-app-server',
+    input_tokens: 1000, output_tokens: 100, cached_input_tokens: 900,
+    cache_write_input_tokens: null, reasoning_output_tokens: 10, total_tokens: 1100,
+  });
+  // The second model call of the same turn accumulates against the same baseline.
+  acc.push(note('thread/tokenUsage/updated', { threadId: TID, turnId: 'TURN2', tokenUsage: {
+    total: tokenBreakdown(7200, 1150, 6000, 140, 8350), last: tokenBreakdown(1200, 250, 1100, 30, 1450),
+  } }));
+  assert.equal(acc.snapshot().usage.input_tokens, 2200);
+  assert.equal(acc.snapshot().usage.total_tokens, 2550);
+  // Another thread's usage never lands here.
+  acc.push(note('thread/tokenUsage/updated', { threadId: 'T-OTHER', turnId: 'X', tokenUsage: {
+    total: tokenBreakdown(99999, 99999, 0, 0, 199998), last: tokenBreakdown(99999, 99999, 0, 0, 199998),
+  } }));
+  assert.equal(acc.snapshot().usage.input_tokens, 2200);
+  acc.push(note('turn/completed', { threadId: TID, turn: { id: 'TURN2', status: 'completed', items: [] } }));
+  assert.equal(acc.snapshot().usage.total_tokens, 2550, 'usage survives the terminal');
+});
+
+test('a tokenUsage frame spelt any way but the schema\'s cannot be written down', () => {
+  assert.throws(() => note('thread/tokenUsage/updated', { threadId: TID, turnId: 'T', tokenUsage: { total: { input_tokens: 1 } } }), /schema/);
+  assert.throws(() => note('thread/tokenUsage/updated', { threadId: TID, turnId: 'T', usage: {} }), /schema/);
+});
+
+test('the watcher carries usage into the terminal summary, and a watch attached mid-turn flags it partial', async () => {
+  const { conn, sock } = await connectFake();
+  const watcher = await openCodexTurnWatcher({ conn, threadId: TID, timeoutMs: 5000 });
+  sock.notify('thread/tokenUsage/updated', { turnId: 'TURN1', tokenUsage: {
+    total: tokenBreakdown(100, 20, 0, 5, 120), last: tokenBreakdown(100, 20, 0, 5, 120),
+  } });
+  sock.notify('item/completed', { item: threadItem('agentMessage', { id: 'm1', text: 'done', phase: 'final_answer' }) });
+  sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+  const result = await watcher.done;
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.summary.usage, {
+    source: 'codex-app-server',
+    input_tokens: 100, output_tokens: 20, cached_input_tokens: 0,
+    cache_write_input_tokens: null, reasoning_output_tokens: 5, total_tokens: 120,
+  });
+  conn.close();
+
+  // A bridge that arrives mid-turn saw only part of it. The watcher cannot know
+  // that by itself — the caller does — so it is told, and says so.
+  const late = await connectFake();
+  const w2 = await openCodexTurnWatcher({ conn: late.conn, threadId: TID, timeoutMs: 5000 });
+  w2.markUsagePartial();
+  late.sock.notify('thread/tokenUsage/updated', { turnId: 'TURN1', tokenUsage: {
+    total: tokenBreakdown(4000, 500, 3000, 50, 4500), last: tokenBreakdown(300, 40, 200, 4, 340),
+  } });
+  late.sock.notify('item/completed', { item: threadItem('agentMessage', { id: 'm1', text: 'tail', phase: 'final_answer' }) });
+  late.sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+  const r2 = await w2.done;
+  assert.equal(r2.summary.usage.partial, true);
+  assert.equal(r2.summary.usage.input_tokens, 300, 'only the calls this bridge observed');
+  late.conn.close();
+
+  // No frames means no usage — a `partial` mark on nothing is still nothing.
+  const none = await connectFake();
+  const w3 = await openCodexTurnWatcher({ conn: none.conn, threadId: TID, timeoutMs: 5000 });
+  w3.markUsagePartial();
+  none.sock.notify('item/completed', { item: threadItem('agentMessage', { id: 'm1', text: 'x', phase: 'final_answer' }) });
+  none.sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
+  const r3 = await w3.done;
+  assert.equal('usage' in r3.summary, false);
+  none.conn.close();
+});
+
 test('a delta spelt any way but the schema\'s cannot be written down', () => {
   // The guard, asserted directly: these four were live reads in the accumulator,
   // each with a green test feeding the same invention back to it. The builder is

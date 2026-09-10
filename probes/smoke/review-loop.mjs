@@ -143,6 +143,11 @@ try {
     /sum\.mjs/.test(body1) && /(subtract|a - b|minus|difference)/i.test(body1),
     body1.replace(/\s+/g, ' ').slice(0, 200));
 
+  const usage1 = final1?.meta?.usage;
+  check('round one\'s usage was read off thread/tokenUsage/updated into meta.usage',
+    usage1?.source === 'codex-app-server' && usage1.input_tokens > 0 && usage1.output_tokens > 0 && !usage1.partial,
+    JSON.stringify(usage1));
+
   const row1 = readLedger(job1);
   threadId = row1?.companionSessionId || null;
   check('round one opened a FRESH codex thread (no prior sid on this thread)',
@@ -179,6 +184,15 @@ try {
   check('round two verdict was parsed (agree|disagree, never guessed)',
     final2?.meta?.verdict === 'agree' || final2?.meta?.verdict === 'disagree',
     `verdict=${JSON.stringify(final2?.meta?.verdict)} reason=${final2?.meta?.verdict_reason ?? ''}`);
+
+  // On the resumed thread the app-server's `total` is thread-cumulative; the
+  // bridge baselines it, so this is round TWO's spend, and not partial — the
+  // fresh bridge started this turn itself.
+  const usage2 = final2?.meta?.usage;
+  check('round two\'s usage is this turn\'s own, on the resumed thread',
+    usage2?.source === 'codex-app-server' && usage2.input_tokens > 0 && usage2.output_tokens > 0 && !usage2.partial
+      && usage2.input_tokens < (usage1?.input_tokens ?? 0) * 3,
+    JSON.stringify(usage2));
 
   const row2 = readLedger(job2);
   check('round two RESUMED round one\'s codex thread — same companionSessionId',
