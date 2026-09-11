@@ -3726,6 +3726,144 @@ test('handleReply preserves fleet on the reply terminal notification (regression
   });
 });
 
+// ---- TRACK: acp-generic ----
+//
+// The bridge's daemon path is keyed on the descriptor (`capabilities.acp`),
+// not on the companion id. These pin what every ACP companion gets from the
+// bridge — the protocol-mismatch verdict, the honest reply acknowledgement,
+// a real detached daemon end to end — on the one shipped ACP companion.
+
+async function withAcpSession(sid, body) {
+  const mod = await bridge();
+  const state = await import('../lib/state.mjs');
+  mod._resetForTest();
+  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = sid;
+  try {
+    return await body(mod, state);
+  } finally {
+    for (const id of [...mod.jobs.keys()]) if (mod.jobs.get(id)?.claudeSessionId === sid) { try { state.deleteJob(id); } catch {} mod.jobs.delete(id); }
+    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
+    mod._resetForTest();
+  }
+}
+
+test('acp: an agent answering another protocol version settles the job unreachable, named, in the runtime_unavailable class', async () => {
+  await withAcpSession('sid-acp-proto', async (mod) => {
+    const { dispatch } = mod;
+    const terminal = await withDaemonStubs({
+      ensureDaemon: async () => {},
+      sendToSocket: async (msg) => {
+        if (msg.command === 'prompt-bg') {
+          return {
+            ok: false, code: 'ACP_PROTOCOL_MISMATCH',
+            error: 'GitHub Copilot CLI answered protocolVersion 2; this daemon pins 1 and does not adapt (agent: Copilot 9.0.0)',
+            data: { protocol: { pinned: 1, answered: 2, status: 'mismatch' } },
+          };
+        }
+        return { ok: true, data: {} };
+      },
+    }, async () => {
+      const send = parse(await dispatch({ action: 'send', target: 'copilot', task: 'hello', mode: 'EXECUTE', template: 'general', cwd: TEST_CWD, host_session_id: 'sid-acp-proto', parallel: 'never', max_wait_sec: 5 }));
+      assert.equal(send.status, 'still_running');
+      return parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-acp-proto', max_wait_sec: 5 }));
+    });
+    assert.equal(terminal.status, 'unreachable');
+    assert.equal(terminal.meta.detail, 'acp_protocol_mismatch');
+    assert.equal(terminal.meta.failure_class, 'runtime_unavailable');
+    assert.equal(terminal.meta.protocol_answered, '2');
+    assert.match(terminal.content, /answered protocolVersion 2/);
+    assert.match(terminal.content, /pins 1/);
+    assert.match(terminal.content, /node scripts\/doctor.mjs/, 'the body says what to do next');
+  });
+});
+
+test('acp: the reply acknowledgement says the turn was cancelled and re-prompted — ACP has no mid-turn steer', async () => {
+  await withAcpSession('sid-acp-reply', async (mod) => {
+    const { dispatch, jobs } = mod;
+    jobs.set('acp-reply-1', {
+      jobId: 'acp-reply-1', target: 'copilot', reqId: 'req-ar', claudeSessionId: 'sid-acp-reply',
+      thread: 'thread-acp-reply', task: 'original task', mode: 'EXECUTE', template: 'general', parallel: 'never',
+      status: 'running', promptId: 'ap-old', sessionId: 'acp-sess-r', startedAt: Date.now() - 1000, inspectAvailable: true,
+    });
+    const body = await withDaemonStubs({
+      sendToSocket: async (msg) => {
+        if (msg.command === 'reply') return { ok: true, data: { ok: true, original_prompt_id: 'ap-old', new_prompt_id: 'ap-new', session_id: 'acp-sess-r' } };
+        if (msg.command === 'watch') return { ok: true, data: { promptId: 'ap-new', sessionId: 'acp-sess-r', status: 'completed', summary: { message: 'continued\n\nRUBBER-DUCK: clean.', toolCalls: [] } } };
+        return { ok: true, data: {} };
+      },
+    }, async () => parse(await dispatch({ action: 'reply', job_id: 'acp-reply-1', message: 'use this instead', host_session_id: 'sid-acp-reply' })));
+    assert.equal(body.ok, true);
+    assert.match(body.hint, /cancelled/);
+    assert.match(body.hint, /no mid-turn steer/);
+    assert.match(body.hint, /same GitHub Copilot CLI session/);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(jobs.get('acp-reply-1').status, 'completed');
+  });
+});
+
+test('acp: the agent_send target enum is the registry, not a literal', async () => {
+  const { mcp } = await bridge();
+  const tools = await mcp._requestHandlers.get('tools/list')({ method: 'tools/list', params: {} });
+  const send = tools.tools.find((t) => t.name === 'agent_send');
+  assert.deepEqual(send.inputSchema.properties.target.enum, ['opencode', 'copilot', 'codex']);
+});
+
+// End to end through a REAL detached daemon and the fake agent: the bridge
+// spawns `scripts/acp-daemon.mjs --companion copilot` under the sandboxed
+// runtime dir, the daemon spawns test/fake-acp-agent.mjs as `copilot`
+// (COPILOT_BIN), and a send/wait pair settles — no stubs anywhere below the
+// bridge. The second send on the same thread reuses the ACP session.
+test('acp: end to end through a real detached daemon and the fake agent — one daemon, one session, two sends', async (t) => {
+  const { fakeAcpAgentBin } = await import('../test/fake-acp-agent.mjs');
+  const { daemonSocketPath, daemonLogFile, promptEventsPath } = await import('../lib/runtime-paths.mjs');
+  const daemonClient = await import('./daemon-client.mjs');
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'ac-acp-e2e-'));
+  const fakeBin = fakeAcpAgentBin(fixtureDir);
+  const cwd = mkdtempSync(join(tmpdir(), 'ac-acp-cwd-'));
+  const oldBin = process.env.COPILOT_BIN;
+  process.env.COPILOT_BIN = fakeBin;
+  t.after(async () => {
+    try { await daemonClient.sendToSocket({ command: 'stop' }, 2000, 'copilot'); } catch {}
+    if (oldBin === undefined) delete process.env.COPILOT_BIN; else process.env.COPILOT_BIN = oldBin;
+    rmSync(fixtureDir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  });
+  await withAcpSession('sid-acp-e2e', async (mod, state) => {
+    const { dispatch, jobs } = mod;
+    const send = parse(await dispatch({ action: 'send', target: 'copilot', task: 'what is the magic word?', mode: 'ANALYZE', template: 'general', cwd, host_session_id: 'sid-acp-e2e', parallel: 'never', max_wait_sec: 5 }));
+    assert.equal(send.status, 'still_running', JSON.stringify(send));
+    const first = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-acp-e2e', max_wait_sec: 20 }));
+    assert.equal(first.status, 'completed', JSON.stringify(first).slice(0, 600));
+    assert.match(first.content, /ready/);
+    assert.equal('usage' in first.meta, false, 'the Copilot descriptor reads OTEL, and the fake writes none: absent, never zeroed');
+    assert.equal(first.meta.session_id, 'fake-sess-1');
+    assert.equal(existsSync(daemonSocketPath('copilot')), true);
+    assert.equal(existsSync(daemonLogFile('copilot')), true);
+    assert.equal(existsSync(promptEventsPath(first.meta.prompt_id, 'copilot')), true);
+    assert.match(readFileSync(first.meta.debug_digest_path, 'utf8'), /^# GitHub Copilot CLI job /);
+
+    // The registry recorded the daemon this bridge adopted, pid and all.
+    const status = parse(await dispatch({ action: 'status', host_session_id: 'sid-acp-e2e' }));
+    assert.equal(status.acp_daemons.copilot.socketPath, daemonSocketPath('copilot'));
+    assert.ok(Number.isInteger(status.acp_daemons.copilot.pid) && status.acp_daemons.copilot.pid > 0);
+
+    // Round two on the same thread: the recorded session continues.
+    const again = parse(await dispatch({ action: 'send', target: 'copilot', task: 'and again?', mode: 'ANALYZE', template: 'general', cwd, thread: send.thread, host_session_id: 'sid-acp-e2e', parallel: 'never', max_wait_sec: 5 }));
+    const second = parse(await dispatch({ action: 'wait', job_id: again.job_id, host_session_id: 'sid-acp-e2e', max_wait_sec: 20 }));
+    assert.equal(second.status, 'completed', JSON.stringify(second).slice(0, 600));
+    assert.equal(second.meta.session_id, 'fake-sess-1', 'same ACP session');
+    assert.equal(second.meta.session_reborn, undefined);
+    const daemonStatus = await daemonClient.sendToSocket({ command: 'status' }, 2000, 'copilot');
+    assert.equal(daemonStatus.data.sessions.find((s) => s.sessionId === 'fake-sess-1').promptCount, 2);
+    assert.equal(daemonStatus.data.companion, 'copilot');
+    assert.deepEqual(daemonStatus.data.protocol, { pinned: 1, answered: 1, status: 'match' });
+    for (const id of [send.job_id, again.job_id]) { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    state.clearThread(send.thread);
+  });
+});
+
 // ---- TRACK: codex-adapter ----
 //
 // W1.1 at the worker seam: runSingleShotCliWorker must bank the codex thread

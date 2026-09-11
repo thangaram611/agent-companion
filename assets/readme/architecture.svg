@@ -103,8 +103,8 @@
 
   <rect x="1198" y="524" width="242" height="54" rx="18" fill="#FFF7ED" stroke="#F59E0B"/>
   <circle cx="1226" cy="551" r="7" fill="#F59E0B"/>
-  <text x="1246" y="546" class="mono code">copilot-runtime</text>
-  <text x="1246" y="566" class="mono tinyDim">acp · sdk</text>
+  <text x="1246" y="546" class="mono code">acp-runtime</text>
+  <text x="1246" y="566" class="mono tinyDim">copilot · acp | sdk</text>
 
   <rect x="1198" y="588" width="242" height="54" rx="18" fill="#EEF0FF" stroke="#818CF8"/>
   <circle cx="1226" cy="615" r="7" fill="#818CF8"/>
@@ -122,7 +122,7 @@
   <text x="158" y="796" class="sans body">One per host home; they outlive the bridge.</text>
 
   <rect x="700" y="756" width="240" height="52" rx="26" fill="#FFFFFF" stroke="#F59E0B"/>
-  <text x="820" y="788" text-anchor="middle" class="mono pillTxt">copilot-acp-daemon</text>
+  <text x="820" y="788" text-anchor="middle" class="mono pillTxt">acp-daemon</text>
   <rect x="956" y="756" width="240" height="52" rx="26" fill="#FFFFFF" stroke="#14B8A6"/>
   <text x="1076" y="788" text-anchor="middle" class="mono pillTxt">opencode serve</text>
   <rect x="1212" y="756" width="228" height="52" rx="26" fill="#FFFFFF" stroke="#818CF8"/>

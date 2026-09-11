@@ -2,8 +2,9 @@
 // agent-bridge MCP server (subagent-oriented, target-generic architecture)
 //
 // MCP tools: agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
-// agent_send takes an optional `target` (opencode | copilot | codex); omitting
-// it uses the configured default target, and there is no silent fallback.
+// agent_send takes an optional `target` (opencode | copilot | codex | gemini);
+// omitting it uses the configured default target, and there is no silent
+// fallback.
 // No start/stop/pause/session-gate. Claude owns this server through the
 // standalone subagent's frontmatter; Codex registers it at plugin/session scope
 // because agent roles cannot add MCP authority. The subagent is the only
@@ -63,7 +64,13 @@ import {
   replyPrompt,
   selectedRuntimeAdapter,
   runtimeSupportsDetachedPromptResume,
-} from './copilot-runtime.mjs';
+} from './acp-runtime.mjs';
+import {
+  syncAcpDaemonLeases,
+  reapIdleAcpDaemon,
+  acpDaemonSnapshot,
+  acpDaemonIdleTtlMs,
+} from './daemon-client.mjs';
 import {
   log,
   formatPrompt,
@@ -154,6 +161,7 @@ import {
   defaultTargetId,
   getTarget,
   listTargets,
+  listTargetIds,
   daemonAdapterFor,
 } from '../lib/target-registry.mjs';
 
@@ -172,6 +180,25 @@ const CLI_RUNTIMES = {
   opencode: { start: runOpenCodeWorker, cancel: cancelOpenCodeRun, info: openCodeRuntimeInfo },
   codex:    { start: runCodexWorker,    cancel: cancelCodexRun,    info: codexRuntimeInfo },
 };
+
+// The ACP companions — everything the daemon path serves (Copilot, Gemini).
+// Keyed on the descriptor's `capabilities.acp`, never on an id: a new ACP
+// companion is a descriptor plus a daemon socket, not a branch here. The two
+// Copilot-only extras key on their own descriptor fields the same way —
+// `/fleet` on `capabilities.parallel`, the rubber-duck wrapper on
+// `acp.rubberDuck` — so a job on a second ACP companion gets neither.
+// `getTarget('')` would resolve the DEFAULT target, so an empty id is refused
+// here rather than silently reading as whatever the default happens to be.
+function isAcpTarget(target) {
+  return Boolean(target) && getTarget(target)?.capabilities?.acp === true;
+}
+function fleetCapable(target) {
+  return Boolean(target) && getTarget(target)?.capabilities?.parallel === 'fleet';
+}
+function rubberDuckTarget(target) {
+  return Boolean(target) && getTarget(target)?.acp?.rubberDuck === true;
+}
+const ACP_TARGET_IDS = listTargetIds().filter(isAcpTarget);
 
 // --- Queue (replaces dev-channel notifications) -----------------------------
 
@@ -331,6 +358,12 @@ const OPENCODE_SERVER_IDLE_TTL_MS = openCodeServerIdleTtlMs();
 // broker's own three gates do not cover on their own.
 const CODEX_BROKER_IDLE_TTL_MS = codexBrokerIdleTtlMs();
 
+// And for each ACP daemon: the daemon runs its own inactivity reaper (no
+// prompt in flight, no beating host heartbeat), and this is the bridge-side
+// backstop that disposes one whose leases have all gone — the third shared
+// runtime, the same two-reaper shape as the broker.
+const ACP_DAEMON_IDLE_TTL_MS = acpDaemonIdleTtlMs();
+
 const jobsGcTimer = setInterval(() => {
   gcExpiredJobs();
   const liveOpenCodeServerJobs = [...jobs.entries()]
@@ -357,6 +390,19 @@ const jobsGcTimer = setInterval(() => {
     idleMs: CODEX_BROKER_IDLE_TTL_MS,
     hasLiveJobs: liveCodexAppServerJobs.length > 0,
   })).catch(() => {});
+  for (const companion of ACP_TARGET_IDS) {
+    // A job holds a lease once its prompt is registered on the daemon — a
+    // `starting` job has nothing on it yet — and until it settles.
+    const live = [...jobs.entries()]
+      .filter(([, j]) => j.target === companion && j.promptId && !j.terminalAt)
+      .map(([jobId]) => jobId);
+    try { syncAcpDaemonLeases(companion, live); }
+    catch (err) { log('WARN', `${companion} acp daemon lease sync failed:`, err.message); }
+    Promise.resolve(reapIdleAcpDaemon(companion, {
+      idleMs: ACP_DAEMON_IDLE_TTL_MS,
+      hasLiveJobs: live.length > 0,
+    })).catch(() => {});
+  }
 }, JOB_GC_INTERVAL_MS);
 if (jobsGcTimer.unref) jobsGcTimer.unref();
 
@@ -448,7 +494,7 @@ function retainTerminalJob(jobId, patch) {
   Object.assign(job, patch, {
     terminalAt,
     retentionExpiresAt: terminalAt + JOB_RETENTION_MS,
-    inspectAvailable: (patch.target || job.target) === 'copilot' && Boolean(job.promptId || patch.promptId),
+    inspectAvailable: isAcpTarget(patch.target || job.target) && Boolean(job.promptId || patch.promptId),
   });
   // Every adapter settles here, so this is where a review's verdict is read
   // once and stored: the wait envelope, the digest and the ledger all render
@@ -740,6 +786,7 @@ async function fetchPromptInspect(job, { includeTimeline = false, limit = 40 } =
     promptId: job.promptId,
     includeTimeline,
     limit: normalizeInspectLimit(limit),
+    companion: job.target || 'copilot',
   });
   if (!resp.ok) throw new Error(`inspect failed: ${resp.error}`);
   return resp.data;
@@ -814,12 +861,14 @@ function writeJobDigest(job, result = null) {
 // blocks a response on a digest write.
 export function refreshDigestForJob(job, statusOverride = null) {
   if (!job || !job.promptId || !job.jobId) return null;
-  if (job.target && job.target !== 'copilot') {
+  if (job.target && !isAcpTarget(job.target)) {
     return writeJobDigest({ ...job, status: statusOverride || job.status || 'running' }, job.adapterResult || null);
   }
   try {
     return writeDigest(job.promptId, {
       jobId:      job.jobId,
+      target:     job.target || 'copilot',
+      targetLabel: targetLabel(job.target || 'copilot'),
       status:     statusOverride || job.status || 'running',
       mode:       job.mode || null,
       template:   job.template || null,
@@ -961,7 +1010,7 @@ function digestResourceLinkForResult(obj) {
 function jobReplyAvailable(job) {
   if (!job || job.terminalAt) return false;
   const target = job.target;
-  if (target === 'copilot') return Boolean(job.promptId);
+  if (isAcpTarget(target)) return Boolean(job.promptId);
   if (target === 'opencode') return Boolean(job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId);
   if (target === 'codex') return Boolean(job.codexAdapter === 'appserver' && job.sessionId);
   return false;
@@ -976,7 +1025,7 @@ function jobReplyAvailable(job) {
 function jobResumeAvailable(job) {
   if (!job) return false;
   const target = job.target;
-  if (target === 'copilot') return Boolean(job.promptId && runtimeSupportsDetachedPromptResume());
+  if (isAcpTarget(target)) return Boolean(job.promptId && runtimeSupportsDetachedPromptResume(target));
   if (target === 'opencode') return Boolean(job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId);
   if (target === 'codex') return Boolean(job.codexAdapter === 'appserver' && job.sessionId);
   return false;
@@ -1153,6 +1202,7 @@ function buildWaitResponse(outcome) {
   if (job.sessionRetired) meta.session_retired = 'true';
   if (job.reattached) meta.reattached = 'true';
   if (job.existingPromptId) meta.existing_prompt_id = String(job.existingPromptId);
+  if (job.protocolAnswered !== undefined && job.protocolAnswered !== null) meta.protocol_answered = String(job.protocolAnswered);
   // A completed review's verdict, as stored by retainTerminalJob: `null` is a
   // real value here (the line was missing/malformed/conflicting — see
   // `verdict_reason`), so the key is present whenever the job carries one.
@@ -1196,12 +1246,12 @@ function emitAlertNotification({ jobId, task, promptId, alert, startedAt, reqId 
 // in long-running threads. emitNotification's session_reborn meta + the
 // formatTerminalContent banner are belt-and-suspenders for callers that
 // don't drain alerts.
-function emitRebirthAlert({ jobId, task, promptId, thread, previousSid, newSessionId, startedAt, reqId = null }) {
+function emitRebirthAlert({ jobId, task, promptId, thread, previousSid, newSessionId, startedAt, reqId = null, target = 'copilot' }) {
   const ageSec = Math.round((Date.now() - startedAt) / 1000);
   const content = [
     `Task: ${truncate(task, 200)}`,
     '',
-    '**Copilot session respawned** — the prior subprocess died, in-process conversation context was lost.',
+    `**${targetLabel(target)} session respawned** — the prior subprocess died, in-process conversation context was lost.`,
     '',
     `**thread:** ${thread || '(none)'}  |  **prev sid:** ${previousSid || '(none)'}  |  **new sid:** ${newSessionId}`,
     '',
@@ -1253,6 +1303,9 @@ const RUNTIME_UNAVAILABLE_DETAILS = new Set([
   'bridge_daemon_unreachable',
   'codex_code_mode_host_unavailable',
   'codex_runtime_unavailable',
+  // The ACP agent answered `initialize` with a protocol version this daemon
+  // does not speak; definitive, bridge-owned, and about the runtime.
+  'acp_protocol_mismatch',
 ]);
 
 // The runtime is not there to be run: spawn could not find/exec it, or the
@@ -1504,9 +1557,11 @@ export function formatTerminalContent({
       : '';
     const targetDigestLine = digestHint('It contains any captured assistant output, raw stdout/stderr, and job metadata.');
     const digestLine = digestHint(
-      'It contains the partial assistant message, /fleet sub-agent reports (often near-complete), files touched, and todos. ' +
+      (fleetCapable(target)
+        ? 'It contains the partial assistant message, /fleet sub-agent reports (often near-complete), files touched, and todos. '
+        : 'It contains the partial assistant message, files touched, and todos. ') +
       'You may be able to finalise from the digest alone, or use it to scope a much smaller follow-up send.');
-    if (target !== 'copilot') {
+    if (!isAcpTarget(target)) {
       const timeoutEnv = getTarget(target)?.timeoutEnv || 'AGENT_COMPANION_OPENCODE_TIMEOUT_MS';
       return taskHeader +
         `${label} did not finish within the target timeout (${Math.round(duration / 1000)}s).\n\n` +
@@ -1525,8 +1580,10 @@ export function formatTerminalContent({
       '- Read the partial-transcript digest resource URI below — sub-agent reports may already cover the work.\n' +
       '- Decompose the task into smaller, explicitly-scoped sub-sends (target ≤ ~100 LOC of source per send).\n' +
       '- For ANALYZE on large files, pass `template_args.scope_hint` (e.g. "imports/types only", "lines 1-120") to bind the analysis to a specific section.\n' +
-      '- Raise `max_wait_sec` (cap 1200s / 20 min for all modes) if the task is genuinely long.\n' +
-      "- Try `parallel: \"never\"` once if you suspect /fleet's coordination overhead is the bottleneck for a strictly linear task." +
+      '- Raise `max_wait_sec` (cap 1200s / 20 min for all modes) if the task is genuinely long.' +
+      (fleetCapable(target)
+        ? "\n- Try `parallel: \"never\"` once if you suspect /fleet's coordination overhead is the bottleneck for a strictly linear task."
+        : '') +
       failedLine + digestLine + retiredLine;
   }
   if (status === 'unreachable') {
@@ -1585,6 +1642,15 @@ export function formatTerminalContent({
           `and re-send after restarting the Codex runtime. Read ${digestPointer} for the captured turn.` +
           classLine + partialEvidence;
       }
+      if (detail === 'acp_protocol_mismatch') {
+        // The reason lives on `error`, not on a captured channel: say it.
+        return taskHeader +
+          `The ${label} ACP agent answered a protocol version this bridge does not speak${detailLine}.\n\n` +
+          `${unwrapErrorMessage(error) || 'The daemon refused the handshake.'}\n\n` +
+          'The daemon pins ACP v1 and does not adapt — the v2 draft renames methods, so guessing would send calls the ' +
+          `agent does not have. Install a ${label} release that speaks v1 (or wait for this bridge to adopt the new ` +
+          'version), run `node scripts/doctor.mjs`, and re-send.' + classLine + channels;
+      }
       if (detail === 'codex_runtime_unavailable') {
         return taskHeader +
           `The Codex app-server runtime was unavailable before a task turn could start${detailLine}.\n\n` +
@@ -1595,8 +1661,8 @@ export function formatTerminalContent({
       // The one class where the binary really is the suspect, and therefore
       // the only one allowed to name `descriptor.binaryEnv`. Wording unchanged.
       let runtimeHint;
-      if (target === 'copilot') {
-        runtimeHint = `check \`ps -ef | grep copilot-acp-daemon\` and tail \`${bridgeLogFile()}\` / \`${daemonLogFile()}\` to confirm the daemon is alive.`;
+      if (isAcpTarget(target)) {
+        runtimeHint = `check \`ps -ef | grep acp-daemon\` and tail \`${bridgeLogFile()}\` / \`${daemonLogFile(target)}\` to confirm the ${label} daemon is alive.`;
       } else {
         // Descriptor-driven, not a hardcoded "for OpenCode" lead-in — reachable
         // for any non-copilot target whose binary is missing or not executable.
@@ -1731,13 +1797,14 @@ export function emitNotification({
   // → stuck) we did above. The resource URI is stable per jobId; surface it
   // whether or not the write succeeded so the parent always knows where to look.
   if (promptId && jobId) {
-    if (target && target !== 'copilot') {
+    if (target && !isAcpTarget(target)) {
       try { refreshDigestForJob(jobs.get(jobId), status); }
       catch (err) { log('WARN', 'emit generic digest write failed:', jobId, err.message); }
     } else {
       try {
         writeDigest(promptId, {
           jobId, status, mode, template: null, thread, parallel: !!fleet,
+          target, targetLabel: label,
           task, sessionId, startedAt: duration ? Date.now() - duration : null,
           terminalAt: Date.now(),
           verdict: verdictFields?.verdict, verdictReason: verdictFields?.verdictReason ?? null,
@@ -1762,7 +1829,7 @@ export function emitNotification({
   });
 
   enqueueEvent({ kind: 'terminal', jobId, content, meta });
-  if (target === 'copilot' && status === 'completed' && rubberDuck === 'missing') {
+  if (rubberDuckTarget(target) && status === 'completed' && rubberDuck === 'missing') {
     log('WARN', 'emit:', jobId, 'rubber_duck verdict missing from completed message — Copilot output drifted from wrapper contract');
   }
   log('INFO', 'emit:', jobId, `status=${status} duration_ms=${duration}${status === 'completed' ? ` rubber_duck=${rubberDuck}` : ''}${stuckReason ? ` stuck=${stuckReason}` : ''}${detail ? ` detail=${detail}` : ''}${bridgeReason ? ` bridge=${bridgeReason}` : ''}`);
@@ -1811,21 +1878,30 @@ function reviewVerdictFields({ template, status, summary }) {
 
 const MAX_JOB_MS = 40 * 60 * 1000;
 
-async function runWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, profileId = null, model, previousSid, parallel }) {
+// The ACP worker: one prompt on the companion's daemon, driven to terminal by
+// runWatchLoop. Every companion-shaped decision is a descriptor read — the
+// daemon the prompt lands on (`target`), whether `/fleet` may be prepended
+// (`capabilities.parallel`), whether the rubber-duck wrapper applies
+// (`acp.rubberDuck`) — so Copilot keeps every behaviour it had and a second
+// ACP companion gets only what its descriptor claims.
+async function runAcpWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, profileId = null, model, previousSid, parallel, target = 'copilot' }) {
   const startedAt = Date.now();
-  const fleet = shouldUseFleet({ parallel, template, mode, task });
-  const rlog = withReq(reqId, { job_id: jobId });
-  rlog.info('worker.start', { mode, template, thread: thread || null, model, cwd: cwd || null, parallel_strategy: parallel, fleet });
-  log('INFO', 'worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} model=${model} cwd=${cwd} parallel=${parallel} fleet=${fleet}`);
+  const fleet = fleetCapable(target) && shouldUseFleet({ parallel, template, mode, task });
+  const rlog = withReq(reqId, { job_id: jobId, target });
+  rlog.info('worker.start', { mode, template, thread: thread || null, model, cwd: cwd || null, parallel_strategy: parallel, fleet, target });
+  log('INFO', 'worker start:', jobId, `req=${reqId} target=${target} mode=${mode} template=${template} thread=${thread || '-'} model=${model} cwd=${cwd} parallel=${parallel} fleet=${fleet}`);
   try {
-    await ensureRuntime({ reqId });
+    await ensureRuntime({ reqId, companion: target });
 
-    let formatted = formatPrompt({ template, task, mode, template_args, parallel });
+    // A companion with no `/fleet` never sees the strategy: formatPrompt would
+    // otherwise prepend `/fleet ` to a task no such agent understands.
+    let formatted = formatPrompt({ template, task, mode, template_args, parallel: fleetCapable(target) ? parallel : 'never' });
     // plan_review and review prompts already embed their own critique
     // instructions and end in a verdict line; layering the generic rubber-duck
     // wrapper on top doubles the prompt size without changing the output.
-    // Every other template still gets the always-on wrapper.
-    if (!RUBBER_DUCK_EXEMPT_TEMPLATES.has(template)) {
+    // Every other template still gets the always-on wrapper — on the companion
+    // whose descriptor asks for it (Copilot); the others are relay-only.
+    if (rubberDuckTarget(target) && !RUBBER_DUCK_EXEMPT_TEMPLATES.has(template)) {
       formatted = appendRubberDuckReview(formatted);
     }
 
@@ -1835,8 +1911,37 @@ async function runWorker({ jobId, reqId, task, mode, template, template_args, cw
       cwd,
       model,
       reqId,
+      companion: target,
     });
     if (!startResp.ok) {
+      // The agent behind the daemon speaks another ACP version. The daemon
+      // refused it (never adapted), so the job settles on the runtime, not on
+      // the task, and the envelope names the version that was answered.
+      if (startResp.code === 'ACP_PROTOCOL_MISMATCH') {
+        const answered = startResp.data?.protocol?.answered ?? null;
+        rlog.warn('worker.acp_protocol_mismatch', { answered });
+        log('WARN', 'worker acp protocol mismatch:', jobId, `target=${target} answered=${answered}`);
+        const duration = Date.now() - startedAt;
+        // On the job, not only in the queue event's extraMeta: the wait
+        // envelope renders from the job, the way `existingPromptId` does.
+        retainTerminalJob(jobId, {
+          status: 'unreachable',
+          detail: 'acp_protocol_mismatch',
+          error: startResp.error || 'the ACP agent answered an unsupported protocol version',
+          protocolAnswered: answered,
+          durationMs: duration,
+          terminalAt: Date.now(),
+        });
+        emitNotification({
+          jobId, status: 'unreachable', summary: null,
+          error: startResp.error || 'the ACP agent answered an unsupported protocol version',
+          stuckReason: null, detail: 'acp_protocol_mismatch',
+          duration, task, mode, cwd, thread,
+          promptId: null, sessionId: null, failedTools: [], reqId, fleet, target,
+          extraMeta: answered === null ? undefined : { protocol_answered: String(answered) },
+        });
+        return;
+      }
       // Daemon-side mutex says another prompt already owns this Copilot
       // sessionId. The bridge reattach guard should normally catch this
       // first, but a race between two send dispatches can still slip
@@ -1871,17 +1976,18 @@ async function runWorker({ jobId, reqId, task, mode, template, template_args, cw
           failedTools: [],
           reqId,
           fleet,
+          target,
           extraMeta: existingPromptId ? { existing_prompt_id: String(existingPromptId) } : undefined,
         });
         return;
       }
       throw new Error(`prompt-bg failed: ${startResp.error}`);
     }
-    const { promptId, sessionId, sessionReborn } = startResp.data;
-    rlog.info('worker.prompt_started', { prompt_id: promptId, session_id: sessionId, session_reborn: !!sessionReborn });
-    log('INFO', 'worker prompt started:', jobId, `promptId=${promptId} sessionId=${sessionId}${sessionReborn ? ' (REBORN)' : ''}`);
+    const { promptId, sessionId, sessionReborn, sessionLoaded } = startResp.data;
+    rlog.info('worker.prompt_started', { prompt_id: promptId, session_id: sessionId, session_reborn: !!sessionReborn, session_loaded: !!sessionLoaded });
+    log('INFO', 'worker prompt started:', jobId, `promptId=${promptId} sessionId=${sessionId}${sessionReborn ? ' (REBORN)' : ''}${sessionLoaded ? ' (LOADED)' : ''}`);
 
-    updateJob(jobId, { promptId, sessionId, status: 'running', inspectAvailable: true, sessionReborn: !!sessionReborn });
+    updateJob(jobId, { promptId, sessionId, status: 'running', inspectAvailable: true, sessionReborn: !!sessionReborn, sessionLoaded: !!sessionLoaded });
 
     if (thread && sessionId) {
       try { writeThreadSid(thread, profileId, sessionId); }
@@ -1889,21 +1995,23 @@ async function runWorker({ jobId, reqId, task, mode, template, template_args, cw
     }
 
     // Surface the rebirth immediately, before the prompt completes. The
-    // parent (Claude/Codex) needs to know that Copilot's in-process
+    // parent (Claude/Codex) needs to know that the companion's in-process
     // conversation context was lost so it can restate any thread context
-    // that matters — Copilot CLI's ACP session/load is process-local
-    // (github/copilot-cli#1767), so cross-process resume isn't possible
-    // at the protocol layer. The terminal emit also tags meta.session_reborn
-    // as belt-and-suspenders for callers that don't drain alerts.
+    // that matters. Copilot CLI's ACP session/load is process-local
+    // (github/copilot-cli#1767), so for it a stale session is always reborn;
+    // an agent whose descriptor honours `session/load` (Gemini) is loaded
+    // instead, and then this never fires. The terminal emit also tags
+    // meta.session_reborn as belt-and-suspenders for callers that don't
+    // drain alerts.
     if (sessionReborn) {
-      emitRebirthAlert({ jobId, task, promptId, thread, previousSid, newSessionId: sessionId, startedAt, reqId });
+      emitRebirthAlert({ jobId, task, promptId, thread, previousSid, newSessionId: sessionId, startedAt, reqId, target });
     }
 
-    await runWatchLoop({ jobId, promptId, sessionId, thread, profileId, task, mode, cwd, startedAt, reqId, sessionReborn: !!sessionReborn, fleet });
+    await runWatchLoop({ jobId, promptId, sessionId, thread, profileId, task, mode, cwd, startedAt, reqId, sessionReborn: !!sessionReborn, fleet, target });
   } catch (err) {
     // Failure before the prompt was registered (ensureDaemon, prompt-bg, etc).
     // No promptId yet → not reconcilable, just record terminal failure.
-    await emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId: null });
+    await emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId: null, target });
   } finally {
     rlog.info('worker.end', { duration_ms: Date.now() - startedAt });
     log('INFO', 'worker end:', jobId, `duration_ms=${Date.now() - startedAt}`);
@@ -2182,7 +2290,7 @@ function finalizeResumedOpenCodeTranscript(job, transcript, reqId, startedAt) {
 // adapters have identical single-shot semantics — only the spawn function
 // differs — so the per-target detail codes derive from `target`. Reuses the
 // shared writeOpenCodeDigest writer (D7: it is already target-neutral). No
-// previousSid read (thread continuity stays copilot-only), no reply/resume.
+// previousSid read (thread continuity stays on the daemon-backed adapters), no reply/resume.
 async function runSingleShotCliWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, model = null, parallel, target, startRun }) {
   const startedAt = Date.now();
   const rlog = withReq(reqId, { job_id: jobId, target });
@@ -2729,12 +2837,12 @@ function finalizeResumedCodexThread(job, { transcript, threadStatus, reqId, star
 // Watch-loop and terminal handling, factored out so a rehydrated bridge can
 // re-attach to a daemon-owned promptId without re-running prompt-bg. Called
 // from runWorker (fresh prompt) and from rehydrate (recovery after restart).
-async function runWatchLoop({ jobId, promptId, sessionId, thread, profileId = null, task, mode, cwd, startedAt, reqId, sessionReborn = false, fleet = false }) {
+async function runWatchLoop({ jobId, promptId, sessionId, thread, profileId = null, task, mode, cwd, startedAt, reqId, sessionReborn = false, fleet = false, target = 'copilot' }) {
   const rlog = withReq(reqId, { job_id: jobId });
   try {
     let result;
     while (true) {
-      result = await awaitTerminal(promptId, 480);
+      result = await awaitTerminal(promptId, 480, target);
       if (result?.interim) {
         emitAlertNotification({ jobId, task, promptId, alert: result.alert, startedAt, reqId });
         // Real-time digest refresh: every supervisor alert (~60s during
@@ -2764,7 +2872,7 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, profileId = nu
 
     if (result.status === 'completed' && isEmptyCompletedSummary(result.summary)) {
       result.status = 'failed';
-      result.error = 'Copilot returned completed without any assistant message, tool calls, or plan updates.';
+      result.error = `${targetLabel(target)} returned completed without any assistant message, tool calls, or plan updates.`;
       result.detail = 'empty_completed';
       retireThreadSid(thread, profileId, sessionId, 'empty_completed');
       result.sessionRetired = true;
@@ -2773,7 +2881,7 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, profileId = nu
     }
 
     if (result.status === 'failed' && result.error === 'empty completed response') {
-      result.error = 'Copilot returned completed without any assistant message, tool calls, or plan updates.';
+      result.error = `${targetLabel(target)} returned completed without any assistant message, tool calls, or plan updates.`;
       result.detail = 'empty_completed';
       retireThreadSid(thread, profileId, sessionId, 'empty_completed');
       result.sessionRetired = true;
@@ -2797,7 +2905,7 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, profileId = nu
     }
 
     const duration = Date.now() - startedAt;
-    const failedTools = failedToolsFromJsonl(promptId);
+    const failedTools = failedToolsFromJsonl(promptId, target);
     retainTerminalJob(jobId, {
       promptId, sessionId,
       status: result.status, summary: result.summary,
@@ -2818,13 +2926,14 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, profileId = nu
       promptId, sessionId, failedTools, reqId, sessionReborn,
       sessionRetired: !!result.sessionRetired,
       fleet,
+      target,
     });
   } catch (err) {
-    await emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId });
+    await emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId, target });
   }
 }
 
-async function emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId }) {
+async function emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId, target = 'copilot' }) {
   const duration = Date.now() - startedAt;
   const job = jobs.get(jobId);
   const promptId = job?.promptId;
@@ -2835,7 +2944,7 @@ async function emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd
     (err && typeof err.code === 'string' && ['ECONNREFUSED', 'ENOENT', 'EPIPE', 'ETIMEDOUT'].includes(err.code)) ||
     /timeout/i.test(err?.message || '')
   );
-  const reconciled = isReconcilableErr ? await reconcileAfterTimeout(promptId) : null;
+  const reconciled = isReconcilableErr ? await reconcileAfterTimeout(promptId, target) : null;
   let status = reconciled?.status ?? 'failed';
   let summary = reconciled?.summary ?? null;
   let error = reconciled?.error ?? err.message;
@@ -2843,7 +2952,7 @@ async function emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd
   let sessionRetired = false;
   if (status === 'completed' && isEmptyCompletedSummary(summary)) {
     status = 'failed';
-    error = 'Copilot returned completed without any assistant message, tool calls, or plan updates.';
+    error = `${targetLabel(target)} returned completed without any assistant message, tool calls, or plan updates.`;
     detail = 'empty_completed';
     retireThreadSid(thread, profileId, currentSessionId, 'empty_completed');
     sessionRetired = true;
@@ -2858,7 +2967,7 @@ async function emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd
     error,
     stuckReason: reconciled?.stuckReason ?? null,
     detail,
-    failedTools: promptId ? failedToolsFromJsonl(promptId) : [],
+    failedTools: promptId ? failedToolsFromJsonl(promptId, target) : [],
     durationMs: duration, terminalAt: Date.now(),
     sessionRetired,
   });
@@ -2872,32 +2981,33 @@ async function emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd
     duration, task, mode, cwd, thread,
     promptId: promptId || null,
     sessionId: currentSessionId || null,
-    failedTools: promptId ? failedToolsFromJsonl(promptId) : [],
+    failedTools: promptId ? failedToolsFromJsonl(promptId, target) : [],
     bridgeReason: reconciled?.bridgeReason || null,
     reconciled: !!reconciled,
     sessionRetired,
     fleet,
     reqId,
+    target,
   });
 }
 
-async function awaitTerminal(promptId, maxWaitSec) {
+async function awaitTerminal(promptId, maxWaitSec, target = 'copilot') {
   // Cap aligned with the daemon's PROMPT_TIMEOUT_MS (25 min). The +120s
   // padding gives the daemon room to return a terminal payload before we
   // give up on the socket roundtrip.
   const timeoutMs = Math.min((maxWaitSec + 120) * 1000, 25 * 60 * 1000);
   const resp = await watchPrompt(
-    { promptId, since: 0, raw: false, wait: maxWaitSec, summaryOnly: true },
+    { promptId, since: 0, raw: false, wait: maxWaitSec, summaryOnly: true, companion: target },
     timeoutMs,
   );
   if (!resp.ok) throw new Error(`await failed: ${resp.error}`);
   return resp.data;
 }
 
-async function reconcileAfterTimeout(promptId) {
+async function reconcileAfterTimeout(promptId, target = 'copilot') {
   try {
     const resp = await watchPrompt(
-      { promptId, since: 0, raw: false, wait: 0, summaryOnly: true },
+      { promptId, since: 0, raw: false, wait: 0, summaryOnly: true, companion: target },
       5_000,
     );
     const data = resp?.ok ? resp.data : null;
@@ -2917,9 +3027,9 @@ async function reconcileAfterTimeout(promptId) {
   }
 }
 
-function failedToolsFromJsonl(promptId) {
+function failedToolsFromJsonl(promptId, target = 'copilot') {
   try {
-    const content = readFileSync(promptEventsPath(promptId), 'utf8');
+    const content = readFileSync(promptEventsPath(promptId, target), 'utf8');
     const byId = new Map();
     const names = new Set();
     for (const line of content.split('\n')) {
@@ -3099,13 +3209,13 @@ async function handleSend(args) {
   // auto-generated companion-<jobId>) reads null and opens fresh. The model was
   // already validated by the capability gate in resolveRouting.
   let previousSid = null;
-  if (target === 'copilot' || (target === 'codex' && codexAppServerActive())) {
+  if (isAcpTarget(target) || (target === 'codex' && codexAppServerActive())) {
     try { previousSid = readThreadSid(thread, profileId); }
     catch (err) { return asJson({ ok: false, error: err.message }); }
   }
 
   const reqId = createReqId();
-  const fleet = target === 'copilot' && shouldUseFleet({
+  const fleet = fleetCapable(target) && shouldUseFleet({
     parallel: args.parallel,
     template: args.template,
     mode: args.mode,
@@ -3137,13 +3247,14 @@ async function handleSend(args) {
   });
   log('INFO', 'agent:send', `job=${jobId} req=${reqId} target=${target} profile=${profileId || '-'} strength=${routedStrength || '-'} template=${args.template} mode=${args.mode} thread=${thread} model=${model || '-'} parallel=${args.parallel} fleet=${fleet}`);
 
-  if (target === 'copilot') {
-    runWorker({
+  if (isAcpTarget(target)) {
+    runAcpWorker({
       jobId, reqId,
       task: args.task, mode: args.mode,
       template: args.template, template_args: args.template_args,
       cwd: args.cwd, thread, profileId, model, previousSid,
       parallel: args.parallel,
+      target,
     }).catch((err) => log('ERROR', 'worker error:', err.message));
   } else if (CLI_RUNTIMES[target]) {
     CLI_RUNTIMES[target].start({
@@ -3209,7 +3320,7 @@ async function handleCancel({ job_id }) {
   const target = job.target;
   if (!job.promptId || job.status === 'starting') return asJson({ ok: false, error: 'job is not yet cancellable' });
   if (job.status !== 'running')                   return asJson({ ok: false, error: `job is ${job.status}` });
-  if (target !== 'copilot') {
+  if (!isAcpTarget(target)) {
     // OpenCode server mode aborts the HTTP session turn; the watch loop then
     // observes session.idle with MessageAbortedError and maps it to cancelled.
     // CLI mode signals the spawned `opencode run` child.
@@ -3312,7 +3423,7 @@ async function handleCancel({ job_id }) {
       error: resp.reason,
     });
   }
-  const resp = await cancelPrompt({ promptId: job.promptId });
+  const resp = await cancelPrompt({ promptId: job.promptId, companion: target });
   // Cancel also surfaces the job via the cancel MCP response, so mark the
   // queue entry consumed to avoid a duplicate drain injection.
   if (resp.data?.cancelled) {
@@ -3559,7 +3670,7 @@ async function handleReply({ job_id, message }) {
         + '`codex exec` is a one-shot pipe with no control channel — cancel or start a new send with the revised prompt.',
     });
   }
-  if (target !== 'copilot') {
+  if (!isAcpTarget(target)) {
     return asJson({
       ok: false,
       action: 'reply',
@@ -3579,7 +3690,7 @@ async function handleReply({ job_id, message }) {
   job.supersededPromptStatus = null;
   persistJob(job_id);
   try {
-    const resp = await replyPrompt({ promptId: originalPromptId, message });
+    const resp = await replyPrompt({ promptId: originalPromptId, message, companion: target });
     if (!resp.ok || !resp.data?.ok) {
       const reason = resp.data?.reason || resp.error || 'reply failed';
       delete job.supersedingPromptId;
@@ -3627,15 +3738,19 @@ async function handleReply({ job_id, message }) {
       reqId,
       sessionReborn: !!job.sessionReborn,
       fleet: !!job.fleet,
+      target,
     }).catch((err) => log('ERROR', 'reply watch loop error:', job_id, err.message));
 
     log('INFO', 'agent:reply', `job=${job_id} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
+    // Said plainly, because it is what happened: ACP has no mid-turn steer,
+    // so a reply on an ACP companion is a cancelled turn and a new prompt on
+    // the same session, told why. Nothing is injected into a running turn.
     return asJson({
       ok: true, action: 'reply', job_id, target,
       original_prompt_id: resp.data.original_prompt_id,
       new_prompt_id: replacementPromptId,
       session_id: replacementSessionId,
-      hint: 'reply accepted. The original turn was cancelled; the follow-up runs as a new prompt on the same Copilot session.',
+      hint: `reply accepted. The original turn was cancelled (ACP has no mid-turn steer); the follow-up runs as a new prompt on the same ${targetLabel(target)} session, told that the previous turn was interrupted on purpose.`,
     });
   } finally {
     job.replyInFlight = false;
@@ -3674,7 +3789,7 @@ async function handleStatus({ job_id, verbose, diagnostics }) {
     const job = getJob(job_id);
     if (!job) return asJson({ ok: false, error: 'unknown job_id' });
     let inspect = null;
-    if (job.promptId && job.target === 'copilot') {
+    if (job.promptId && isAcpTarget(job.target)) {
       try { inspect = await fetchPromptInspect(job, { includeTimeline: verbose }); }
       catch (err) { log('WARN', 'status inspect failed:', job_id, err.message); }
     }
@@ -3700,6 +3815,9 @@ async function handleStatus({ job_id, verbose, diagnostics }) {
     targets: listTargets(),
     strengths: flatStrengths(registry),
     runtime_adapter: selectedRuntimeAdapter(),
+    // The shared-runtime-registry entry for each ACP daemon on this host home
+    // (null until a bridge has adopted one).
+    acp_daemons: Object.fromEntries(ACP_TARGET_IDS.map((id) => [id, acpDaemonSnapshot(id)])),
     opencode_runtime: { ...openCodeRuntimeInfo(), ...openCodeServerRuntimeInfo(), server_pool: openCodeServerPoolSnapshot() },
     codex_runtime: codexRuntimeStatus(),
     default_model: modelInfo,
@@ -3795,9 +3913,9 @@ const MAX_WAIT_FIELD = {
 
 const TARGET_FIELD = {
   type: 'string',
-  enum: ['opencode', 'copilot', 'codex'],
+  enum: listTargetIds(),
   description:
-    'Target agent runtime. Supported now: opencode, copilot, and codex. Omit only when relying on the configured bridge target.',
+    `Target agent runtime. Supported now: ${listTargetIds().join(', ')}. Omit only when relying on the configured bridge target.`,
 };
 
 const AGENT_OUTPUT_SCHEMA = {
@@ -4164,7 +4282,6 @@ export function hydrateJobsFromLedger({ pidAlive: isPidAlive = pidAlive } = {}) 
 
   let claimed = 0;
   let resumed = 0;
-  const canResumeDetachedPrompts = runtimeSupportsDetachedPromptResume();
   for (const persisted of entries) {
     const { companionSessionId, ...rest } = persisted;
     const job = { ...rest };
@@ -4181,6 +4298,9 @@ export function hydrateJobsFromLedger({ pidAlive: isPidAlive = pidAlive } = {}) 
 
     const isTerminal = !!job.terminalAt;
     const target = job.target;
+    // Per target, not per bridge: every ACP daemon is detached except
+    // Copilot's experimental SDK adapter, which has no daemon to rejoin.
+    const canResumeDetachedPrompts = isAcpTarget(target) && runtimeSupportsDetachedPromptResume(target);
 
     // If thread + sessionId are both known but the thread file may not
     // exist (original bridge died before writeThreadSid ran), restore it.
@@ -4189,7 +4309,7 @@ export function hydrateJobsFromLedger({ pidAlive: isPidAlive = pidAlive } = {}) 
     // A codex app-server job's thread id is restored the same way — it is
     // what the next send on that thread resumes; an exec job's is not, there
     // being nothing to resume on that transport.
-    const sidRestorable = target === 'copilot'
+    const sidRestorable = isAcpTarget(target)
       ? (isTerminal || canResumeDetachedPrompts)
       : (target === 'codex' && job.codexAdapter === 'appserver');
     if (sidRestorable && job.thread && job.sessionId && !(isTerminal && job.sessionRetired)) {
@@ -4197,7 +4317,7 @@ export function hydrateJobsFromLedger({ pidAlive: isPidAlive = pidAlive } = {}) 
       catch (err) { log('WARN', 'hydrate writeThreadSid failed:', err.message); }
     }
 
-    if (target !== 'copilot') {
+    if (!isAcpTarget(target)) {
       // Restart-resumability is a per-JOB property, not a per-target one, and
       // `jobResumeAvailable` is already the predicate that answers it on the
       // wire (`resume_available`) — so hydrate asks it rather than keeping a
@@ -4256,6 +4376,7 @@ export function hydrateJobsFromLedger({ pidAlive: isPidAlive = pidAlive } = {}) 
       startedAt: job.startedAt || Date.now(),
       reqId: job.reqId || createReqId(),
       fleet: !!job.fleet,
+      target,
     }).catch((err) => log('ERROR', 'rehydrate watch error:', job.jobId, err.message));
     resumed++;
   }

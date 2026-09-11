@@ -90,7 +90,7 @@ companion runtime boundary.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | OpenCode (cli, default) | `opencode run --format json --dir <cwd>` | yes | yes | yes | yes | no | no |
 | OpenCode (server) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
-| GitHub Copilot CLI | ACP daemon path | yes | yes | yes | yes | yes | yes, with ACP |
+| GitHub Copilot CLI | `copilot --acp` behind the shared ACP daemon | yes | yes | yes | yes | yes (cancel + re-prompt) | yes, with ACP |
 | Codex CLI (exec) | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
 | Codex CLI (app-server, what the templates ship) | `codex app-server` behind a shared broker | yes | yes | yes | yes | yes | yes |
 
@@ -114,6 +114,22 @@ Notes:
     wins either way, and unset leaves OpenCode's configured default in place.
 - Copilot keeps `/fleet` parallel orchestration. `parallel: "auto"` can prepend
   `/fleet` for broad Copilot tasks; OpenCode and Codex remain single-job.
+- The Copilot ACP daemon is a generic ACP daemon, `scripts/acp-daemon.mjs`,
+  run as one detached process **per ACP companion** per host home
+  (`--companion copilot`), with its own socket, log and prompt streams and an
+  entry in `runtime/acp-daemons.json` with leases and a two-phase disposal
+  claim — the codex broker's shape. Everything companion-shaped is the
+  descriptor's `acp` block in `lib/target-registry.mjs`: the spawn argv, extra
+  env, `clientInfo.name`, the default model, whether `session/load` is
+  honoured, the answer to `session/request_permission`, the usage reader and
+  the `session/update` kinds the agent was measured to emit. So a second
+  native ACP agent is a descriptor plus an install/auth block, not a daemon.
+  The daemon pins ACP **v1**; an agent answering another version is refused
+  (`ACP_PROTOCOL_MISMATCH`, the job settles `unreachable`), never adapted. It
+  answers `session/request_permission` itself, from the descriptor's policy,
+  so an agent that asks is never left hanging. Reply on an ACP companion is a
+  cancelled turn plus a new prompt on the same session, told why — ACP has no
+  mid-turn steer and the acknowledgement says so.
 - Codex ships two adapters, selected by `CODEX_RUNTIME_ADAPTER`:
   - `exec` is the single-shot `codex exec --json` adapter — the *code* default,
     but not what you get: both agent templates set
@@ -196,7 +212,13 @@ Notes:
   profile: `AGENT_COMPANION_CODEX_MODEL=<model id>` (a profile's own `model`
   wins); timeout default 40 minutes, override with
   `AGENT_COMPANION_CODEX_TIMEOUT_MS`.
-- Goose and Aider are tracked as future companion adapter candidates.
+- The next ACP companion is a descriptor away. Gemini CLI was built and
+  measured against the generic daemon on 2026-09-11 and then dropped before
+  shipping: Google closed "Login with Google" for individual accounts on
+  2026-06-18 (AI Studio or Vertex API keys still work), and its successor
+  Antigravity CLI has no ACP mode and a ToS that forbids third-party clients on
+  an Antigravity login — see `docs/MVP_TRACKER.md` item 7 for the evidence and
+  the handoff. Goose is an ACP row; Aider was dropped (stalled, no ACP or MCP).
 
 ## Strength Routing
 
@@ -329,7 +351,7 @@ node scripts/onboard.mjs --set-default-profile <id>
 ```
 
 `--adapter` takes `cli|server` for OpenCode and `exec|appserver` for Codex.
-Copilot has no profile-selectable adapter; its transport is host-level.
+Copilot has no profile-selectable adapter; the ACP daemon is its one transport.
 `--strength` takes a comma-separated subset of `reviewer`, `web_researcher`,
 `planner`, `fast_executor`.
 
@@ -634,13 +656,13 @@ reported nothing has no `usage` key at all, never zeros. Where it comes from:
 | --- | --- |
 | Codex app-server | `thread/tokenUsage/updated`, baselined so a follow-up send on a resumed thread reports its own turn, not the thread. Streams into the digest mid-turn. |
 | Codex exec | `turn.completed.usage` (no total, no model on that stream). |
-| Copilot | The `invoke_agent` span in the OTEL file exporter the daemon enables, keyed by the ACP session id: tokens, cache read/write, reasoning, model and `cost` in premium requests. The ACP stream itself carries no usage. |
+| Copilot | The `invoke_agent` span in the OTEL file exporter the daemon enables, keyed by the ACP session id: tokens, cache read/write, reasoning, model and `cost` in premium requests. The ACP stream's `usage_update` (1.0.83) is context occupancy, not the turn's tokens. |
 | OpenCode server | The assistant message's `tokens`, `cost` (USD) and `modelID`, live and from the transcript on resume. OpenCode's `total` counts cached input too and is carried as reported. |
 | OpenCode CLI | The `step-finish` part on the `--format json` stream: tokens and cost, no model on that stream. |
 
 A codex app-server turn resumed mid-flight by a fresh bridge reports only the
 model calls it observed, flagged `"partial": true`; a `thread/read` salvage and
-a Copilot prompt that did not complete carry none.
+an ACP prompt that did not complete carry none.
 
 ### Output wrapper
 
@@ -648,7 +670,7 @@ Copilot-target output for the `general` and `research` templates carries a
 server-appended `RUBBER-DUCK: clean|revised` verdict line. It is not
 configurable and there is no payload field controlling it. `plan_review` and
 `review` have their own critique built in and skip the wrapper, and OpenCode
-MVP output is relay-only so it never carries one.
+and Codex output is relay-only so it never carries one.
 
 This lives here rather than in the subagent descriptions because it describes
 what the caller *receives*, not how to construct a call — and the server
@@ -702,12 +724,13 @@ agent-bridge.log                        human-readable bridge trace
 copilot-acp.sock                        Copilot ACP daemon socket
 copilot-acp-daemon.log                  Copilot ACP daemon log
 copilot-otel-traces.jsonl               Copilot OTEL traces
+acp-daemons.json                        per-companion ACP daemon identity, leases and disposal claim
 codex-app-server.sock                   codex app-server broker socket
 codex-app-server-broker.log             codex app-server broker log
 codex-broker.json                       codex running identity, leases and disposal claim
 opencode-servers.json                   pooled `opencode serve` registry
 heartbeats/                             host-liveness files the daemons reap against
-prompts/copilot-acp-<promptId>.jsonl    per-prompt event stream
+prompts/<companion>-acp-<promptId>.jsonl  per-prompt event stream (copilot today)
 digests/agent-digest-<jobId>.md         rendered progress digests
 completions.jsonl                       orphan completion queue
 ```
@@ -826,6 +849,10 @@ claude plugin validate .
   `turn/steer`).
 - Codex `exec` restart resume (app-server mode supports it via `thread/resume`).
 - MCP elicitation or `NEEDS_USER_INPUT` flows.
+- Mid-turn steering on an ACP companion (Copilot): `agent_reply` cancels the
+  running turn and re-prompts the same session, and says so.
+- ACP over HTTP or WebSocket (still an RFD upstream; stdio is the only stable
+  transport, which is why the daemons exist).
 
 ## Repository Map
 

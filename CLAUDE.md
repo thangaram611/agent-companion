@@ -101,8 +101,9 @@ harness (claude|codex)
             (agent-local on Claude; inherited plugin MCP on Codex)
             ├─ resolveRouting          → one profile → {companion, model, adapter}
             └─ adapter                 bridge-server/<companion>[-<transport>]-runtime.mjs
+                                       (acp-runtime.mjs serves every ACP companion)
                  └─ detached shared runtime, when the transport has one
-                      copilot-acp-daemon | opencode serve | codex-app-server-broker
+                      acp-daemon (one per ACP companion; copilot today) | opencode serve | codex-app-server-broker
 ```
 
 **Layers.** `lib/` is host-neutral and importable from both the MCP server and standalone CLI
@@ -129,13 +130,14 @@ carry none.
 
 **Capability-driven where a capability exists.** Reply, resume, `serverMode`, and model
 selection are per-companion×transport capabilities resolved from `lib/target-registry.mjs`;
-prefer a registry lookup over a companion-id branch when adding to that set. Two exceptions are
-real and worth knowing before you generalize: there is no `streaming` capability key at all, and
-`capabilities.parallel` is declared but read by nothing — the fleet decision is a literal
-`target === 'copilot' && shouldUseFleet(...)` branch (`bridge-server/server.mjs:2859`).
-Per-job `reply_available` / `resume_available` pin **opencode and codex** to the adapter the job
-started with (`opencodeAdapter` / `codexAdapter`); copilot has no recorded per-job adapter and
-re-reads live `COPILOT_RUNTIME_ADAPTER` on every call (`server.mjs:898`).
+prefer a registry lookup over a companion-id branch when adding to that set. The daemon path
+is keyed the same way: `isAcpTarget` reads `capabilities.acp`, `/fleet` reads
+`capabilities.parallel === 'fleet'`, the rubber-duck wrapper reads `acp.rubberDuck` — so a
+second ACP companion shares every branch and Copilot alone keeps its extras. One exception is
+still real: there is no `streaming` capability key at all. Per-job `reply_available` /
+`resume_available` pin **opencode and codex** to the adapter the job started with
+(`opencodeAdapter` / `codexAdapter`); an ACP companion has no recorded per-job adapter —
+copilot re-reads live `COPILOT_RUNTIME_ADAPTER` on every call.
 
 ## Single-source-of-truth modules
 
@@ -147,7 +149,8 @@ second reader/definition is how these break.
 | `lib/host.mjs` | The only place that chooses claude-vs-codex conventions. `AGENT_COMPANION_HOST` is authoritative; `.host` marker files are diagnostic only, never a fallback. |
 | `lib/state.mjs` | All durable state under `~/.{claude,codex}/agent-companion/`. Atomic tmp+rename, 0600. |
 | `lib/runtime-paths.mjs` | All transient runtime paths — logs, sockets, prompt streams, digests. |
-| `lib/target-registry.mjs` | What a companion can do (capabilities) **and** what it takes to be ready (onboarding). Two concerns, one descriptor, deliberately. |
+| `lib/target-registry.mjs` | What a companion can do (capabilities) **and** what it takes to be ready (onboarding). Two concerns, one descriptor, deliberately. For the ACP companions the `acp` block is also everything the daemon needs to run them. |
+| `scripts/acp-daemon.mjs` | The only ACP daemon. Every companion-shaped decision — argv, env, client name, `session/load`, the permission answer, the usage reader, the declared update kinds — is a descriptor read; `scripts/copilot-acp-daemon.mjs` is its Copilot binding, kept so the Copilot daemon suite runs unchanged. Pins ACP v1 and refuses any other answer. |
 | `lib/profile-registry.mjs` | The **only** reader of `profiles.json`. `test/profile-registry-guard.test.mjs` fails on any other reference to `readProfilesRaw` / `PROFILES_FILE`. |
 | `lib/command-probe.mjs` | `probeCommand` is the **only** sanctioned synchronous shell-out from bridge code. It stays dependency-free so broker preflight does not initialize durable state. `test/exec-timeout-guard.test.mjs` fails on any duplicate or unbounded one. |
 | `lib/target-diagnostics.mjs` | Target/profile readiness inspection; re-exports the shared `probeCommand` for existing callers. |
@@ -199,6 +202,17 @@ second reader/definition is how these break.
 - **Codex sandbox defaults are deliberately not codex's defaults** (`workspace-write` with
   network **on**), and under the app-server transport `approvalPolicy: 'never'` is structural —
   accepting one approval was measured escalating past the sandbox. Do not make it configurable.
+- **The ACP daemon answers `session/request_permission` itself.** Gemini CLI, evaluated and
+  dropped on 2026-09-11, downgraded `--approval-mode yolo` to `default` in any folder it did
+  not trust, so a client that only passes a flag hangs its agent on the first tool. The
+  answer comes from the descriptor's `acp.permission(env)`; do not remove that handler on the
+  theory that Copilot's flags make it dead code. And do not send MCP's
+  `notifications/initialized` on ACP — it is not part of the protocol.
+- **The next ACP companion is Antigravity CLI, and the facts are already in the tracker.**
+  `docs/MVP_TRACKER.md` item 7 records what was measured on 2026-09-11: `agy` has no `--acp`,
+  Google's FAQ forbids third-party clients on an Antigravity login, and the registry's
+  `antigravity-acp` binary is the IDE-extension server. Start from those, not from the
+  assumption that "Gemini moved to Antigravity" means the ACP path moved with it.
 
 ## Docs
 

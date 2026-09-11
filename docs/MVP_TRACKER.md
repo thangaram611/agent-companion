@@ -1,6 +1,6 @@
 # MVP Tracker
 
-Last updated: 2026-09-10
+Last updated: 2026-09-11
 
 ## MVP Definition
 
@@ -9,7 +9,8 @@ primary companion:
 
 - Generic `agent_*` MCP tools are the only subagent surface.
 - Users bring their harness; supported harnesses are Claude Code and Codex CLI.
-- Users attach their companion; supported companions are OpenCode, Copilot, and Codex.
+- Users attach their companion; supported companions are OpenCode, Copilot,
+  Codex, and Gemini.
 - Copilot keeps working as a first-class companion adapter (no legacy MCP
   aliases).
 - Repo docs and tests make the current state and remaining work recoverable.
@@ -164,7 +165,9 @@ primary companion:
   persists a rollout transcript under `$CODEX_HOME/sessions` with no auto-cleanup
   in v1; nested Seatbelt sandboxing is documented, not worked around (use
   `AGENT_COMPANION_CODEX_SANDBOX_MODE=bypass` in an externally-sandboxed bridge).
-- Goose and Aider are not implemented yet.
+- Only Copilot rides the generic ACP daemon today; Goose is a descriptor away
+  and Antigravity CLI is the next candidate (item 7's handoff). Aider was
+  dropped (2026-09-09 assessment: stalled, no ACP or MCP).
 - README diagram assets are current as of 2026-08-13 and are now reproducible:
   every PNG is rendered from a committed SVG by
   `bash scripts/render-readme-assets.sh` (headless Chrome, byte-deterministic).
@@ -241,8 +244,11 @@ primary companion:
      is still what recovery reads, now via `thread/resume` / `thread/read`.
    - Still deferred for codex: fleet/parallel, and the shared opencode+codex
      spawn-core extraction.
-   - Goose first candidate for desktop/CLI/API plus MCP/ACP fit.
-   - Aider second candidate for git-native terminal workflows.
+   - The generic ACP transport — DONE with item 7 below; a second native ACP
+     agent is a descriptor plus an install/auth block. Gemini CLI was built
+     on it and dropped at the auth gate; Antigravity CLI is next (item 7's
+     handoff). Goose stays an ACP row.
+   - Aider dropped (stalled upstream, no ACP or MCP surface).
    - Keep adapters capability-driven: read reply/resume/parallel support from
      the descriptor, which the selected adapter may upgrade.
 
@@ -329,6 +335,124 @@ primary companion:
      thread. The other three stay 8/8, 17/17, 18/18.
    - Non-goals: no routing, strengths, profiles or currency estimation; no
      new companion; no change to the review loop.
+
+7. Generic ACP transport — DONE (2026-09-11). The second companion is NOT
+   shipped: Gemini CLI was built, measured and then dropped on the live auth
+   gate (below), and its successor has no ToS-clean ACP path yet. Built per
+   [docs/DIRECTION_ASSESSMENT.md](DIRECTION_ASSESSMENT.md) §4 item 4, criteria
+   written before any code:
+   - **One daemon, parameterised from the descriptor.**
+     `scripts/acp-daemon.mjs --companion <id>` is the only ACP daemon
+     implementation. Everything companion-shaped is the descriptor's `acp`
+     block in `lib/target-registry.mjs`: spawn argv, extra child env, files
+     rotated at spawn, `clientInfo.name`, the default model, whether
+     `session/load` is honoured, the answer to `session/request_permission`,
+     the usage reader and the `session/update` kinds the agent was measured
+     to emit. `scripts/copilot-acp-daemon.mjs` is the Copilot binding of the
+     same classes, so `scripts/copilot-acp-daemon.test.mjs` runs **unchanged**
+     (13/13). No companion-id branch anywhere in the daemon.
+   - **Copilot is byte-identical where an operator can see it:** spawn argv
+     (`--acp --model <m> --reasoning-effort xhigh --no-ask-user
+     --allow-all-tools --allow-all-paths --allow-all-urls --experimental`),
+     OTEL env and trace rotation, the socket/log/prompt-stream paths and their
+     `COPILOT_*` overrides, `clientInfo.name`, the `.sid` files, the
+     rubber-duck wrapper and footer, `/fleet`, the prompt-timeout and
+     empty-completed retirements, the IPC commands and response shapes.
+     Pinned by the unchanged suite, an argv/paths test against the
+     descriptor, and one real Copilot job through the bridge after the
+     refactor (job `copilot-mtwil1g9-e4si`, 33 s, Copilot CLI 1.0.83, the
+     identical argv in the daemon log, `RUBBER-DUCK: clean`, `meta.usage`
+     from OTEL at cost 3 premium requests). Deliberate deviations, all
+     operator-facing text: no MCP `notifications/initialized` after
+     `initialize` and `clientCapabilities` instead of `capabilities` (both
+     spec corrections; the live job was unaffected), the digest heading and
+     the empty-completed error naming the registry's `GitHub Copilot CLI`
+     rather than `Copilot`, the unreachable hint saying `grep acp-daemon`,
+     and the reply acknowledgement stating that ACP has no mid-turn steer.
+     The drift log surfaced four `session/update` kinds Copilot 1.0.83 now
+     emits (`available_commands_update`, `session_info_update`,
+     `config_option_update`, `usage_update`); the descriptor declares them.
+   - **One detached daemon per ACP companion per host home**, with its own
+     socket (`runtime/<companion>-acp.sock`), log and prompt streams,
+     recorded in `runtime/acp-daemons.json` through
+     `lib/shared-runtime-registry.mjs` (leases from the bridge GC tick,
+     two-phase disposal whose `stop` is sent only after `confirmDisposal()`)
+     beside the daemon's own inactivity reaper — the codex broker's shape.
+     The bridge keys the daemon path on `capabilities.acp`, `/fleet` on
+     `capabilities.parallel` and the rubber-duck wrapper on `acp.rubberDuck`.
+   - **Protocol v1 is pinned.** An agent answering any other version is
+     refused: child killed, prompt failed `ACP_PROTOCOL_MISMATCH` naming the
+     version, job settled `unreachable` with `detail: acp_protocol_mismatch`
+     (class `runtime_unavailable`, `meta.protocol_answered`), daemon status
+     naming it. Never adapted — the v2 draft renames `session/load` to
+     `session/resume`. Measured: Copilot 1.0.83 and Gemini 0.59.0 both
+     answer `1` even to a request for `2`.
+   - **`session/load` is per-descriptor ANDed with the agent's
+     advertisement.** Copilot declares false (process-local sessions,
+     github/copilot-cli#1767 — it advertises `loadSession: true` all the
+     same, measured); the fake agent's descriptor declares true and the
+     daemon loads a session it no longer holds instead of minting fresh,
+     replayed history ignored, answering `sessionLoaded: true`.
+   - **Permission requests are answered by the daemon, per descriptor
+     policy** (`all` | `edit` | `none`): the first `allow_once` option or
+     the first `reject_once`, recorded as a `permission` event in the prompt
+     stream; an undeclared client method (`fs/*`, `terminal/*`) is answered
+     `-32601`; an agent never waits on the bridge.
+   - **Update-kind drift is flagged, not swallowed:** a kind missing from
+     `acp.updates` is logged once per kind and still parsed generically.
+   - **The reproduction:** `test/fake-acp-agent.mjs`, an ACP agent over stdio
+     with its own companion descriptor (`fakeAcpDescriptor`), driven through
+     `FAKE_ACP_BIN` / `COPILOT_BIN` the way `test/fake-codex-app-server.mjs`
+     is driven — scripted updates, `_meta.quota` and standard `usage`,
+     `session/request_permission`, `session/load`, cancel, undeclared kinds,
+     a configurable `protocolVersion`. `scripts/acp-daemon.test.mjs` drives
+     the daemon with it over real stdio; `bridge-server/server.test.mjs`
+     drives the real detached daemon end to end (one daemon, one session,
+     two sends) with no stub below the bridge.
+   - **Gates:** full root-anchored `node --test` green; the five codex smokes
+     13/13, 8/8, 17/17, 18/18, 16/16 on 2026-09-11; README,
+     `docs/ARCHITECTURE.md`, both templates and the registry updated.
+   - **Why the second companion is not Gemini CLI, with evidence.** The whole
+     Gemini descriptor was built and measured on 2026-09-11 against 0.59.0
+     (`gemini --acp` answers v1, advertises `loadSession`, puts the turn's
+     tokens on the prompt response under `_meta.quota.token_count`, asks via
+     `session/request_permission`, and overrides `--approval-mode yolo` to
+     `default` in an untrusted folder). At the live auth gate the operator's
+     individual Google account was refused: "This client is no longer
+     supported for Gemini Code Assist for individuals. To continue using
+     Gemini, please migrate to the Antigravity suite of products." Google's
+     transition post and deprecation page confirm: since 2026-06-18 Gemini
+     CLI stopped serving Code Assist for individuals, AI Pro and AI Ultra;
+     it "will remain accessible via paid Gemini and Gemini Enterprise Agent
+     Platform API keys" and Code Assist Standard/Enterprise licenses. The
+     operator chose not to run on an API key; the descriptor, its onboarding,
+     tests, docs and smoke were removed and the CLI uninstalled. The
+     measurements stay in `docs/ARCHITECTURE.md` Negative Results.
+   - **Handoff — next session, Antigravity CLI.** Facts gathered 2026-09-11,
+     to start from: (1) `agy` (Homebrew cask `antigravity-cli`, 1.2.0, a
+     closed-source Go rewrite) has **no ACP mode**; the feature request
+     google-antigravity/antigravity-cli#31 has been open since 2026-05-20
+     with 192 comments and no Google response; its headless mode is `-p`,
+     a one-shot pipe with no streaming, cancel or resume. (2) Google's
+     Antigravity FAQ: "Using third party software, tools, or services to
+     access Antigravity is a violation of our Terms of Service … If you
+     would like to use a third party coding agent with Gemini, we recommend
+     using a Vertex or AI Studio API key." (3) The ACP registry's
+     `antigravity-acp` entry (v1.1.1) is Google's own IDE-extension server
+     (`agy_acp_server.par`, dl.google.com/agy-extensions), used by the Zed
+     and JetBrains extensions on the Antigravity login. (4) Community
+     `agy-acp` adapters wrap `agy -p` and rely on
+     `--dangerously-skip-permissions`. So the questions to settle before
+     writing a descriptor: whether the bridge, as a client of Google's own
+     ACP server binary, is inside or outside that FAQ (this repo's rule from
+     §1 of the assessment is ToS-clean or not at all); whether that binary
+     runs headless with cached `agy` credentials and answers protocol v1; and
+     whether its session/load, permission and usage shapes are what the fake
+     agent already models. The transport needs nothing: a descriptor with an
+     `acp` block plus install/auth/permission/smoke, and the suites in this
+     item are the ones it inherits.
+   - Non-goals held: no HTTP/WebSocket ACP transport, no routing or strength
+     change, no change to the codex or opencode adapters.
 
 ## Validation Commands
 

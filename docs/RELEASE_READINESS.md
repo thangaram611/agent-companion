@@ -261,6 +261,13 @@ Manual smoke gates before a public tag:
    a real `codex app-server`, and all three spend real tokens. Run `CODEX_RUNTIME_ADAPTER=appserver node scripts/doctor.mjs --json`
    before and after a Codex package upgrade; record the selected and running
    path/version/helper, and require no stale-runtime warning before the smoke.
+9. One real Copilot send through the bridge after any change to
+   `scripts/acp-daemon.mjs` (Copilot rides the generic daemon), checking the
+   spawn argv in `copilot-acp-daemon.log`, the rubber-duck footer, the OTEL
+   `meta.usage` and the `acp_daemons.copilot` registry entry on `agent_status`.
+   Recorded 2026-09-11 on Copilot CLI 1.0.83: job `copilot-mtwil1g9-e4si`
+   completed in 33 s with the identical argv, `RUBBER-DUCK: clean`, usage
+   `source: copilot-otel` (cost 3 premium requests), daemon pid recorded.
 
 ### Smoke evidence
 

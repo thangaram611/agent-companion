@@ -1,7 +1,9 @@
 # Direction Assessment and Next-Item Handoff
 
-Last updated: 2026-09-10 (assessment made 2026-09-09).
-Status: assessment recorded; the next item (§5) is **not started**.
+Last updated: 2026-09-11 (assessment made 2026-09-09).
+Status: §5 shipped 2026-09-10 (df198b0); §4 item 3 shipped 2026-09-10
+(67ed198); §4 item 4's transport shipped 2026-09-11, without its companion —
+see the correction under item 4.
 
 This document answers three questions with evidence: is the direction right,
 what would improve it, and what to take up next. §1 is the verdict, §2 and §3
@@ -156,7 +158,8 @@ governed by Zed and JetBrains.
   `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`
   (40 agents on 2026-09-09).
 - Native ACP agents: Copilot CLI (`copilot --acp`), OpenCode (`opencode acp`),
-  Gemini CLI (`gemini --acp`), Goose, Kiro, Cursor (`cursor-agent acp`), Qwen,
+  Gemini CLI (`gemini --acp` — wire yes; consumer login gone since
+  2026-06-18, see §4 item 4), Goose, Kiro, Cursor (`cursor-agent acp`), Qwen,
   Kimi, Droid, Mistral Vibe, Auggie, Junie, Cline. Adapter only: Codex
   (`@agentclientprotocol/codex-acp`), Claude Code
   (`@agentclientprotocol/claude-agent-acp`). None: Amp (community adapter),
@@ -235,6 +238,14 @@ work. Goose comes free with a generic ACP transport.
    becomes cancel plus re-prompt, as OpenCode server mode already does;
    `session/load` is optional per agent, so resume is a per-descriptor
    capability. Pin protocol v1; v2 renames methods.
+   **Correction 2026-09-11:** the transport shipped (`docs/MVP_TRACKER.md`
+   item 7) but the "Gemini CLI first" premise did not survive the live auth
+   gate. §3.2's list of native ACP agents was accurate for the wire, not for
+   access: Gemini CLI stopped serving individual, AI Pro and AI Ultra Google
+   logins on 2026-06-18 (API keys and Code Assist Standard/Enterprise still
+   work), and Antigravity CLI — its successor — has no ACP mode and a ToS
+   that forbids third-party clients on its login. The next companion is
+   decided from item 7's handoff, not from this list.
 5. **Pin the new host budgets** in `docs/ARCHITECTURE.md` "Host budgets":
    `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`.
 
@@ -339,8 +350,11 @@ in the bridge; it is a documented protocol for the parent.
 - Claude Code: `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` behaviour for an
   agent-local MCP server inside a subagent; whether `--bare` became the `-p`
   default.
-- ACP: v2 promotion out of draft (method renames) and whether the
-  HTTP/WebSocket transport RFD lands, which would let a daemon-less ACP
-  adapter exist.
+- ACP: v2 promotion out of draft (method renames — the generic daemon refuses
+  any answer but v1) and whether the HTTP/WebSocket transport RFD lands, which
+  would let a daemon-less ACP adapter exist.
+- Antigravity: whether `agy` gains an ACP mode (antigravity-cli#31) or Google
+  sanctions third-party clients of its `antigravity-acp` server; either makes
+  the next companion a descriptor.
 - Ledger: re-run the §2 queries; the case for item 4 strengthens only if a
   second companion actually gets used.

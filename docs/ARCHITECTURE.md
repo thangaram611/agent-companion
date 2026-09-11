@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-09-10
+Last updated: 2026-09-11
 
 ## Goal
 
@@ -41,13 +41,15 @@ flowchart LR
   Subagent --> MCP["agent-bridge MCP server"]
   MCP --> Registry["companion registry (target-registry.mjs)"]
   Registry --> OpenCode["opencode-runtime.mjs"]
-  Registry --> Copilot["copilot-runtime.mjs + ACP daemon"]
+  Registry --> Acp["acp-runtime.mjs (copilot)"]
   Registry --> CodexRuntime["codex-runtime.mjs (exec, default)"]
   Registry --> CodexAppServer["codex-app-server-runtime.mjs (appserver)"]
+  Acp -.->|"UDS, JSON"| Daemon["acp-daemon.mjs (detached, one per companion)"]
+  Daemon -.->|"stdio, ACP v1"| Agent["copilot --acp"]
   CodexAppServer -.->|"UDS, JSON-RPC"| Broker["codex-app-server-broker.mjs (detached, shared)"]
   Broker -.->|"stdio"| AppServer["codex app-server"]
   OpenCode --> Job["job ledger + queue + digest"]
-  Copilot --> Job
+  Acp --> Job
   CodexRuntime --> Job
   CodexAppServer --> Job
   Job --> Subagent
@@ -55,7 +57,8 @@ flowchart LR
 ```
 
 The dotted edges are the ones that survive a bridge replacement. Everything else in this
-diagram dies with the bridge process, which is the whole reason the broker exists.
+diagram dies with the bridge process, which is the whole reason the broker and the ACP
+daemons exist.
 
 ### MCP registration boundary
 
@@ -104,11 +107,46 @@ identity is complete.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | OpenCode (cli) | Implemented CLI adapter (default) | yes | yes | yes | yes | no | no |
 | OpenCode (server) | Implemented HTTP server adapter | yes | yes | yes | yes | yes | yes |
-| Copilot CLI | Implemented ACP adapter | yes | yes | yes | yes | yes | yes with ACP |
+| Copilot CLI | Implemented ACP adapter (generic daemon, Copilot descriptor) | yes | yes | yes | yes | yes (cancel + re-prompt) | yes with ACP |
 | Codex CLI (exec) | Implemented `codex exec` adapter (default, send-only) | yes | yes | yes | yes | no | no |
 | Codex CLI (app-server) | Implemented broker + JSON-RPC adapter | yes | yes | yes | yes | yes | yes |
-| Goose | Planned | no | no | no | no | no | no |
-| Aider | Planned | no | no | no | no | no | no |
+| Goose | Planned — an ACP row, a descriptor away | no | no | no | no | no | no |
+
+Aider was dropped from the plan (2026-09-09 assessment: stalled upstream, no ACP
+or MCP surface). Gemini CLI was built on the generic daemon and dropped before
+shipping (2026-09-11): consumer "Login with Google" ended on 2026-06-18, and its
+successor Antigravity CLI has no ACP mode and forbids third-party clients on an
+Antigravity login — `docs/MVP_TRACKER.md` item 7 keeps the measurements and the
+handoff.
+
+The ACP transport is one daemon implementation, `scripts/acp-daemon.mjs`, run
+as **one detached process per ACP companion per host home**
+(`--companion copilot`; `scripts/copilot-acp-daemon.mjs` is the Copilot
+binding of the same classes, and `test/fake-acp-agent.mjs` carries the second
+descriptor the suites drive it with). Each daemon owns one `<agent> --acp` child over
+stdio — the only stable ACP transport — and one socket, log and prompt-stream
+namespace (`runtime/<companion>-acp.sock`, `<companion>-acp-daemon.log`,
+`prompts/<companion>-acp-<promptId>.jsonl`), and is recorded in
+`runtime/acp-daemons.json` through `lib/shared-runtime-registry.mjs` with
+leases, `lastUsedAt` and the two-phase disposal claim; the bridge's GC tick is
+the second reaper beside the daemon's own inactivity timer, as for the broker.
+Everything companion-shaped is the descriptor's `acp` block in
+`lib/target-registry.mjs` — spawn argv, extra env, files rotated at spawn,
+`clientInfo.name`, default model, whether `session/load` is honoured, the
+answer to `session/request_permission`, the usage reader and the
+`session/update` kinds the agent was measured to emit (an undeclared kind is
+logged once as drift and still parsed). The daemon pins ACP **v1** at
+`initialize`; an agent answering any other version is refused — child killed,
+prompt failed `ACP_PROTOCOL_MISMATCH`, job settled `unreachable` with
+`detail: acp_protocol_mismatch` — never adapted, because the v2 draft renames
+`session/load` to `session/resume`. Reply is cancel + re-prompt on the same
+session (ACP has no mid-turn steer, and the acknowledgement says so); restart
+resume is the daemon outliving the bridge, plus `session/load` for a session
+the daemon no longer holds when the descriptor declares `acp.loadSession` AND
+the agent advertises it (Copilot's declares false: process-local sessions). The
+daemon answers `session/request_permission` itself, from the descriptor's
+policy, because an unattended client that leaves a permission request pending
+has hung the agent.
 
 The OpenCode adapter is selected by `OPENCODE_RUNTIME_ADAPTER` (`cli` default,
 `server` opt-in), mirroring how Copilot selects `acp`/`sdk`. Server mode drives a
@@ -287,6 +325,11 @@ State lives under the host-routed companion home `~/.{claude,codex}/agent-compan
 - `runtime/opencode-servers.json`: registry of the shared detached
   `opencode serve` process so a respawned bridge reattaches instead of
   re-spawning.
+- `runtime/<companion>-acp.sock`: each ACP daemon's unix socket (copilot
+  today), a fixed short path like the broker's; `runtime/acp-daemons.json`
+  records the daemon's pid, leases, `lastUsedAt` and disposal claim per
+  companion — bookkeeping, not an address book, for the same reason as the
+  broker's file.
 - `runtime/codex-app-server.sock`: the codex broker's unix socket. Its path is
   fixed and short on purpose — unix paths truncate silently at `SUN_LEN`
   (~104 bytes on darwin). **Socket presence is not liveness:** SIGKILL skips the
@@ -462,6 +505,45 @@ because the cost of re-deriving them is a day each.
 - **Config inheritance works — do not pin the model.** With no `model`, `turn_context` records
   exactly `~/.codex/config.toml`'s model and effort. Passing `model: null` is *not* the same
   as omitting the key.
+- **An agent's yolo flag is not yolo.** Measured 2026-09-11 on Gemini CLI 0.59.0 under
+  `--acp`, while it was being evaluated as the second companion: "Approval mode
+  overridden to \"default\" because the current folder is not trusted", after which
+  every edit and shell call arrives as a `session/request_permission` request. A
+  client that only passes a flag hangs its agent on the first tool; the generic daemon
+  therefore answers the request itself, from the descriptor's policy, whatever any
+  flag said.
+- **`notifications/initialized` is not ACP.** It is MCP's post-handshake notification;
+  the Copilot daemon sent it for a year and Copilot ignored it, but Gemini's SDK
+  answers it `-32601 "Method not found"` on stderr. The spec's key for what the client
+  can do is `clientCapabilities`, not `capabilities`. Both were corrected in the generic
+  daemon and the live Copilot job afterwards was unaffected.
+- **Per-turn usage is not on the ACP stream, for either agent measured.** Gemini CLI
+  0.59.0 emits no `usage_update`; its turn tokens are on the prompt RESPONSE under
+  `_meta.quota.token_count`. Copilot CLI 1.0.83 does emit `usage_update`, and it is the
+  protocol's context-occupancy signal (`used`/`size`), not the turn's tokens — the OTEL
+  span stays Copilot's source. The protocol's own `PromptResponse.usage` (six counters)
+  is still marked unstable in the v1 schema; a descriptor's `acp.usage` reader is where
+  any of these shapes is read.
+- **An agent advertising `loadSession: true` does not mean its sessions survive its
+  process.** Copilot CLI 1.0.83 advertises it (measured) and its sessions are
+  process-local (github/copilot-cli#1767). Which is why `session/load` is a
+  descriptor decision (`acp.loadSession`) ANDed with the agent's advertisement, not
+  the advertisement alone: Copilot false; the fake agent's descriptor true.
+- **A v2 `initialize` request is answered with `protocolVersion: 1`.** By both agents
+  measured (Copilot 1.0.83, Gemini 0.59.0; the spec says an agent answers with the
+  latest version it supports), so a client cannot probe for v2 support by asking — and
+  the pin can be enforced at the handshake, where refusing costs nothing.
+- **Homebrew's `gemini-cli` is not the latest Gemini CLI, and Antigravity CLI is not a
+  Gemini CLI with a new name.** The formula is deprecated at 0.46.0 (disabled
+  2026-12-18) with the `antigravity-cli` cask as its replacement; npm carries 0.59.0 and
+  the ACP registry launches that package. `agy` is a closed-source rewrite with no
+  `--acp` (feature request open since 2026-05-20), Google's FAQ forbids "third party
+  software, tools, or services" on an Antigravity login and recommends "a Vertex or AI
+  Studio API key" for third-party coding agents, and the registry's `antigravity-acp`
+  entry is Google's IDE-extension server on that same login. And Gemini CLI itself
+  refuses "Login with Google" for individual, AI Pro and AI Ultra accounts since
+  2026-06-18 (screenshot evidence, 2026-09-11) — only Code Assist Standard/Enterprise
+  licenses and API keys remain. Neither is a companion this bridge can ship today.
 - **A codex role file accepting `mcp_servers` does not mean the child gets it.** The Codex
   subagents docs say a custom agent file may declare `mcp_servers`. Read against rust-v0.153.4
   (2026-09-09): the role parser (`codex-rs/agent-roles/src/agent_role_config.rs`) flattens the
@@ -523,6 +605,9 @@ The product identity is uniformly `agent-*`, with no backward-compatibility shim
 - Repo / package / plugin / subagent / template names: `agent-companion`.
 
 The Copilot *companion adapter* keeps its own `copilot-*` identifiers
-(`copilot-runtime.mjs`, `copilot-acp-daemon`, `COPILOT_BIN`,
-`COPILOT_RUNTIME_ADAPTER`, the `~/.copilot/agents/reviewer.agent.md` reviewer)
-— those name the Copilot companion, not the product.
+(`copilot-acp-daemon.mjs` — the Copilot binding of the generic daemon —
+`copilot-acp.sock`, `COPILOT_BIN`, `COPILOT_RUNTIME_ADAPTER`, the
+`~/.copilot/agents/reviewer.agent.md` reviewer) — those name the Copilot
+companion, not the product. The generic pieces are `acp-*`
+(`scripts/acp-daemon.mjs`, `bridge-server/acp-runtime.mjs`,
+`runtime/<companion>-acp.sock`, `AGENT_ACP_DAEMON_PATH`).

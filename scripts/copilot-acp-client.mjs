@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // copilot-acp-client.mjs
-// Stateless CLI client for the copilot-acp-daemon. Communicates over a Unix
-// domain socket using newline-delimited JSON. Auto-spawns the daemon if not
-// running. All output is single-line JSON to stdout.
+// Stateless CLI client for the Copilot ACP daemon (scripts/acp-daemon.mjs
+// bound to the copilot companion). Communicates over a Unix domain socket
+// using newline-delimited JSON. Auto-spawns the daemon if not running. All
+// output is single-line JSON to stdout.
 
 import { connect as connectSocket } from 'node:net';
 import { spawn } from 'node:child_process';
@@ -13,7 +14,7 @@ import { dirname, isAbsolute, resolve as pathResolve } from 'node:path';
 import { daemonSocketPath } from '../lib/runtime-paths.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DAEMON_PATH = pathResolve(__dirname, 'copilot-acp-daemon.mjs');
+const DAEMON_PATH = pathResolve(__dirname, 'acp-daemon.mjs');
 const DAEMON_BOOT_TIMEOUT_MS = 8_000;
 const REQUEST_TIMEOUT_MS = 6 * 60 * 1000;
 const MAX_LONG_POLL_WAIT_SEC = 22 * 60;
@@ -65,7 +66,7 @@ async function spawnDaemon() {
   if (!existsSync(DAEMON_PATH)) {
     throw new Error(`daemon not found at ${DAEMON_PATH}`);
   }
-  const child = spawn(process.execPath, [DAEMON_PATH], {
+  const child = spawn(process.execPath, [DAEMON_PATH, '--companion', 'copilot'], {
     detached: true,
     stdio: 'ignore',
   });

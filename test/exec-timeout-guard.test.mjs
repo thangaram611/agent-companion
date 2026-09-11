@@ -26,7 +26,7 @@ const SCAN_DIRS = ['lib', 'bridge-server', 'scripts', 'hooks'];
 const ALLOWED = new Set(['lib/command-probe.mjs']);
 const BOUNDED_EXCEPTIONS = new Set([
   'scripts/onboard.mjs',
-  'scripts/copilot-acp-daemon.mjs',
+  'scripts/acp-daemon.mjs',
   'scripts/validate-codex-release.mjs',
 ]);
 

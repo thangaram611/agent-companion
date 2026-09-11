@@ -37,7 +37,7 @@ test('planProfile validates id, companion, model, adapter, strengths, and duplic
   assert.equal(planProfile({ id: 'cop-review', companion: 'copilot', model: 'claude-sonnet-4.6', strengths: ['reviewer', 'Reviewer'] }).kind, 'ok');
   assert.deepEqual(planProfile({ id: 'cop-review', companion: 'copilot', strengths: ['reviewer', 'Reviewer'] }).profile.strengths, ['reviewer']);
   assert.equal(planProfile({ id: 'BadId', companion: 'copilot' }).code, 'bad_id');
-  assert.equal(planProfile({ id: 'ok', companion: 'gemini' }).code, 'bad_companion');
+  assert.equal(planProfile({ id: 'ok', companion: 'goose' }).code, 'bad_companion');
   assert.equal(planProfile({ id: 'ok', companion: 'copilot', model: 'gpt-5.5' }).code, 'bad_model');
   assert.equal(planProfile({ id: 'ok', companion: 'opencode', model: 'no-slash' }).code, 'bad_model');
   assert.equal(planProfile({ id: 'ok', companion: 'opencode', model: 'anthropic/claude-sonnet-4.6' }).kind, 'ok');

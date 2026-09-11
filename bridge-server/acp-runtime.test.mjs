@@ -1,3 +1,4 @@
+import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -14,7 +15,7 @@ import {
   _resetSdkRuntimeForTest,
   _setSdkRuntimeForTest,
   watchPrompt,
-} from './copilot-runtime.mjs';
+} from './acp-runtime.mjs';
 
 async function withEnv(key, value, fn) {
   const prior = process.env[key];
@@ -32,8 +33,8 @@ test('ACP runtime adapter maps bridge methods to daemon socket commands', async 
     const calls = [];
     daemonClient._setForTest({
       ensureDaemon: async (opts) => { calls.push(['ensure', opts]); },
-      sendToSocket: async (message, timeoutMs) => {
-        calls.push(['send', message, timeoutMs]);
+      sendToSocket: async (message, timeoutMs, companion) => {
+        calls.push(['send', message, timeoutMs, companion]);
         return { ok: true, data: { command: message.command } };
       },
     });
@@ -51,14 +52,53 @@ test('ACP runtime adapter maps bridge methods to daemon socket commands', async 
       daemonClient._resetForTest();
     }
 
+    // Copilot is the default companion, so every call lands on its socket and
+    // the IPC messages are byte-identical to what the daemon always received.
     assert.deepEqual(calls, [
-      ['ensure', { reqId: 'req-1' }],
-      ['send', { command: 'status' }, 123],
-      ['send', { command: 'prompt-bg', sessionId: 'sid', text: 'hello', cwd: '/repo', model: 'claude-sonnet-4.6', reqId: 'req-2' }, undefined],
-      ['send', { command: 'watch', promptId: 'pid', since: 0, raw: false, wait: 10, summaryOnly: true }, 456],
-      ['send', { command: 'inspect', promptId: 'pid', includeTimeline: true, limit: 9 }, 15000],
-      ['send', { command: 'cancel', promptId: 'pid' }, undefined],
-      ['send', { command: 'reply', promptId: 'pid', message: 'continue' }, 15000],
+      ['ensure', { reqId: 'req-1', companion: 'copilot' }],
+      ['send', { command: 'status' }, 123, 'copilot'],
+      ['send', { command: 'prompt-bg', sessionId: 'sid', text: 'hello', cwd: '/repo', model: 'claude-sonnet-4.6', reqId: 'req-2' }, undefined, 'copilot'],
+      ['send', { command: 'watch', promptId: 'pid', since: 0, raw: false, wait: 10, summaryOnly: true }, 456, 'copilot'],
+      ['send', { command: 'inspect', promptId: 'pid', includeTimeline: true, limit: 9 }, 15000, 'copilot'],
+      ['send', { command: 'cancel', promptId: 'pid' }, undefined, 'copilot'],
+      ['send', { command: 'reply', promptId: 'pid', message: 'continue' }, 15000, 'copilot'],
+    ]);
+  });
+});
+
+test('a second ACP companion routes to its own daemon socket and never through the Copilot SDK adapter', async () => {
+  // Even with the SDK adapter selected for Copilot, a Acme call is a daemon
+  // call: the adapter knob is Copilot's alone.
+  await withEnv('COPILOT_RUNTIME_ADAPTER', 'sdk', async () => {
+    const calls = [];
+    _setSdkRuntimeForTest({
+      ensureRuntime: async () => { throw new Error('the SDK adapter must not serve acme'); },
+      promptBg: async () => { throw new Error('the SDK adapter must not serve acme'); },
+    });
+    daemonClient._setForTest({
+      ensureDaemon: async (opts) => { calls.push(['ensure', opts]); },
+      sendToSocket: async (message, timeoutMs, companion) => {
+        calls.push(['send', message, timeoutMs, companion]);
+        return { ok: true, data: {} };
+      },
+    });
+    try {
+      assert.equal(runtimeSupportsDetachedPromptResume('acme'), true, 'the Acme daemon is detached by construction');
+      await ensureRuntime({ reqId: 'req-g', companion: 'acme' });
+      await promptBg({ sessionId: null, text: 'hi', cwd: '/repo', model: null, reqId: 'req-g2', companion: 'acme' });
+      await watchPrompt({ promptId: 'gp', wait: 5, summaryOnly: true, companion: 'acme' }, 99);
+      await cancelPrompt({ promptId: 'gp', companion: 'acme' });
+      await replyPrompt({ promptId: 'gp', message: 'more', companion: 'acme' });
+    } finally {
+      _resetSdkRuntimeForTest();
+      daemonClient._resetForTest();
+    }
+    assert.deepEqual(calls, [
+      ['ensure', { reqId: 'req-g', companion: 'acme' }],
+      ['send', { command: 'prompt-bg', sessionId: null, text: 'hi', cwd: '/repo', model: null, reqId: 'req-g2' }, undefined, 'acme'],
+      ['send', { command: 'watch', promptId: 'gp', since: 0, raw: false, wait: 5, summaryOnly: true }, 99, 'acme'],
+      ['send', { command: 'cancel', promptId: 'gp' }, undefined, 'acme'],
+      ['send', { command: 'reply', promptId: 'gp', message: 'more' }, 15000, 'acme'],
     ]);
   });
 });
