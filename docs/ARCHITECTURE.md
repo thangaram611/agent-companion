@@ -641,6 +641,11 @@ Evidence boundaries retained as inference or unknown:
   parent and restarting stopped the Gatekeeper dialog, while changing the helper
   did not. The exact Gatekeeper responsibility/inheritance mechanism remains an
   inference, so quarantine is detected and surfaced rather than rewritten.
+  There is no install-time pre-emption either: Homebrew removed `--no-quarantine`
+  (Homebrew/brew#20755, closed 2025-11-05; brew 6.0.22 lists no such option and
+  `HOMEBREW_CASK_OPTS` would fail on it), so the attribute returns with every
+  cask upgrade and the doctor and inspector warnings name the operator's
+  `xattr -d` as the remedy (checked 2026-09-11).
 - The currently published [0.152.0](https://github.com/openai/codex/releases/tag/rust-v0.152.0)
   and [0.152.1](https://github.com/openai/codex/releases/tag/rust-v0.152.1)
   package archives both contain the helper and use the same lookup

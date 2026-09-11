@@ -220,7 +220,11 @@ Notes:
     configured pair remains usable with an advisory when no such fallback is
     available. A failed xattr probe is reported as indeterminate, never silently
     treated as “not quarantined.” Agent Companion creates no helper symlink and
-    removes no xattr.
+    removes no xattr. The remedy is the operator's: `xattr -d
+    com.apple.quarantine` on the cask's `codex` and `codex-code-mode-host`,
+    repeated after each cask upgrade, because Homebrew removed its
+    `--no-quarantine` install switch (Homebrew/brew#20755, closed 2025-11-05)
+    and `HOMEBREW_CASK_OPTS` no longer accepts it.
   - Every send compares the running app-server's path, version and file identity
     with the pair a fresh broker would select. A stale broker is replaced only
     after the client, lease and active-turn guards all prove it idle; otherwise
