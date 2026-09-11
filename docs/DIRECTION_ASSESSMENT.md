@@ -353,8 +353,10 @@ in the bridge; it is a documented protocol for the parent.
 - ACP: v2 promotion out of draft (method renames — the generic daemon refuses
   any answer but v1) and whether the HTTP/WebSocket transport RFD lands, which
   would let a daemon-less ACP adapter exist.
-- Antigravity: whether `agy` gains an ACP mode (antigravity-cli#31) or Google
-  sanctions third-party clients of its `antigravity-acp` server; either makes
+- Antigravity: whether `agy` gains an ACP mode (antigravity-cli#31), and whether
+  Google ever states in its own voice which clients may launch its
+  `antigravity-acp` server (shipped as the second ACP companion on 2026-09-11 on
+  the reading in tracker item 8); either makes
   the next companion a descriptor.
 - Ledger: re-run the §2 queries; the case for item 4 strengthens only if a
   second companion actually gets used.

@@ -31,6 +31,7 @@ test.after(() => rmSync(FIXTURE_DIR, { recursive: true, force: true }));
 
 const FAKE = fakeAcpDescriptor();
 const COPILOT = getTargetById('copilot');
+const ANTIGRAVITY = getTargetById('antigravity');
 
 function tempCwd(prefix = 'acp-daemon-cwd-') {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -365,5 +366,101 @@ test('session/cancel mid-turn settles the prompt cancelled', async (t) => {
     assert.equal(cancelled.cancelled, true);
     assert.ok(await until(() => state.status === 'cancelled', { budgetMs: 5000 }), `cancelled within budget (status ${state.status})`);
     assert.equal(readEvents(state.eventsFile).at(-1).type, 'cancelled');
+  });
+});
+
+// ---- Antigravity: the shipped second companion, through the same fake ----
+//
+// Google's agy_acp_server (registry `antigravity-acp`), measured 2026-09-11 on
+// 1.1.1: no spawn flags (the registry launches the bare binary on macOS), no
+// usage anywhere on the ACP surface, sessions that survive the process, and a
+// model that is a per-session config option the loaded session forgets.
+
+test('antigravity: the descriptor — bare spawn, no usage reader, load honoured, the permission knob, and the model as a session config option', () => {
+  assert.deepEqual(ANTIGRAVITY.acp.args({ model: 'gemini-pro-agent', env: {} }), process.platform === 'linux' ? ['--uid='] : [],
+    'the registry entry\'s own args: nothing on macOS, `--uid=` on linux — the model is not a flag');
+  assert.deepEqual(ANTIGRAVITY.acp.env({ env: {}, paths: {} }), {});
+  assert.deepEqual(ANTIGRAVITY.acp.rotate, []);
+  assert.equal(ANTIGRAVITY.acp.clientName, 'agent-companion');
+  assert.equal(ANTIGRAVITY.acp.loadSession, true, 'a session survives the server process and session/load remembers (measured)');
+  assert.equal(ANTIGRAVITY.acp.defaultModel({}), null, 'unset leaves the account\'s default model');
+  assert.equal(ANTIGRAVITY.acp.rubberDuck, false);
+  assert.equal(ANTIGRAVITY.acp.permission({}), 'all');
+  assert.equal(ANTIGRAVITY.acp.permission({ AGENT_COMPANION_ANTIGRAVITY_PERMISSION: 'edit' }), 'edit');
+  assert.equal(ANTIGRAVITY.acp.permission({ AGENT_COMPANION_ANTIGRAVITY_PERMISSION: 'NONE' }), 'none');
+  assert.equal(ANTIGRAVITY.acp.permission({ AGENT_COMPANION_ANTIGRAVITY_PERMISSION: 'yolo' }), 'all', 'an unrecognised policy is the default, never a guess');
+  assert.equal(ANTIGRAVITY.acp.usage({ result: { stopReason: 'end_turn', _meta: { quota: { token_count: { input_tokens: 1, output_tokens: 1 } } } } }), null,
+    'nothing on the ACP surface carries usage (measured): even a shape another agent uses is not read');
+  assert.deepEqual(ANTIGRAVITY.acp.updates, ['agent_thought_chunk', 'agent_message_chunk', 'tool_call', 'tool_call_update', 'available_commands_update', 'user_message_chunk']);
+  assert.deepEqual(ANTIGRAVITY.acp.setModel({ sessionId: 's1', model: 'gemini-pro-agent' }),
+    ['session/set_config_option', { sessionId: 's1', configId: 'model', value: 'gemini-pro-agent' }]);
+  assert.equal(COPILOT.acp.setModel, undefined, 'Copilot takes its model as a spawn flag, and nothing changes for it');
+  assert.equal(FAKE.acp.setModel, undefined);
+  assert.equal(ANTIGRAVITY.binaryEnv, 'ANTIGRAVITY_ACP_BIN');
+  assert.match(ANTIGRAVITY.binaryNames[0], /agent-companion\/antigravity-acp\/current\/agy_acp_server\.par$/, 'the registry binary, never agy');
+  assert.equal(ANTIGRAVITY.capabilities.modelSelection, true);
+  assert.equal(ANTIGRAVITY.capabilities.parallel, 'planned');
+});
+
+test('antigravity: a pinned model is set on the session after session/new, set again after session/load, and no usage is invented', async (t) => {
+  const cwd = tempCwd();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const trace = join(cwd, 'trace.jsonl');
+  let sessionId;
+  await withEnv({ ANTIGRAVITY_ACP_BIN: FAKE_BIN, ACP_FAKE_TRACE: trace, ACP_FAKE_LOAD_SESSION: '1', ACP_FAKE_USAGE: 'quota' }, async () => {
+    const first = managerFor(t, ANTIGRAVITY);
+    sessionId = await first.startSession(cwd, 'gemini-3.8-flash-low');
+    assert.equal(first.getStatus().companion, 'antigravity');
+    const state = await runPrompt(first, sessionId, 'round one');
+    assert.equal(state.status, 'completed');
+    assert.equal(state.summary.message, 'ready');
+    assert.equal('usage' in state.summary, false, 'the fake answered `_meta.quota`; the Antigravity reader reads nothing — absent, never zeroed');
+    const frames = readTrace(trace);
+    assert.deepEqual(frames[0].argv, process.platform === 'linux' ? ['--uid='] : []);
+    assert.deepEqual(frames.filter((f) => f.method).map((f) => f.method).slice(0, 4),
+      ['initialize', 'session/new', 'session/set_config_option', 'session/prompt'], 'the model follows session/new, before the first prompt');
+    assert.deepEqual(frames.find((f) => f.method === 'session/set_config_option').params, { sessionId, configId: 'model', value: 'gemini-3.8-flash-low' });
+    first.shutdown();
+  });
+
+  // A fresh daemon handed the old id loads it — and pins the model again,
+  // because the loaded session comes back on the default (measured).
+  const trace2 = join(cwd, 'trace-load.jsonl');
+  await withEnv({ ANTIGRAVITY_ACP_BIN: FAKE_BIN, ACP_FAKE_TRACE: trace2, ACP_FAKE_LOAD_SESSION: '1' }, async () => {
+    const second = managerFor(t, ANTIGRAVITY);
+    const server = new IpcServer(second);
+    const response = await server._dispatch({ command: 'prompt-bg', sessionId, cwd, text: 'round two', model: 'gemini-3.8-flash-low' });
+    assert.equal(response.ok, true, JSON.stringify(response));
+    assert.equal(response.data.sessionId, sessionId);
+    assert.equal(response.data.sessionLoaded, true);
+    const state = second.inFlightPrompts.get(response.data.promptId);
+    assert.ok(await until(() => TERMINAL_STATUSES.has(state.status)));
+    assert.equal(state.status, 'completed');
+    assert.deepEqual(readTrace(trace2).filter((f) => f.method).map((f) => f.method).slice(0, 4),
+      ['initialize', 'session/load', 'session/set_config_option', 'session/prompt'], 'the model follows session/load too');
+  });
+
+  // No pin: nothing is sent, the agent's own default serves.
+  const trace3 = join(cwd, 'trace-unpinned.jsonl');
+  await withEnv({ ANTIGRAVITY_ACP_BIN: FAKE_BIN, ACP_FAKE_TRACE: trace3 }, async () => {
+    const third = managerFor(t, ANTIGRAVITY);
+    const sid = await third.startSession(cwd);
+    await runPrompt(third, sid, 'hello');
+    assert.equal(readTrace(trace3).some((f) => f.method === 'session/set_config_option'), false);
+  });
+});
+
+test('antigravity: a model the agent does not have fails the session explicitly, naming the refusal — never a silent fallback to the default', async (t) => {
+  const cwd = tempCwd();
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  await withEnv({ ANTIGRAVITY_ACP_BIN: FAKE_BIN }, async () => {
+    const manager = managerFor(t, ANTIGRAVITY);
+    await assert.rejects(() => manager.startSession(cwd, 'not-a-model'), /not available for the current authentication method/);
+    // Over IPC the same refusal reaches the bridge as a failed prompt-bg
+    // (the daemon rethrows what is not a busy/protocol verdict), and the job
+    // fails naming it — the fake echoes the server's own -32602 wording.
+    const server = new IpcServer(manager);
+    await assert.rejects(() => server._dispatch({ command: 'prompt-bg', cwd, text: 'hello', model: 'not-a-model' }), /Model 'not-a-model' is not available/);
+    assert.equal(manager.sessions.size, 0, 'no session is kept on the default model behind the refusal');
   });
 });

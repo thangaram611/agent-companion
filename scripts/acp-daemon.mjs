@@ -1,19 +1,20 @@
 #!/usr/bin/env node
 // acp-daemon.mjs
-// Long-lived daemon that owns ONE native ACP agent (`copilot --acp` today; any
-// agent with an `acp` block on its descriptor) over stdio and exposes it over a
-// Unix domain socket. Speaks JSON-RPC 2.0 (Agent Client Protocol v1) to the
-// agent, simple JSON over the socket to clients. One daemon per companion per
+// Long-lived daemon that owns ONE native ACP agent (`copilot --acp`, Google's
+// `agy_acp_server.par`; any agent with an `acp` block on its descriptor) over
+// stdio and exposes it over a Unix domain socket. Speaks JSON-RPC 2.0 (Agent
+// Client Protocol v1) to the agent, simple JSON over the socket to clients. One daemon per companion per
 // host home: each has its own socket, log and prompt streams
 // (lib/runtime-paths.mjs keys them by companion).
 //
 // Everything companion-shaped is read from the descriptor's `acp` block in
 // lib/target-registry.mjs — the spawn argv, extra child env, files to rotate,
 // `clientInfo.name`, the default model, whether `session/load` is honoured,
-// the answer to `session/request_permission`, the usage reader and the
-// `session/update` kinds the agent was measured to emit. There is no
-// companion-id branch in this file; `scripts/copilot-acp-daemon.mjs` is the
-// Copilot binding of these same classes.
+// the answer to `session/request_permission`, the usage reader, the
+// `session/update` kinds the agent was measured to emit and, for an agent that
+// takes its model per session rather than per spawn, the request that sets it
+// (`acp.setModel`). There is no companion-id branch in this file;
+// `scripts/copilot-acp-daemon.mjs` is the Copilot binding of these same classes.
 //
 // Yolo posture is the companion's, declared on its descriptor (Copilot's
 // `--allow-all-*` flags; an agent that asks anyway gets the descriptor's
@@ -50,10 +51,11 @@ import { getTargetById } from '../lib/target-registry.mjs';
 
 // --- Constants ---------------------------------------------------------------
 
-// The one protocol version this daemon speaks. Copilot CLI 1.0.83 answers it,
-// and so did Gemini CLI 0.59.0 when it was evaluated as the second companion
-// (measured 2026-09-11; both answer 1 even to a request for 2, as the spec
-// says an agent should).
+// The one protocol version this daemon speaks. Copilot CLI 1.0.83 and Google's
+// agy_acp_server 1.1.1 answer it, and so did Gemini CLI 0.59.0 when it was
+// evaluated (all measured 2026-09-11). Copilot and Gemini answer 1 even to a
+// request for 2, as the spec says an agent should; Antigravity answers whatever
+// it is asked (1 or 2), which is why the pin is enforced at the handshake.
 export const ACP_PROTOCOL_VERSION = 1;
 
 const LOG_MAX_BYTES = 1024 * 1024; // 1 MB
@@ -690,7 +692,24 @@ class AcpConnection {
   async createSession(cwd) {
     const result = await this._sendRequest('session/new', { cwd, mcpServers: [] }, SPAWN_INIT_TIMEOUT_MS);
     this.log('INFO', 'session/new ok:', { sessionId: result?.sessionId });
+    await this._applySessionModel(result.sessionId);
     return result.sessionId;
+  }
+
+  // The model, where the agent takes it per session rather than as a spawn
+  // flag — the descriptor's `acp.setModel` names the request (Antigravity's
+  // `session/set_config_option`, measured 2026-09-11 on agy_acp_server 1.1.1).
+  // Sent after `session/new` AND after `session/load`, because a loaded
+  // session comes back on the agent's default model (measured). No pin, or
+  // no hook, sends nothing. An agent that refuses the id (-32602, naming the
+  // ids it has) fails the session and the prompt with it: never a silent
+  // fallback to the default.
+  async _applySessionModel(sessionId) {
+    const setModel = this.descriptor.acp.setModel;
+    if (typeof setModel !== 'function' || !this.model) return;
+    const [method, params] = setModel({ sessionId, model: this.model });
+    await this._sendRequest(method, params, SPAWN_INIT_TIMEOUT_MS);
+    this.log('INFO', `${method} ok:`, { sessionId, model: this.model });
   }
 
   // `session/load`: the agent replays the session's history as
@@ -700,6 +719,7 @@ class AcpConnection {
   async loadSession(sessionId, cwd) {
     const result = await this._sendRequest('session/load', { sessionId, cwd, mcpServers: [] }, SPAWN_INIT_TIMEOUT_MS);
     this.log('INFO', 'session/load ok:', { sessionId });
+    await this._applySessionModel(sessionId);
     return result;
   }
 

@@ -165,9 +165,9 @@ primary companion:
   persists a rollout transcript under `$CODEX_HOME/sessions` with no auto-cleanup
   in v1; nested Seatbelt sandboxing is documented, not worked around (use
   `AGENT_COMPANION_CODEX_SANDBOX_MODE=bypass` in an externally-sandboxed bridge).
-- Only Copilot rides the generic ACP daemon today; Goose is a descriptor away
-  and Antigravity CLI is the next candidate (item 7's handoff). Aider was
-  dropped (2026-09-09 assessment: stalled, no ACP or MCP).
+- Copilot and Antigravity ride the generic ACP daemon (item 8); Goose is a
+  descriptor away. Aider was dropped (2026-09-09 assessment: stalled, no ACP or
+  MCP).
 - README diagram assets are current as of 2026-08-13 and are now reproducible:
   every PNG is rendered from a committed SVG by
   `bash scripts/render-readme-assets.sh` (headless Chrome, byte-deterministic).
@@ -454,6 +454,240 @@ primary companion:
    - Non-goals held: no HTTP/WebSocket ACP transport, no routing or strength
      change, no change to the codex or opencode adapters.
 
+8. Antigravity as the second ACP companion — DONE (2026-09-11). Gate 0
+   (access and terms) was settled with primary sources before any code, and the
+   criteria below were written before the descriptor. Start-of-day state was
+   item 7's handoff; what moved since is the first bullet.
+   - **Gate 0.1 — `agy` still has no ACP mode, but Google now ships an ACP server
+     of its own.** Homebrew cask `antigravity-cli` 1.2.0 (released 2026-09-10,
+     installed today; `brew update` reports nothing newer). `agy --help` and
+     `--helpfull` on 1.2.0 list no `--acp`, JSON-RPC or serve flag; the headless
+     surface is `-p` with `--input-format stream-json` / `--output-format
+     stream-json` (one NDJSON turn per line), `--dangerously-skip-permissions`,
+     `--mode accept-edits|plan`, `--sandbox`. The CHANGELOG from 1.1.19 to 1.2.0
+     has no ACP entry. google-antigravity/antigravity-cli#31 is still open
+     (192 comments, last 2026-08-21, no Google reply). What changed: the ACP
+     registry's `antigravity-acp` entry was added by PR #542 on 2026-08-20 —
+     the day of @antigravity's "Antigravity IDE extensions are here! Now
+     available for Visual Studio Code, Visual Studio, Zed, and JetBrains." —
+     and bumped to 1.1.1 by PR #567 from `ivanporty@google.com` on 2026-09-03.
+     Its `agent.json` says `authors: ["Google LLC"]`, `license: proprietary`,
+     `license_url: https://antigravity.google/terms`, and launches
+     `./agy_acp_server.par` from `dl.google.com/agy-extensions` (linux adds
+     `--uid=`). The darwin-arm64 zip (316 MB) holds `agy_acp_server.par` and
+     `localharness_external`, both Mach-O arm64 signed `Developer ID
+     Application: Google LLC (EQHXZ8M8AV)`; `--version` reports "Built on Thu
+     Sep 3 00:22:52 2026 … //cloud/developer_experience/antigravity_extensions/
+     acp_server". Its only flags are `--debug` and `--notices` (absl
+     boilerplate aside): no model, no approval mode, no allow-dir.
+   - **Gate 0.2 — ToS reading: INSIDE, with the risk named.** The texts, read
+     2026-09-11:
+     - antigravity.google/terms, section 6 (no effective date shown): "You must
+       not abuse, harm, interfere with, or disrupt the Service. This includes,
+       but is not limited to, using the Service in connection with products not
+       provided by us. Using third party software, tools, or services to access
+       the Service (e.g. using OpenClaw with Antigravity OAuth) is a breach of
+       this Agreement. Such actions may be grounds for suspension or
+       termination of your Antigravity and/or Gemini CLI accounts."
+     - antigravity.google/docs/faq, "Why can't I use third party software (e.g.
+       Claude Code, OpenClaw, OpenCode) with my Antigravity login?": "Using
+       third party software, tools, or services to access Antigravity is a
+       violation of our Terms of Service, and severely degrades the experience
+       for legitimate product users. Such actions may be grounds for suspension
+       or termination of your account. … If you would like to use a third party
+       coding agent with Gemini, we recommend using a Vertex or AI Studio API
+       key."
+     - Google's own definition of the banned conduct (a gemini-cli maintainer,
+       google-gemini/gemini-cli discussion #20632, 2026-02-27): "use of 3rd
+       party tools or proxies to access Antigravity resources and quotas";
+       "Using third-party software, tools, or services to harvest or piggyback
+       on Gemini CLI's OAuth authentication to access our backend services is a
+       direct violation."
+     - The registry Google published to (agentclientprotocol.com): "an easy way
+       for developers to distribute their ACP-compatible agents to any client
+       that speaks the protocol." Google's submitting PR #542: "Google
+       Antigravity is Google's AI coding agent server implementing the Agent
+       Client Protocol (ACP)" and "Verified live ACP handshake & auth methods:
+       Auth OK: oauth-personal(agent), oauth-business(agent),
+       gemini-api-key(agent), agent-platform(agent)".
+     - Google's Zed page (antigravity.google/docs/ide/extensions/zed): install
+       via "External Agents > Add > Install from Registry"; prerequisite "a
+       Google Account with any Antigravity plan (including the free tier) or
+       Gemini Enterprise"; auth "Google Accounts (Individual): OAuth for
+       personal Google AI subscriptions (Free, Pro, Ultra tiers)". Xcode 27
+       gets the same server through Settings > Intelligence.
+     The reading. Every prohibited example — OpenClaw, Claude Code, OpenCode on
+     an Antigravity login — is software that takes the Antigravity OAuth token
+     and calls Google's backend itself; the maintainer's words are "piggyback
+     on … OAuth authentication to access our backend services". This bridge
+     would do neither: it never sees the token (it lives in
+     `~/.gemini/antigravity-acp/`, read by Google's process) and never calls
+     the backend; it is a stdio client of Google's own signed agent server,
+     which is exactly what Zed, JetBrains and Xcode are — third-party products
+     Google documents against the same binary, the same registry and the same
+     personal OAuth. Google published that server to a registry whose stated
+     purpose is any client that speaks the protocol, verified `oauth-personal`
+     in its own PR, and points registry consumers at these terms as the
+     license. That is the structure §1 of the assessment already relies on for
+     codex, copilot and opencode: spawn the vendor's own binary and let it hold
+     the credential. The sentence "using the Service in connection with
+     products not provided by us", read literally, would also forbid Zed and
+     Xcode, so it cannot mean what it literally says; its gloss is the OpenClaw
+     example. Two honest caveats: Google has not written "any ACP client" in
+     its own voice — the registry submission is the closest statement — and
+     Google's docs list five editors, not orchestrators; the account risk stays
+     with the operator, who chose to proceed on this reading.
+   - **Gate 0.3 — account.** `agy` is not logged in on this machine (no
+     `~/.gemini/antigravity-cli/`, nothing in the keychain); the ACP server is
+     not either (no `~/.gemini/antigravity-acp/`, `session/new` answers
+     `-32000 Authentication required`). The two do not share credentials: the
+     server resolves its home to `~/.gemini` (`$GEMINI_HOME` honoured) and its
+     own `antigravity-acp/settings.json`, and ignores the `oauth_creds.json`
+     the morning's Gemini CLI attempt left there. Plan tier: unknown until the
+     login; Google's Zed page says any plan including free suffices. The
+     terms' data clause applies to whatever tier answers: "Google employees
+     and contractors may access, view, review and use Interactions. If you
+     don't want your Interactions used in this way, navigate to settings to
+     change your preference" — how the ACP server exposes that preference is
+     a measurement, recorded below once made.
+   - **Measured before the descriptor, unauthenticated (no turn spent).**
+     `initialize` with `protocolVersion: 1` is answered `1` (13.7 s cold, 1.0 s
+     warm); with `2` it is answered `2` — so the daemon's v1 pin holds with no
+     change (the registry-forum report that it "negotiates protocolVersion 2"
+     is the client asking for 2). `agentInfo` `antigravity-acp` /
+     `agy_acp_server_1.1.1`; `agentCapabilities.loadSession: true`,
+     `sessionCapabilities: {list, resume}`, `mcpCapabilities: {http, sse}`,
+     `promptCapabilities: {image, audio, embeddedContext}`, `auth: {logout}`;
+     `authMethods`: `oauth-personal` ("Log in with Google"), `oauth-business`,
+     `gemini-api-key`, `agent-platform`. `session/new` without credentials:
+     `-32000 Authentication required`, data naming the `authenticate` method
+     and the `auth.type` key of `~/.gemini/antigravity-acp/settings.json`.
+     Still to measure once logged in: `session/prompt` update kinds, where
+     usage lands (`usage_update`, `PromptResponse.usage`, `_meta`, or
+     nowhere), `session/request_permission` shape and whether a settings key
+     silences it, `session/cancel`, `session/load` across a server restart,
+     model selection (`config_option_update` / `session/set_config_option`),
+     and the tier the login reports.
+   - **Success criteria (written before code):**
+     1. One `antigravity` descriptor in `lib/target-registry.mjs` with an `acp`
+        block the fake-agent shape already models; **no change to
+        `scripts/acp-daemon.mjs`** unless a measurement forces one, and then
+        `scripts/copilot-acp-daemon.test.mjs` still passes unchanged.
+     2. The daemon spawns the registry's `agy_acp_server.par`, never `agy`
+        (`agy` has no ACP mode; the `.par` is the binary Google ships for ACP
+        clients). `scripts/install-antigravity-acp.mjs` installs it: reads the
+        live registry `agent.json`, downloads the platform archive, verifies
+        the Google LLC Developer ID signature on macOS, unpacks under
+        `~/.local/share/agent-companion/antigravity-acp/<version>/` and points
+        `current` at it; `ANTIGRAVITY_ACP_BIN` overrides the path. Onboarding,
+        doctor and README name this command; the cask is optional and
+        unreferenced.
+     3. The auth probe spends no turn: it reads the server's own credential
+        files (measured after login), never `session/new`.
+     4. The permission policy is the daemon's answer to
+        `session/request_permission`, from
+        `AGENT_COMPANION_ANTIGRAVITY_PERMISSION=all|edit|none` (default
+        `all`), the shape Gemini's had minus the flag the server does not take.
+     5. Usage is read from wherever the measurement finds it, through
+        `lib/usage.mjs`, `source: antigravity-acp`; absent when nothing is
+        reported.
+     6. `acp.loadSession` is true only if a session measured to survive a
+        server restart loads; `acp.updates` lists exactly the kinds measured.
+     7. Target enum and docs: `TARGET_IDS`, `VALID_TARGETS`, both plugin
+        manifests, `setup.sh`, onboarding usage strings, `prewarm-target.sh`,
+        both agent templates and their suites, README matrix and notes,
+        `docs/ARCHITECTURE.md` Companion Matrix, CLAUDE.md, `probes/README.md`.
+     8. `probes/smoke/acp-antigravity.mjs`, modelled on the dropped
+        `acp-gemini.mjs` (908193b): send with `meta.usage`, thread continuity
+        on one session, reply as cancel + re-prompt with the honest
+        acknowledgement, cancel, and a bridge SIGKILL mid-turn with bridge B
+        rejoining the same prompt id.
+     9. Gates before done: full root-anchored `node --test`; the five codex
+        smokes still 13/13, 8/8, 17/17, 18/18, 16/16; one real Copilot job
+        through the bridge (shared daemon code path); the Antigravity probe
+        green against the real bridge; this item marked done with the date;
+        commit in `type(scope): …` style and push.
+   - **Measured after the login, before the descriptor (agy_acp_server 1.1.1,
+     2026-09-11; every prompt was on a throwaway cwd).** The operator signed
+     in with `oauth-personal`; the server recorded `auth.type` in
+     `~/.gemini/antigravity-acp/settings.json`, put the token in the login
+     keychain (service `gemini`, account `antigravity-acp`) and logged
+     `loadCodeAssist … currentTier: free-tier (Antigravity)` with the privacy
+     notice that human reviewers may read prompts and code for up to 18
+     months unless the account opts out. `session/new` answers `modes`
+     (`default`, `auto_edit`, `yolo`), `configOptions` (a `model` select —
+     `gemini-3.8-flash-{high,medium,low}`, `gemini-3.7-flash-*`,
+     `gemini-3.6-flash-*`, `gemini-pro-agent`, `gemini-3.1-pro-low`; current
+     `gemini-3.7-flash-high`) and `models.availableModels`, then emits
+     `available_commands_update` (`plan`, `logout`). A prompt that reads a
+     file emits `tool_call`, `tool_call_update`, `agent_message_chunk` (and
+     `agent_thought_chunk` when it thinks) and answers `{stopReason:
+     "end_turn"}` — no `usage`, no `_meta`, no `usage_update` on the stream:
+     usage is nowhere on the ACP surface. (The server's stderr echoes the
+     internal harness's `usageUpdate` frames — promptTokenCount,
+     candidatesTokenCount, thoughtsTokenCount — as debug logging; not read.)
+     In `default` mode a shell command and a file write each arrive as
+     `session/request_permission` (kind `execute` with allow_always /
+     allow_once / reject_once, kind `edit` with allow_once / reject_once; the
+     allow_always option carries an `agy.security.warning` about prompt
+     injection); a read never asks; after `session/set_mode yolo` nothing
+     asks. `session/cancel` mid-turn answers `stopReason: cancelled` after a
+     "context canceled" chunk. The server process killed, a fresh one
+     `session/load`s the id, replays twelve updates (`user_message_chunk`
+     included) and the follow-up answers from memory; `session/list` answers
+     on v1 too. `session/set_config_option {configId: model}` switches the
+     model and echoes `currentValue`; `session/set_model` answers `{}`; an
+     unknown id is `-32602 "Model 'x' is not available for the current
+     authentication method"` with `availableModels`; and the loaded session
+     comes back on the default model with the mode reset. Cold start to the
+     `initialize` answer 13.7 s, warm 1.0 s; `--version` 1.2 s.
+   - **Shipped (2026-09-11).** `antigravity` descriptor in
+     `lib/target-registry.mjs` with `antigravityAcpPaths`,
+     `resolveAntigravityPermission` and `probeAntigravityAuth`;
+     `scripts/install-antigravity-acp.mjs` (registry-driven install with the
+     Developer ID check on macOS, `--check`, `--login` driving `authenticate`
+     over stdio and echoing the tier); **one daemon change, forced by the
+     model measurement**: `acp.setModel` names the request the daemon sends
+     after `session/new` and again after `session/load` when a model is
+     pinned (`_applySessionModel`; Copilot's descriptor has no hook and
+     `scripts/copilot-acp-daemon.test.mjs` passes unchanged, 13/13). The auth
+     probe hook (`descriptor.auth.probe` with an injected reader, runner and
+     platform) returned to `lib/target-diagnostics.mjs`. The fake agent
+     accepts a bare spawn, answers `session/set_config_option` and forgets
+     the model on load. `test/fake-acp-agent.mjs`'s own descriptor stays the
+     neutral one; Antigravity's is driven through the same fake via
+     `ANTIGRAVITY_ACP_BIN` in `scripts/acp-daemon.test.mjs` (descriptor, model
+     on new and on load, the -32602 refusal reaching prompt-bg) and
+     `bridge-server/server.test.mjs` (send without wrapper/fleet/usage, reply
+     wording, the enum, and an end-to-end run where the daemon is stopped
+     between rounds so round two `session/load`s on a fresh daemon). Docs:
+     README matrix, notes, requirements, onboarding, usage table and runtime
+     files; both diagram SVGs re-rendered; ARCHITECTURE matrix, ACP paragraph
+     and four Negative Results; both templates; CLAUDE.md; probes/README;
+     RELEASE_READINESS gate 9; DIRECTION_ASSESSMENT §7.
+   - **Gates, 2026-09-11.** `probes/smoke/acp-antigravity.mjs` 24/24 against
+     the real bridge, daemon and server (send 22 s with two tool calls and no
+     `usage` key; round two on the same session from memory; reply as cancel
+     + re-prompt with the follow-up winning; cancel → `cancelled`; bridge A
+     SIGKILLed mid-turn, the daemon outlived it, bridge B hydrated the same
+     prompt id and the job completed; a `gemini-3.8-flash-low` pin sent to
+     the daemon landed as `session/set_config_option ok` in its log). One
+     real Copilot job through the same bridge: `copilot-mtwm2l8q-uqhz`,
+     completed in 54 s, `RUBBER-DUCK: clean`, `meta.usage` from OTEL
+     (`claude-sonnet-5`, cost 3), both daemons registered side by side in
+     `acp_daemons`. Doctor: `antigravity` installed (build stamp
+     `Built on Thu Sep 3 00:22:52 2026`), authenticated (keychain item
+     present), permission `all`, ready. `claude plugin validate .` and the
+     codex marketplace build pass. Full root-anchored `node --test`: 685/685
+     (the exec-timeout guard caught the installer's first, unbounded
+     shell-outs; every one is now bounded and the script is a listed
+     exception); the five codex smokes 13/13, 8/8, 17/17, 18/18, 16/16;
+     `npm audit` clean.
+   - Non-goals: no HTTP/WebSocket ACP, no routing or strength change, no
+     change to the codex or opencode adapters, no API-key auth path unless the
+     operator asks for one; the `yolo` session mode is not set (the daemon's
+     answer is the policy); the stderr usage frames are not read.
+
 ## Validation Commands
 
 ```bash
@@ -468,6 +702,8 @@ node --check lib/target-registry.mjs
 node --check lib/target-diagnostics.mjs
 node --check lib/doctor.mjs
 node --check scripts/onboard.mjs
+node --check scripts/acp-daemon.mjs
+node --check scripts/install-antigravity-acp.mjs
 node --check lib/state.mjs
 find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 node --test
 node scripts/validate-codex-release.mjs

@@ -11,8 +11,8 @@ A **harness** is the parent coding-agent surface you already work in. Supported
 now: **Claude Code** and **Codex CLI**.
 
 A **companion** is the downstream agent runtime that receives delegated work.
-Supported now: **OpenCode**, **GitHub Copilot CLI**, and **Codex CLI** (Codex CLI
-can be both the harness and a downstream companion — the two roles are
+Supported now: **OpenCode**, **GitHub Copilot CLI**, **Codex CLI** and **Google
+Antigravity** (Codex CLI can be both the harness and a downstream companion — the two roles are
 independent; running Codex as a companion does not require Codex as the harness,
 or vice versa).
 
@@ -25,7 +25,7 @@ The product posture is deliberately companion-neutral:
 
 - **Bring your harness.** Install the Claude Code surface, the Codex CLI surface,
   or both.
-- **Attach your companion.** Choose `opencode`, `copilot`, or `codex` on each
+- **Attach your companion.** Choose `opencode`, `copilot`, `codex` or `antigravity` on each
   send, route by strength or profile, or persist one bridge default.
 - **Keep the parent workflow clean.** Delegated work runs through the isolated
   subagent. Claude scopes the bridge to that agent; Codex must register the
@@ -93,6 +93,7 @@ companion runtime boundary.
 | GitHub Copilot CLI | `copilot --acp` behind the shared ACP daemon | yes | yes | yes | yes | yes (cancel + re-prompt) | yes, with ACP |
 | Codex CLI (exec) | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
 | Codex CLI (app-server, what the templates ship) | `codex app-server` behind a shared broker | yes | yes | yes | yes | yes | yes |
+| Google Antigravity | `agy_acp_server.par` (Google's ACP-registry server) behind the shared ACP daemon | yes | yes | yes | yes | yes (cancel + re-prompt) | yes, with ACP and `session/load` |
 
 Notes:
 
@@ -113,23 +114,67 @@ Notes:
     the job as the synthesized default profile's model. A profile's own `model`
     wins either way, and unset leaves OpenCode's configured default in place.
 - Copilot keeps `/fleet` parallel orchestration. `parallel: "auto"` can prepend
-  `/fleet` for broad Copilot tasks; OpenCode and Codex remain single-job.
-- The Copilot ACP daemon is a generic ACP daemon, `scripts/acp-daemon.mjs`,
-  run as one detached process **per ACP companion** per host home
-  (`--companion copilot`), with its own socket, log and prompt streams and an
+  `/fleet` for broad Copilot tasks; OpenCode, Codex and Antigravity remain single-job.
+- The two ACP companions share one daemon implementation,
+  `scripts/acp-daemon.mjs`, run as one detached process **per companion** per
+  host home (`--companion copilot|antigravity`), each with its own socket, log
+  and prompt streams and an
   entry in `runtime/acp-daemons.json` with leases and a two-phase disposal
   claim — the codex broker's shape. Everything companion-shaped is the
   descriptor's `acp` block in `lib/target-registry.mjs`: the spawn argv, extra
   env, `clientInfo.name`, the default model, whether `session/load` is
-  honoured, the answer to `session/request_permission`, the usage reader and
-  the `session/update` kinds the agent was measured to emit. So a second
-  native ACP agent is a descriptor plus an install/auth block, not a daemon.
+  honoured, the answer to `session/request_permission`, the usage reader, the
+  `session/update` kinds the agent was measured to emit and, where the agent
+  takes its model per session rather than as a flag, the request that sets it.
+  So a native ACP agent is a descriptor plus an install/auth block, not a
+  daemon — Antigravity is one.
   The daemon pins ACP **v1**; an agent answering another version is refused
   (`ACP_PROTOCOL_MISMATCH`, the job settles `unreachable`), never adapted. It
   answers `session/request_permission` itself, from the descriptor's policy,
   so an agent that asks is never left hanging. Reply on an ACP companion is a
   cancelled turn plus a new prompt on the same session, told why — ACP has no
   mid-turn steer and the acknowledgement says so.
+- Google Antigravity (`agy_acp_server.par` 1.1.1, measured 2026-09-11):
+  - The daemon spawns **Google's own ACP server** from the ACP registry
+    (`antigravity-acp` — the binary Zed, JetBrains and Xcode launch), never the
+    `agy` CLI, which has no ACP mode (cask 1.2.0; antigravity-cli#31 is open).
+    Install it with `node scripts/install-antigravity-acp.mjs` (reads the
+    registry, downloads the platform archive, verifies the Google LLC
+    Developer ID signature on macOS, unpacks under
+    `~/.local/share/agent-companion/antigravity-acp/<version>/`); override the
+    path with `ANTIGRAVITY_ACP_BIN`.
+  - Sign in with `node scripts/install-antigravity-acp.mjs --login`: the
+    server prints a Google sign-in URL and opens the browser (any Antigravity
+    plan, including the free tier, or `--method gemini-api-key` with
+    `GEMINI_API_KEY`). Credentials are the server's own — `auth.type` in
+    `~/.gemini/antigravity-acp/settings.json`, the token in the login
+    keychain — shared with neither `agy` nor Gemini CLI; `node
+    scripts/onboard.mjs --list-targets` reads that state without a turn.
+  - Terms: the bridge is a stdio client of Google's signed server, exactly
+    what the editors Google documents are. It never holds the OAuth token and
+    never calls Google's backend, which is the conduct the Antigravity terms
+    and FAQ prohibit ("third party software, tools, or services to access the
+    Service (e.g. using OpenClaw with Antigravity OAuth)"). The reading, its
+    quotes and its caveats are `docs/MVP_TRACKER.md` item 8; the account risk
+    is yours. On the free tier Google staff may review your Interactions
+    unless the account opts out in Antigravity's own settings.
+  - Permissions: the daemon is the user. The server asks
+    `session/request_permission` for `execute` and `edit` tool calls in its
+    default mode and never for reads; `AGENT_COMPANION_ANTIGRAVITY_PERMISSION=
+    all|edit|none` (default `all`) is the daemon's answer (allow everything /
+    allow edits only / allow nothing that asks — a rejected tool tells the
+    model). The tool sandbox is derived from the session `cwd` with symlinks
+    resolved, so `cwd` must be the real project directory.
+  - A profile `model` (`gemini-3.7-flash-high`, `gemini-3.8-flash-low`,
+    `gemini-pro-agent`, …) is a per-session config option the server
+    validates itself (an unknown id fails the job, naming the available ones);
+    unset leaves the account's default. A session the daemon no longer holds
+    is `session/load`ed — the server keeps sessions on disk and a loaded one
+    remembers — and told its model again, because a loaded session comes
+    back on the default.
+  - Usage: none. The ACP surface carries no usage (the prompt response is
+    `{stopReason}` only, no `usage_update`), so Antigravity jobs have no
+    `usage` key. No `/fleet`, no rubber-duck wrapper: output is relay-only.
 - Codex ships two adapters, selected by `CODEX_RUNTIME_ADAPTER`:
   - `exec` is the single-shot `codex exec --json` adapter — the *code* default,
     but not what you get: both agent templates set
@@ -212,13 +257,11 @@ Notes:
   profile: `AGENT_COMPANION_CODEX_MODEL=<model id>` (a profile's own `model`
   wins); timeout default 40 minutes, override with
   `AGENT_COMPANION_CODEX_TIMEOUT_MS`.
-- The next ACP companion is a descriptor away. Gemini CLI was built and
-  measured against the generic daemon on 2026-09-11 and then dropped before
-  shipping: Google closed "Login with Google" for individual accounts on
-  2026-06-18 (AI Studio or Vertex API keys still work), and its successor
-  Antigravity CLI has no ACP mode and a ToS that forbids third-party clients on
-  an Antigravity login — see `docs/MVP_TRACKER.md` item 7 for the evidence and
-  the handoff. Goose is an ACP row; Aider was dropped (stalled, no ACP or MCP).
+- Gemini CLI was built on the generic daemon and dropped before shipping on
+  2026-09-11 (Google closed "Login with Google" for individual accounts on
+  2026-06-18); Google's own ACP server for Antigravity took its place as the
+  second ACP companion the same day — `docs/MVP_TRACKER.md` items 7 and 8 keep
+  the evidence. Goose is an ACP row; Aider was dropped (stalled, no ACP or MCP).
 
 ## Strength Routing
 
@@ -235,7 +278,7 @@ One `agent_send` resolves to exactly one companion profile. A send may carry:
 | --- | --- |
 | `strength` | Preferred. Route to the configured profile that declares this label. |
 | `profile` | A specific configured profile id. Mutually exclusive with `strength`. |
-| `target` | A bare companion: `opencode`, `copilot`, or `codex`. |
+| `target` | A bare companion: `opencode`, `copilot`, `codex`, or `antigravity`. |
 | *(none)* | The configured default profile wins — see Internal MCP Surface for the full zero-input order. |
 
 Passing both `strength` and `profile` is `ROUTING_CONFLICT`. A `target` passed
@@ -281,6 +324,10 @@ Two open items:
 - At least one companion runtime:
   - OpenCode on `PATH`, or `OPENCODE_BIN=/absolute/path/to/opencode`.
   - GitHub Copilot CLI on `PATH`, or `COPILOT_BIN=/absolute/path/to/copilot`.
+  - Google's Antigravity ACP server, installed by
+    `node scripts/install-antigravity-acp.mjs` (or
+    `ANTIGRAVITY_ACP_BIN=/absolute/path/to/agy_acp_server.par`) and signed in
+    with `--login`.
   - Codex CLI on `PATH`, or `CODEX_BIN=/absolute/path/to/codex`, authenticated
     via `codex login` (ChatGPT plan) or an API key.
 - Claude Code CLI when installing the Claude surface.
@@ -288,7 +335,8 @@ Two open items:
 
 OpenCode authentication and provider setup stays inside OpenCode. Copilot
 authentication stays inside Copilot CLI. Codex authentication stays inside
-Codex CLI. Agent Companion does not ask for or store provider secrets.
+Codex CLI. Antigravity authentication stays inside Google's ACP server and
+the login keychain. Agent Companion does not ask for or store provider secrets.
 
 ## Fast Path
 
@@ -337,6 +385,7 @@ node scripts/onboard.mjs --doctor
 node scripts/onboard.mjs --target opencode --set-default
 node scripts/onboard.mjs --target copilot --set-default
 node scripts/onboard.mjs --target codex --set-default
+node scripts/onboard.mjs --target antigravity --set-default
 node scripts/onboard.mjs --target opencode --smoke
 ```
 
@@ -351,7 +400,8 @@ node scripts/onboard.mjs --set-default-profile <id>
 ```
 
 `--adapter` takes `cli|server` for OpenCode and `exec|appserver` for Codex.
-Copilot has no profile-selectable adapter; the ACP daemon is its one transport.
+Copilot and Antigravity have no profile-selectable adapter; the ACP daemon is
+their one transport.
 `--strength` takes a comma-separated subset of `reviewer`, `web_researcher`,
 `planner`, `fast_executor`.
 
@@ -360,7 +410,7 @@ Useful flags:
 | Flag | Purpose |
 | --- | --- |
 | `--host` | Label/scope onboarding output as `claude`, `codex`, or `both`. |
-| `--target` | Select `opencode`, `copilot`, `codex`, `auto`, or `none`. |
+| `--target` | Select `opencode`, `copilot`, `codex`, `antigravity`, `auto`, or `none`. |
 | `--set-default` | Write `~/.{claude,codex}/agent-companion/default-target`. |
 | `--json` | Emit machine-readable reports. |
 | `--no-target-check` | Persist the target even if readiness checks fail. |
@@ -562,7 +612,7 @@ Important rules:
 
 - `cwd` is required on every send and must be an absolute target repo/worktree
   path.
-- `target` may be `opencode`, `copilot`, or `codex`. Prefer `strength`, or
+- `target` may be `opencode`, `copilot`, `codex`, or `antigravity`. Prefer `strength`, or
   `profile` when you need one specific configured profile.
 - With `target`, `strength` and `profile` all omitted, resolution uses the
   default profile — `AGENT_COMPANION_DEFAULT_PROFILE`, else the `defaultProfile`
@@ -657,6 +707,7 @@ reported nothing has no `usage` key at all, never zeros. Where it comes from:
 | Codex app-server | `thread/tokenUsage/updated`, baselined so a follow-up send on a resumed thread reports its own turn, not the thread. Streams into the digest mid-turn. |
 | Codex exec | `turn.completed.usage` (no total, no model on that stream). |
 | Copilot | The `invoke_agent` span in the OTEL file exporter the daemon enables, keyed by the ACP session id: tokens, cache read/write, reasoning, model and `cost` in premium requests. The ACP stream's `usage_update` (1.0.83) is context occupancy, not the turn's tokens. |
+| Antigravity | Nothing: the ACP surface carries no usage (measured 2026-09-11 on 1.1.1 — the prompt response is `{stopReason}` only, no `usage_update`), so its jobs have no `usage` key. |
 | OpenCode server | The assistant message's `tokens`, `cost` (USD) and `modelID`, live and from the transcript on resume. OpenCode's `total` counts cached input too and is carried as reported. |
 | OpenCode CLI | The `step-finish` part on the `--format json` stream: tokens and cost, no model on that stream. |
 
@@ -669,8 +720,8 @@ an ACP prompt that did not complete carry none.
 Copilot-target output for the `general` and `research` templates carries a
 server-appended `RUBBER-DUCK: clean|revised` verdict line. It is not
 configurable and there is no payload field controlling it. `plan_review` and
-`review` have their own critique built in and skip the wrapper, and OpenCode
-and Codex output is relay-only so it never carries one.
+`review` have their own critique built in and skip the wrapper, and OpenCode,
+Codex and Antigravity output is relay-only so it never carries one.
 
 This lives here rather than in the subagent descriptions because it describes
 what the caller *receives*, not how to construct a call — and the server
@@ -724,13 +775,15 @@ agent-bridge.log                        human-readable bridge trace
 copilot-acp.sock                        Copilot ACP daemon socket
 copilot-acp-daemon.log                  Copilot ACP daemon log
 copilot-otel-traces.jsonl               Copilot OTEL traces
+antigravity-acp.sock                    Antigravity ACP daemon socket
+antigravity-acp-daemon.log              Antigravity ACP daemon log
 acp-daemons.json                        per-companion ACP daemon identity, leases and disposal claim
 codex-app-server.sock                   codex app-server broker socket
 codex-app-server-broker.log             codex app-server broker log
 codex-broker.json                       codex running identity, leases and disposal claim
 opencode-servers.json                   pooled `opencode serve` registry
 heartbeats/                             host-liveness files the daemons reap against
-prompts/<companion>-acp-<promptId>.jsonl  per-prompt event stream (copilot today)
+prompts/<companion>-acp-<promptId>.jsonl  per-prompt event stream (copilot, antigravity)
 digests/agent-digest-<jobId>.md         rendered progress digests
 completions.jsonl                       orphan completion queue
 ```
@@ -849,8 +902,8 @@ claude plugin validate .
   `turn/steer`).
 - Codex `exec` restart resume (app-server mode supports it via `thread/resume`).
 - MCP elicitation or `NEEDS_USER_INPUT` flows.
-- Mid-turn steering on an ACP companion (Copilot): `agent_reply` cancels the
-  running turn and re-prompts the same session, and says so.
+- Mid-turn steering on the ACP companions (Copilot, Antigravity): `agent_reply`
+  cancels the running turn and re-prompts the same session, and says so.
 - ACP over HTTP or WebSocket (still an RFD upstream; stdio is the only stable
   transport, which is why the daemons exist).
 

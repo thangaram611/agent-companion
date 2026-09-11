@@ -158,9 +158,10 @@ test('send validation handles strength/profile open-string siblings with mutual 
   assert.throws(() => validateAgentArgs(sendArgs({ strengths: 'reviewer' })), /unknown field "strengths"/);
 });
 
-test('target:"codex" is accepted alongside opencode and copilot', () => {
-  assert.deepEqual([...VALID_TARGETS].sort(), ['codex', 'copilot', 'opencode']);
+test('target:"codex" and target:"antigravity" are accepted alongside opencode and copilot', () => {
+  assert.deepEqual([...VALID_TARGETS].sort(), ['antigravity', 'codex', 'copilot', 'opencode']);
   assert.equal(validateAgentArgs(sendArgs({ target: 'codex' })).target, 'codex');
+  assert.equal(validateAgentArgs(sendArgs({ target: 'antigravity' })).target, 'antigravity');
   assert.throws(() => validateAgentArgs(sendArgs({ target: 'goose' })), /target must be one of/);
 });
 

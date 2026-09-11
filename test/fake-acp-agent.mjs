@@ -9,7 +9,8 @@
 // would quietly stop agreeing.
 //
 // Driven through a companion's `binaryEnv` (`FAKE_ACP_BIN` for its own
-// descriptor, `COPILOT_BIN` for Copilot's), the
+// descriptor, `COPILOT_BIN` for Copilot's, `ANTIGRAVITY_ACP_BIN` for
+// Antigravity's), the
 // idiom bridge-server/codex-runtime.test.mjs uses for its fake codex. It never
 // runs a model and never spends a token. Everything it does is scripted from
 // its environment, so a test orders it around before the spawn:
@@ -33,18 +34,20 @@
 //                              permission is appended to, as JSON lines
 //
 // Shapes follow the ACP v1 schema (agentclientprotocol/agent-client-protocol,
-// `agent-client-protocol-schema/src/v1`) and what Gemini CLI 0.59.0 was
-// measured to send on 2026-09-11, when it was evaluated as the second
-// companion: `_meta.quota.token_count` on the prompt response, `-32601
-// "Method not found"` for an unknown notification on stderr, a `cancelled`
-// stop reason when `session/cancel` lands mid-turn.
+// `agent-client-protocol-schema/src/v1`) and what two agents were measured to
+// send on 2026-09-11 — Gemini CLI 0.59.0 (`_meta.quota.token_count` on the
+// prompt response, `-32601 "Method not found"` for an unknown notification on
+// stderr, a `cancelled` stop reason when `session/cancel` lands mid-turn) and
+// Google's agy_acp_server 1.1.1 (`session/set_config_option` for the model,
+// `-32602` naming the available ids for an unknown one, and a loaded session
+// that comes back on the default model).
 //
-// `fakeAcpDescriptor` below is the fake's own companion descriptor — the
-// second ACP companion the suites drive the generic daemon with, since no
-// shipped agent beyond Copilot has a ToS-clean headless ACP path today
-// (docs/MVP_TRACKER.md item 7). It carries an `acp` block exactly as a real
-// descriptor in lib/target-registry.mjs does, so a suite that passes against
-// it is a suite the next real companion inherits.
+// `fakeAcpDescriptor` below is the fake's own companion descriptor, the
+// neutral descriptor the suites drive the generic daemon with; Antigravity's
+// real descriptor is driven through the same fake via `ANTIGRAVITY_ACP_BIN`.
+// It carries an `acp` block exactly as a real descriptor in
+// lib/target-registry.mjs does, so a suite that passes against it is a suite
+// the next real companion inherits.
 
 import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -105,8 +108,12 @@ if (process.argv.includes('--version')) {
   process.stdout.write('fake-acp-agent 1.0.0\\n');
   process.exit(0);
 }
-if (!process.argv.includes('--acp')) {
-  process.stderr.write('fake acp agent: expected --acp in argv\\n');
+// Copilot and Gemini are launched with --acp; Antigravity's server is launched
+// bare (--uid= on linux, as the registry entry says). Any other argv is a
+// wrong spawn and exits loudly. (No backticks here: this is inside a template.)
+const spawnFlags = process.argv.slice(2);
+if (spawnFlags.length && !spawnFlags.includes('--acp') && !spawnFlags.every((f) => f.startsWith('--uid='))) {
+  process.stderr.write('fake acp agent: unexpected argv ' + JSON.stringify(spawnFlags) + '\\n');
   process.exit(2);
 }
 trace({ argv: process.argv.slice(2) });
@@ -178,7 +185,8 @@ function handle(msg) {
     case 'session/load': {
       if (!LOAD_SESSION) { fail(-32601, '"Method not found": session/load'); return; }
       if (env.ACP_FAKE_LOAD_FAIL === '1' || !p.sessionId) { fail(-32602, 'Session not found: ' + p.sessionId); return; }
-      sessions.set(p.sessionId, { cwd: p.cwd, prompts: 0, loaded: true });
+      // A loaded session comes back on the default model (Antigravity, measured).
+      sessions.set(p.sessionId, { cwd: p.cwd, prompts: 0, loaded: true, model: null });
       // History replay, as the spec requires BEFORE the response: the client
       // must not mistake it for a live turn.
       out(update(p.sessionId, { sessionUpdate: 'user_message_chunk', content: text('earlier question') }));
@@ -198,6 +206,21 @@ function handle(msg) {
     case 'session/set_mode':
       reply({});
       return;
+    // The model as a session config option (Antigravity's shape): the answer
+    // echoes the option with its new current value; an id the agent does not
+    // have is -32602 naming the ones it does.
+    case 'session/set_config_option': {
+      if (p.configId !== 'model') { fail(-32602, 'Unknown config option: ' + p.configId); return; }
+      const session = sessions.get(p.sessionId);
+      if (!session) { fail(-32602, 'Session not found: ' + p.sessionId); return; }
+      if (String(p.value).startsWith('not-a-model')) {
+        out({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: "Model '" + p.value + "' is not available for the current authentication method.", data: { modelId: p.value, availableModels: ['fake-model-a', 'fake-model-b'] } } });
+        return;
+      }
+      session.model = p.value;
+      reply({ configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: p.value, options: [{ value: p.value, name: p.value }] }] });
+      return;
+    }
     default:
       fail(-32601, '"Method not found": ' + msg.method);
   }

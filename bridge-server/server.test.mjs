@@ -3807,7 +3807,7 @@ test('acp: the agent_send target enum is the registry, not a literal', async () 
   const { mcp } = await bridge();
   const tools = await mcp._requestHandlers.get('tools/list')({ method: 'tools/list', params: {} });
   const send = tools.tools.find((t) => t.name === 'agent_send');
-  assert.deepEqual(send.inputSchema.properties.target.enum, ['opencode', 'copilot', 'codex']);
+  assert.deepEqual(send.inputSchema.properties.target.enum, ['opencode', 'copilot', 'codex', 'antigravity']);
 });
 
 // End to end through a REAL detached daemon and the fake agent: the bridge
@@ -3858,6 +3858,162 @@ test('acp: end to end through a real detached daemon and the fake agent — one 
     const daemonStatus = await daemonClient.sendToSocket({ command: 'status' }, 2000, 'copilot');
     assert.equal(daemonStatus.data.sessions.find((s) => s.sessionId === 'fake-sess-1').promptCount, 2);
     assert.equal(daemonStatus.data.companion, 'copilot');
+    assert.deepEqual(daemonStatus.data.protocol, { pinned: 1, answered: 1, status: 'match' });
+    for (const id of [send.job_id, again.job_id]) { try { state.deleteJob(id); } catch {} jobs.delete(id); }
+    state.clearThread(send.thread);
+  });
+});
+
+// ---- TRACK: acp-antigravity ----
+//
+// The shipped second ACP companion (docs/MVP_TRACKER.md item 8). Every
+// daemon-path decision is a descriptor read, so these pin what Antigravity
+// gets from the bridge (its own daemon socket, the honest reply wording, a
+// real detached daemon with `session/load` across a daemon restart) and what
+// it does not (Copilot's rubber-duck wrapper, /fleet, and any usage — the ACP
+// surface carries none, measured 2026-09-11).
+
+test('antigravity: a send lands on the antigravity daemon, carries no rubber-duck wrapper, never /fleets, and settles with no usage key', async () => {
+  await withAcpSession('sid-agy-send', async (mod, state) => {
+    const { dispatch, jobs } = mod;
+    const calls = [];
+    const terminal = await withDaemonStubs({
+      ensureDaemon: async (opts) => { calls.push(['ensure', opts]); },
+      sendToSocket: async (msg, _timeout, companion) => {
+        calls.push([msg.command, companion, msg]);
+        if (msg.command === 'prompt-bg') return { ok: true, data: { promptId: 'ap-1', sessionId: 'agy-sess-1', sessionReborn: false, sessionLoaded: false } };
+        if (msg.command === 'watch') {
+          return { ok: true, data: { status: 'completed', summary: { message: 'ready', thoughts: '', toolCalls: [{ name: 'read README.md', kind: 'read', status: 'completed' }], plan: null, stopReason: 'end_turn' } } };
+        }
+        if (msg.command === 'inspect') return { ok: true, data: { status: 'completed' } };
+        return { ok: true, data: {} };
+      },
+    }, async () => {
+      const send = parse(await dispatch({
+        action: 'send', target: 'antigravity', task: 'audit auth, billing, and API routes across multiple files', mode: 'EXECUTE', template: 'general',
+        cwd: TEST_CWD, host_session_id: 'sid-agy-send', parallel: 'always', max_wait_sec: 5,
+      }));
+      assert.equal(send.status, 'still_running');
+      assert.equal(send.target, 'antigravity');
+      assert.equal(send.fleet, false, 'parallel:always is Copilot vocabulary; Antigravity has no /fleet');
+      return parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-agy-send', max_wait_sec: 5 }));
+    });
+    assert.equal(terminal.status, 'completed');
+    assert.match(terminal.content, /ready/);
+    assert.equal('usage' in terminal.meta, false, 'no usage on the ACP surface: no key, never zeros');
+    assert.equal(terminal.meta.fleet, 'false');
+    assert.equal(terminal.meta.session_id, 'agy-sess-1');
+
+    assert.deepEqual(calls[0], ['ensure', { reqId: calls[0][1].reqId, companion: 'antigravity' }]);
+    const promptBg = calls.find((c) => c[0] === 'prompt-bg');
+    assert.equal(promptBg[1], 'antigravity', 'the prompt goes to the antigravity daemon socket');
+    assert.doesNotMatch(promptBg[2].text, /RUBBER-DUCK/, 'the rubber-duck wrapper is Copilot\'s (acp.rubberDuck)');
+    assert.doesNotMatch(promptBg[2].text, /^\/fleet /, 'no /fleet prefix on a companion without one');
+    assert.match(promptBg[2].text, /^TASK: audit auth/);
+    assert.equal(promptBg[2].model, null, 'no model pin: the account\'s default serves');
+    assert.ok(calls.every((c) => c[0] === 'ensure' || c[1] === 'antigravity'), 'no call reached another companion\'s socket');
+
+    const job = jobs.get(terminal.job_id);
+    assert.equal(job.inspectAvailable, true);
+    assert.equal(state.readThreadSid(job.thread), 'agy-sess-1', 'the thread .sid is written the way Copilot\'s is');
+    const status = parse(await withDaemonStubs({ sendToSocket: async () => ({ ok: true, data: {} }) },
+      () => dispatch({ action: 'status', job_id: terminal.job_id, host_session_id: 'sid-agy-send' })));
+    assert.equal(status.reply_available, false, 'terminal: nothing to reply to');
+    assert.equal(status.resume_available, true, 'the daemon is detached, so the job is resumable by construction');
+    assert.equal('usage' in status, false);
+    assert.ok(Object.hasOwn(parse(await dispatch({ action: 'status', host_session_id: 'sid-agy-send' })).acp_daemons, 'antigravity'));
+  });
+});
+
+test('antigravity: reply is cancel-then-re-prompt on the same session, and the acknowledgement names Google Antigravity', async () => {
+  await withAcpSession('sid-agy-reply', async (mod) => {
+    const { dispatch, jobs } = mod;
+    jobs.set('antigravity-reply-1', {
+      jobId: 'antigravity-reply-1', target: 'antigravity', reqId: 'req-ar', claudeSessionId: 'sid-agy-reply',
+      thread: 'thread-agy-reply', task: 'original task', mode: 'EXECUTE', template: 'general', parallel: 'never',
+      status: 'running', promptId: 'ap-old', sessionId: 'agy-sess-r', startedAt: Date.now() - 1000, inspectAvailable: true,
+    });
+    const calls = [];
+    const body = await withDaemonStubs({
+      sendToSocket: async (msg, _timeout, companion) => {
+        calls.push([msg.command, companion]);
+        if (msg.command === 'reply') return { ok: true, data: { ok: true, original_prompt_id: 'ap-old', new_prompt_id: 'ap-new', session_id: 'agy-sess-r' } };
+        if (msg.command === 'watch') return { ok: true, data: { promptId: 'ap-new', sessionId: 'agy-sess-r', status: 'completed', summary: { message: 'continued', toolCalls: [] } } };
+        return { ok: true, data: {} };
+      },
+    }, async () => {
+      const status = parse(await dispatch({ action: 'status', job_id: 'antigravity-reply-1', host_session_id: 'sid-agy-reply' }));
+      assert.equal(status.reply_available, true);
+      assert.equal(status.resume_available, true);
+      return parse(await dispatch({ action: 'reply', job_id: 'antigravity-reply-1', message: 'use this instead', host_session_id: 'sid-agy-reply' }));
+    });
+    assert.equal(body.ok, true);
+    assert.equal(body.new_prompt_id, 'ap-new');
+    assert.match(body.hint, /cancelled/);
+    assert.match(body.hint, /no mid-turn steer/);
+    assert.match(body.hint, /same Google Antigravity session/);
+    assert.ok(calls.every(([, companion]) => companion === 'antigravity'));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(jobs.get('antigravity-reply-1').status, 'completed');
+  });
+});
+
+// End to end through a REAL detached `acp-daemon --companion antigravity` and
+// the fake agent (ANTIGRAVITY_ACP_BIN), no stubs below the bridge — and then
+// the daemon is stopped between rounds, so round two on the same thread has
+// to `session/load` the recorded session on a fresh daemon: the descriptor
+// honours it, the fake advertises it, and the bridge reports the same session
+// with no rebirth. Copilot's e2e above can never take this branch.
+test('antigravity: end to end through a real detached daemon, then session/load on a fresh daemon after the first is stopped', async (t) => {
+  const { fakeAcpAgentBin } = await import('../test/fake-acp-agent.mjs');
+  const { daemonSocketPath, daemonLogFile, promptEventsPath } = await import('../lib/runtime-paths.mjs');
+  const daemonClient = await import('./daemon-client.mjs');
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'ac-agy-e2e-'));
+  const fakeBin = fakeAcpAgentBin(fixtureDir);
+  const cwd = mkdtempSync(join(tmpdir(), 'ac-agy-cwd-'));
+  const prior = { ANTIGRAVITY_ACP_BIN: process.env.ANTIGRAVITY_ACP_BIN, ACP_FAKE_LOAD_SESSION: process.env.ACP_FAKE_LOAD_SESSION };
+  process.env.ANTIGRAVITY_ACP_BIN = fakeBin;
+  process.env.ACP_FAKE_LOAD_SESSION = '1';
+  t.after(async () => {
+    try { await daemonClient.sendToSocket({ command: 'stop' }, 2000, 'antigravity'); } catch {}
+    for (const [k, v] of Object.entries(prior)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    rmSync(fixtureDir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  });
+  await withAcpSession('sid-agy-e2e', async (mod, state) => {
+    const { dispatch, jobs } = mod;
+    const send = parse(await dispatch({ action: 'send', target: 'antigravity', task: 'what is the magic word?', mode: 'ANALYZE', template: 'general', cwd, host_session_id: 'sid-agy-e2e', parallel: 'never', max_wait_sec: 5 }));
+    assert.equal(send.status, 'still_running', JSON.stringify(send));
+    const first = parse(await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-agy-e2e', max_wait_sec: 20 }));
+    assert.equal(first.status, 'completed', JSON.stringify(first).slice(0, 600));
+    assert.match(first.content, /ready/);
+    assert.equal('usage' in first.meta, false, 'the fake answers `_meta.quota`; the Antigravity descriptor reads no usage');
+    assert.equal(first.meta.session_id, 'fake-sess-1');
+    assert.equal(existsSync(daemonSocketPath('antigravity')), true, 'the antigravity daemon owns its own socket');
+    assert.equal(existsSync(daemonLogFile('antigravity')), true);
+    assert.equal(existsSync(promptEventsPath(first.meta.prompt_id, 'antigravity')), true, 'the prompt stream is keyed by companion');
+    assert.match(readFileSync(first.meta.debug_digest_path, 'utf8'), /^# Google Antigravity job /);
+    const status = parse(await dispatch({ action: 'status', host_session_id: 'sid-agy-e2e' }));
+    assert.equal(status.acp_daemons.antigravity.socketPath, daemonSocketPath('antigravity'));
+    const firstPid = status.acp_daemons.antigravity.pid;
+    assert.ok(Number.isInteger(firstPid) && firstPid > 0);
+    assert.equal(state.readThreadSid(send.thread), 'fake-sess-1');
+
+    // Stop the daemon: the next send on the thread meets a fresh one that no
+    // longer holds the session, and loads it instead of minting.
+    await daemonClient.sendToSocket({ command: 'stop' }, 2000, 'antigravity');
+    for (let i = 0; i < 100 && existsSync(daemonSocketPath('antigravity')); i++) await new Promise((r) => setTimeout(r, 50));
+    const again = parse(await dispatch({ action: 'send', target: 'antigravity', task: 'and again?', mode: 'ANALYZE', template: 'general', cwd, thread: send.thread, host_session_id: 'sid-agy-e2e', parallel: 'never', max_wait_sec: 5 }));
+    const second = parse(await dispatch({ action: 'wait', job_id: again.job_id, host_session_id: 'sid-agy-e2e', max_wait_sec: 20 }));
+    assert.equal(second.status, 'completed', JSON.stringify(second).slice(0, 600));
+    assert.equal(second.meta.session_id, 'fake-sess-1', 'the same ACP session, loaded on the fresh daemon');
+    assert.equal(second.meta.session_reborn, undefined, 'a loaded session is not a rebirth');
+    const daemonStatus = await daemonClient.sendToSocket({ command: 'status' }, 2000, 'antigravity');
+    assert.equal(daemonStatus.data.companion, 'antigravity');
+    const secondPid = parse(await dispatch({ action: 'status', host_session_id: 'sid-agy-e2e' })).acp_daemons.antigravity.pid;
+    assert.notEqual(secondPid, firstPid, 'a different daemon process served round two');
+    assert.equal(daemonStatus.data.sessions.find((s) => s.sessionId === 'fake-sess-1')?.loaded, true);
     assert.deepEqual(daemonStatus.data.protocol, { pinned: 1, answered: 1, status: 'match' });
     for (const id of [send.job_id, again.job_id]) { try { state.deleteJob(id); } catch {} jobs.delete(id); }
     state.clearThread(send.thread);

@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // onboard.mjs — first-class companion onboarding for agent-companion.
 //
-// "Attach your companion." Supported now: opencode, copilot, and codex. This is the
+// "Attach your companion." Supported now: opencode, copilot, codex, and antigravity. This is the
 // one place that selects today's target id, explains how to get it ready, and
 // (with --set-default) persists the choice. It never prompts for or stores
 // provider secrets — auth is delegated to the vendor tools (`opencode` /connect,
-// `copilot login`).
+// `copilot login`, `scripts/install-antigravity-acp.mjs --login`).
 //
 // Usage:
-//   node scripts/onboard.mjs --host claude|codex|both --target opencode|copilot|codex|auto|none [--set-default] [--yes] [--json]
+//   node scripts/onboard.mjs --host claude|codex|both --target opencode|copilot|codex|antigravity|auto|none [--set-default] [--yes] [--json]
 //   node scripts/onboard.mjs --list-targets [--json]
 //   node scripts/onboard.mjs --doctor [--json]
 //   node scripts/onboard.mjs --target opencode --smoke
@@ -377,20 +377,20 @@ export function runProfileCommand(options, env = process.env, io = console) {
 
 const HELP = `agent-companion onboarding
 
-  node scripts/onboard.mjs --target opencode|copilot|codex|auto|none [--host claude|codex|both]
+  node scripts/onboard.mjs --target opencode|copilot|codex|antigravity|auto|none [--host claude|codex|both]
                            [--set-default] [--yes] [--json] [--smoke] [--no-target-check]
   node scripts/onboard.mjs --list-targets [--json]
   node scripts/onboard.mjs --doctor [--json]
 
   # Strength-routed companion profiles (authoring; ids/models/labels only, no secrets):
   node scripts/onboard.mjs --list-profiles [--json]
-  node scripts/onboard.mjs --define-profile <id> --companion opencode|copilot|codex \\
+  node scripts/onboard.mjs --define-profile <id> --companion opencode|copilot|codex|antigravity \\
                            [--model <m>] [--adapter cli|server (opencode) | exec|appserver (codex)] \\
                            [--strength reviewer,planner] [--yes]
   node scripts/onboard.mjs --assign-strength <id> --strength <labels> [--yes]
   node scripts/onboard.mjs --set-default-profile <id>
 
-Attach your companion. Supported now: opencode, copilot, and codex. Onboarding never
+Attach your companion. Supported now: opencode, copilot, codex, and antigravity. Onboarding never
 asks for or stores provider secrets — authenticate with the vendor tools.`;
 
 async function main() {
@@ -432,7 +432,7 @@ async function main() {
   // Interactive target selection when required and a tty is available.
   if (plan.kind === 'ask') {
     if (!process.stdin.isTTY) {
-      console.error('[FAIL] no --target given and not a tty; pass --target opencode|copilot|codex|none.');
+      console.error('[FAIL] no --target given and not a tty; pass --target opencode|copilot|codex|antigravity|none.');
       process.exit(2);
     }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

@@ -1,8 +1,8 @@
 #!/bin/bash
 # prewarm-target.sh — SessionStart hook
 #
-# Target-aware prewarm. An ACP companion (Copilot today) is what this hook
-# warms: pre-spawning the default target's ACP daemon at session start
+# Target-aware prewarm. The ACP companions (Copilot, Antigravity) are what this
+# hook warms: pre-spawning the default target's ACP daemon at session start
 # means the first delegation call doesn't pay the daemon-spawn latency that
 # otherwise surfaces as "bridge_daemon_unreachable" when the daemon is cold.
 #
@@ -15,9 +15,8 @@
 # cost is real and is simply paid on first dispatch.
 #
 # So the cases this hook sees:
-#   copilot  — prewarm its ACP daemon (below); the descriptor's
-#              `capabilities.acp` is what decides, not the id, so a second ACP
-#              companion is warmed by the same lines.
+#   copilot | antigravity — prewarm that companion's ACP daemon (below); the
+#              descriptor's `capabilities.acp` is what decides, not the id.
 #   opencode — default `cli` transport is single-shot with nothing to warm;
 #              `server` is opt-in and warmed lazily.
 #   codex    — default `exec` transport is single-shot with nothing to warm;

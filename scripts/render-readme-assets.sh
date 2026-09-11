@@ -32,7 +32,7 @@ fi
 ASSET_SPECS="
 hero:3200:1800
 architecture:3200:2220
-target-matrix:3200:1700
+target-matrix:3200:1876
 "
 
 render_one() {

@@ -2,7 +2,7 @@
 // agent-bridge MCP server (subagent-oriented, target-generic architecture)
 //
 // MCP tools: agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
-// agent_send takes an optional `target` (opencode | copilot | codex | gemini);
+// agent_send takes an optional `target` (opencode | copilot | codex | antigravity);
 // omitting it uses the configured default target, and there is no silent
 // fallback.
 // No start/stop/pause/session-gate. Claude owns this server through the
@@ -181,7 +181,7 @@ const CLI_RUNTIMES = {
   codex:    { start: runCodexWorker,    cancel: cancelCodexRun,    info: codexRuntimeInfo },
 };
 
-// The ACP companions — everything the daemon path serves (Copilot, Gemini).
+// The ACP companions — everything the daemon path serves (Copilot, Antigravity).
 // Keyed on the descriptor's `capabilities.acp`, never on an id: a new ACP
 // companion is a descriptor plus a daemon socket, not a branch here. The two
 // Copilot-only extras key on their own descriptor fields the same way —
@@ -1999,7 +1999,7 @@ async function runAcpWorker({ jobId, reqId, task, mode, template, template_args,
     // conversation context was lost so it can restate any thread context
     // that matters. Copilot CLI's ACP session/load is process-local
     // (github/copilot-cli#1767), so for it a stale session is always reborn;
-    // an agent whose descriptor honours `session/load` (Gemini) is loaded
+    // an agent whose descriptor honours `session/load` (Antigravity) is loaded
     // instead, and then this never fires. The terminal emit also tags
     // meta.session_reborn as belt-and-suspenders for callers that don't
     // drain alerts.

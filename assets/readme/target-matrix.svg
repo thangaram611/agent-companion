@@ -1,8 +1,8 @@
-<svg width="3200" height="1700" viewBox="0 0 1600 850" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+<svg width="3200" height="1876" viewBox="0 0 1600 938" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">Agent Companion companion capability matrix</title>
-  <desc id="desc">A capability matrix of the five companion transports Agent Companion supports: OpenCode cli, OpenCode server, GitHub Copilot CLI over ACP, Codex exec, and Codex app-server. Every transport supports send, wait, status and cancel; in-flight reply and restart resume are available on OpenCode server, Copilot and Codex app-server; parallel fan-out is Copilot's /fleet only.</desc>
+  <desc id="desc">A capability matrix of the six companion transports Agent Companion supports: OpenCode cli, OpenCode server, GitHub Copilot CLI over ACP, Codex exec, Codex app-server, and Google Antigravity over ACP. Every transport supports send, wait, status and cancel; in-flight reply and restart resume are available on OpenCode server, Copilot and Codex app-server; parallel fan-out is Copilot's /fleet only.</desc>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="850" gradientUnits="userSpaceOnUse">
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="938" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#07111F"/>
       <stop offset="0.54" stop-color="#0B1728"/>
       <stop offset="1" stop-color="#0A2221"/>
@@ -11,7 +11,7 @@
       <stop offset="0" stop-color="#38BDF8" stop-opacity="0.22"/>
       <stop offset="1" stop-color="#38BDF8" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="glowAmber" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1290 700) rotate(145) scale(520 280)">
+    <radialGradient id="glowAmber" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1290 788) rotate(145) scale(520 280)">
       <stop offset="0" stop-color="#F59E0B" stop-opacity="0.18"/>
       <stop offset="1" stop-color="#F59E0B" stop-opacity="0"/>
     </radialGradient>
@@ -35,13 +35,13 @@
     </style>
   </defs>
 
-  <rect width="1600" height="850" fill="url(#bg)"/>
-  <rect width="1600" height="850" fill="url(#glowBlue)"/>
-  <rect width="1600" height="850" fill="url(#glowAmber)"/>
+  <rect width="1600" height="938" fill="url(#bg)"/>
+  <rect width="1600" height="938" fill="url(#glowBlue)"/>
+  <rect width="1600" height="938" fill="url(#glowAmber)"/>
 
   <text x="104" y="92" class="sans eyebrow">SUPPORTED COMPANIONS</text>
   <text x="104" y="154" class="sans title">Attach your companion</text>
-  <text x="104" y="195" class="sans subtitle">Five transports across three runtimes. Capability follows the transport, not the vendor.</text>
+  <text x="104" y="195" class="sans subtitle">Six transports across four runtimes. Capability follows the transport, not the vendor.</text>
 
   <!-- column headers -->
   <text x="104" y="262" class="sans colhead">COMPANION · TRANSPORT</text>
@@ -123,10 +123,22 @@
   <g transform="translate(1200 687)"><use href="#tick"/></g>
   <g transform="translate(1420 687)"><use href="#dash"/></g>
 
-  <text x="104" y="764" class="sans note">Reply and restart resume are transport properties: the same runtime gains both by moving off a one-shot pipe onto a long-lived server.</text>
+  <!-- row 6 — Google Antigravity -->
+  <g filter="url(#shadow)">
+    <rect x="104" y="738" width="1392" height="74" rx="20" fill="#0F2A3A" fill-opacity="0.66" stroke="#60A5FA" stroke-opacity="0.40"/>
+  </g>
+  <rect x="104" y="738" width="6" height="74" rx="3" fill="#60A5FA"/>
+  <text x="140" y="769" class="sans rowname">Google Antigravity · acp</text>
+  <text x="140" y="794" class="mono rowsub">agy_acp_server.par behind its own shared daemon   ·   session/load on a restarted daemon</text>
+  <text x="640" y="781" class="mono cellyes">send · wait · status · cancel</text>
+  <g transform="translate(1000 775)"><use href="#tick"/></g>
+  <g transform="translate(1200 775)"><use href="#tick"/></g>
+  <g transform="translate(1420 775)"><use href="#dash"/></g>
+
+  <text x="104" y="852" class="sans note">Reply and restart resume are transport properties: the same runtime gains both by moving off a one-shot pipe onto a long-lived server. Both ACP rows are one daemon, parameterised from the descriptor.</text>
 
   <g filter="url(#shadow)">
-    <rect x="104" y="784" width="1392" height="52" rx="26" fill="#F8FAFC" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.12"/>
-    <text x="136" y="817" class="mono foot">agent_send({ task, cwd, strength? })  ->  agent_wait({ job_id })  ->  agent-digest://&lt;jobId&gt;</text>
+    <rect x="104" y="872" width="1392" height="52" rx="26" fill="#F8FAFC" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.12"/>
+    <text x="136" y="905" class="mono foot">agent_send({ task, cwd, strength? })  ->  agent_wait({ job_id })  ->  agent-digest://&lt;jobId&gt;</text>
   </g>
 </svg>

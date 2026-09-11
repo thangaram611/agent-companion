@@ -1,4 +1,4 @@
-// Runtime adapter boundary for the ACP companions (Copilot, Gemini).
+// Runtime adapter boundary for the ACP companions (Copilot, Antigravity).
 //
 // Every method takes the companion it addresses and routes to that companion's
 // daemon socket (daemon-client.mjs). Copilot alone has a second transport, the

@@ -103,7 +103,7 @@ harness (claude|codex)
             └─ adapter                 bridge-server/<companion>[-<transport>]-runtime.mjs
                                        (acp-runtime.mjs serves every ACP companion)
                  └─ detached shared runtime, when the transport has one
-                      acp-daemon (one per ACP companion; copilot today) | opencode serve | codex-app-server-broker
+                      acp-daemon (one per ACP companion: copilot, antigravity) | opencode serve | codex-app-server-broker
 ```
 
 **Layers.** `lib/` is host-neutral and importable from both the MCP server and standalone CLI
@@ -133,7 +133,7 @@ selection are per-companion×transport capabilities resolved from `lib/target-re
 prefer a registry lookup over a companion-id branch when adding to that set. The daemon path
 is keyed the same way: `isAcpTarget` reads `capabilities.acp`, `/fleet` reads
 `capabilities.parallel === 'fleet'`, the rubber-duck wrapper reads `acp.rubberDuck` — so a
-second ACP companion shares every branch and Copilot alone keeps its extras. One exception is
+second ACP companion (Antigravity) shares every branch and Copilot alone keeps its extras. One exception is
 still real: there is no `streaming` capability key at all. Per-job `reply_available` /
 `resume_available` pin **opencode and codex** to the adapter the job started with
 (`opencodeAdapter` / `codexAdapter`); an ACP companion has no recorded per-job adapter —
@@ -208,11 +208,18 @@ second reader/definition is how these break.
   answer comes from the descriptor's `acp.permission(env)`; do not remove that handler on the
   theory that Copilot's flags make it dead code. And do not send MCP's
   `notifications/initialized` on ACP — it is not part of the protocol.
-- **The next ACP companion is Antigravity CLI, and the facts are already in the tracker.**
-  `docs/MVP_TRACKER.md` item 7 records what was measured on 2026-09-11: `agy` has no `--acp`,
-  Google's FAQ forbids third-party clients on an Antigravity login, and the registry's
-  `antigravity-acp` binary is the IDE-extension server. Start from those, not from the
-  assumption that "Gemini moved to Antigravity" means the ACP path moved with it.
+- **Antigravity is the second ACP companion, and its daemon spawns Google's registry
+  server, never `agy`.** `agy` (cask 1.2.0) has no ACP mode; the descriptor's binary is
+  the ACP registry's `agy_acp_server.par`, installed by
+  `scripts/install-antigravity-acp.mjs` under `~/.local/share/agent-companion/antigravity-acp/`
+  (signature-checked on macOS) and signed in with `--login`. Its credentials live in
+  `~/.gemini/antigravity-acp/` plus the login keychain and are shared with nothing else.
+  Its model is a per-session config option that `session/load` forgets — hence
+  `acp.setModel`, the one daemon hook Copilot does not use; its ACP surface carries no
+  usage; permission requests are answered per `AGENT_COMPANION_ANTIGRAVITY_PERMISSION`.
+  The terms reading (a stdio client of Google's own signed server, as Zed and Xcode
+  are; never the OAuth token, never Google's backend) and its caveats are tracker
+  item 8 — re-read it before widening what the bridge does with that login.
 
 ## Docs
 

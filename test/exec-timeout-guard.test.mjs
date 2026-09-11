@@ -28,6 +28,8 @@ const BOUNDED_EXCEPTIONS = new Set([
   'scripts/onboard.mjs',
   'scripts/acp-daemon.mjs',
   'scripts/validate-codex-release.mjs',
+  // The Antigravity installer: curl, unzip and codesign in its own process.
+  'scripts/install-antigravity-acp.mjs',
 ]);
 
 function walk(dir) {

@@ -261,8 +261,13 @@ Manual smoke gates before a public tag:
    a real `codex app-server`, and all three spend real tokens. Run `CODEX_RUNTIME_ADAPTER=appserver node scripts/doctor.mjs --json`
    before and after a Codex package upgrade; record the selected and running
    path/version/helper, and require no stale-runtime warning before the smoke.
-9. One real Copilot send through the bridge after any change to
-   `scripts/acp-daemon.mjs` (Copilot rides the generic daemon), checking the
+9. `node probes/smoke/acp-antigravity.mjs` — Google's Antigravity ACP server on
+   the generic daemon: send, thread continuity on one ACP session, reply as
+   cancel + re-prompt, cancel, restart survival across a bridge SIGKILL, and a
+   model pin reaching the session; needs the server installed and signed in
+   (`scripts/install-antigravity-acp.mjs --login`) and spends real turns. Plus
+   one real Copilot send through the bridge after any change to
+   `scripts/acp-daemon.mjs` (Copilot rides the same daemon), checking the
    spawn argv in `copilot-acp-daemon.log`, the rubber-duck footer, the OTEL
    `meta.usage` and the `acp_daemons.copilot` registry entry on `agent_status`.
    Recorded 2026-09-11 on Copilot CLI 1.0.83: job `copilot-mtwil1g9-e4si`
@@ -271,9 +276,12 @@ Manual smoke gates before a public tag:
 
 ### Smoke evidence
 
-Recorded 2026-06-23 (macOS, Node 24.15.0), extended 2026-07-24 for gate 7 and
-2026-08-11 for gate 8, and re-verified on the live hosts 2026-09-03 with
-Claude Code 2.1.259 and codex-cli 0.152.1. All eight gates pass. The original
+Recorded 2026-06-23 (macOS, Node 24.15.0), extended 2026-07-24 for gate 7,
+2026-08-11 for gate 8 and 2026-09-11 for gate 9 (Antigravity:
+`acp-antigravity.mjs` 24/24 on agy_acp_server 1.1.1 plus Copilot job
+`copilot-mtwm2l8q-uqhz` on Copilot CLI 1.0.83), and re-verified on the live
+hosts 2026-09-03 with Claude Code 2.1.259 and codex-cli 0.152.1. All nine
+gates pass. The original
 harness install smokes
 (1, 2, 6) were run under a sandboxed `$HOME` so the real `~/.claude` /
 `~/.codex` were never written, then the sandbox was deleted and the real config

@@ -110,21 +110,24 @@ identity is complete.
 | Copilot CLI | Implemented ACP adapter (generic daemon, Copilot descriptor) | yes | yes | yes | yes | yes (cancel + re-prompt) | yes with ACP |
 | Codex CLI (exec) | Implemented `codex exec` adapter (default, send-only) | yes | yes | yes | yes | no | no |
 | Codex CLI (app-server) | Implemented broker + JSON-RPC adapter | yes | yes | yes | yes | yes | yes |
+| Google Antigravity | Implemented ACP adapter (generic daemon, Antigravity descriptor; spawns the registry's `agy_acp_server.par`) | yes | yes | yes | yes | yes (cancel + re-prompt) | yes with ACP and `session/load` |
 | Goose | Planned — an ACP row, a descriptor away | no | no | no | no | no | no |
 
 Aider was dropped from the plan (2026-09-09 assessment: stalled upstream, no ACP
 or MCP surface). Gemini CLI was built on the generic daemon and dropped before
-shipping (2026-09-11): consumer "Login with Google" ended on 2026-06-18, and its
-successor Antigravity CLI has no ACP mode and forbids third-party clients on an
-Antigravity login — `docs/MVP_TRACKER.md` item 7 keeps the measurements and the
-handoff.
+shipping (2026-09-11): consumer "Login with Google" ended on 2026-06-18. The
+same day Google's own ACP server for Antigravity — the registry's
+`antigravity-acp`, published by Google on 2026-08-20 — became the second ACP
+companion; the `agy` CLI itself still has no ACP mode. `docs/MVP_TRACKER.md`
+items 7 and 8 keep the measurements, the terms reading and the handoff.
 
 The ACP transport is one daemon implementation, `scripts/acp-daemon.mjs`, run
 as **one detached process per ACP companion per host home**
-(`--companion copilot`; `scripts/copilot-acp-daemon.mjs` is the Copilot
-binding of the same classes, and `test/fake-acp-agent.mjs` carries the second
-descriptor the suites drive it with). Each daemon owns one `<agent> --acp` child over
-stdio — the only stable ACP transport — and one socket, log and prompt-stream
+(`--companion copilot|antigravity`; `scripts/copilot-acp-daemon.mjs` is the
+Copilot binding of the same classes, and `test/fake-acp-agent.mjs` carries the
+neutral descriptor the suites drive it with). Each daemon owns one agent child
+over stdio — `copilot --acp`, or Google's `agy_acp_server.par` launched bare as
+the registry launches it; stdio is the only stable ACP transport — and one socket, log and prompt-stream
 namespace (`runtime/<companion>-acp.sock`, `<companion>-acp-daemon.log`,
 `prompts/<companion>-acp-<promptId>.jsonl`), and is recorded in
 `runtime/acp-daemons.json` through `lib/shared-runtime-registry.mjs` with
@@ -133,9 +136,13 @@ the second reaper beside the daemon's own inactivity timer, as for the broker.
 Everything companion-shaped is the descriptor's `acp` block in
 `lib/target-registry.mjs` — spawn argv, extra env, files rotated at spawn,
 `clientInfo.name`, default model, whether `session/load` is honoured, the
-answer to `session/request_permission`, the usage reader and the
+answer to `session/request_permission`, the usage reader, the
 `session/update` kinds the agent was measured to emit (an undeclared kind is
-logged once as drift and still parsed). The daemon pins ACP **v1** at
+logged once as drift and still parsed) and, for an agent that takes its model
+per session rather than as a spawn flag, the request that sets it
+(`acp.setModel`: Antigravity's `session/set_config_option`, sent after
+`session/new` and again after `session/load`, because a loaded session comes
+back on the default model — measured). The daemon pins ACP **v1** at
 `initialize`; an agent answering any other version is refused — child killed,
 prompt failed `ACP_PROTOCOL_MISMATCH`, job settled `unreachable` with
 `detail: acp_protocol_mismatch` — never adapted, because the v2 draft renames
@@ -143,8 +150,10 @@ prompt failed `ACP_PROTOCOL_MISMATCH`, job settled `unreachable` with
 session (ACP has no mid-turn steer, and the acknowledgement says so); restart
 resume is the daemon outliving the bridge, plus `session/load` for a session
 the daemon no longer holds when the descriptor declares `acp.loadSession` AND
-the agent advertises it (Copilot's declares false: process-local sessions). The
-daemon answers `session/request_permission` itself, from the descriptor's
+the agent advertises it (Copilot's declares false: process-local sessions;
+Antigravity's declares true: its sessions are SQLite files under
+`~/.gemini/antigravity-acp/conversations/` and a loaded one remembers,
+measured). The daemon answers `session/request_permission` itself, from the descriptor's
 policy, because an unattended client that leaves a permission request pending
 has hung the agent.
 
@@ -521,18 +530,28 @@ because the cost of re-deriving them is a day each.
   0.59.0 emits no `usage_update`; its turn tokens are on the prompt RESPONSE under
   `_meta.quota.token_count`. Copilot CLI 1.0.83 does emit `usage_update`, and it is the
   protocol's context-occupancy signal (`used`/`size`), not the turn's tokens — the OTEL
-  span stays Copilot's source. The protocol's own `PromptResponse.usage` (six counters)
+  span stays Copilot's source. Google's agy_acp_server 1.1.1 has it nowhere on ACP
+  (measured 2026-09-11): the prompt response is `{stopReason}` alone and no
+  `usage_update` is emitted; the internal harness's `usageUpdate` frames
+  (promptTokenCount, candidatesTokenCount, thoughtsTokenCount) are echoed on its
+  stderr log as debug output, which this bridge does not read — Antigravity jobs
+  carry no `usage`. The protocol's own `PromptResponse.usage` (six counters)
   is still marked unstable in the v1 schema; a descriptor's `acp.usage` reader is where
   any of these shapes is read.
 - **An agent advertising `loadSession: true` does not mean its sessions survive its
   process.** Copilot CLI 1.0.83 advertises it (measured) and its sessions are
   process-local (github/copilot-cli#1767). Which is why `session/load` is a
   descriptor decision (`acp.loadSession`) ANDed with the agent's advertisement, not
-  the advertisement alone: Copilot false; the fake agent's descriptor true.
+  the advertisement alone: Copilot false; the fake agent's descriptor true; Antigravity
+  true, and measured to mean it — a fresh `agy_acp_server.par` process loads the id,
+  replays twelve updates of history and answers the follow-up from memory.
 - **A v2 `initialize` request is answered with `protocolVersion: 1`.** By both agents
   measured (Copilot 1.0.83, Gemini 0.59.0; the spec says an agent answers with the
   latest version it supports), so a client cannot probe for v2 support by asking — and
-  the pin can be enforced at the handshake, where refusing costs nothing.
+  the pin can be enforced at the handshake, where refusing costs nothing. Google's
+  agy_acp_server 1.1.1 does the opposite: it answers 1 when asked 1 and 2 when asked 2
+  (measured 2026-09-11), so a forum report that it "negotiates protocolVersion 2" was
+  the client asking for 2. Either way the pin holds at the handshake.
 - **Homebrew's `gemini-cli` is not the latest Gemini CLI, and Antigravity CLI is not a
   Gemini CLI with a new name.** The formula is deprecated at 0.46.0 (disabled
   2026-12-18) with the `antigravity-cli` cask as its replacement; npm carries 0.59.0 and
@@ -543,7 +562,24 @@ because the cost of re-deriving them is a day each.
   entry is Google's IDE-extension server on that same login. And Gemini CLI itself
   refuses "Login with Google" for individual, AI Pro and AI Ultra accounts since
   2026-06-18 (screenshot evidence, 2026-09-11) — only Code Assist Standard/Enterprise
-  licenses and API keys remain. Neither is a companion this bridge can ship today.
+  licenses and API keys remain. Neither CLI is a companion this bridge can ship.
+  **Corrected the same day for the server half:** the registry's `antigravity-acp` is
+  Google's own signed server (`agy_acp_server.par`; PR #542 by Google on 2026-08-20,
+  bumped to 1.1.1 from a google.com address on 2026-09-03), published to a registry
+  whose stated purpose is any client that speaks the protocol; Google's terms and FAQ
+  prohibit software that piggybacks on the OAuth token to reach Google's backend, which
+  a stdio client of Google's own server does not do. That server is the second ACP
+  companion; `agy` still is not. `docs/MVP_TRACKER.md` item 8 carries the quotes, the
+  reading and its caveats.
+- **A model is not always a spawn flag.** Google's agy_acp_server 1.1.1 takes the model
+  as a session config option (`session/set_config_option`, id `model`; `session/set_model`
+  answers too) and a `session/load`ed session comes back on the default model (measured
+  2026-09-11: set to `gemini-3.8-flash-low`, killed, loaded, `currentValue` back to
+  `gemini-3.7-flash-high`). So the descriptor names the request (`acp.setModel`) and the
+  daemon sends it after `session/new` and again after `session/load`; an unknown id is
+  refused with -32602 naming the available ones and fails the prompt, never a silent
+  fallback to the default. Copilot's descriptor has no such hook and its argv is
+  unchanged.
 - **A codex role file accepting `mcp_servers` does not mean the child gets it.** The Codex
   subagents docs say a custom agent file may declare `mcp_servers`. Read against rust-v0.153.4
   (2026-09-09): the role parser (`codex-rs/agent-roles/src/agent_role_config.rs`) flattens the
