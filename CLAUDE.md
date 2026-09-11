@@ -173,8 +173,10 @@ second reader/definition is how these break.
   a comment counts as *not set*.
 - **MCP timeouts:** the working fields are a **sibling** `timeout:` on the Claude server entry
   (ms) and `tool_timeout_sec` in the Codex plugin manifest. `env: { MCP_TOOL_TIMEOUT }` reaches
-  the child and is ignored by the host. Never raise `clampWaitSec` past 1500 s without a
-  per-server timeout.
+  the child and is ignored by the host. The idle window those fields floor is Claude Code's
+  own `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` (30 min default for stdio; pinned with
+  `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` in `docs/ARCHITECTURE.md` "Host budgets"). Never raise
+  `clampWaitSec` past 1500 s without a per-server timeout.
 - **Tests sandbox `$HOME` by env** — `import '../test/sandbox-home.mjs';` as the **first** import
   sets `AGENT_COMPANION_HOME` and `AGENT_RUNTIME_DIR` to a tmpdir before anything else evaluates
   (ESM evaluates imports in statement order). That matters because `lib/state.mjs` binds
@@ -230,7 +232,7 @@ second reader/definition is how these break.
 | `docs/MVP_TRACKER.md` | What is done, what the current limitations are, what is next. |
 | `docs/RELEASE_READINESS.md` | Release gates and source-backed vendor compatibility notes. |
 | `docs/STRENGTH_ROUTING_HANDOFF.md`, `docs/ONBOARDING_HANDOFF.md` | Design records for the profile/strength router and onboarding. |
-| `docs/DIRECTION_ASSESSMENT.md` | 2026-09 direction verdict: ledger usage evidence, external research, ranked improvements, and the handoff for the next item (§5). |
+| `docs/DIRECTION_ASSESSMENT.md` | 2026-09 direction verdict: ledger usage evidence, external research, the ranked improvements with their dated done/superseded marks (§4), and the shipped review-loop handoff (§5). The next item is the profile experiment, `docs/MVP_TRACKER.md` item 9. |
 | `probes/README.md` | What each probe proves, and the dead ends already ruled out. |
 
 Commit subjects follow `type(scope): lowercase description of what changed and why`, often with

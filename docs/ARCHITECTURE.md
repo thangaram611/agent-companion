@@ -416,6 +416,23 @@ because the cost of re-deriving them is a day each.
   stdio default is **1,800,000 ms** (30 min) polled on a 30 s tick, satisfied by each
   `agent_wait` *returning*, not by any mid-call emission. So `clampWaitSec`'s 1200 s ceiling
   has 600 s of headroom — never raise it past 1500 s without a per-server `timeout`.
+- **The two Claude Code budget variables, pinned** (docs read 2026-09-11; both names are
+  present in the 2.1.268 binary; neither has been set or measured on this host).
+  `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` (v2.1.187+, stdio servers included from v2.1.203) is
+  the idle window above, in ms: default 1,800,000 for stdio, 300,000 for HTTP/SSE/WebSocket,
+  `0` disables the check. It is a host-shell variable, read where `claude` is launched; an
+  `env:` entry on the server reaches only the bridge child, like `MCP_TOOL_TIMEOUT`. The
+  default is the measured value, so nothing sets it. The documented interaction that does
+  matter: from v2.1.203 a per-server `timeout` of at least 1000 ms also floors the idle
+  window for that server, so the frontmatter's `timeout: 1320000` is the one knob the
+  templates carry (Codex: `tool_timeout_sec = 1320`). `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`
+  (v2.1.212+): an MCP call in the **main conversation** still running after 120,000 ms
+  becomes a background task and the model receives a task id instead of the result; `0`
+  turns it off. The docs exclude subagent calls outright, and every bridge call is made by
+  the `agent-companion` subagent, so the blocking `agent_wait` contract stands and the
+  bridge sets nothing. The sign that it fired anyway would be a wait answered with a task
+  id rather than an envelope — `docs/DIRECTION_ASSESSMENT.md` §7 keeps it on the
+  re-verify list.
 - **`env: { MCP_TOOL_TIMEOUT }` in agent frontmatter is inert.** The variable reaches the
   bridge child; the host ignores it. The fields that work are a sibling `timeout` (Claude,
   milliseconds) and `tool_timeout_sec` in the Codex plugin manifest (seconds).

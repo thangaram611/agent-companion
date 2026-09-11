@@ -461,7 +461,11 @@ On the Claude side this must be a **sibling of `command`/`args`**, not an `env:`
 entry — an `MCP_TOOL_TIMEOUT` environment variable reaches the bridge child
 process but the host ignores it, and it silently buys nothing. The per-server
 field also floors the MCP idle window, which is what keeps a long silent
-`agent_wait` from being cut at the host's watchdog tick.
+`agent_wait` from being cut at the host's watchdog tick. That idle window is
+Claude Code's own `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` (30 minutes by default for
+stdio servers), a variable of the shell that launches `claude`, never of the
+agent frontmatter; `docs/ARCHITECTURE.md` "Host budgets and observability" pins
+it together with `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`.
 
 ### Claude Permissions
 

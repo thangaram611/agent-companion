@@ -2,12 +2,16 @@
 
 Last updated: 2026-09-11 (assessment made 2026-09-09).
 Status: §5 shipped 2026-09-10 (df198b0); §4 item 3 shipped 2026-09-10
-(67ed198); §4 item 4's transport shipped 2026-09-11, without its companion —
-see the correction under item 4.
+(67ed198); §4 item 4's transport shipped 2026-09-11 (4e42893) and its second
+companion, Antigravity, the same day (f6343ea) — see the correction under
+item 4; §4 item 5 pinned 2026-09-11. Nothing in §4 is open. The next item is
+the profile experiment, `docs/MVP_TRACKER.md` item 9: use the second
+companion for a week and let the ledger judge before any further build.
 
 This document answers three questions with evidence: is the direction right,
 what would improve it, and what to take up next. §1 is the verdict, §2 and §3
-are the evidence, §4 the ranked improvements, §5 the handoff for the next item.
+are the evidence, §4 the ranked improvements, §5 the handoff for the review
+loop (since shipped; kept as the record of what was built and why).
 Everything version-specific is dated; §7 lists what to re-verify on upgrade.
 
 ## 1. Verdict
@@ -105,10 +109,11 @@ UNVERIFIED were not confirmed against a primary source.
   The bridge's poll design stands.
 - **Claude Code knobs to pin** ([mcp docs](https://code.claude.com/docs/en/mcp)):
   `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` (MCP calls over 2 min auto-background,
-  v2.1.212+, documented as main-conversation only; effect on the
-  agent-local bridge inside a subagent is UNVERIFIED) and
+  v2.1.212+, documented as main-conversation only with subagent calls
+  excluded outright; unmeasured live on this host, so §7 keeps it) and
   `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` (30 min stdio / 5 min HTTP, v2.1.187+,
-  which matches the 1,800,000 ms this repo measured and is now a knob).
+  which matches the 1,800,000 ms this repo measured and is now a knob). Both
+  pinned 2026-09-11 in `docs/ARCHITECTURE.md` "Host budgets and observability".
   Per-server `timeout` has a 1000 ms floor and is not extended by progress
   notifications. Plugin-bundled agents still strip `mcpServers`/`hooks`
   ([sub-agents](https://code.claude.com/docs/en/sub-agents)), so the
@@ -243,11 +248,18 @@ work. Goose comes free with a generic ACP transport.
    gate. §3.2's list of native ACP agents was accurate for the wire, not for
    access: Gemini CLI stopped serving individual, AI Pro and AI Ultra Google
    logins on 2026-06-18 (API keys and Code Assist Standard/Enterprise still
-   work), and Antigravity CLI — its successor — has no ACP mode and a ToS
-   that forbids third-party clients on its login. The next companion is
-   decided from item 7's handoff, not from this list.
+   work). This paragraph first also ruled Antigravity out ("no ACP mode and
+   a ToS that forbids third-party clients on its login"); **tracker item 8
+   supersedes that sentence.** `agy` still has no ACP mode, but Google
+   publishes its own ACP server to the registry (`antigravity-acp`, the
+   binary Zed, JetBrains and Xcode launch), and the terms prohibit software
+   that takes the Antigravity OAuth token to call Google's backend, which a
+   stdio client of Google's signed server is not. Antigravity shipped as the
+   second ACP companion the same day (`f6343ea`); item 8 holds the sources,
+   the reading and its caveats.
 5. **Pin the new host budgets** in `docs/ARCHITECTURE.md` "Host budgets":
    `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`.
+   Done 2026-09-11 ("Host budgets and observability").
 
 Do not pursue: the codex WebSocket listener (vendor-experimental; the broker
 stays), MCP Tasks (no host client), an Aider adapter (stalled, no ACP or MCP),
@@ -260,7 +272,7 @@ expansion. The Codex host has two smoke jobs, and the adapter's constraints
 grew (real `claude` binary only, unset `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT`,
 `--bare`). Take it up when the Codex host is actually in use.
 
-## 5. Next item: make the review loop first-class
+## 5. Handoff, shipped 2026-09-10 (df198b0): make the review loop first-class
 
 Items 1 and 2 as one change. It is the only workflow in use, it is days of
 work rather than weeks, and it leaves the matrix alone. The generic ACP
@@ -339,7 +351,8 @@ in the bridge; it is a documented protocol for the parent.
 - `docs/ARCHITECTURE.md` Negative Results: the codex 0.153.4 role-file
   `mcp_servers` parse-but-drop entry (added 2026-09-10).
 - `docs/MVP_TRACKER.md` Next Backlog: item 5 points here.
-- Still to do with item 5 of §4: the two Claude Code host-budget knobs.
+- Item 5 of §4, the two Claude Code host-budget knobs: pinned 2026-09-11 in
+  `docs/ARCHITECTURE.md` "Host budgets and observability".
 
 ## 7. Re-verify on upgrade
 

@@ -246,8 +246,8 @@ primary companion:
      spawn-core extraction.
    - The generic ACP transport — DONE with item 7 below; a second native ACP
      agent is a descriptor plus an install/auth block. Gemini CLI was built
-     on it and dropped at the auth gate; Antigravity CLI is next (item 7's
-     handoff). Goose stays an ACP row.
+     on it and dropped at the auth gate; Antigravity followed as the second
+     ACP companion (item 8, 2026-09-11). Goose stays an ACP row.
    - Aider dropped (stalled upstream, no ACP or MCP surface).
    - Keep adapters capability-driven: read reply/resume/parallel support from
      the descriptor, which the selected adapter may upgrade.
@@ -687,6 +687,90 @@ primary companion:
      change to the codex or opencode adapters, no API-key auth path unless the
      operator asks for one; the `yolo` session mode is not set (the daemon's
      answer is the policy); the stderr usage frames are not read.
+
+9. Profile experiment: does a second companion get used? — RUNNING (started
+   2026-09-11, review on 2026-09-18). The assessment's own rule (§7 "Ledger")
+   is that the case for a second companion strengthens only if one actually
+   gets used, and its ledger evidence (§2) is one cell: Claude host → Codex →
+   read-only review with a verdict. Before this item no `profiles.json`
+   existed, so `resolveRouting`'s strength path had never carried a real job.
+   This item runs a week of real review rounds through it and lets the ledger
+   judge before any further build (Goose, the Claude companion for the Codex
+   host) is chosen.
+   - **Setup (2026-09-11).** One profile, authored with the onboarding CLI
+     (`--define-profile antigravity-reviewer --companion antigravity --model
+     gemini-pro-agent --strength reviewer`), in
+     `~/.claude/agent-companion/profiles.json` — Claude host only; the Codex
+     host has none. No `defaultProfile`, and the default target stays `codex`,
+     so the split is decided per send: `strength: reviewer` routes to
+     Antigravity, a send with no routing key routes to Codex exactly as
+     before. `gemini-pro-agent` rather than the free tier's default
+     `gemini-3.7-flash-high` because the comparison is against Codex on
+     `gpt-5.6-sol` at xhigh; a flash-tier "disagree" would not say whether
+     the model or the companion was the reason. If the free tier's quota
+     refuses pro, switch the profile to `gemini-3.7-flash-high` and date it
+     here.
+   - **Protocol.** Every real review round until 2026-09-18 is sent twice
+     with the same task, cwd, `template: review` and `mode: ANALYZE`: once
+     with `strength: reviewer` (Antigravity, free tier, so the second send
+     costs nothing) and once with no routing key (Codex, as today). **One
+     after the other, never both in flight** — measured in round 1: a send
+     with no thread attaches to the host session's persisted thread
+     (`resolveSendThread`), and the reattach guard refuses a second target on
+     a thread with a live job (`target_mismatch`), so the second send waits
+     for the first to be terminal. The parent records its own verdict before
+     reading either (the review loop's blind-commitment rule). Antigravity
+     reports no usage, so tokens are not compared. Per pair, record here:
+     both verdicts, agreement with each other and with the parent, both
+     `durationMs`, and whether the Antigravity findings added anything Codex
+     missed.
+   - **Ledger query.** Every row carries `target`, `strength` and
+     `profileId` from the send; `verdict` and `durationMs` are written only
+     when a review reaches a terminal state (a starting or running row has
+     neither). Before this item all 12 review rows had `strength: null`. One
+     line per job, sorted by target, so pairs sit together (no `uniq -c`: a
+     per-row duration makes every line unique, as round 1's Antigravity
+     review pointed out):
+     `for f in ~/.claude/agent-companion/jobs/*.json; do jq -r 'select(.template=="review") | [.target, .strength // "-", .status, .verdict // "-", .durationMs // "-", .jobId] | @tsv' "$f"; done | sort`
+   - **Decision rule, written before the data.** Three outcomes, kept
+     distinct because the assessment's §7 asks whether a second companion
+     gets *used*, and a rejection on measured results is not non-use:
+     1. Fewer than five pairs by 2026-09-18 — **unused**: delete the profile
+        and carry "second companion unused" into §7.
+     2. At least five pairs, and Antigravity's verdict matched the parent's
+        at least as often as Codex's did with a median duration within 2× of
+        Codex's — **kept**: the profile stays and a `fast_executor` profile
+        is the next candidate.
+     3. At least five pairs failing either threshold — **used and rejected**:
+        delete the profile, keep the pairs recorded here, and carry the
+        measured reason (agreement or latency) into §7.
+     The 2× bound is a starting threshold chosen before the data, not a
+     measurement.
+   - **Round 1 (2026-09-11)** — subject: this commit's own working tree (the
+     two assessment corrections, the ARCHITECTURE host-budget pin, this
+     item). Parent's blind verdict: agree.
+     | | Antigravity `antigravity-mtwn5cd4-piul` | Codex `codex-mtwnb5k6-47wd` |
+     | --- | --- | --- |
+     | route | `strength: reviewer` → `antigravity-reviewer`, `gemini-pro-agent` (first real job through the strength router; the daemon's `session/set_config_option` landed) | no routing key → default target, `gpt-5.6-sol` xhigh |
+     | verdict | disagree | disagree |
+     | findings | 1: the ledger query's per-row `durationMs` made every line unique, so `uniq -c` never grouped | 2: the decision rule called a failed threshold "unused"; `verdict`/`durationMs` exist on terminal rows only |
+     | valid | 1 of 1 | 2 of 2 |
+     | missed | both of Codex's | Antigravity's |
+     | `durationMs` | 234,664 (17 tool calls) | 219,384 (27 tool calls) |
+     | usage | none (by design) | 798,457 total, 689,280 cached |
+     Parent: wrong (agree against two justified disagrees). Companions: same
+     verdict, disjoint findings, each valid, each missed by the other — the
+     second reviewer added real coverage. Duration ratio 1.07×. All three
+     findings fixed in this change before commit. Cost of the pair on the
+     Claude host: one refused send (`target_mismatch`, see Protocol) and one
+     re-send once the Antigravity job was terminal. Codex also surfaced a
+     stale sentence at HEAD, outside the diff: `templates/agent-companion.md`
+     still tells the subagent its per-iteration "Loop iter" line "resets
+     Claude Code's 600-second stream-idle watchdog" — the figure and the
+     mechanism ARCHITECTURE's "Host budgets" retracts (the idle budget is
+     30 min and is satisfied by each `agent_wait` returning). Fixed in this
+     change, with the operator's go-ahead, to the wording the Codex template
+     already had plus a pointer to the pin.
 
 ## Validation Commands
 

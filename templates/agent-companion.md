@@ -231,7 +231,7 @@ Emit exactly one line at the top of each iteration:
 
   Loop iter N: job <job_id> still running, re-waiting.
 
-This emission resets Claude Code's 600-second stream-idle watchdog so the next MCP call proceeds cleanly.
+This emission keeps the parent informed that progress is happening before the next blocking MCP call. It is the transcript's only visible progress marker and nothing more: the host's MCP idle budget is satisfied by each `agent_wait` *returning*, not by this line (see docs/ARCHITECTURE.md "Host budgets and observability").
 
 Then call `mcp__agent-bridge__agent_wait`:
 
