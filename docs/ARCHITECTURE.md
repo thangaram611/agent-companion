@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-09-11
+Last updated: 2026-10-09
 
 ## Goal
 
@@ -9,7 +9,7 @@ Agent Companion is organized around a harness + companion model:
 - **Harnesses outward:** Claude Code and Codex CLI install surfaces today; future
   harnesses should plug in at the host/template/hook/session-routing boundary.
 - **MCP middle:** one subagent-oriented MCP server with generic `agent_*` tools.
-- **Companion adapters inward:** OpenCode, Copilot, Codex, and future companions
+- **Companion adapters inward:** OpenCode, Copilot, Codex, and Google Antigravity
   behind a small runtime boundary.
 - **Strength routing:** installs can expose strengths to the harness while the
   bridge maps each strength to one configured companion profile (see
@@ -23,7 +23,7 @@ Agent Companion is organized around a harness + companion model:
 | Product term | Current implementation term | Meaning |
 | --- | --- | --- |
 | Harness | host | Parent coding-agent surface, currently Claude Code or Codex CLI. |
-| Companion | target | Downstream agent runtime, currently OpenCode, GitHub Copilot CLI, or Codex CLI. |
+| Companion | target | Downstream agent runtime, currently OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity. |
 | Companion profile | `profiles.json` entry | A configured runtime/model instance, such as a Copilot model profile or OpenCode provider/model profile. |
 | Strength | `agent_send({ strength })` | A public capability label such as `reviewer`, `web_researcher`, `planner`, or `fast_executor`. |
 
@@ -41,11 +41,11 @@ flowchart LR
   Subagent --> MCP["agent-bridge MCP server"]
   MCP --> Registry["companion registry (target-registry.mjs)"]
   Registry --> OpenCode["opencode-runtime.mjs"]
-  Registry --> Acp["acp-runtime.mjs (copilot)"]
+  Registry --> Acp["acp-runtime.mjs (copilot, antigravity)"]
   Registry --> CodexRuntime["codex-runtime.mjs (exec, default)"]
   Registry --> CodexAppServer["codex-app-server-runtime.mjs (appserver)"]
   Acp -.->|"UDS, JSON"| Daemon["acp-daemon.mjs (detached, one per companion)"]
-  Daemon -.->|"stdio, ACP v1"| Agent["copilot --acp"]
+  Daemon -.->|"stdio, ACP v1"| Agent["copilot --acp / agy_acp_server.par"]
   CodexAppServer -.->|"UDS, JSON-RPC"| Broker["codex-app-server-broker.mjs (detached, shared)"]
   Broker -.->|"stdio"| AppServer["codex app-server"]
   OpenCode --> Job["job ledger + queue + digest"]

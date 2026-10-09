@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/drain-completions.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/drain-completions.sh\"",
             "timeout": 5
           }
         ]
@@ -17,22 +17,22 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/install-agent.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/install-agent.sh\"",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/prewarm-target.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/prewarm-target.sh\"",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/install-deps.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/install-deps.sh\"",
             "timeout": 55
           },
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/drain-completions.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/drain-completions.sh\"",
             "timeout": 5
           }
         ]
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/drain-completions.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/drain-completions.sh\"",
             "timeout": 5
           }
         ]

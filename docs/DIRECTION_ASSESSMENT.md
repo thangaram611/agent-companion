@@ -1,12 +1,22 @@
 # Direction Assessment and Next-Item Handoff
 
-Last updated: 2026-09-11 (assessment made 2026-09-09).
+Last updated: 2026-10-09 (assessment made 2026-09-09).
 Status: §5 shipped 2026-09-10 (df198b0); §4 item 3 shipped 2026-09-10
 (67ed198); §4 item 4's transport shipped 2026-09-11 (4e42893) and its second
 companion, Antigravity, the same day (f6343ea) — see the correction under
-item 4; §4 item 5 pinned 2026-09-11. Nothing in §4 is open. The next item is
-the profile experiment, `docs/MVP_TRACKER.md` item 9: use the second
-companion for a week and let the ledger judge before any further build.
+item 4; §4 item 5 pinned 2026-09-11. Nothing in §4 is open. The profile
+experiment closed 2026-10-09 below its adoption threshold; see
+`docs/MVP_TRACKER.md` item 9. The next item is v0.1.0 release preparation
+(tracker item 10), followed by maintenance.
+
+Current decision (2026-10-09): preserve the working review loop and maintain
+compatibility and reliability. The available event log records two uses of the
+experimental reviewer profile and only one qualifying paired comparison is
+documented, below the agreed five-pair minimum. That pair added a valid finding
+the other reviewer missed; the outcome establishes low adoption, not poor
+review quality. Retire the experimental profile and hold further expansion
+until a recurring unmet workflow justifies it. The dated assessment below
+remains the record behind the features already shipped.
 
 This document answers three questions with evidence: is the direction right,
 what would improve it, and what to take up next. §1 is the verdict, §2 and §3
@@ -371,5 +381,7 @@ in the bridge; it is a documented protocol for the parent.
   `antigravity-acp` server (shipped as the second ACP companion on 2026-09-11 on
   the reading in tracker item 8); either makes
   the next companion a descriptor.
-- Ledger: re-run the §2 queries; the case for item 4 strengthens only if a
-  second companion actually gets used.
+- Usage: a future profile experiment must record its paired findings and
+  durations while they are available. Job records are GC'd after one hour and
+  structured event logs rotate; `jobs/*.json` alone is not a historical ledger.
+  Tracker item 9 closes the 2026-09 experiment below its adoption threshold.

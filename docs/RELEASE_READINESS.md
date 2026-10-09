@@ -1,10 +1,82 @@
 # Release Readiness
 
-Last updated: 2026-09-03
+Last updated: 2026-10-09
 
 This page is the public-readiness checklist for the harness + companion launch.
 It records the source-backed compatibility assumptions behind the repo copy,
 setup flow, and next backlog.
+
+## v0.1.0 Candidate
+
+Status: candidate prepared; live delegation gates pending, not published.
+Both plugin manifests use 0.1.0; the private bridge package already uses 0.1.0.
+The previous public tag,
+v0.0.1 (2026-06-23), precedes 84 implementation commits on main.
+
+Changes since v0.0.1:
+
+- Strength-routed companion profiles and per-profile models, with explicit
+  refusal for unresolvable routing.
+- OpenCode server mode and the detached Codex app-server broker: streamed
+  progress, reply, cancellation and recovery after bridge replacement.
+- The `review` template with a parsed verdict and Codex thread continuity on
+  follow-up sends; per-job usage where the vendor transport reports it.
+- One descriptor-driven ACP daemon for Copilot and Google Antigravity.
+- Install, completion-routing and Codex-upgrade reliability fixes; quoted
+  hook paths for both hosts so plugin directories containing spaces work.
+
+The reviewer-profile experiment closed below its adoption threshold; see
+MVP_TRACKER item 9. Its local profile was retired. All four companion adapters
+remain supported. Further expansion requires a recurring unmet workflow.
+
+### Fresh validation (2026-10-09)
+
+| Check | Result |
+| --- | --- |
+| Root-discovered tests with coverage, Node 24.18.0 | PASS — 687/687, no skips |
+| Same suite on CI's Node major, Node 22.23.3 | PASS — 687/687, no skips |
+| Shell syntax, JavaScript syntax, `git diff --check` | PASS |
+| Production dependency audit at moderate or higher | PASS — zero vulnerabilities |
+| Claude plugin validation, Claude Code 2.1.295 | PASS — one advisory that root CLAUDE.md is repository context, not plugin context |
+| Codex marketplace build/install validation, Codex CLI 0.162.0 | PASS — isolated install reports version 0.1.0 and the declared MCP transport |
+| Doctor on both live host configurations | PASS — default target Codex, no authored reviewer profile or stale broker |
+
+The initial suite reproduced three failures from a 0.154.0 wire pin against
+Codex 0.162.0. Regeneration found no routing moves: one removed unused request
+(`thread/rollback`), eleven additions and nine shape changes. The named global
+notification assertion and agent-message phase assertion were reconciled;
+tests now prove `partial_answer` does not replace a final answer in live or
+salvaged output. The adapter's requests and turn-control ids are unchanged.
+
+Both hook manifests initially failed from a plugin directory containing spaces
+(exit 127). Quoting the script paths fixes all twelve commands; the regression
+executes their real command strings against inert scripts on both hosts.
+
+The audited lockfile packages are now SDK 1.32.1, fast-uri 3.1.8, hono 4.13.13,
+ip-address 10.7.3 and proxy-addr 2.0.8. `bridge-server/package.json` is unchanged.
+
+### Manual gates for this candidate
+
+| Gate | Result |
+| --- | --- |
+| 1 — Claude source install | PASS — isolated home, `--target none --skip-tests`; full suite checked separately |
+| 2 — Codex source install | PASS — isolated home, `--target none --skip-tests`; materialized role and accepted MCP transport |
+| 3 — OpenCode delegated send | NOT RUN — no provider configured on this machine |
+| 4 — Copilot delegated send | NOT RUN — requires an approved real turn |
+| 5 — Codex marketplace install | PASS — isolated release validator |
+| 6 — Claude marketplace install | PASS — isolated home, installed version 0.1.0 |
+| 7 — Codex exec delegated send with network | NOT RUN — requires an approved real turn |
+| 8 — Codex app-server restart/control/review smokes | NOT RUN — require approved real turns |
+| 9 — Antigravity smoke and Copilot shared-daemon send | NOT RUN — require approved real turns |
+
+No real agent turns, daemon reloads or quarantine changes were performed.
+Historical smoke evidence below belongs to its dated binary versions and does
+not certify this candidate. A public tag still requires all manual gates and
+fresh CI on the candidate commit.
+
+Candidate archives are prepared locally under `dist/release-0.1.0/`: a source
+ZIP for the Claude/source install path and a Codex marketplace tarball. This
+ignored directory also holds the test/install logs and SHA-256 checksums.
 
 ## Public Positioning
 
@@ -17,7 +89,7 @@ Current vocabulary:
 | Product term | Current implementation term | Supported now |
 | --- | --- | --- |
 | Harness | `host` | Claude Code, Codex CLI |
-| Companion | `target` | OpenCode (`cli`/`server`), GitHub Copilot CLI, Codex CLI (`exec`/`appserver`) |
+| Companion | `target` | OpenCode (`cli`/`server`), GitHub Copilot CLI, Codex CLI (`exec`/`appserver`), Google Antigravity |
 | Companion profile | `profile` — a `profiles.json` entry | yes, `agent_send({ profile })` |
 | Strength | `strength` | yes — `reviewer`, `web_researcher`, `planner`, `fast_executor` |
 
@@ -217,15 +289,21 @@ node scripts/validate-codex-release.mjs
 claude plugin validate .
 ```
 
-On the audit gate: every advisory the bridge has ever carried came in through
+On the audit gate: the advisories measured on 2026-08-28 came in through
 `@modelcontextprotocol/sdk`'s HTTP-transport dependencies (`hono`, `express`,
 `ajv`, `express-rate-limit`), which a stdio-only server never loads. Measured
 2026-08-28 on five advisories: bumping the SDK cleared none of them, because
 the patched versions already sat inside the ranges the SDK declares — only the
 lockfile was stale. The fix for that class is `npm update <the transitives>`
-in `bridge-server/` with `package.json` untouched, never an SDK bump or an
+in `bridge-server/` with `package.json` untouched, rather than an SDK bump or an
 `overrides` block; upstream (modelcontextprotocol/typescript-sdk#2042) reached
-the same conclusion. Gate re-verified clean that day.
+the same conclusion. Gate re-verified clean that day. This rule is specific to
+that transitive-dependency case: the 2026-10-09 audit also flags the SDK itself
+([GHSA-6qxp-vccf-f47h](https://github.com/advisories/GHSA-6qxp-vccf-f47h), patched
+in 1.31.0). The advisory explicitly excludes MCP servers and stdio clients;
+this bridge imports the stdio server, not the affected OAuth client. Release
+preparation still updates the SDK and affected transitives within existing
+manifest ranges to satisfy the audit gate, with no new override or API change.
 
 The first four commands are the same work `.github/workflows/ci.yml` does in its
 `Shell syntax`, `JavaScript syntax`, `Tests with coverage`, and `Production
@@ -281,7 +359,8 @@ Recorded 2026-06-23 (macOS, Node 24.15.0), extended 2026-07-24 for gate 7,
 `acp-antigravity.mjs` 24/24 on agy_acp_server 1.1.1 plus Copilot job
 `copilot-mtwm2l8q-uqhz` on Copilot CLI 1.0.83), and re-verified on the live
 hosts 2026-09-03 with Claude Code 2.1.259 and codex-cli 0.152.1. All nine
-gates pass. The original
+gates passed on those dated versions; fresh v0.1.0 checks are tracked above.
+The original
 harness install smokes
 (1, 2, 6) were run under a sandboxed `$HOME` so the real `~/.claude` /
 `~/.codex` were never written, then the sandbox was deleted and the real config

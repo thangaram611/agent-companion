@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agent-companion v0.0.1 — post-install setup
+# agent-companion — post-install setup
 # Idempotent: safe to run multiple times.
 set -euo pipefail
 

@@ -51,6 +51,11 @@ Public release gates live in [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.
 The delivered onboarding design record lives in
 [docs/ONBOARDING_HANDOFF.md](docs/ONBOARDING_HANDOFF.md).
 
+The project is in maintenance as of 2026-10-09. The supported review and
+delegation workflows remain available; new companions, profiles or transports
+require a recurring unmet workflow. The reviewer-profile experiment closeout
+and v0.1.0 release preparation are recorded in the tracker.
+
 ## What It Does
 
 Agent Companion turns a natural-language delegation request into a background
