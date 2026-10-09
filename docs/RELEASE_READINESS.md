@@ -8,7 +8,9 @@ setup flow, and next backlog.
 
 ## v0.1.0 Candidate
 
-Status: candidate prepared; live delegation gates pending, not published.
+Status: candidate prepared; configured live transport and usage checks passed.
+OpenCode, the critic fallback follow-up below, and fresh CI remain pending
+before publication.
 Both plugin manifests use 0.1.0; the private bridge package already uses 0.1.0.
 The previous public tag,
 v0.0.1 (2026-06-23), precedes 84 implementation commits on main.
@@ -33,8 +35,8 @@ remain supported. Further expansion requires a recurring unmet workflow.
 
 | Check | Result |
 | --- | --- |
-| Root-discovered tests with coverage, Node 24.18.0 | PASS — 687/687, no skips |
-| Same suite on CI's Node major, Node 22.23.3 | PASS — 687/687, no skips |
+| Root-discovered tests with coverage, Node 24.18.0 | PASS — 689/689, no skips |
+| Same suite on CI's Node major, Node 22.23.3 | PASS — 689/689, no skips |
 | Shell syntax, JavaScript syntax, `git diff --check` | PASS |
 | Production dependency audit at moderate or higher | PASS — zero vulnerabilities |
 | Claude plugin validation, Claude Code 2.1.295 | PASS — one advisory that root CLAUDE.md is repository context, not plugin context |
@@ -55,6 +57,15 @@ executes their real command strings against inert scripts on both hosts.
 The audited lockfile packages are now SDK 1.32.1, fast-uri 3.1.8, hono 4.13.13,
 ip-address 10.7.3 and proxy-addr 2.0.8. `bridge-server/package.json` is unchanged.
 
+The live Copilot gate reproduced missing usage on CLI 1.0.94. Both the default
+exporter configuration and an explicit `COPILOT_OTEL_EXPORTER_TYPE=file` run
+produced no OTEL file. A direct native ACP turn instead returned token, cache
+and thought counters on `session/prompt`; the old descriptor discarded them.
+The reader now prefers that response (`source: copilot-acp`) and retains the
+older OTEL fallback. It invents neither model nor cost. The captured response
+failed the terminal-summary regression before the repair and passes afterward;
+the older OTEL regressions remain green.
+
 ### Manual gates for this candidate
 
 | Gate | Result |
@@ -62,14 +73,35 @@ ip-address 10.7.3 and proxy-addr 2.0.8. `bridge-server/package.json` is unchange
 | 1 — Claude source install | PASS — isolated home, `--target none --skip-tests`; full suite checked separately |
 | 2 — Codex source install | PASS — isolated home, `--target none --skip-tests`; materialized role and accepted MCP transport |
 | 3 — OpenCode delegated send | NOT RUN — no provider configured on this machine |
-| 4 — Copilot delegated send | NOT RUN — requires an approved real turn |
+| 4 — Copilot delegated send | PASS — CLI 1.0.94; isolated default-target onboarding and a real README read |
 | 5 — Codex marketplace install | PASS — isolated release validator |
 | 6 — Claude marketplace install | PASS — isolated home, installed version 0.1.0 |
-| 7 — Codex exec delegated send with network | NOT RUN — requires an approved real turn |
-| 8 — Codex app-server restart/control/review smokes | NOT RUN — require approved real turns |
-| 9 — Antigravity smoke and Copilot shared-daemon send | NOT RUN — require approved real turns |
+| 7 — Codex exec delegated send with network | PASS — CLI 0.162.0; default-target onboarding, exec smoke 13/13, real `curl https://example.com` wrote `200` to NETCHECK.txt |
+| 8 — Codex app-server restart/control/review smokes | PASS — CLI 0.162.0; restart 17/17, control 18/18, review loop 16/16 |
+| 9 — Antigravity smoke and Copilot shared-daemon send | PASS — Antigravity ACP server 1.1.1: 24/24; Copilot CLI 1.0.94: 9/9 after the native usage repair |
 
-No real agent turns, daemon reloads or quarantine changes were performed.
+The user approved the real turns and the newly reproduced Copilot repair.
+Probe state and runtime sockets used separate private directories; native
+clients retained their existing logins and normal vendor session histories.
+Temporary copies of the existing probes changed only state/runtime lookup
+paths. The exec probe's unconditional `|| true` digest assertion was removed
+in its temporary copy, and the resulting strict assertion passed. The checked-in
+probe is unchanged; hardening that assertion is a follow-up.
+
+All probe-owned brokers and ACP daemons were stopped, their sockets removed,
+and their pids verified exited. The live harness did not edit installed host
+config, authored profiles, the real default target or quarantine attributes.
+
+Copilot's output carried the required footer, but its native `rubber-duck`
+agent was unavailable on this account. It substituted a successful `code-review`
+critique and emitted `RUBBER-DUCK: clean`. This proves footer plumbing, not a
+native cross-model critique. Follow-up: make an unavailable native critic
+explicit in the footer instead of accepting a substitute as native evidence;
+reproduce with this captured response before changing the wrapper. That
+behavior change was outside the approved usage repair. Keep this as a release
+follow-up for the owner to scope before treating the wrapper as a verified
+quality guarantee.
+
 Historical smoke evidence below belongs to its dated binary versions and does
 not certify this candidate. A public tag still requires all manual gates and
 fresh CI on the candidate commit.
@@ -346,8 +378,9 @@ Manual smoke gates before a public tag:
    (`scripts/install-antigravity-acp.mjs --login`) and spends real turns. Plus
    one real Copilot send through the bridge after any change to
    `scripts/acp-daemon.mjs` (Copilot rides the same daemon), checking the
-   spawn argv in `copilot-acp-daemon.log`, the rubber-duck footer, the OTEL
-   `meta.usage` and the `acp_daemons.copilot` registry entry on `agent_status`.
+   spawn argv in `copilot-acp-daemon.log`, the rubber-duck footer, native ACP
+   `meta.usage` on CLI 1.0.94 (OTEL on older CLIs) and the
+   `acp_daemons.copilot` registry entry on `agent_status`.
    Recorded 2026-09-11 on Copilot CLI 1.0.83: job `copilot-mtwil1g9-e4si`
    completed in 33 s with the identical argv, `RUBBER-DUCK: clean`, usage
    `source: copilot-otel` (cost 3 premium requests), daemon pid recorded.

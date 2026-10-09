@@ -719,7 +719,7 @@ reported nothing has no `usage` key at all, never zeros. Where it comes from:
 | --- | --- |
 | Codex app-server | `thread/tokenUsage/updated`, baselined so a follow-up send on a resumed thread reports its own turn, not the thread. Streams into the digest mid-turn. |
 | Codex exec | `turn.completed.usage` (no total, no model on that stream). |
-| Copilot | The `invoke_agent` span in the OTEL file exporter the daemon enables, keyed by the ACP session id: tokens, cache read/write, reasoning, model and `cost` in premium requests. The ACP stream's `usage_update` (1.0.83) is context occupancy, not the turn's tokens. |
+| Copilot | Native `session/prompt` token, cache and thought counters on CLI 1.0.94 (`source: copilot-acp`), with no model or cost reported. Older CLIs fall back to the `invoke_agent` OTEL span keyed by the ACP session id, which also carries model and premium-request cost (`source: copilot-otel`). The stream's `usage_update` is context occupancy, not turn tokens. |
 | Antigravity | Nothing: the ACP surface carries no usage (measured 2026-09-11 on 1.1.1 — the prompt response is `{stopReason}` only, no `usage_update`), so its jobs have no `usage` key. |
 | OpenCode server | The assistant message's `tokens`, `cost` (USD) and `modelID`, live and from the transcript on resume. OpenCode's `total` counts cached input too and is carried as reported. |
 | OpenCode CLI | The `step-finish` part on the `--format json` stream: tokens and cost, no model on that stream. |

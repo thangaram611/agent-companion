@@ -904,13 +904,12 @@ class SessionManager {
     return null;
   }
 
-  // The prompt's usage, from the descriptor's reader. Copilot's reads the
-  // prompt's `invoke_agent` span off the OTEL file exporter (measured
-  // 2026-09-10 against Copilot CLI 1.0.77: on disk before the daemon sees the
-  // `session/prompt` answer, so this is ONE synchronous read in the prompt's
-  // own window — no wait, no retry); Gemini's reads the prompt response
-  // itself. `null` (no key on the summary) when the transport reported
-  // nothing: a prompt that spent nothing measurable reports nothing.
+  // The prompt's usage, from the descriptor's reader. Copilot prefers the
+  // native prompt response (1.0.94), falling back to the invoke_agent OTEL
+  // span on older CLIs (1.0.77: on disk before the prompt response, so one
+  // synchronous read — no wait or retry). `null` (no key on the summary) when
+  // the transport reported nothing: a prompt that spent nothing measurable
+  // reports nothing.
   _readPromptUsage({ result, sessionId, sinceMs }) {
     try {
       return this.descriptor.acp.usage({
