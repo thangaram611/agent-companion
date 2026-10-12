@@ -165,12 +165,18 @@ OpenCode 1.x retains `--dir` and its opt-in permission flag; 2.x uses a private
 receives both the requested OS cwd and matching `PWD`: the 2.0.25 legacy-provider
 tool runtime otherwise reads from the inherited bridge directory. Readiness
 uses v2's native provider-connection metadata; a model omitted from its catalog
-stays unverified until a real run. Server mode remains qualified against the
-1.x HTTP API; migrating the changed 2.x API is separate work. Server mode drives a
-single detached `opencode serve` and roots each job's session at its own `cwd`
-via the `?directory=` query param; terminal detection consumes the directory-
-scoped `/event` SSE stream (`session.idle` is the per-turn terminal marker) with a
-`/session/status` + transcript level-check as the resume/stream-drop backstop. A
+stays unverified until a real run. One server adapter supports both HTTP contracts.
+It drives a single detached `opencode serve`: 1.x scopes sessions and SSE by
+`?directory=`, while 2.x creates sessions with a `location` and filters its global
+event stream by session id. The 2.x bootstrap password lives only in the private
+lease registry, survives bridge replacement and is omitted from public snapshots.
+Native step events feed partial output; the completed projected turn restores
+tool steps and usage missed during a bridge outage. Its paginated transcript is
+limited to the newest user turn and requires an idle outcome, rather than an
+intermediate tool step's completion timestamp. Active-session and transcript
+checks close subscription/stream-drop races. Since 2.x has no server-dispose API,
+the idle reaper authenticates the native process id and reconfirms its lease
+claim immediately before SIGTERM. A
 job records the adapter it started with (`opencodeAdapter`), and per-job
 `reply_available` / `resume_available` flags on the status response report what
 that specific job can do — independent of the current env.

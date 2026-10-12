@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -43,6 +43,167 @@ afterEach(() => {
 });
 
 const SID = 'ses_abc';
+const V2 = JSON.parse(readFileSync(new URL('../test/fixtures/opencode-v2-turn.json', import.meta.url), 'utf8'));
+const V2_BASE = 'http://127.0.0.1:4096';
+const V2_PASSWORD = 'private-test-password';
+const V2_AUTH = 'Basic ' + Buffer.from('opencode:' + V2_PASSWORD).toString('base64');
+
+function seedV2(extra = {}) {
+  seedRegistry({ baseUrl: V2_BASE, pid: 4242, password: V2_PASSWORD, ...extra });
+}
+
+test('v2 boot retains private authentication across bridge restart without exposing it in status', async () => {
+  let spawns = 0;
+  const fetchJson = async (url, opts) => {
+    assert.equal(url, V2_BASE + '/api/info');
+    assert.equal(opts.headers.authorization, V2_AUTH);
+    return { ok: true, data: { version: '2.0.25', pid: 4242 } };
+  };
+  _setForTest({
+    spawnServer: () => { spawns++; return fakeChild(['server listening on ' + V2_BASE + '\n', 'server pass', 'word ' + V2_PASSWORD + '\n']); },
+    fetchJson,
+  });
+  await ensureOpenCodeServer();
+  assert.equal(readReg().password, V2_PASSWORD);
+  assert.equal(statSync(regPath()).mode & 0o777, 0o600);
+  assert.doesNotMatch(JSON.stringify(openCodeServerPoolSnapshot()), /private-test-password|password/);
+  _resetForTest();
+  _setForTest({ fetchJson, spawnServer: () => { throw new Error('must adopt the original server'); } });
+  assert.equal((await ensureOpenCodeServer()).reused, true);
+  assert.equal(spawns, 1);
+});
+
+test('v2 session operations use location, native model refs and prompt/interrupt contracts', async () => {
+  seedV2();
+  const calls = [];
+  _setForTest({ fetchJson: async (url, opts) => {
+    calls.push({ url, ...opts });
+    assert.equal(opts.headers.authorization, V2_AUTH);
+    if (url === V2_BASE + '/api/session') return { ok: true, data: { data: { id: V2.sessionId } } };
+    if (url.endsWith('/active')) return { ok: true, data: { data: { [V2.sessionId]: { type: 'running' } } } };
+    if (url.endsWith('/interrupt')) return { ok: true, data: { interrupted: true } };
+    return { ok: true, data: { data: { id: 'msg_admitted' } } };
+  } });
+  assert.equal(await createOpenCodeSession({ baseUrl: V2_BASE, directory: '/work a', title: 'v2' }), V2.sessionId);
+  await startOpenCodeServerPrompt({ baseUrl: V2_BASE, sessionId: V2.sessionId, prompt: 'read', model: { providerID: 'ollama-cloud', modelID: 'gpt-oss:120b#fast' } });
+  assert.equal(await getOpenCodeSessionStatus({ baseUrl: V2_BASE, sessionId: V2.sessionId }), 'busy');
+  assert.equal((await abortOpenCodeSession({ baseUrl: V2_BASE, sessionId: V2.sessionId })).aborted, true);
+  assert.deepEqual(calls[0].body, { title: 'v2', location: { directory: '/work a' } });
+  assert.deepEqual(calls.find(c => c.url.endsWith('/model')).body, { model: { providerID: 'ollama-cloud', id: 'gpt-oss:120b', variant: 'fast' } });
+  assert.deepEqual(calls.find(c => c.url.endsWith('/prompt')).body, { text: 'read' });
+  _setForTest({ fetchJson: async () => ({ ok: true, data: { interrupted: false } }) });
+  assert.equal((await abortOpenCodeSession({ baseUrl: V2_BASE, sessionId: V2.sessionId })).aborted, false, 'a native no-op is not a confirmed cancellation');
+});
+
+test('captured native v2 events retain final text, earlier tool steps and per-turn usage', () => {
+  const acc = createTurnAccumulator(V2.sessionId);
+  feed(acc, V2.events.map(frame));
+  assert.equal(acc.terminal.status, 'completed');
+  const snap = acc.snapshot();
+  assert.equal(snap.message, 'MANGO');
+  assert.equal(snap.toolCalls.length, 1);
+  assert.equal(snap.toolCalls[0].name, 'read');
+  assert.equal(snap.toolCalls[0].input.path, 'README.md');
+  assert.equal(snap.usage.input_tokens, 7078);
+  assert.equal(snap.usage.output_tokens, 62);
+  assert.equal(snap.usage.cached_input_tokens, 8816);
+  assert.equal(snap.usage.model, 'gpt-oss:120b');
+});
+
+test('v2 global events ignore foreign sessions and classify interrupted/failed executions', () => {
+  const acc = createTurnAccumulator(V2.sessionId);
+  feed(acc, V2.events.map(e => frame({ ...e, data: { ...e.data, sessionID: 'ses_foreign' } })));
+  assert.equal(acc.terminal, null);
+  assert.equal(acc.snapshot().message, '');
+  feed(acc, [frame({ type: 'session.execution.interrupted', data: { sessionID: V2.sessionId } })]);
+  assert.equal(acc.terminal.status, 'cancelled');
+  const failed = createTurnAccumulator(V2.sessionId);
+  feed(failed, [frame({ type: 'session.execution.failed', data: { sessionID: V2.sessionId, error: { type: 'ProviderError', message: 'quota exhausted' } } })]);
+  assert.equal(failed.terminal.status, 'failed');
+  assert.equal(failed.snapshot().error, 'quota exhausted');
+});
+
+test('v2 transcript pagination collects only the newest turn and requires its idle outcome', async () => {
+  seedV2();
+  const messages = V2.messages.toReversed();
+  const calls = [];
+  _setForTest({ fetchJson: async (url, opts) => {
+    assert.equal(opts.headers.authorization, V2_AUTH);
+    calls.push(url);
+    const older = { ...V2.messages[2], id: 'msg_prior', content: [{ type: 'text', text: 'PRIOR ANSWER' }], tokens: { input: 99999, output: 1 } };
+    const page = url.includes('cursor=older') ? [...messages.slice(2), older] : messages.slice(0, 2);
+    return { ok: true, data: { data: page, cursor: { next: url.includes('cursor=older') ? null : 'older' } } };
+  } });
+  const result = await loadOpenCodeTranscript({ baseUrl: V2_BASE, sessionId: V2.sessionId });
+  assert.equal(result.completed, true);
+  assert.equal(result.summary.message, 'MANGO');
+  assert.equal(result.summary.toolCalls[0].name, 'read');
+  assert.equal(result.summary.usage.input_tokens, 7078);
+  assert.equal(calls.length, 2);
+  _setForTest({ fetchJson: async () => ({ ok: true, data: { data: V2.messages.filter(m => m.type !== 'idle').toReversed(), cursor: { next: null } } }) });
+  assert.equal((await loadOpenCodeTranscript({ baseUrl: V2_BASE, sessionId: V2.sessionId })).completed, false);
+});
+
+test('v2 watcher authenticates the global event stream and resumes a finished turn from the transcript', async () => {
+  seedV2();
+  _setForTest({
+    openEventStream: async (url, opts) => {
+      assert.equal(url, V2_BASE + '/api/event');
+      assert.equal(opts.headers.authorization, V2_AUTH);
+      return (async function* () { for (const e of V2.events.filter(e => /session\.(text|execution.succeeded)/.test(e.type))) yield frame(e); })();
+    },
+    fetchJson: async url => ({ ok: true, data: url.endsWith('/active') ? { data: {} } : { data: V2.messages.toReversed(), cursor: { next: null } } }),
+  });
+  const live = await openOpenCodeTurnWatcher({ baseUrl: V2_BASE, sessionId: V2.sessionId, directory: '/work' });
+  const liveResult = await live.done;
+  assert.equal(liveResult.summary.message, 'MANGO');
+  assert.equal(liveResult.summary.toolCalls[0].name, 'read');
+  assert.equal(liveResult.summary.usage.input_tokens, 7078);
+  const resumed = await openOpenCodeTurnWatcher({ baseUrl: V2_BASE, sessionId: V2.sessionId, initialLevelCheck: true });
+  assert.equal((await resumed.done).status, 'completed');
+});
+
+test('v2 disposal checks authenticated process identity and reconfirms the lease claim before signalling', async () => {
+  const now = Date.now();
+  seedV2({ lastUsedAt: now - 2000, leases: {} });
+  const killed = [];
+  _setForTest({ fetchJson: async (url, opts) => {
+    assert.equal(url, V2_BASE + '/api/info');
+    assert.equal(opts.headers.authorization, V2_AUTH);
+    return { ok: true, data: { version: '2.0.25', pid: 4242 } };
+  }, killServer: pid => killed.push(pid) });
+  await reapIdleOpenCodeServer({ idleMs: 1000, now });
+  assert.deepEqual(killed, [4242]);
+  seedV2({ lastUsedAt: now - 2000, leases: {} });
+  _setForTest({ fetchJson: async () => {
+    seedRegistry({ ...readReg(), lastUsedAt: now, leases: { live: { pid: process.ppid, renewedAt: now, jobId: 'another-bridge' } } });
+    return { ok: true, data: { version: '2.0.25', pid: 4242 } };
+  } });
+  await reapIdleOpenCodeServer({ idleMs: 1000, now });
+  assert.deepEqual(killed, [4242]);
+  assert.ok(readReg().leases.live);
+  seedV2({ lastUsedAt: now - 2000, leases: {} });
+  _setForTest({ fetchJson: async () => ({ ok: true, data: { version: '2.0.25', pid: 9999 } }) });
+  await reapIdleOpenCodeServer({ idleMs: 1000, now });
+  assert.deepEqual(killed, [4242], 'a mismatched native pid must never be signalled');
+});
+
+test('v2 stream loss preserves partial output and never treats an unfinished assistant step as terminal', async () => {
+  seedV2();
+  _setForTest({
+    openEventStream: sseStream([frame({ type: 'session.text.delta', data: { sessionID: V2.sessionId, assistantMessageID: 'msg_partial', ordinal: 0, delta: 'partial answer' } })]),
+    fetchJson: async url => {
+      if (url.endsWith('/active')) return { ok: true, data: { data: {} } };
+      if (url.includes('/message')) return { ok: true, data: { data: V2.messages.filter(m => m.type !== 'idle').toReversed(), cursor: { next: null } } };
+      return { ok: false, status: 503, data: null };
+    },
+  });
+  const watcher = await openOpenCodeTurnWatcher({ baseUrl: V2_BASE, sessionId: V2.sessionId });
+  const result = await watcher.done;
+  assert.equal(result.status, 'unreachable');
+  assert.equal(result.summary.message, 'partial answer');
+  assert.equal(result.summary.stopReason, 'server-gone');
+});
 
 // An async-iterable SSE source matching the real openEventStream contract
 // (async function returning an async iterable of decoded text chunks).

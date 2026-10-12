@@ -813,16 +813,17 @@ primary companion:
     [RELEASE_READINESS.md](RELEASE_READINESS.md). Approved live Codex and
     Antigravity checks passed; Copilot passed after preserving the native
     ACP usage returned by CLI 1.0.94. The critic-footer repair now requires a
-    completed native call before displaying success; 695 tests and the
+    completed native call before displaying success; 703 tests and the
     Copilot 1.0.95 live check pass. OpenCode 2.0.25 passes the default CLI
     gate after repairing removed flags, inherited `PWD`, native readiness and
-    onboarding smoke validation. Its changed 2.x HTTP API remains a scoped
-    follow-up; server mode is qualified against 1.x. The exec probe's unconditional digest
+    onboarding smoke validation. The same PR also migrates its 2.x HTTP API,
+    retaining v1 support: authentication, sessions, global streaming, native
+    usage, reply/cancel, restart recovery and idle disposal. The live HTTP
+    checks pass 16/16. The exec probe's unconditional digest
     assertion remains a scoped follow-up in the release record. No public tag or release is
     created until the published head's checks pass and publication is approved.
     [Draft PR #12](https://github.com/thangaram611/agent-companion/pull/12)
-    holds the candidate for review; implementation commit `d79538d` passed fresh
-    GitHub CI.
+    holds the candidate for review; its final head must pass fresh GitHub CI.
 
 ## Validation Commands
 

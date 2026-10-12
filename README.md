@@ -94,7 +94,7 @@ companion runtime boundary.
 | Companion | Runtime | Send | Wait | Status | Cancel | Reply | Restart resume |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | OpenCode (cli, default) | `opencode run --format json` in the requested cwd (1.x and 2.x) | yes | yes | yes | yes | no | no |
-| OpenCode (server, 1.x API) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
+| OpenCode (server, 1.x and 2.x) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
 | GitHub Copilot CLI | `copilot --acp` behind the shared ACP daemon | yes | yes | yes | yes | yes (cancel + re-prompt) | yes, with ACP |
 | Codex CLI (exec) | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
 | Codex CLI (app-server, what the templates ship) | `codex app-server` behind a shared broker | yes | yes | yes | yes | yes | yes |
@@ -109,11 +109,13 @@ Notes:
     `--dangerously-skip-permissions` or 2.x's `--auto`.
   - `server` drives a long-lived `opencode serve` HTTP server and adds in-flight
     reply/re-steer, restart resume, and streamed event digests. One shared server
-    roots each job at its own `cwd` via the `?directory=` query param. The server
+    roots each job at its own `cwd` via 1.x's `?directory=` query or 2.x's
+    session `location`. The server
     is detached and survives bridge restarts (like the Copilot daemon) so a
-    respawned bridge reattaches instead of re-spawning. This adapter is
-    qualified against the 1.x HTTP API; the changed 2.x API is a follow-up.
-  - Server-mode binds `127.0.0.1` and is unsecured; permission handling follows
+    respawned bridge reattaches instead of re-spawning.
+  - Server mode binds `127.0.0.1`. OpenCode 2.x generates a private server
+    password, retained in the owner's runtime registry for restart recovery
+    and omitted from status and digests; 1.x remains unsecured. Permission handling follows
     OpenCode's own config (the `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip`
     flag applies to the cli adapter only). Job timeout defaults to 40 minutes,
     override with `AGENT_COMPANION_OPENCODE_TIMEOUT_MS`; in server mode the
@@ -725,7 +727,7 @@ reported nothing has no `usage` key at all, never zeros. Where it comes from:
 | Codex exec | `turn.completed.usage` (no total, no model on that stream). |
 | Copilot | Native `session/prompt` token, cache and thought counters on CLI 1.0.94 (`source: copilot-acp`), with no model or cost reported. Older CLIs fall back to the `invoke_agent` OTEL span keyed by the ACP session id, which also carries model and premium-request cost (`source: copilot-otel`). The stream's `usage_update` is context occupancy, not turn tokens. |
 | Antigravity | Nothing: the ACP surface carries no usage (measured 2026-09-11 on 1.1.1 — the prompt response is `{stopReason}` only, no `usage_update`), so its jobs have no `usage` key. |
-| OpenCode server | The assistant message's `tokens`, `cost` (USD) and `modelID`, live and from the transcript on resume. OpenCode's `total` counts cached input too and is carried as reported. |
+| OpenCode server | Native tokens, cost (USD) and model, live and from the transcript on resume. 1.x uses assistant info; 2.x uses step events and the projected current turn, including all tool steps. A vendor-reported `total` is carried as reported. |
 | OpenCode CLI | The `step-finish` part on the `--format json` stream: tokens and cost, no model on that stream. |
 
 A codex app-server turn resumed mid-flight by a fresh bridge reports only the
@@ -920,7 +922,6 @@ claude plugin validate .
 - Session opt-in or pause.
 - OpenCode CLI in-flight reply/re-steer (server mode supports it).
 - OpenCode CLI restart resume (server mode supports it).
-- OpenCode 2.x HTTP server API (server mode is qualified against 1.x).
 - Codex `exec` in-flight reply/re-steer (app-server mode supports it via
   `turn/steer`).
 - Codex `exec` restart resume (app-server mode supports it via `thread/resume`).

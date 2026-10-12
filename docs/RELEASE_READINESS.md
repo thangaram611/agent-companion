@@ -8,10 +8,10 @@ setup flow, and next backlog.
 
 ## v0.1.0 Candidate
 
-Status: candidate prepared; all nine manual gates and fresh implementation CI passed.
+Status: candidate prepared; all ten manual gates passed. Fresh CI is tracked in
+the release PR; checks on the final published head must pass before a public tag.
 The release is awaiting review and publication approval in
 [draft PR #12](https://github.com/thangaram611/agent-companion/pull/12).
-Checks on the final published head must pass before a public tag.
 Both plugin manifests use 0.1.0; the private bridge package already uses 0.1.0.
 The previous public tag,
 v0.0.1 (2026-06-23), precedes 84 implementation commits on main.
@@ -36,14 +36,14 @@ remain supported. Further expansion requires a recurring unmet workflow.
 
 | Check | Result |
 | --- | --- |
-| Root-discovered tests with coverage, Node 24.18.0 | PASS — 695/695, no skips |
-| Same suite on CI's Node major, Node 22.23.3 | PASS — 695/695, no skips |
+| Root-discovered tests with coverage, Node 24.18.0 | PASS — 703/703, no skips |
+| Same suite on CI's Node major, Node 22.23.3 | PASS — 703/703, no skips |
 | Shell syntax, JavaScript syntax, `git diff --check` | PASS |
 | Production dependency audit at moderate or higher | PASS — zero vulnerabilities |
 | Claude plugin validation, Claude Code 2.1.296 | PASS — one advisory that root CLAUDE.md is repository context, not plugin context |
 | Codex marketplace build/install validation, Codex CLI 0.162.1 | PASS — isolated install reports version 0.1.0 and the declared MCP transport |
 | Doctor on both live host configurations | PASS — default target Codex, no authored reviewer profile or stale broker |
-| Fresh GitHub CI on implementation commit `d79538d` | PASS — [pull request run](https://github.com/thangaram611/agent-companion/actions/runs/38215199141); install, syntax, tests with coverage and dependency audit on Ubuntu/Node 22 |
+| GitHub CI for the final candidate head | Required before a tag — [release PR checks](https://github.com/thangaram611/agent-companion/pull/12/checks): install, syntax, tests with coverage and dependency audit on Ubuntu/Node 22 |
 
 The initial suite reproduced three failures from a 0.154.0 wire pin against
 Codex 0.162.0. Regeneration found no routing moves: one removed unused request
@@ -81,6 +81,7 @@ the older OTEL regressions remain green.
 | 7 — Codex exec delegated send with network | PASS — CLI 0.162.0; default-target onboarding, exec smoke 13/13, real `curl https://example.com` wrote `200` to NETCHECK.txt |
 | 8 — Codex app-server restart/control/review smokes | PASS — CLI 0.162.0; restart 17/17, control 18/18, review loop 16/16 |
 | 9 — Antigravity smoke and Copilot shared-daemon send | PASS — Antigravity ACP server 1.1.1: 24/24 on 2026-10-09; Copilot CLI 1.0.95: 11/11 on 2026-10-12, including recorded native critic execution and native usage |
+| 10 — OpenCode 2.x HTTP server | PASS — 2.0.25 with the existing Ollama Cloud pin: send 4/4, reply/cancel/recovery 9/9, live streaming/idle reaper 3/3 |
 
 The user approved the real turns and the newly reproduced Copilot and OpenCode repairs.
 Probe state and runtime sockets used separate private directories; native
@@ -128,8 +129,31 @@ unprompted `PAPAYA` with one native `read` call and emitted native step usage
 the user's existing background service was untouched. The run used the
 existing `ollama-cloud/gpt-oss:120b` pin only in its private test environment.
 Regression tests cover the flags, both cwd values, readiness metadata and
-smoke failure. OpenCode's changed 2.x HTTP API remains an explicit follow-up;
-this repair and gate qualify the default CLI adapter.
+smoke failure. These checks qualify the default CLI adapter.
+
+The user included the 2.x HTTP migration in this candidate and approved its live
+checks. The existing server adapter now supports both contracts. It captures the
+native v2 bootstrap password, retains it in the 0600 lease registry for bridge
+replacement and excludes it from status and job/digest data. V2 session creation
+uses `location`, model selection uses native refs, prompts are durably admitted,
+and cancellation uses `interrupt`, requiring its native `interrupted` confirmation.
+Its global SSE stream is filtered by session;
+the paginated current-turn transcript restores tool steps and usage missed by a
+bridge outage and requires a native idle outcome. The v2 idle reaper checks the
+authenticated native pid and reconfirms its disposal claim before SIGTERM.
+
+Captured native wire regressions initially failed on authentication, request
+shapes, events and transcript pages. The final live controls used distinct
+threads and waited for a native running shell tool before reply, cancel or
+SIGKILL. Private project instructions required the pause, and an explicit
+permission rule allowed the test's `sleep` shell command. Early harness attempts reused an
+implicit thread or relied on model prose for timing and do not qualify the
+candidate. The corrected run proved two working directories on one server,
+reply, cancellation, in-flight bridge recovery and completed transcript recovery
+after server replacement. A separate native run published 14 partial snapshots,
+preserved final usage and stopped its owned server through the idle reaper.
+All probe-owned processes exited; the existing native background service and
+account configuration were untouched.
 
 One Node 24 suite stalled in the Codex broker tests while both Node suites ran
 concurrently. That run was stopped; the broker recheck passed 46/46, and a
@@ -219,8 +243,11 @@ OpenCode companion:
   the directory-scoped `GET /event?directory=<cwd>` SSE stream carries
   `message.part.updated` + a terminal `session.idle`, and `GET /session/status`
   reports per-session busy/idle. One detached server is shared and reused across
-  restarts. OpenCode 2.x intentionally changes the HTTP contract; this adapter
-  has not been migrated or live-qualified against it:
+  restarts. The same adapter supports 2.x's authenticated `/api` contract:
+  session `location`, native model refs, `prompt`/`interrupt`, the global
+  session-filtered event stream, active-session status and projected message
+  pages. Both the CLI and server paths passed real 2.0.25 qualification:
+  <https://dev.opencode.ai/v2/docs/api>. These contracts intentionally differ:
   <https://dev.opencode.ai/v2/docs/migrate-v1/>.
 - On 1.x, `opencode models` lists provider/model pins. On 2.0.25 this machine's
   catalog omitted a callable legacy pin, so readiness uses

@@ -12,9 +12,12 @@
 // duplicate. There is ONE shared server (not one per cwd): a single
 // `opencode serve` roots each job's session at its own working directory via
 // the `?directory=<cwd>` query param, which the server honours on session
-// create, prompt, abort, the `/event` stream, and `/session/status`. (Verified
+// create, prompt, abort, the `/event` stream, and `/session/status` on 1.x. (Verified
 // against opencode 1.17.9: the no-param `/event` stream carries only events for
 // the server's own launch cwd, so the directory param is mandatory.)
+// V2 uses an authenticated /api surface, session locations, a global event
+// stream and projected message pages. The same adapter and lease registry own
+// both contracts; the native v2 bootstrap password stays private to that registry.
 //
 // Test seam: every side-effecting primitive (HTTP JSON, the SSE event stream,
 // and server spawn) routes through module-local impl pointers that tests swap
@@ -86,7 +89,7 @@ export function openCodeServerPromptId(jobId, replyTurn = 0) {
 // Injectable I/O seam (default impls use global fetch / spawn)
 // ---------------------------------------------------------------------------
 
-async function realFetchJson(url, { method = 'GET', body = null, signal = null, timeoutMs = 30_000 } = {}) {
+async function realFetchJson(url, { method = 'GET', body = null, signal = null, timeoutMs = 30_000, headers = {} } = {}) {
   const ac = signal ? null : new AbortController();
   const finalSignal = signal || ac?.signal;
   const timer = ac ? setTimeout(() => ac.abort(), timeoutMs) : null;
@@ -95,7 +98,7 @@ async function realFetchJson(url, { method = 'GET', body = null, signal = null, 
     const res = await fetch(url, {
       method,
       signal: finalSignal,
-      headers: body != null ? { 'content-type': 'application/json' } : undefined,
+      headers: { ...headers, ...(body != null ? { 'content-type': 'application/json' } : {}) },
       body: body != null ? JSON.stringify(body) : undefined,
     });
     let data = null;
@@ -112,8 +115,8 @@ async function realFetchJson(url, { method = 'GET', body = null, signal = null, 
 // of decoded text chunks. The caller aborts `signal` to stop; we never buffer the
 // whole stream. TCP/stream buffering preserves events that arrive between connect
 // and the first iteration, so a session.idle just after connect is not lost.
-async function realOpenEventStream(url, { signal = null } = {}) {
-  const res = await fetch(url, { signal, headers: { accept: 'text/event-stream' } });
+async function realOpenEventStream(url, { signal = null, headers = {} } = {}) {
+  const res = await fetch(url, { signal, headers: { ...headers, accept: 'text/event-stream' } });
   if (!res.ok || !res.body) {
     throw new Error(`opencode /event stream failed: HTTP ${res.status}`);
   }
@@ -134,6 +137,7 @@ let _impl = {
   fetchJson: realFetchJson,
   openEventStream: realOpenEventStream,
   spawnServer: realSpawnServer,
+  killServer: pid => process.kill(pid, 'SIGTERM'),
 };
 
 export function _setForTest(overrides = {}) {
@@ -141,7 +145,7 @@ export function _setForTest(overrides = {}) {
 }
 
 export function _resetForTest() {
-  _impl = { fetchJson: realFetchJson, openEventStream: realOpenEventStream, spawnServer: realSpawnServer };
+  _impl = { fetchJson: realFetchJson, openEventStream: realOpenEventStream, spawnServer: realSpawnServer, killServer: pid => process.kill(pid, 'SIGTERM') };
   serverRegistry.clearCache();
   _spawnLocks.clear();
 }
@@ -170,11 +174,10 @@ export function createTurnAccumulator(sessionId) {
 
   function snapshotMessage(id) {
     const m = messages.get(id);
-    if (!m) return { text: '', thoughts: '', tools: [] };
+    if (!m) return { text: '', thoughts: '' };
     return {
       text: partText(m.textParts),
       thoughts: partText(m.reasoning),
-      tools: [...m.tools.values()],
     };
   }
 
@@ -188,9 +191,14 @@ export function createTurnAccumulator(sessionId) {
   function onEvent(evt) {
     if (!evt || typeof evt !== 'object') return;
     const type = String(evt.type || '');
+    if (evt.data && type.startsWith('session.')) {
+      onV2Event(type, evt.data);
+      return;
+    }
     const props = evt.properties || {};
     // Global noise (no sessionID, or a different session) is ignored.
-    if (props.sessionID && props.sessionID !== sessionId) return;
+    const eventSession = props.sessionID || props.info?.sessionID || props.part?.sessionID;
+    if (eventSession !== sessionId) return;
     sawEvent = true;
 
     if (type === 'message.updated') {
@@ -254,6 +262,40 @@ export function createTurnAccumulator(sessionId) {
     }
   }
 
+  function onV2Event(type, data) {
+    if (data.sessionID !== sessionId) return;
+    sawEvent = true;
+    if (type.startsWith('session.execution.')) {
+      const status = { succeeded: 'completed', interrupted: 'cancelled', failed: 'failed' }[type.split('.').at(-1)];
+      if (status) {
+        if (data.error) messageError = { name: data.error.type, message: data.error.message };
+        terminal = { status };
+      }
+      return;
+    }
+    const id = data.assistantMessageID;
+    if (!id) return;
+    const message = ensureMessage(id);
+    latestAssistantId = id;
+    if (type === 'session.step.started') message.model = data.model?.id;
+    if (type === 'session.step.ended') {
+      const usage = usageFromOpenCodeInfo({ ...data, modelID: message.model }, 'opencode-server');
+      if (usage) usageByMessage.set(id, usage);
+      if (data.error) messageError = { name: data.error.type, message: data.error.message };
+    }
+    const textKind = type.match(/^session\.(text|reasoning)\.(delta|ended)$/);
+    if (textKind) {
+      const parts = textKind[1] === 'text' ? message.textParts : message.reasoning;
+      const key = data.ordinal;
+      parts.set(key, textKind[2] === 'ended' ? data.text : (parts.get(key) || '') + data.delta);
+    }
+    if (type === 'session.tool.input.started' || type === 'session.tool.called') {
+      const tool = message.tools.get(data.id) || { name: data.name, input: {} };
+      if (data.input) tool.input = data.input;
+      message.tools.set(data.id, tool);
+    }
+  }
+
   return {
     // Feed raw SSE text; parses complete `\n\n`-delimited frames.
     push(text) {
@@ -273,11 +315,11 @@ export function createTurnAccumulator(sessionId) {
     get terminal() { return terminal; },
     get sawEvent() { return sawEvent; },
     snapshot() {
-      const snap = latestAssistantId ? snapshotMessage(latestAssistantId) : { text: '', thoughts: '', tools: [] };
+      const snap = latestAssistantId ? snapshotMessage(latestAssistantId) : { text: '', thoughts: '' };
       const out = {
         message: truncateChars(snap.text, MAX_SUMMARY_CHARS),
         thoughts: truncateChars(snap.thoughts, MAX_SUMMARY_CHARS),
-        toolCalls: snap.tools.map((t) => ({ name: t.name, input: t.input })),
+        toolCalls: [...messages.values()].flatMap(m => [...m.tools.values()]).map(t => ({ name: t.name, input: t.input })),
         error: messageError ? messageError.message : null,
       };
       const usage = sumUsage([...usageByMessage.values()]);
@@ -309,14 +351,35 @@ const _spawnLocks = new Map();  // key -> Promise
 // two-phase disposal claim and the idle reaper — lives in the runtime-neutral
 // registry module. Only the opencode-shaped parts are supplied here: an entry is
 // the same server iff it answers on the same base URL (a replacement gets a new
-// port), and disposal is the server's own `POST /global/dispose`. The dispose
+// port), and disposal uses v1's HTTP endpoint or the authenticated v2 pid. The dispose
 // closure reads `_impl` at call time so the test seam still intercepts it.
 const serverRegistry = createSharedRuntimeRegistry({
   registryPath: openCodeServerRegistryPath,
   key: SHARED_SERVER_KEY,
   identity: (entry) => entry?.baseUrl,
-  dispose: (entry) => _impl.fetchJson(`${entry.baseUrl}/global/dispose`, { method: 'POST', timeoutMs: HEALTH_PROBE_TIMEOUT_MS }),
+  dispose: async (entry, { confirmDisposal }) => {
+    if (!entry.password) return _impl.fetchJson(`${entry.baseUrl}/global/dispose`, { method: 'POST', timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
+    // V2 has no server-dispose route. Authenticate the owned process before
+    // signalling it, then recheck leases after that HTTP round-trip.
+    const info = await request(entry.baseUrl, '/info', { timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
+    if (info.ok && Number.isInteger(entry.pid) && entry.pid > 0 && info.data?.pid === entry.pid && confirmDisposal()) _impl.killServer(entry.pid);
+  },
 });
+
+// The bootstrap password identifies the v2 contract and belongs only to this
+// detached server. Keep it in the private lease registry so a new bridge can
+// authenticate; never copy it into jobs, digests or status.
+function connection(baseUrl) {
+  const cached = serverRegistry.getCached();
+  const entry = cached?.baseUrl === baseUrl ? cached : serverRegistry.read();
+  const password = entry?.baseUrl === baseUrl ? entry.password : null;
+  return { v2: !!password, headers: password ? { authorization: 'Basic ' + Buffer.from('opencode:' + password).toString('base64') } : {} };
+}
+
+function request(baseUrl, path, opts = {}) {
+  const { v2, headers } = connection(baseUrl);
+  return _impl.fetchJson(`${baseUrl}${v2 ? '/api' : ''}${path}`, { ...opts, headers });
+}
 
 // How long the shared server may sit unused before the reaper disposes it.
 //
@@ -339,8 +402,9 @@ export function openCodeServerIdleTtlMs(env = process.env) {
 
 async function probeHealth(baseUrl) {
   try {
-    const r = await _impl.fetchJson(`${baseUrl}/global/health`, { timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
-    return !!(r.ok && r.data && r.data.healthy);
+    const v2 = connection(baseUrl).v2;
+    const r = await request(baseUrl, v2 ? '/info' : '/global/health', { timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
+    return !!(r.ok && (v2 ? r.data?.version?.startsWith('2.') : r.data?.healthy));
   } catch { return false; }
 }
 
@@ -375,7 +439,7 @@ export async function ensureOpenCodeServer({ env = process.env } = {}) {
 
   const recorded = serverRegistry.read();
   if (recorded?.baseUrl && !disposalClaimedBy(recorded) && await probeHealth(recorded.baseUrl)) {
-    serverRegistry.setCached({ baseUrl: recorded.baseUrl, pid: recorded.pid });
+    serverRegistry.setCached(recorded);
     serverRegistry.record(recorded);
     return { baseUrl: recorded.baseUrl, pid: recorded.pid, reused: true };
   }
@@ -391,9 +455,9 @@ async function spawnServer(env) {
   const bin = resolveOpenCodeBin(env);
   const args = ['serve', '--port', '0', '--hostname', '127.0.0.1'];
   const child = _impl.spawnServer({ bin, args, env });
-  let baseUrl;
+  let boot;
   try {
-    baseUrl = await waitForBootUrl(child);
+    boot = await waitForBootUrl(child);
   } catch (err) {
     // Boot timed out or the server exited before listening. Don't leak the
     // detached child — kill it (SIGTERM, then SIGKILL) before propagating.
@@ -404,14 +468,17 @@ async function spawnServer(env) {
   }
   try { child.unref?.(); } catch {}
   const pid = child.pid || null;
-  serverRegistry.setCached({ baseUrl, pid });
-  serverRegistry.record({ baseUrl, pid, startedAt: Date.now() });
-  return { baseUrl, pid, reused: false };
+  serverRegistry.setCached({ ...boot, pid });
+  serverRegistry.record({ ...boot, pid, startedAt: Date.now() });
+  return { baseUrl: boot.baseUrl, pid, reused: false };
 }
 
 // Snapshot of the shared server for status/observability.
 export function openCodeServerPoolSnapshot() {
-  return serverRegistry.snapshot();
+  const entry = serverRegistry.snapshot();
+  if (!entry) return null;
+  const { password, ...publicEntry } = entry;
+  return publicEntry;
 }
 
 // Publish this process's in-flight server-mode jobs as leases on the shared
@@ -432,7 +499,7 @@ export function reapIdleOpenCodeServer(opts = {}) {
 // and should not have to know where the machinery now lives.
 export { LEASE_STALE_MS } from '../lib/shared-runtime-registry.mjs';
 
-// Parse the `listening on http://host:port` boot line from the server's stdout.
+// Parse the native boot URL and, on v2, its generated private server password.
 function waitForBootUrl(child) {
   return new Promise((resolve, reject) => {
     let buf = '';
@@ -440,8 +507,10 @@ function waitForBootUrl(child) {
     const done = (fn, arg) => { if (!settled) { settled = true; cleanup(); fn(arg); } };
     const onData = (chunk) => {
       buf += chunk.toString('utf8');
-      const m = buf.match(/listening on\s+(https?:\/\/[^\s]+)/i);
-      if (m) done(resolve, m[1].replace(/\/+$/, ''));
+      const m = buf.match(/(?:^|\n)(opencode )?server listening on\s+(https?:\/\/[^\s]+)/i);
+      const password = buf.match(/server password\s+(\S+)/i)?.[1];
+      // V2 prints the password after its URL, possibly in a later chunk.
+      if (m && (m[1] || password)) done(resolve, { baseUrl: m[2].replace(/\/+$/, ''), ...(password ? { password } : {}) });
     };
     const onErr = (err) => done(reject, err);
     const onClose = (code) => done(reject, new Error(`opencode serve exited before listening (code ${code})`));
@@ -462,8 +531,7 @@ function waitForBootUrl(child) {
 }
 
 // ---------------------------------------------------------------------------
-// Session operations  (all directory-scoped: opencode roots/serves a session by
-// the ?directory= param, NOT by the server's launch cwd)
+// Session operations: v1 uses directory queries, v2 stores a session location.
 // ---------------------------------------------------------------------------
 
 function dirQuery(directory) {
@@ -471,20 +539,38 @@ function dirQuery(directory) {
 }
 
 export async function createOpenCodeSession({ baseUrl, directory = null, title = null }) {
+  const v2 = connection(baseUrl).v2;
   const body = {};
   if (title) body.title = title;
-  const r = await _impl.fetchJson(`${baseUrl}/session${dirQuery(directory)}`, { method: 'POST', body });
-  if (!r.ok || !r.data?.id) {
+  if (v2 && directory) body.location = { directory };
+  const r = await request(baseUrl, `/session${v2 ? '' : dirQuery(directory)}`, { method: 'POST', body });
+  const session = v2 ? r.data?.data : r.data;
+  if (!r.ok || !session?.id) {
     throw new Error(`opencode session create failed: HTTP ${r.status}`);
   }
-  return r.data.id;
+  return session.id;
 }
 
 export async function startOpenCodeServerPrompt({ baseUrl, sessionId, directory = null, prompt, model = null, agent = null }) {
+  if (connection(baseUrl).v2) {
+    const path = `/session/${encodeURIComponent(sessionId)}`;
+    if (model) {
+      const [id, variant] = model.modelID.split('#');
+      const r = await request(baseUrl, path + '/model', { method: 'POST', body: { model: { providerID: model.providerID, id, ...(variant ? { variant } : {}) } } });
+      if (!r.ok) throw new Error(`opencode model selection failed: HTTP ${r.status}`);
+    }
+    if (agent) {
+      const r = await request(baseUrl, path + '/agent', { method: 'POST', body: { agent } });
+      if (!r.ok) throw new Error(`opencode agent selection failed: HTTP ${r.status}`);
+    }
+    const r = await request(baseUrl, path + '/prompt', { method: 'POST', body: { text: prompt } });
+    if (!r.ok) throw new Error(`opencode prompt admission failed: HTTP ${r.status}`);
+    return r.data;
+  }
   const body = { parts: [{ type: 'text', text: prompt }] };
   if (model) body.model = model;
   if (agent) body.agent = agent;
-  const r = await _impl.fetchJson(`${baseUrl}/session/${encodeURIComponent(sessionId)}/prompt_async${dirQuery(directory)}`, {
+  const r = await request(baseUrl, `/session/${encodeURIComponent(sessionId)}/prompt_async${dirQuery(directory)}`, {
     method: 'POST', body,
   });
   if (!r.ok) throw new Error(`opencode prompt_async failed: HTTP ${r.status}`);
@@ -493,8 +579,9 @@ export async function startOpenCodeServerPrompt({ baseUrl, sessionId, directory 
 
 export async function abortOpenCodeSession({ baseUrl, sessionId, directory = null }) {
   try {
-    const r = await _impl.fetchJson(`${baseUrl}/session/${encodeURIComponent(sessionId)}/abort${dirQuery(directory)}`, { method: 'POST' });
-    return { ok: r.ok, aborted: r.data === true || r.ok };
+    const v2 = connection(baseUrl).v2;
+    const r = await request(baseUrl, `/session/${encodeURIComponent(sessionId)}/${v2 ? 'interrupt' : 'abort' + dirQuery(directory)}`, { method: 'POST' });
+    return { ok: r.ok, aborted: v2 ? r.ok && r.data?.interrupted === true : r.data === true || r.ok };
   } catch (err) {
     return { ok: false, aborted: false, error: err.message };
   }
@@ -505,19 +592,23 @@ export async function abortOpenCodeSession({ baseUrl, sessionId, directory = nul
 // sessions and `{}` when idle.
 export async function getOpenCodeSessionStatus({ baseUrl, sessionId, directory = null }) {
   try {
-    const r = await _impl.fetchJson(`${baseUrl}/session/status${dirQuery(directory)}`, { timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
+    const v2 = connection(baseUrl).v2;
+    const r = await request(baseUrl, `/session/${v2 ? 'active' : 'status' + dirQuery(directory)}`, { timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
     if (!r.ok || !r.data || typeof r.data !== 'object') return 'unknown';
-    const entry = r.data[sessionId];
+    const data = v2 ? r.data.data : r.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return 'unknown';
+    const entry = data[sessionId];
     if (!entry) return 'idle';
-    return entry.type === 'busy' ? 'busy' : 'idle';
+    return entry.type === 'busy' || entry.type === 'running' ? 'busy' : 'idle';
   } catch { return 'unknown'; }
 }
 
 // Build a terminal/partial transcript snapshot from the persisted message list.
 // Used for resume (turn already finished while bridge was down) and digests.
-// The message list reads without the directory param.
+// V1 reads a flat message list; v2 pages the projected current user turn.
 export async function loadOpenCodeTranscript({ baseUrl, sessionId, directory = null }) {
-  const r = await _impl.fetchJson(`${baseUrl}/session/${encodeURIComponent(sessionId)}/message${dirQuery(directory)}`, { timeoutMs: 10_000 });
+  if (connection(baseUrl).v2) return loadV2Transcript(baseUrl, sessionId);
+  const r = await request(baseUrl, `/session/${encodeURIComponent(sessionId)}/message${dirQuery(directory)}`, { timeoutMs: 10_000 });
   if (!r.ok || !Array.isArray(r.data)) return { completed: false, summary: emptySummary(), found: false };
   const assistant = [...r.data].reverse().find((m) => m?.info?.role === 'assistant');
   if (!assistant) return { completed: false, summary: emptySummary(), found: r.data.length > 0 };
@@ -545,6 +636,37 @@ export async function loadOpenCodeTranscript({ baseUrl, sessionId, directory = n
   };
 }
 
+async function loadV2Transcript(baseUrl, sessionId) {
+  const messages = [];
+  let query = '?order=desc&limit=100';
+  // Newest first, across pages, stopping at this turn's user input. Never
+  // include an earlier reply's answer or cumulative session usage.
+  while (query) {
+    const r = await request(baseUrl, `/session/${encodeURIComponent(sessionId)}/message${query}`, { timeoutMs: 10_000 });
+    if (!r.ok || !Array.isArray(r.data?.data)) return { found: false, completed: false, summary: emptySummary() };
+    const user = r.data.data.findIndex(m => m.type === 'user');
+    messages.push(...(user < 0 ? r.data.data : r.data.data.slice(0, user)));
+    if (user >= 0) break;
+    const cursor = r.data.cursor?.next;
+    query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : null;
+  }
+  const idle = messages.find(m => m.type === 'idle');
+  const assistant = messages.filter(m => m.type === 'assistant');
+  const last = assistant[0];
+  const parts = last?.content || [];
+  const error = idle?.error?.message || last?.error?.message || (idle?.outcome === 'failed' ? 'opencode execution failed' : null);
+  const summary = {
+    message: truncateChars(parts.filter(p => p.type === 'text').map(p => p.text).join(''), MAX_SUMMARY_CHARS),
+    thoughts: truncateChars(parts.filter(p => p.type === 'reasoning').map(p => p.text).join(''), MAX_SUMMARY_CHARS),
+    toolCalls: assistant.toReversed().flatMap(m => m.content.filter(p => p.type === 'tool').map(p => ({ name: p.name, input: p.state?.input || {} }))),
+    stopReason: idle ? 'idle' : null,
+    error,
+  };
+  const usage = sumUsage(assistant.map(m => usageFromOpenCodeInfo({ ...m, modelID: m.model?.id }, 'opencode-server')));
+  if (usage) summary.usage = usage;
+  return { found: messages.length > 0, completed: !!idle, aborted: idle?.outcome === 'interrupted', error, summary };
+}
+
 // ---------------------------------------------------------------------------
 // Turn watcher — subscribe to /event?directory, resolve on terminal
 // ---------------------------------------------------------------------------
@@ -566,7 +688,8 @@ export async function openOpenCodeTurnWatcher({ baseUrl, sessionId, directory = 
 
   // Establish the subscription first (this await = "connected"). Stream/TCP
   // buffering preserves any frames that land before we start iterating.
-  const stream = await _impl.openEventStream(`${baseUrl}/event${dirQuery(directory)}`, { signal: ac.signal });
+  const { v2, headers } = connection(baseUrl);
+  const stream = await _impl.openEventStream(`${baseUrl}${v2 ? '/api' : ''}/event${v2 ? '' : dirQuery(directory)}`, { signal: ac.signal, headers });
 
   // Resume path: the turn may already be terminal. Check level state up front.
   let preTerminal = null;
@@ -606,6 +729,12 @@ export async function openOpenCodeTurnWatcher({ baseUrl, sessionId, directory = 
     if (!acc.terminal) {
       return streamDropFallback(acc, { baseUrl, sessionId, directory, error: 'opencode /event stream closed before session.idle' });
     }
+    if (v2) {
+      // V2's volatile stream has no replay. A bridge attaching mid-turn may
+      // miss tool steps and usage; the projected turn is authoritative at idle.
+      const transcript = await loadOpenCodeTranscript({ baseUrl, sessionId, directory });
+      if (transcript.completed) return transcriptEnvelope(transcript);
+    }
     return finalize(acc, { status: acc.terminal.status, stopReason: 'idle' });
   })();
 
@@ -617,7 +746,7 @@ export async function openOpenCodeTurnWatcher({ baseUrl, sessionId, directory = 
 // transcript. Otherwise null (turn still running or indeterminate).
 async function levelTerminal({ baseUrl, sessionId, directory }) {
   const status = await getOpenCodeSessionStatus({ baseUrl, sessionId, directory });
-  if (status === 'busy') return null;
+  if (status !== 'idle') return null;
   let transcript = null;
   try { transcript = await loadOpenCodeTranscript({ baseUrl, sessionId, directory }); } catch { return null; }
   if (!transcript?.completed) return null;
