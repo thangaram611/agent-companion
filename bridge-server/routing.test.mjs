@@ -570,6 +570,7 @@ test('REGRESSION opencode CLI model: a profile model reaches `opencode run --mod
   const fakeBin = join(tmp, 'opencode-fake.mjs');
   writeFileSync(fakeBin, [
     '#!/usr/bin/env node',
+    'if (process.argv.includes("--version")) { console.log("opencode v1.18.30"); process.exit(0); }',
     'import { writeFileSync } from "node:fs";',
     'const args = process.argv.slice(2);',
     `writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(args));`,

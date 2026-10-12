@@ -93,8 +93,8 @@ companion runtime boundary.
 
 | Companion | Runtime | Send | Wait | Status | Cancel | Reply | Restart resume |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| OpenCode (cli, default) | `opencode run --format json --dir <cwd>` | yes | yes | yes | yes | no | no |
-| OpenCode (server) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
+| OpenCode (cli, default) | `opencode run --format json` in the requested cwd (1.x and 2.x) | yes | yes | yes | yes | no | no |
+| OpenCode (server, 1.x API) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
 | GitHub Copilot CLI | `copilot --acp` behind the shared ACP daemon | yes | yes | yes | yes | yes (cancel + re-prompt) | yes, with ACP |
 | Codex CLI (exec) | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
 | Codex CLI (app-server, what the templates ship) | `codex app-server` behind a shared broker | yes | yes | yes | yes | yes | yes |
@@ -103,12 +103,16 @@ companion runtime boundary.
 Notes:
 
 - OpenCode ships two adapters, selected by `OPENCODE_RUNTIME_ADAPTER`:
-  - `cli` (default) is the single-shot `opencode run` adapter.
+  - `cli` (default) is the single-shot `opencode run` adapter. OpenCode 1.x
+    uses `--dir`; 2.x uses a private `--standalone` server and a matching
+    `PWD`. Permission mode `skip` maps to 1.x's
+    `--dangerously-skip-permissions` or 2.x's `--auto`.
   - `server` drives a long-lived `opencode serve` HTTP server and adds in-flight
     reply/re-steer, restart resume, and streamed event digests. One shared server
     roots each job at its own `cwd` via the `?directory=` query param. The server
     is detached and survives bridge restarts (like the Copilot daemon) so a
-    respawned bridge reattaches instead of re-spawning.
+    respawned bridge reattaches instead of re-spawning. This adapter is
+    qualified against the 1.x HTTP API; the changed 2.x API is a follow-up.
   - Server-mode binds `127.0.0.1` and is unsecured; permission handling follows
     OpenCode's own config (the `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip`
     flag applies to the cli adapter only). Job timeout defaults to 40 minutes,
@@ -916,6 +920,7 @@ claude plugin validate .
 - Session opt-in or pause.
 - OpenCode CLI in-flight reply/re-steer (server mode supports it).
 - OpenCode CLI restart resume (server mode supports it).
+- OpenCode 2.x HTTP server API (server mode is qualified against 1.x).
 - Codex `exec` in-flight reply/re-steer (app-server mode supports it via
   `turn/steer`).
 - Codex `exec` restart resume (app-server mode supports it via `thread/resume`).

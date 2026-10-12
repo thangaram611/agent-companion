@@ -158,7 +158,15 @@ policy, because an unattended client that leaves a permission request pending
 has hung the agent.
 
 The OpenCode adapter is selected by `OPENCODE_RUNTIME_ADAPTER` (`cli` default,
-`server` opt-in), mirroring how Copilot selects `acp`/`sdk`. Server mode drives a
+`server` opt-in), mirroring how Copilot selects `acp`/`sdk`. The CLI adapter and
+onboarding share `lib/opencode-cli.mjs`'s version-specific command builder.
+OpenCode 1.x retains `--dir` and its opt-in permission flag; 2.x uses a private
+`--standalone` server and `--auto` only when explicitly configured. The child
+receives both the requested OS cwd and matching `PWD`: the 2.0.25 legacy-provider
+tool runtime otherwise reads from the inherited bridge directory. Readiness
+uses v2's native provider-connection metadata; a model omitted from its catalog
+stays unverified until a real run. Server mode remains qualified against the
+1.x HTTP API; migrating the changed 2.x API is separate work. Server mode drives a
 single detached `opencode serve` and roots each job's session at its own `cwd`
 via the `?directory=` query param; terminal detection consumes the directory-
 scoped `/event` SSE stream (`session.idle` is the per-turn terminal marker) with a

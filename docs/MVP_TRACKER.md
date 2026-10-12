@@ -41,9 +41,11 @@ primary companion:
 
 - Implemented OpenCode MVP adapter:
   - resolves `OPENCODE_BIN` or `opencode`.
-  - runs `opencode run --dir <cwd> --format json <prompt>`.
+  - runs `opencode run --format json <prompt>` at the requested cwd; 1.x
+    retains `--dir`, 2.x uses `--standalone` with matching `PWD`.
   - exposes permission mode and timeout via `agent_status().opencode_runtime`.
-  - supports `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip` for OpenCode's dangerous auto-approval flag.
+  - supports `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip` for 1.x's
+    `--dangerously-skip-permissions` or 2.x's `--auto`.
   - enforces `AGENT_COMPANION_OPENCODE_TIMEOUT_MS` with a 40-minute default.
   - supports send, wait, status, cancel.
   - parses NDJSON/text output into the standard terminal envelope without selecting tool output as the assistant message.
@@ -152,7 +154,7 @@ primary companion:
   mode they are unsupported and persisted nonterminal cli jobs are marked
   `unreachable` after bridge restart.
 - OpenCode `cli` permission auto-approval is opt-in via
-  `--dangerously-skip-permissions`; `server` mode follows OpenCode's own
+  `--dangerously-skip-permissions` on 1.x or `--auto` on 2.x; `server` mode follows OpenCode's own
   permission config (the bridge does not auto-approve).
 - OpenCode `acp` stdio mode is not implemented; server mode covers reply, resume,
   and streamed digests.
@@ -805,14 +807,17 @@ primary companion:
      companion or additional transport is scheduled. Reopen one only for
      recurring demand with success criteria agreed before implementation.
 
-10. v0.1.0 release preparation — PREPARED, OpenCode and fresh CI pending (updated 2026-10-12). Both plugin
+10. v0.1.0 release preparation — PREPARED, fresh CI pending (updated 2026-10-12). Both plugin
     manifests use 0.1.0 and describe all four supported companions. Fresh
     automated checks and remaining manual gates are recorded in
     [RELEASE_READINESS.md](RELEASE_READINESS.md). Approved live Codex and
     Antigravity checks passed; Copilot passed after preserving the native
     ACP usage returned by CLI 1.0.94. The critic-footer repair now requires a
-    completed native call before displaying success; 691 tests and the
-    Copilot 1.0.95 live check pass. The exec probe's unconditional digest
+    completed native call before displaying success; 695 tests and the
+    Copilot 1.0.95 live check pass. OpenCode 2.0.25 passes the default CLI
+    gate after repairing removed flags, inherited `PWD`, native readiness and
+    onboarding smoke validation. Its changed 2.x HTTP API remains a scoped
+    follow-up; server mode is qualified against 1.x. The exec probe's unconditional digest
     assertion remains a scoped follow-up in the release record. No public tag or release is
     created until those gates pass.
 

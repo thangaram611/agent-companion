@@ -35,6 +35,7 @@ import {
 } from '../lib/target-diagnostics.mjs';
 import { writeDefaultTarget, readDefaultTarget, writeProfiles, isModelAllowedFor } from '../lib/state.mjs';
 import { buildDoctorReport, renderDoctorReport } from '../lib/doctor.mjs';
+import { startOpenCodeRun } from '../bridge-server/opencode-runtime.mjs';
 import {
   loadProfiles,
   VALID_STRENGTHS,
@@ -253,21 +254,17 @@ function runSmoke(id, env) {
   return { supported: false, passed: null, detail: `${id} has no non-interactive smoke path; start it once interactively to verify.` };
 }
 
-function runOpenCodeSmoke(env) {
-  const bin = String(env.OPENCODE_BIN || 'opencode').trim() || 'opencode';
+async function runOpenCodeSmoke(env) {
   const dir = mkdtempSync(join(tmpdir(), 'agent-onboard-smoke-'));
   try {
-    const out = execFileSync(bin, ['run', '--dir', dir, '--format', 'json', 'Reply with the single word: ready'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 120_000,
-      // `timeout` signals the child and then keeps blocking until it actually
-      // exits, so with the default (catchable) SIGTERM a companion that traps
-      // it — or whose shutdown path is itself wedged — is not bounded at all.
-      killSignal: 'SIGKILL',
-      env,
+    const result = await startOpenCodeRun({
+      jobId: `onboard-opencode-${process.pid}`, cwd: dir,
+      prompt: 'Reply with the single word: ready',
+      model: String(env.AGENT_COMPANION_OPENCODE_MODEL || '').trim() || null,
+      env: { ...env, AGENT_COMPANION_OPENCODE_TIMEOUT_MS: '120000' },
     });
-    return { supported: true, passed: true, detail: out.trim().split('\n').slice(-1)[0] || '(no output)' };
+    const message = result.summary?.message?.trim() || '';
+    return { supported: true, passed: result.status === 'completed' && /^ready[.!]?$/i.test(message), detail: message || result.error || result.status };
   } catch (err) {
     return { supported: true, passed: false, detail: String(err.stderr || err.message || 'smoke failed').trim() };
   } finally {
@@ -293,7 +290,7 @@ function runCodexSmoke(env) {
       stdio: ['pipe', 'pipe', 'pipe'],
       input: 'Reply with the single word: ready',
       timeout: 120_000,
-      // See runOpenCodeSmoke's comment — same uncatchable-signal reasoning.
+      // Bound the synchronous wait even if the child ignores SIGTERM.
       killSignal: 'SIGKILL',
       env,
     });
@@ -476,12 +473,12 @@ async function main() {
         rl.close();
         if (ans !== 'y' && ans !== 'yes') smoke = { supported: true, passed: null, detail: 'declined' };
       }
-      if (!smoke) smoke = runSmoke(id, env);
+      if (!smoke) smoke = await runSmoke(id, env);
     }
   }
 
   if (options.json) {
-    console.log(JSON.stringify({ ok: report.ready, host: options.host, target: id, wroteDefault: wrote, autoSelected: !!plan.autoSelected, report, smoke }, null, 2));
+    console.log(JSON.stringify({ ok: report.ready && smoke?.passed !== false, host: options.host, target: id, wroteDefault: wrote, autoSelected: !!plan.autoSelected, report, smoke }, null, 2));
   } else {
     if (plan.autoSelected) console.log(`[OK] auto-selected the only ready target: ${id}`);
     printTargetReport(report);
@@ -490,7 +487,7 @@ async function main() {
     if (smoke) console.log(`\nsmoke: ${smoke.supported ? (smoke.passed === null ? 'skipped' : smoke.passed ? 'passed' : 'failed') : 'unsupported'} — ${smoke.detail}`);
   }
 
-  if (!report.ready && !options.noTargetCheck) process.exit(3);
+  if (smoke?.passed === false || (!report.ready && !options.noTargetCheck)) process.exit(3);
   process.exit(0);
 }
 

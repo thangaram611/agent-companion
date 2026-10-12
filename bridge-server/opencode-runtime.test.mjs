@@ -12,10 +12,10 @@ import {
   writeOpenCodeDigest,
 } from './opencode-runtime.mjs';
 
-function fakeBin(source) {
+function fakeBin(source, version = '1.18.30') {
   const dir = mkdtempSync(join(tmpdir(), 'opencode-runtime-test-'));
   const bin = join(dir, 'opencode-fake.mjs');
-  writeFileSync(bin, ['#!/usr/bin/env node', source, ''].join('\n'), { mode: 0o700 });
+  writeFileSync(bin, ['#!/usr/bin/env node', `if (process.argv.includes('--version')) { console.log('opencode v${version}'); process.exit(0); }`, source, ''].join('\n'), { mode: 0o700 });
   chmodSync(bin, 0o700);
   return { dir, bin };
 }
@@ -58,6 +58,8 @@ test('startOpenCodeRun passes dangerous permission flag only when configured', a
     });
     assert.equal(result.status, 'completed');
     assert.doesNotMatch(result.stdout, /dangerously-skip-permissions/);
+    assert.match(result.stdout, new RegExp(`--dir ${dir}`));
+    assert.doesNotMatch(result.stdout, /--standalone|--auto/);
 
     result = await startOpenCodeRun({
       jobId: 'j-skip',
@@ -74,6 +76,29 @@ test('startOpenCodeRun passes dangerous permission flag only when configured', a
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('OpenCode 2 uses a private server, native permission flags, and the requested working directory', async () => {
+  const { dir, bin } = fakeBin(`
+    const args = process.argv.slice(2);
+    if (args.includes('--dir') || args.includes('--dangerously-skip-permissions') || !args.includes('--standalone')) {
+      console.error('Unrecognized legacy flag or missing private server'); process.exit(2);
+    }
+    const fs = await import('node:fs');
+    if (fs.realpathSync(process.env.PWD) !== process.cwd()) { console.error('PWD does not match cwd'); process.exit(2); }
+    const text = fs.readFileSync(process.env.PWD + '/README.md', 'utf8').trim();
+    console.log(JSON.stringify({ type: 'text', part: { type: 'text', text: text + ' ' + (args.includes('--auto') ? 'auto' : 'default') } }));
+  `, '2.0.25');
+  writeFileSync(join(dir, 'README.md'), 'V2-CWD-CANARY');
+  try {
+    for (const skip of [false, true]) {
+      const result = await startOpenCodeRun({ jobId: `v2-${skip}`, cwd: dir, prompt: 'read README.md', env: {
+        ...process.env, OPENCODE_BIN: bin, AGENT_COMPANION_OPENCODE_PERMISSION_MODE: skip ? 'skip' : 'default',
+      } });
+      assert.equal(result.status, 'completed', result.error);
+      assert.equal(result.summary.message, `V2-CWD-CANARY ${skip ? 'auto' : 'default'}`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('startOpenCodeRun extracts assistant NDJSON without selecting tool output', async () => {

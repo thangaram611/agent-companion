@@ -920,6 +920,7 @@ test('OpenCode companion adapter runs a fake CLI and surfaces terminal job state
   const fakeBin = join(tmp, 'opencode-fake.mjs');
   writeFileSync(fakeBin, [
     '#!/usr/bin/env node',
+    'if (process.argv.includes("--version")) { console.log("opencode v1.18.30"); process.exit(0); }',
     'const args = process.argv.slice(2);',
     'if (args[0] !== "run" || !args.includes("--format")) {',
     '  console.error("unexpected args: " + args.join(" "));',
@@ -1018,6 +1019,7 @@ test('OpenCode cancel returns a standard terminal envelope', async () => {
   const fakeBin = join(tmp, 'opencode-fake.mjs');
   writeFileSync(fakeBin, [
     '#!/usr/bin/env node',
+    'if (process.argv.includes("--version")) { console.log("opencode v1.18.30"); process.exit(0); }',
     'process.on("SIGTERM", () => {',
     '  console.log(JSON.stringify({ type: "message", message: "cancelled partial output" }));',
     '  process.exit(0);',
@@ -1076,6 +1078,7 @@ test('OpenCode timeout is terminal and target-specific', async () => {
   const fakeBin = join(tmp, 'opencode-fake.mjs');
   writeFileSync(fakeBin, [
     '#!/usr/bin/env node',
+    'if (process.argv.includes("--version")) { console.log("opencode v1.18.30"); process.exit(0); }',
     'setInterval(() => {}, 1000);',
     '',
   ].join('\n'), { mode: 0o700 });

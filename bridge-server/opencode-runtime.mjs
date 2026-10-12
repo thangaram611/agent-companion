@@ -5,6 +5,7 @@ import { digestPath } from '../lib/prompt-digest.mjs';
 import { writePrivateFileAtomic } from '../lib/runtime-paths.mjs';
 import { appendCapped, truncateChars, MAX_SUMMARY_CHARS } from '../lib/text-utils.mjs';
 import { usageFromOpenCodeInfo, sumUsage, formatUsage } from '../lib/usage.mjs';
+import { openCodeRunArgs } from '../lib/opencode-cli.mjs';
 
 const running = new Map();
 const cancelRequested = new Set();
@@ -47,7 +48,7 @@ export function openCodePromptId(jobId) {
   return `opencode-${jobId}`;
 }
 
-export function startOpenCodeRun({
+export async function startOpenCodeRun({
   jobId,
   cwd,
   prompt,
@@ -60,19 +61,14 @@ export function startOpenCodeRun({
   const bin = resolveOpenCodeBin(env);
   const permission = resolveOpenCodePermissionMode(env);
   const timeoutMs = resolveOpenCodeTimeoutMs(env);
-  const args = ['run', '--dir', cwd, '--format', 'json'];
-  if (model) args.push('--model', model);
-  if (agent) args.push('--agent', agent);
-  if (title) args.push('--title', title);
-  if (permission.skipPermissions) {
-    args.push('--dangerously-skip-permissions');
-  }
-  args.push(prompt);
+  const args = openCodeRunArgs({ bin, cwd, prompt, model, agent, title, skipPermissions: permission.skipPermissions });
 
   let timedOut = false;
   const child = spawn(bin, args, {
     cwd,
-    env,
+    // The v2 legacy-provider tool runtime inherits PWD; changing only the
+    // child's OS working directory left its reads rooted at the bridge cwd.
+    env: { ...env, PWD: cwd || process.cwd() },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   running.set(jobId, child);

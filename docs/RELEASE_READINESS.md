@@ -8,8 +8,8 @@ setup flow, and next backlog.
 
 ## v0.1.0 Candidate
 
-Status: candidate prepared; configured live transport and usage checks passed.
-OpenCode and fresh CI remain pending before publication.
+Status: candidate prepared; all nine manual gates passed.
+Fresh CI remains pending before publication.
 Both plugin manifests use 0.1.0; the private bridge package already uses 0.1.0.
 The previous public tag,
 v0.0.1 (2026-06-23), precedes 84 implementation commits on main.
@@ -34,11 +34,11 @@ remain supported. Further expansion requires a recurring unmet workflow.
 
 | Check | Result |
 | --- | --- |
-| Root-discovered tests with coverage, Node 24.18.0 | PASS — 691/691, no skips |
-| Same suite on CI's Node major, Node 22.23.3 | PASS — 691/691, no skips |
+| Root-discovered tests with coverage, Node 24.18.0 | PASS — 695/695, no skips |
+| Same suite on CI's Node major, Node 22.23.3 | PASS — 695/695, no skips |
 | Shell syntax, JavaScript syntax, `git diff --check` | PASS |
 | Production dependency audit at moderate or higher | PASS — zero vulnerabilities |
-| Claude plugin validation, Claude Code 2.1.295 | PASS — one advisory that root CLAUDE.md is repository context, not plugin context |
+| Claude plugin validation, Claude Code 2.1.296 | PASS — one advisory that root CLAUDE.md is repository context, not plugin context |
 | Codex marketplace build/install validation, Codex CLI 0.162.1 | PASS — isolated install reports version 0.1.0 and the declared MCP transport |
 | Doctor on both live host configurations | PASS — default target Codex, no authored reviewer profile or stale broker |
 
@@ -71,7 +71,7 @@ the older OTEL regressions remain green.
 | --- | --- |
 | 1 — Claude source install | PASS — isolated home, `--target none --skip-tests`; full suite checked separately |
 | 2 — Codex source install | PASS — isolated home, `--target none --skip-tests`; materialized role and accepted MCP transport |
-| 3 — OpenCode delegated send | NOT RUN — live OpenCode check remains pending; doctor now reports readiness on 2026-10-12 |
+| 3 — OpenCode delegated send | PASS — CLI 2.0.25 on 2026-10-12; isolated default-target onboarding, native smoke reply, a real README read and terminal digest, 4/4 |
 | 4 — Copilot delegated send | PASS — CLI 1.0.95 on 2026-10-12; isolated default-target onboarding and a real README read |
 | 5 — Codex marketplace install | PASS — isolated release validator |
 | 6 — Claude marketplace install | PASS — isolated home, installed version 0.1.0 |
@@ -79,7 +79,7 @@ the older OTEL regressions remain green.
 | 8 — Codex app-server restart/control/review smokes | PASS — CLI 0.162.0; restart 17/17, control 18/18, review loop 16/16 |
 | 9 — Antigravity smoke and Copilot shared-daemon send | PASS — Antigravity ACP server 1.1.1: 24/24 on 2026-10-09; Copilot CLI 1.0.95: 11/11 on 2026-10-12, including recorded native critic execution and native usage |
 
-The user approved the real turns and the newly reproduced Copilot repair.
+The user approved the real turns and the newly reproduced Copilot and OpenCode repairs.
 Probe state and runtime sockets used separate private directories; native
 clients retained their existing logins and normal vendor session histories.
 Temporary copies of the existing probes changed only state/runtime lookup
@@ -108,6 +108,30 @@ Tests also cover unavailable, failed and unrecorded critic calls, and ensure
 relay-only companions never receive this footer. This verifies invocation,
 not critique quality or the critic's chosen model. No account settings or
 installed plugin files were changed by the repair.
+
+OpenCode 2.0.25 initially failed before inference with `Unrecognized flag:
+--dir`. The CLI command builder now preserves 1.x arguments and selects
+`--standalone` for 2.x; permission auto-approval remains opt-in and maps to
+`--auto` on 2.x. Onboarding reuses this runtime and requires an assistant
+`ready` reply; tool-only output fails the smoke and returns exit 3. Readiness
+checks v2's native provider connections instead of its empty model list, and
+legacy profile pins stay unverified rather than falsely rejected.
+
+The first repaired live run still read the bridge repository instead of the
+requested cwd. Setting both the child's OS working directory and `PWD` fixed
+the v2 legacy-provider tool runtime. The rerun read the isolated README's
+unprompted `PAPAYA` with one native `read` call and emitted native step usage
+(8,004 input, 69 output, 64 cached input, $0.001242896). The job's child exited;
+the user's existing background service was untouched. The run used the
+existing `ollama-cloud/gpt-oss:120b` pin only in its private test environment.
+Regression tests cover the flags, both cwd values, readiness metadata and
+smoke failure. OpenCode's changed 2.x HTTP API remains an explicit follow-up;
+this repair and gate qualify the default CLI adapter.
+
+One Node 24 suite stalled in the Codex broker tests while both Node suites ran
+concurrently. That run was stopped; the broker recheck passed 46/46, and a
+subsequent full Node 24 run passed 695/695. No broker code was changed. Both
+final full-suite logs and the recheck are retained with the candidate evidence.
 
 Historical smoke evidence below belongs to its dated binary versions and does
 not certify this candidate. A public tag still requires all manual gates and
@@ -181,8 +205,10 @@ Codex plugins:
 OpenCode companion:
 
 - The `cli` adapter (default) uses the documented non-interactive `opencode run`
-  path. OpenCode documents `--format`, `--model`, `--attach`, and `--dir` flags
-  for `run`: <https://opencode.ai/docs/cli/>.
+  path. It retains `--dir` on 1.x and uses a private `--standalone` server on
+  2.x, with both OS cwd and `PWD` set to the requested directory. The v2 CLI
+  documents `--format`, `--model` and `--standalone`:
+  <https://dev.opencode.ai/v2/docs/cli/commands/>.
 - The `server` adapter (`OPENCODE_RUNTIME_ADAPTER=server`) drives `opencode serve`
   over HTTP for reply/resume/streamed digests. Verified against the live server
   API (opencode 1.17.9): `POST /session?directory=<cwd>` roots a session at a cwd,
@@ -190,16 +216,21 @@ OpenCode companion:
   the directory-scoped `GET /event?directory=<cwd>` SSE stream carries
   `message.part.updated` + a terminal `session.idle`, and `GET /session/status`
   reports per-session busy/idle. One detached server is shared and reused across
-  restarts.
-- `opencode models` lists configured provider models in `provider/model` form,
-  which is the form an OpenCode companion profile's `model` takes:
-  <https://opencode.ai/docs/cli/>.
+  restarts. OpenCode 2.x intentionally changes the HTTP contract; this adapter
+  has not been migrated or live-qualified against it:
+  <https://dev.opencode.ai/v2/docs/migrate-v1/>.
+- On 1.x, `opencode models` lists provider/model pins. On 2.0.25 this machine's
+  catalog omitted a callable legacy pin, so readiness uses
+  `opencode auth list --standalone --format json` and model validation remains
+  `unknown` until a real run. Native provider connections establish local
+  configuration, not provider availability or quota.
 - OpenCode also documents `opencode acp` for ACP-compatible editors:
   <https://opencode.ai/docs/acp/>. The adapter set is `cli` and `server`, and
   the server adapter already covers reply/resume, so an ACP stdio adapter stays
   deferred — it is the one item on this page with no code behind it.
 - OpenCode permissions are configured as `allow`, `ask`, or `deny`; the `cli`
-  adapter exposes opt-in `--dangerously-skip-permissions`, while the `server`
+  adapter exposes opt-in `--dangerously-skip-permissions` on 1.x or `--auto`
+  on 2.x, while the `server`
   adapter follows OpenCode's own permission config (no hidden auto-approval):
   <https://opencode.ai/docs/permissions/>.
 
