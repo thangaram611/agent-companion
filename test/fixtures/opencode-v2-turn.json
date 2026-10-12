@@ -1,0 +1,302 @@
+{
+  "source": "OpenCode 2.0.25 native HTTP turn, 2026-10-12; only event metadata omitted and identifiers normalized",
+  "sessionId": "ses_v2",
+  "events": [
+    {
+      "type": "session.execution.started",
+      "data": {
+        "sessionID": "ses_v2"
+      }
+    },
+    {
+      "type": "session.step.started",
+      "data": {
+        "sessionID": "ses_v2",
+        "agent": "build",
+        "model": {
+          "id": "gpt-oss:120b",
+          "providerID": "ollama-cloud",
+          "variant": "default"
+        },
+        "assistantMessageID": "msg_0",
+        "started": 1791789607564
+      }
+    },
+    {
+      "type": "session.reasoning.started",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_0",
+        "ordinal": 0,
+        "state": {
+          "reasoningField": "reasoning"
+        }
+      }
+    },
+    {
+      "type": "session.reasoning.delta",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_0",
+        "ordinal": 0,
+        "delta": "We need to read README.md file in current directory. Use read tool."
+      }
+    },
+    {
+      "type": "session.tool.input.started",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_0",
+        "id": "call_o5an2di0",
+        "name": "read"
+      }
+    },
+    {
+      "type": "session.reasoning.ended",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_0",
+        "ordinal": 0,
+        "text": "We need to read README.md file in current directory. Use read tool.",
+        "state": {
+          "reasoningField": "reasoning"
+        }
+      }
+    },
+    {
+      "type": "session.tool.called",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_0",
+        "id": "call_o5an2di0",
+        "input": {
+          "path": "README.md",
+          "limit": 2000,
+          "offset": 1
+        },
+        "executed": false
+      }
+    },
+    {
+      "type": "session.tool.success",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_0",
+        "id": "call_o5an2di0",
+        "content": [
+          {
+            "type": "text",
+            "text": "Read file README.md, lines 1-1\n1: The magic word is MANGO."
+          }
+        ],
+        "metadata": {
+          "truncated": false
+        },
+        "executed": false
+      }
+    },
+    {
+      "type": "session.step.ended",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_0",
+        "finish": "tool-calls",
+        "rawFinish": "tool_calls",
+        "cost": 0.001097944,
+        "tokens": {
+          "input": 7012,
+          "output": 56,
+          "reasoning": 0,
+          "cache": {
+            "read": 896,
+            "write": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "session.step.started",
+      "data": {
+        "sessionID": "ses_v2",
+        "agent": "build",
+        "model": {
+          "id": "gpt-oss:120b",
+          "providerID": "ollama-cloud",
+          "variant": "default"
+        },
+        "assistantMessageID": "msg_1",
+        "started": 1791789609582
+      }
+    },
+    {
+      "type": "session.text.started",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_1",
+        "ordinal": 0
+      }
+    },
+    {
+      "type": "session.text.delta",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_1",
+        "ordinal": 0,
+        "delta": "MANGO"
+      }
+    },
+    {
+      "type": "session.text.ended",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_1",
+        "ordinal": 0,
+        "text": "MANGO"
+      }
+    },
+    {
+      "type": "session.step.ended",
+      "data": {
+        "sessionID": "ses_v2",
+        "assistantMessageID": "msg_1",
+        "finish": "stop",
+        "rawFinish": "stop",
+        "cost": 0.00012438,
+        "tokens": {
+          "input": 66,
+          "output": 6,
+          "reasoning": 0,
+          "cache": {
+            "read": 7920,
+            "write": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "session.execution.succeeded",
+      "data": {
+        "sessionID": "ses_v2"
+      }
+    }
+  ],
+  "messages": [
+    {
+      "id": "msg_2",
+      "time": {
+        "created": 1791789607554
+      },
+      "text": "Read README.md in this directory and reply with only the magic word. Do not edit files.",
+      "type": "user"
+    },
+    {
+      "id": "msg_0",
+      "time": {
+        "created": 1791789607564,
+        "streamed": 1791789609562,
+        "completed": 1791789609571
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "gpt-oss:120b",
+        "providerID": "ollama-cloud",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "We need to read README.md file in current directory. Use read tool.",
+          "state": {
+            "reasoningField": "reasoning"
+          },
+          "time": {
+            "created": 1791789609355,
+            "completed": 1791789609551
+          }
+        },
+        {
+          "type": "tool",
+          "id": "call_o5an2di0",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "README.md",
+              "limit": 2000,
+              "offset": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file README.md, lines 1-1\n1: The magic word is MANGO."
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1791789609480,
+            "ran": 1791789609559,
+            "completed": 1791789609569
+          }
+        }
+      ],
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0.001097944,
+      "tokens": {
+        "input": 7012,
+        "output": 56,
+        "reasoning": 0,
+        "cache": {
+          "read": 896,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1",
+      "time": {
+        "created": 1791789609582,
+        "streamed": 1791789610544,
+        "completed": 1791789610546
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "gpt-oss:120b",
+        "providerID": "ollama-cloud",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "MANGO"
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0.00012438,
+      "tokens": {
+        "input": 66,
+        "output": 6,
+        "reasoning": 0,
+        "cache": {
+          "read": 7920,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_3",
+      "time": {
+        "created": 1791789610549
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}

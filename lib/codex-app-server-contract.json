@@ -1,6 +1,21 @@
 {
-  "codexVersion": "0.154.0",
+  "codexVersion": "0.162.0",
   "clientRequests": [
+    {
+      "method": "account/gatewayOAuth/cancel",
+      "paramsRequired": false,
+      "required": []
+    },
+    {
+      "method": "account/gatewayOAuth/login",
+      "paramsRequired": false,
+      "required": []
+    },
+    {
+      "method": "account/gatewayOAuth/read",
+      "paramsRequired": false,
+      "required": []
+    },
     {
       "method": "account/login/cancel",
       "paramsRequired": true,
@@ -445,6 +460,40 @@
       ]
     },
     {
+      "method": "thread/attachment/add",
+      "paramsRequired": true,
+      "required": [
+        "attachmentType",
+        "identityKey",
+        "payload",
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/attachment/list",
+      "paramsRequired": true,
+      "required": [
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/attachment/remove",
+      "paramsRequired": true,
+      "required": [
+        "attachmentType",
+        "identityKey",
+        "threadId"
+      ]
+    },
+    {
+      "method": "thread/attachmentOwner/list",
+      "paramsRequired": true,
+      "required": [
+        "attachmentType",
+        "identityKey"
+      ]
+    },
+    {
       "method": "thread/compact/start",
       "paramsRequired": true,
       "required": [
@@ -545,14 +594,6 @@
       "paramsRequired": true,
       "required": [
         "beforeTurnId",
-        "threadId"
-      ]
-    },
-    {
-      "method": "thread/rollback",
-      "paramsRequired": true,
-      "required": [
-        "numTurns",
         "threadId"
       ]
     },
@@ -665,6 +706,18 @@
   ],
   "serverNotifications": [
     {
+      "method": "account/gatewayOAuth/changed",
+      "routing": "global",
+      "key": null,
+      "optional": false,
+      "params": {
+        "authUrl": "string?",
+        "error": "string?",
+        "providerId": "string",
+        "status": "enum:notReady|started|succeeded|failed"
+      }
+    },
+    {
       "method": "account/login/completed",
       "routing": "global",
       "key": null,
@@ -692,7 +745,7 @@
       "optional": false,
       "params": {
         "authMode": "enum:apikey|chatgpt|chatgptAuthTokens|headers|agentIdentity|personalAccessToken|bedrockApiKey|bedrockAccessKeys?",
-        "planType": "enum:free|go|plus|pro|prolite|team|self_serve_business_prolite|self_serve_business_usage_based|business|ent26|enterprise_cbp_automation|enterprise_cbp_usage_based|enterprise|edu|edu_plus|edu_pro|unknown?"
+        "planType": "enum:free|go|plus|pro|prolite|promax|team|self_serve_business_prolite|self_serve_business_usage_based|business|ent26|enterprise_cbp_automation|enterprise_cbp_usage_based|enterprise|edu|edu_plus|edu_pro|unknown?"
       }
     },
     {
@@ -1039,6 +1092,7 @@
       "optional": true,
       "params": {
         "error": "string?",
+        "loginId": "string?",
         "name": "string",
         "success": "boolean",
         "threadId": "string?"
@@ -1195,6 +1249,19 @@
       }
     },
     {
+      "method": "thread/attachment/updated",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "attachmentId": "string",
+        "attachmentType": "string",
+        "identityKey": "string",
+        "operation": "enum:created|deleted",
+        "threadId": "string"
+      }
+    },
+    {
       "method": "thread/closed",
       "routing": "threadId",
       "key": "params.threadId",
@@ -1270,6 +1337,17 @@
       "params": {
         "threadId": "string",
         "threadName": "string?"
+      }
+    },
+    {
+      "method": "thread/prediction/updated",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "result": "ThreadPredictionResult",
+        "sourceTurnId": "string",
+        "threadId": "string"
       }
     },
     {
@@ -1617,7 +1695,7 @@
       "delivery": "enum:async?",
       "id": "string",
       "memoryCitation": "MemoryCitation?",
-      "phase": "enum:commentary|final_answer?",
+      "phase": "enum:commentary|partial_answer|final_answer?",
       "questions": "AsyncUserInputQuestion[]?",
       "text": "string",
       "type": "enum:agentMessage"
@@ -1714,6 +1792,7 @@
       "error": "McpToolCallError?",
       "id": "string",
       "mcpAppResourceUri": "string?",
+      "mcpAppUi": "McpAppUi?",
       "pluginId": "string?",
       "readOnlyHint": "boolean?",
       "result": "McpToolCallResult?",
@@ -1743,6 +1822,8 @@
       "agentThreadId": "string",
       "id": "string",
       "kind": "enum:started|interacted|interrupted|completed",
+      "model": "string?",
+      "reasoningEffort": "string?",
       "type": "enum:subAgentActivity"
     },
     "userMessage": {
@@ -1974,6 +2055,15 @@
       "tokensUsed": "integer",
       "updatedAt": "integer"
     },
+    "ThreadPredictionResult": [
+      {
+        "text": "string?",
+        "type": "enum:completed"
+      },
+      {
+        "type": "enum:failed"
+      }
+    ],
     "ThreadRealtimeAudioChunk": {
       "data": "string",
       "itemId": "string?",
@@ -2019,6 +2109,7 @@
       "approvalsReviewer": "enum:user|auto_review|guardian_subagent",
       "collaborationMode": "CollaborationMode",
       "cwd": "string",
+      "disabledPluginIds": "string[]?",
       "effort": "string?",
       "model": "string",
       "modelProvider": "string",
@@ -2062,12 +2153,13 @@
       "id": "string",
       "items": "ThreadItem[]",
       "itemsView": "enum:notLoaded|summary|full?",
+      "rootTurnId": "string?",
       "startedAt": "integer?",
       "status": "enum:completed|interrupted|failed|inProgress"
     },
     "TurnError": {
       "additionalDetails": "string?",
-      "codexErrorInfo": "CodexErrorInfo?",
+      "codexErrorInfo": "any?",
       "message": "string",
       "misalignment": "MisalignmentErrorDetails?"
     },
@@ -2083,8 +2175,7 @@
       },
       {
         "detail": "enum:auto|low|high|original?",
-        "type": "enum:image",
-        "url": "string"
+        "type": "enum:image"
       },
       {
         "detail": "enum:auto|low|high|original?",

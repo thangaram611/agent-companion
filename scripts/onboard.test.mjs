@@ -175,6 +175,37 @@ test('CLI --target none --yes is host-only and exits 0', () => {
   assert.equal(JSON.parse(r.stdout).target, null);
 });
 
+test('OpenCode 2 onboarding smoke uses the same private CLI and verifies the assistant reply', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'opencode2-onboard-'));
+  const bin = join(dir, 'opencode-fake.mjs'), capture = join(dir, 'run.json');
+  writeFileSync(bin, `#!${process.execPath}
+    const args = process.argv.slice(2);
+    if (args[0] === '--version') { console.log('opencode v2.0.25'); process.exit(0); }
+    if (args[0] === 'models') { console.log('ollama-cloud/gpt-oss:120b'); process.exit(0); }
+    if (args[0] === 'auth') { console.log(JSON.stringify([{ id: 'ollama-cloud', connections: [{ type: 'credential', id: 'cred_fixture' }] }])); process.exit(0); }
+    if (args.includes('--dir') || !args.includes('--standalone')) { console.error('Unrecognized legacy flag or missing private server'); process.exit(2); }
+    (await import('node:fs')).writeFileSync(process.env.OC_CAPTURE, JSON.stringify({ args, cwd: process.cwd() }));
+    if (process.env.OC_FAKE_TOOL_ONLY) console.log(JSON.stringify({ type: 'tool_call', name: 'read', output: 'READY' }));
+    else console.log(JSON.stringify({ type: 'text', part: { type: 'text', text: 'READY' } }));
+  `, { mode: 0o700 });
+  try {
+    const r = run(['--target', 'opencode', '--set-default', '--yes', '--smoke', '--json'], {
+      OPENCODE_BIN: bin, OC_CAPTURE: capture, AGENT_COMPANION_OPENCODE_MODEL: 'ollama-cloud/gpt-oss:120b',
+    });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).smoke.passed, true);
+    const actual = JSON.parse(readFileSync(capture));
+    assert.ok(actual.args.includes('--standalone'));
+    assert.ok(actual.args.includes('ollama-cloud/gpt-oss:120b'));
+    assert.doesNotMatch(actual.args.join(' '), /--dir/);
+    assert.match(actual.cwd, /agent-onboard-smoke-/);
+    const toolOnly = run(['--target', 'opencode', '--yes', '--smoke', '--json'], { OPENCODE_BIN: bin, OC_CAPTURE: capture, OC_FAKE_TOOL_ONLY: '1' });
+    assert.equal(toolOnly.code, 3, toolOnly.stderr);
+    assert.equal(JSON.parse(toolOnly.stdout).ok, false);
+    assert.equal(JSON.parse(toolOnly.stdout).smoke.passed, false, 'tool output is not an assistant smoke reply');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('CLI unknown target exits 2', () => {
   const r = run(['--target', 'goose', '--yes']);
   assert.equal(r.code, 2);

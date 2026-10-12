@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A delegation plugin: a **harness** (Claude Code or Codex CLI) spawns an isolated
 `agent-companion` subagent, which uses `agent-bridge` to run work on a **companion** runtime
-(OpenCode, GitHub Copilot CLI, or Codex CLI). Claude scopes the MCP server to the subagent.
+(OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity). Claude scopes the MCP server to the subagent.
 Current Codex forbids role-local MCP authority, so its plugin registers the internal bridge at
 session scope and the child inherits it; main can see the schemas, but direct use is unsupported.
-The matrix is 2 harnesses × 3 companions, and two companions ship two transports each — parity
+The matrix is 2 harnesses × 4 companions, and two companions ship two transports each — parity
 across that matrix is the product, not an implementation detail.
 
 Read `README.md` for the user-facing contract and `docs/ARCHITECTURE.md` before any non-trivial
@@ -232,7 +232,7 @@ second reader/definition is how these break.
 | `docs/MVP_TRACKER.md` | What is done, what the current limitations are, what is next. |
 | `docs/RELEASE_READINESS.md` | Release gates and source-backed vendor compatibility notes. |
 | `docs/STRENGTH_ROUTING_HANDOFF.md`, `docs/ONBOARDING_HANDOFF.md` | Design records for the profile/strength router and onboarding. |
-| `docs/DIRECTION_ASSESSMENT.md` | 2026-09 direction verdict: ledger usage evidence, external research, the ranked improvements with their dated done/superseded marks (§4), and the shipped review-loop handoff (§5). The next item is the profile experiment, `docs/MVP_TRACKER.md` item 9. |
+| `docs/DIRECTION_ASSESSMENT.md` | 2026-09 direction evidence and shipped review-loop handoff; the 2026-10 closeout puts the project in maintenance. `docs/MVP_TRACKER.md` item 9 closes the profile experiment and item 10 tracks v0.1.0 release preparation. |
 | `probes/README.md` | What each probe proves, and the dead ends already ruled out. |
 
 Commit subjects follow `type(scope): lowercase description of what changed and why`, often with

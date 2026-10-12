@@ -51,6 +51,11 @@ Public release gates live in [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.
 The delivered onboarding design record lives in
 [docs/ONBOARDING_HANDOFF.md](docs/ONBOARDING_HANDOFF.md).
 
+The project is in maintenance as of 2026-10-09. The supported review and
+delegation workflows remain available; new companions, profiles or transports
+require a recurring unmet workflow. The reviewer-profile experiment closeout
+and v0.1.0 release preparation are recorded in the tracker.
+
 ## What It Does
 
 Agent Companion turns a natural-language delegation request into a background
@@ -88,8 +93,8 @@ companion runtime boundary.
 
 | Companion | Runtime | Send | Wait | Status | Cancel | Reply | Restart resume |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| OpenCode (cli, default) | `opencode run --format json --dir <cwd>` | yes | yes | yes | yes | no | no |
-| OpenCode (server) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
+| OpenCode (cli, default) | `opencode run --format json` in the requested cwd (1.x and 2.x) | yes | yes | yes | yes | no | no |
+| OpenCode (server, 1.x and 2.x) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
 | GitHub Copilot CLI | `copilot --acp` behind the shared ACP daemon | yes | yes | yes | yes | yes (cancel + re-prompt) | yes, with ACP |
 | Codex CLI (exec) | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
 | Codex CLI (app-server, what the templates ship) | `codex app-server` behind a shared broker | yes | yes | yes | yes | yes | yes |
@@ -98,13 +103,19 @@ companion runtime boundary.
 Notes:
 
 - OpenCode ships two adapters, selected by `OPENCODE_RUNTIME_ADAPTER`:
-  - `cli` (default) is the single-shot `opencode run` adapter.
+  - `cli` (default) is the single-shot `opencode run` adapter. OpenCode 1.x
+    uses `--dir`; 2.x uses a private `--standalone` server and a matching
+    `PWD`. Permission mode `skip` maps to 1.x's
+    `--dangerously-skip-permissions` or 2.x's `--auto`.
   - `server` drives a long-lived `opencode serve` HTTP server and adds in-flight
     reply/re-steer, restart resume, and streamed event digests. One shared server
-    roots each job at its own `cwd` via the `?directory=` query param. The server
+    roots each job at its own `cwd` via 1.x's `?directory=` query or 2.x's
+    session `location`. The server
     is detached and survives bridge restarts (like the Copilot daemon) so a
     respawned bridge reattaches instead of re-spawning.
-  - Server-mode binds `127.0.0.1` and is unsecured; permission handling follows
+  - Server mode binds `127.0.0.1`. OpenCode 2.x generates a private server
+    password, retained in the owner's runtime registry for restart recovery
+    and omitted from status and digests; 1.x remains unsecured. Permission handling follows
     OpenCode's own config (the `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip`
     flag applies to the cli adapter only). Job timeout defaults to 40 minutes,
     override with `AGENT_COMPANION_OPENCODE_TIMEOUT_MS`; in server mode the
@@ -714,9 +725,9 @@ reported nothing has no `usage` key at all, never zeros. Where it comes from:
 | --- | --- |
 | Codex app-server | `thread/tokenUsage/updated`, baselined so a follow-up send on a resumed thread reports its own turn, not the thread. Streams into the digest mid-turn. |
 | Codex exec | `turn.completed.usage` (no total, no model on that stream). |
-| Copilot | The `invoke_agent` span in the OTEL file exporter the daemon enables, keyed by the ACP session id: tokens, cache read/write, reasoning, model and `cost` in premium requests. The ACP stream's `usage_update` (1.0.83) is context occupancy, not the turn's tokens. |
+| Copilot | Native `session/prompt` token, cache and thought counters on CLI 1.0.94 (`source: copilot-acp`), with no model or cost reported. Older CLIs fall back to the `invoke_agent` OTEL span keyed by the ACP session id, which also carries model and premium-request cost (`source: copilot-otel`). The stream's `usage_update` is context occupancy, not turn tokens. |
 | Antigravity | Nothing: the ACP surface carries no usage (measured 2026-09-11 on 1.1.1 — the prompt response is `{stopReason}` only, no `usage_update`), so its jobs have no `usage` key. |
-| OpenCode server | The assistant message's `tokens`, `cost` (USD) and `modelID`, live and from the transcript on resume. OpenCode's `total` counts cached input too and is carried as reported. |
+| OpenCode server | Native tokens, cost (USD) and model, live and from the transcript on resume. 1.x uses assistant info; 2.x uses step events and the projected current turn, including all tool steps. A vendor-reported `total` is carried as reported. |
 | OpenCode CLI | The `step-finish` part on the `--format json` stream: tokens and cost, no model on that stream. |
 
 A codex app-server turn resumed mid-flight by a fresh bridge reports only the
@@ -726,8 +737,13 @@ an ACP prompt that did not complete carry none.
 ### Output wrapper
 
 Copilot-target output for the `general` and `research` templates carries a
-server-appended `RUBBER-DUCK: clean|revised` verdict line. It is not
-configurable and there is no payload field controlling it. `plan_review` and
+native critic request and a server-appended footer. A reported `clean` or
+`revised` verdict gets a success footer only when a completed native
+`rubber-duck` call was recorded. A substitute reviewer cannot satisfy this
+check. Copilot reports `unavailable` when it cannot run the critic; a claimed
+success without recorded native evidence is shown as `unverified`.
+This verifies the invocation, not the critique's quality or model choice.
+The wrapper is not configurable and there is no payload field controlling it. `plan_review` and
 `review` have their own critique built in and skip the wrapper, and OpenCode,
 Codex and Antigravity output is relay-only so it never carries one.
 

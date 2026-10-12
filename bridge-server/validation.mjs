@@ -308,10 +308,9 @@ function maybeFleetPrefix(body, useFleet) {
   return useFleet ? `/fleet ${body}` : body;
 }
 
-// Rubber-duck cross-examination wrapper — always appended unconditionally.
-// This is how rubber-duck is "always on": the server injects it for every
-// send. It is NOT exposed as a tool parameter. There is no way to disable it
-// through the public API.
+// Native rubber-duck request, added to every Copilot general/research prompt.
+// Unavailable critics must be reported, never silently substituted. The wrapper
+// is not exposed as a public tool parameter.
 export function appendRubberDuckReview(formatted) {
   return [
     formatted,
@@ -326,11 +325,13 @@ export function appendRubberDuckReview(formatted) {
     '  3. Overlooked edge cases or assumptions worth flagging.',
     '  4. Internal inconsistencies in the draft.',
     '',
+    'If the native `rubber-duck` agent is unavailable or its call fails, do not substitute another agent or claim the critique passed. Return your answer with `RUBBER-DUCK: unavailable — <reason>`.',
+    '',
     "Incorporate the rubber-duck's findings into your final answer. If the critique surfaces a Confirmed hallucination, REMOVE the offending claim. Prefix your final message with one of:",
     '  `RUBBER-DUCK: clean.`   (if the critique approved)',
     '  `RUBBER-DUCK: revised — <1-line summary of what you changed>.`',
     '',
-    'Do NOT skip this step. It is a server-enforced, always-on quality gate.',
+    'Always request the native critique and report its outcome honestly. The bridge checks the verdict marker against the recorded native critic call.',
   ].join('\n');
 }
 

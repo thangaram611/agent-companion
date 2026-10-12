@@ -1,10 +1,172 @@
 # Release Readiness
 
-Last updated: 2026-09-03
+Last updated: 2026-10-12
 
 This page is the public-readiness checklist for the harness + companion launch.
 It records the source-backed compatibility assumptions behind the repo copy,
 setup flow, and next backlog.
+
+## v0.1.0 Candidate
+
+Status: candidate prepared; all ten manual gates passed. Fresh CI is tracked in
+the release PR; checks on the final published head must pass before a public tag.
+The release is awaiting review and publication approval in
+[draft PR #12](https://github.com/thangaram611/agent-companion/pull/12).
+Both plugin manifests use 0.1.0; the private bridge package already uses 0.1.0.
+The previous public tag,
+v0.0.1 (2026-06-23), precedes 84 implementation commits on main.
+
+Changes since v0.0.1:
+
+- Strength-routed companion profiles and per-profile models, with explicit
+  refusal for unresolvable routing.
+- OpenCode server mode and the detached Codex app-server broker: streamed
+  progress, reply, cancellation and recovery after bridge replacement.
+- The `review` template with a parsed verdict and Codex thread continuity on
+  follow-up sends; per-job usage where the vendor transport reports it.
+- One descriptor-driven ACP daemon for Copilot and Google Antigravity.
+- Install, completion-routing and Codex-upgrade reliability fixes; quoted
+  hook paths for both hosts so plugin directories containing spaces work.
+
+The reviewer-profile experiment closed below its adoption threshold; see
+MVP_TRACKER item 9. Its local profile was retired. All four companion adapters
+remain supported. Further expansion requires a recurring unmet workflow.
+
+### Fresh validation (2026-10-09; automated checks refreshed 2026-10-12)
+
+| Check | Result |
+| --- | --- |
+| Root-discovered tests with coverage, Node 24.18.0 | PASS — 703/703, no skips |
+| Same suite on CI's Node major, Node 22.23.3 | PASS — 703/703, no skips |
+| Shell syntax, JavaScript syntax, `git diff --check` | PASS |
+| Production dependency audit at moderate or higher | PASS — zero vulnerabilities |
+| Claude plugin validation, Claude Code 2.1.296 | PASS — one advisory that root CLAUDE.md is repository context, not plugin context |
+| Codex marketplace build/install validation, Codex CLI 0.162.1 | PASS — isolated install reports version 0.1.0 and the declared MCP transport |
+| Doctor on both live host configurations | PASS — default target Codex, no authored reviewer profile or stale broker |
+| GitHub CI for the final candidate head | Required before a tag — [release PR checks](https://github.com/thangaram611/agent-companion/pull/12/checks): install, syntax, tests with coverage and dependency audit on Ubuntu/Node 22 |
+
+The initial suite reproduced three failures from a 0.154.0 wire pin against
+Codex 0.162.0. Regeneration found no routing moves: one removed unused request
+(`thread/rollback`), eleven additions and nine shape changes. The named global
+notification assertion and agent-message phase assertion were reconciled;
+tests now prove `partial_answer` does not replace a final answer in live or
+salvaged output. The adapter's requests and turn-control ids are unchanged.
+
+Both hook manifests initially failed from a plugin directory containing spaces
+(exit 127). Quoting the script paths fixes all twelve commands; the regression
+executes their real command strings against inert scripts on both hosts.
+
+The audited lockfile packages are now SDK 1.32.1, fast-uri 3.1.8, hono 4.13.13,
+ip-address 10.7.3 and proxy-addr 2.0.8. `bridge-server/package.json` is unchanged.
+
+The live Copilot gate reproduced missing usage on CLI 1.0.94. Both the default
+exporter configuration and an explicit `COPILOT_OTEL_EXPORTER_TYPE=file` run
+produced no OTEL file. A direct native ACP turn instead returned token, cache
+and thought counters on `session/prompt`; the old descriptor discarded them.
+The reader now prefers that response (`source: copilot-acp`) and retains the
+older OTEL fallback. It invents neither model nor cost. The captured response
+failed the terminal-summary regression before the repair and passes afterward;
+the older OTEL regressions remain green.
+
+### Manual gates for this candidate
+
+| Gate | Result |
+| --- | --- |
+| 1 — Claude source install | PASS — isolated home, `--target none --skip-tests`; full suite checked separately |
+| 2 — Codex source install | PASS — isolated home, `--target none --skip-tests`; materialized role and accepted MCP transport |
+| 3 — OpenCode delegated send | PASS — CLI 2.0.25 on 2026-10-12; isolated default-target onboarding, native smoke reply, a real README read and terminal digest, 4/4 |
+| 4 — Copilot delegated send | PASS — CLI 1.0.95 on 2026-10-12; isolated default-target onboarding and a real README read |
+| 5 — Codex marketplace install | PASS — isolated release validator |
+| 6 — Claude marketplace install | PASS — isolated home, installed version 0.1.0 |
+| 7 — Codex exec delegated send with network | PASS — CLI 0.162.0; default-target onboarding, exec smoke 13/13, real `curl https://example.com` wrote `200` to NETCHECK.txt |
+| 8 — Codex app-server restart/control/review smokes | PASS — CLI 0.162.0; restart 17/17, control 18/18, review loop 16/16 |
+| 9 — Antigravity smoke and Copilot shared-daemon send | PASS — Antigravity ACP server 1.1.1: 24/24 on 2026-10-09; Copilot CLI 1.0.95: 11/11 on 2026-10-12, including recorded native critic execution and native usage |
+| 10 — OpenCode 2.x HTTP server | PASS — 2.0.25 with the existing Ollama Cloud pin: send 4/4, reply/cancel/recovery 9/9, live streaming/idle reaper 3/3 |
+
+The user approved the real turns and the newly reproduced Copilot and OpenCode repairs.
+Probe state and runtime sockets used separate private directories; native
+clients retained their existing logins and normal vendor session histories.
+Temporary copies of the existing probes changed only state/runtime lookup
+paths. The exec probe's unconditional `|| true` digest assertion was removed
+in its temporary copy, and the resulting strict assertion passed. The checked-in
+probe is unchanged; hardening that assertion is a follow-up.
+
+All probe-owned brokers and ACP daemons were stopped, their sockets removed,
+and their pids verified exited. The live harness did not edit installed host
+config, authored profiles, the real default target or quarantine attributes.
+
+The 2026-10-09 Copilot 1.0.94 checks exposed a false success footer: the native
+`rubber-duck` agent was unavailable, another reviewer ran, and the model still
+emitted `RUBBER-DUCK: clean`. The captured response reproduced `clean` before
+the repair; it now yields `unverified` in both wait content and queued
+notification metadata/content. The user authorized this repair as the next
+item. A success marker now requires a recorded completed call whose
+`agent_type` is `rubber-duck`. An explicit `unavailable` marker takes
+precedence over other verdicts, including concatenated fleet output. The
+prompt forbids substituting another critic when the native one is unavailable.
+The task answer remains intact and its completed status is preserved.
+
+On 2026-10-12, Copilot 1.0.95 completed a real native critic call, and both the
+footer and notification reported `clean`; native ACP usage remained present.
+Tests also cover unavailable, failed and unrecorded critic calls, and ensure
+relay-only companions never receive this footer. This verifies invocation,
+not critique quality or the critic's chosen model. No account settings or
+installed plugin files were changed by the repair.
+
+OpenCode 2.0.25 initially failed before inference with `Unrecognized flag:
+--dir`. The CLI command builder now preserves 1.x arguments and selects
+`--standalone` for 2.x; permission auto-approval remains opt-in and maps to
+`--auto` on 2.x. Onboarding reuses this runtime and requires an assistant
+`ready` reply; tool-only output fails the smoke and returns exit 3. Readiness
+checks v2's native provider connections instead of its empty model list, and
+legacy profile pins stay unverified rather than falsely rejected.
+
+The first repaired live run still read the bridge repository instead of the
+requested cwd. Setting both the child's OS working directory and `PWD` fixed
+the v2 legacy-provider tool runtime. The rerun read the isolated README's
+unprompted `PAPAYA` with one native `read` call and emitted native step usage
+(8,004 input, 69 output, 64 cached input, $0.001242896). The job's child exited;
+the user's existing background service was untouched. The run used the
+existing `ollama-cloud/gpt-oss:120b` pin only in its private test environment.
+Regression tests cover the flags, both cwd values, readiness metadata and
+smoke failure. These checks qualify the default CLI adapter.
+
+The user included the 2.x HTTP migration in this candidate and approved its live
+checks. The existing server adapter now supports both contracts. It captures the
+native v2 bootstrap password, retains it in the 0600 lease registry for bridge
+replacement and excludes it from status and job/digest data. V2 session creation
+uses `location`, model selection uses native refs, prompts are durably admitted,
+and cancellation uses `interrupt`, requiring its native `interrupted` confirmation.
+Its global SSE stream is filtered by session;
+the paginated current-turn transcript restores tool steps and usage missed by a
+bridge outage and requires a native idle outcome. The v2 idle reaper checks the
+authenticated native pid and reconfirms its disposal claim before SIGTERM.
+
+Captured native wire regressions initially failed on authentication, request
+shapes, events and transcript pages. The final live controls used distinct
+threads and waited for a native running shell tool before reply, cancel or
+SIGKILL. Private project instructions required the pause, and an explicit
+permission rule allowed the test's `sleep` shell command. Early harness attempts reused an
+implicit thread or relied on model prose for timing and do not qualify the
+candidate. The corrected run proved two working directories on one server,
+reply, cancellation, in-flight bridge recovery and completed transcript recovery
+after server replacement. A separate native run published 14 partial snapshots,
+preserved final usage and stopped its owned server through the idle reaper.
+All probe-owned processes exited; the existing native background service and
+account configuration were untouched.
+
+One Node 24 suite stalled in the Codex broker tests while both Node suites ran
+concurrently. That run was stopped; the broker recheck passed 46/46, and a
+subsequent full Node 24 run passed 695/695. No broker code was changed. Both
+final full-suite logs and the recheck are retained with the candidate evidence.
+
+Historical smoke evidence below belongs to its dated binary versions and does
+not certify this candidate. A public tag still requires all manual gates and
+fresh CI on the candidate commit.
+
+Candidate archives are prepared locally under `dist/release-0.1.0/`: a source
+ZIP for the Claude/source install path and a Codex marketplace tarball. This
+ignored directory also holds the test/install logs and SHA-256 checksums.
 
 ## Public Positioning
 
@@ -17,7 +179,7 @@ Current vocabulary:
 | Product term | Current implementation term | Supported now |
 | --- | --- | --- |
 | Harness | `host` | Claude Code, Codex CLI |
-| Companion | `target` | OpenCode (`cli`/`server`), GitHub Copilot CLI, Codex CLI (`exec`/`appserver`) |
+| Companion | `target` | OpenCode (`cli`/`server`), GitHub Copilot CLI, Codex CLI (`exec`/`appserver`), Google Antigravity |
 | Companion profile | `profile` — a `profiles.json` entry | yes, `agent_send({ profile })` |
 | Strength | `strength` | yes — `reviewer`, `web_researcher`, `planner`, `fast_executor` |
 
@@ -70,8 +232,10 @@ Codex plugins:
 OpenCode companion:
 
 - The `cli` adapter (default) uses the documented non-interactive `opencode run`
-  path. OpenCode documents `--format`, `--model`, `--attach`, and `--dir` flags
-  for `run`: <https://opencode.ai/docs/cli/>.
+  path. It retains `--dir` on 1.x and uses a private `--standalone` server on
+  2.x, with both OS cwd and `PWD` set to the requested directory. The v2 CLI
+  documents `--format`, `--model` and `--standalone`:
+  <https://dev.opencode.ai/v2/docs/cli/commands/>.
 - The `server` adapter (`OPENCODE_RUNTIME_ADAPTER=server`) drives `opencode serve`
   over HTTP for reply/resume/streamed digests. Verified against the live server
   API (opencode 1.17.9): `POST /session?directory=<cwd>` roots a session at a cwd,
@@ -79,16 +243,24 @@ OpenCode companion:
   the directory-scoped `GET /event?directory=<cwd>` SSE stream carries
   `message.part.updated` + a terminal `session.idle`, and `GET /session/status`
   reports per-session busy/idle. One detached server is shared and reused across
-  restarts.
-- `opencode models` lists configured provider models in `provider/model` form,
-  which is the form an OpenCode companion profile's `model` takes:
-  <https://opencode.ai/docs/cli/>.
+  restarts. The same adapter supports 2.x's authenticated `/api` contract:
+  session `location`, native model refs, `prompt`/`interrupt`, the global
+  session-filtered event stream, active-session status and projected message
+  pages. Both the CLI and server paths passed real 2.0.25 qualification:
+  <https://dev.opencode.ai/v2/docs/api>. These contracts intentionally differ:
+  <https://dev.opencode.ai/v2/docs/migrate-v1/>.
+- On 1.x, `opencode models` lists provider/model pins. On 2.0.25 this machine's
+  catalog omitted a callable legacy pin, so readiness uses
+  `opencode auth list --standalone --format json` and model validation remains
+  `unknown` until a real run. Native provider connections establish local
+  configuration, not provider availability or quota.
 - OpenCode also documents `opencode acp` for ACP-compatible editors:
   <https://opencode.ai/docs/acp/>. The adapter set is `cli` and `server`, and
   the server adapter already covers reply/resume, so an ACP stdio adapter stays
   deferred — it is the one item on this page with no code behind it.
 - OpenCode permissions are configured as `allow`, `ask`, or `deny`; the `cli`
-  adapter exposes opt-in `--dangerously-skip-permissions`, while the `server`
+  adapter exposes opt-in `--dangerously-skip-permissions` on 1.x or `--auto`
+  on 2.x, while the `server`
   adapter follows OpenCode's own permission config (no hidden auto-approval):
   <https://opencode.ai/docs/permissions/>.
 
@@ -217,15 +389,21 @@ node scripts/validate-codex-release.mjs
 claude plugin validate .
 ```
 
-On the audit gate: every advisory the bridge has ever carried came in through
+On the audit gate: the advisories measured on 2026-08-28 came in through
 `@modelcontextprotocol/sdk`'s HTTP-transport dependencies (`hono`, `express`,
 `ajv`, `express-rate-limit`), which a stdio-only server never loads. Measured
 2026-08-28 on five advisories: bumping the SDK cleared none of them, because
 the patched versions already sat inside the ranges the SDK declares — only the
 lockfile was stale. The fix for that class is `npm update <the transitives>`
-in `bridge-server/` with `package.json` untouched, never an SDK bump or an
+in `bridge-server/` with `package.json` untouched, rather than an SDK bump or an
 `overrides` block; upstream (modelcontextprotocol/typescript-sdk#2042) reached
-the same conclusion. Gate re-verified clean that day.
+the same conclusion. Gate re-verified clean that day. This rule is specific to
+that transitive-dependency case: the 2026-10-09 audit also flags the SDK itself
+([GHSA-6qxp-vccf-f47h](https://github.com/advisories/GHSA-6qxp-vccf-f47h), patched
+in 1.31.0). The advisory explicitly excludes MCP servers and stdio clients;
+this bridge imports the stdio server, not the affected OAuth client. Release
+preparation still updates the SDK and affected transitives within existing
+manifest ranges to satisfy the audit gate, with no new override or API change.
 
 The first four commands are the same work `.github/workflows/ci.yml` does in its
 `Shell syntax`, `JavaScript syntax`, `Tests with coverage`, and `Production
@@ -268,8 +446,9 @@ Manual smoke gates before a public tag:
    (`scripts/install-antigravity-acp.mjs --login`) and spends real turns. Plus
    one real Copilot send through the bridge after any change to
    `scripts/acp-daemon.mjs` (Copilot rides the same daemon), checking the
-   spawn argv in `copilot-acp-daemon.log`, the rubber-duck footer, the OTEL
-   `meta.usage` and the `acp_daemons.copilot` registry entry on `agent_status`.
+   spawn argv in `copilot-acp-daemon.log`, the rubber-duck footer, native ACP
+   `meta.usage` on CLI 1.0.94 (OTEL on older CLIs) and the
+   `acp_daemons.copilot` registry entry on `agent_status`.
    Recorded 2026-09-11 on Copilot CLI 1.0.83: job `copilot-mtwil1g9-e4si`
    completed in 33 s with the identical argv, `RUBBER-DUCK: clean`, usage
    `source: copilot-otel` (cost 3 premium requests), daemon pid recorded.
@@ -281,7 +460,8 @@ Recorded 2026-06-23 (macOS, Node 24.15.0), extended 2026-07-24 for gate 7,
 `acp-antigravity.mjs` 24/24 on agy_acp_server 1.1.1 plus Copilot job
 `copilot-mtwm2l8q-uqhz` on Copilot CLI 1.0.83), and re-verified on the live
 hosts 2026-09-03 with Claude Code 2.1.259 and codex-cli 0.152.1. All nine
-gates pass. The original
+gates passed on those dated versions; fresh v0.1.0 checks are tracked above.
+The original
 harness install smokes
 (1, 2, 6) were run under a sandboxed `$HOME` so the real `~/.claude` /
 `~/.codex` were never written, then the sandbox was deleted and the real config

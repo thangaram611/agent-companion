@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-09-11
+Last updated: 2026-10-09
 
 ## Goal
 
@@ -9,7 +9,7 @@ Agent Companion is organized around a harness + companion model:
 - **Harnesses outward:** Claude Code and Codex CLI install surfaces today; future
   harnesses should plug in at the host/template/hook/session-routing boundary.
 - **MCP middle:** one subagent-oriented MCP server with generic `agent_*` tools.
-- **Companion adapters inward:** OpenCode, Copilot, Codex, and future companions
+- **Companion adapters inward:** OpenCode, Copilot, Codex, and Google Antigravity
   behind a small runtime boundary.
 - **Strength routing:** installs can expose strengths to the harness while the
   bridge maps each strength to one configured companion profile (see
@@ -23,7 +23,7 @@ Agent Companion is organized around a harness + companion model:
 | Product term | Current implementation term | Meaning |
 | --- | --- | --- |
 | Harness | host | Parent coding-agent surface, currently Claude Code or Codex CLI. |
-| Companion | target | Downstream agent runtime, currently OpenCode, GitHub Copilot CLI, or Codex CLI. |
+| Companion | target | Downstream agent runtime, currently OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity. |
 | Companion profile | `profiles.json` entry | A configured runtime/model instance, such as a Copilot model profile or OpenCode provider/model profile. |
 | Strength | `agent_send({ strength })` | A public capability label such as `reviewer`, `web_researcher`, `planner`, or `fast_executor`. |
 
@@ -41,11 +41,11 @@ flowchart LR
   Subagent --> MCP["agent-bridge MCP server"]
   MCP --> Registry["companion registry (target-registry.mjs)"]
   Registry --> OpenCode["opencode-runtime.mjs"]
-  Registry --> Acp["acp-runtime.mjs (copilot)"]
+  Registry --> Acp["acp-runtime.mjs (copilot, antigravity)"]
   Registry --> CodexRuntime["codex-runtime.mjs (exec, default)"]
   Registry --> CodexAppServer["codex-app-server-runtime.mjs (appserver)"]
   Acp -.->|"UDS, JSON"| Daemon["acp-daemon.mjs (detached, one per companion)"]
-  Daemon -.->|"stdio, ACP v1"| Agent["copilot --acp"]
+  Daemon -.->|"stdio, ACP v1"| Agent["copilot --acp / agy_acp_server.par"]
   CodexAppServer -.->|"UDS, JSON-RPC"| Broker["codex-app-server-broker.mjs (detached, shared)"]
   Broker -.->|"stdio"| AppServer["codex app-server"]
   OpenCode --> Job["job ledger + queue + digest"]
@@ -158,11 +158,25 @@ policy, because an unattended client that leaves a permission request pending
 has hung the agent.
 
 The OpenCode adapter is selected by `OPENCODE_RUNTIME_ADAPTER` (`cli` default,
-`server` opt-in), mirroring how Copilot selects `acp`/`sdk`. Server mode drives a
-single detached `opencode serve` and roots each job's session at its own `cwd`
-via the `?directory=` query param; terminal detection consumes the directory-
-scoped `/event` SSE stream (`session.idle` is the per-turn terminal marker) with a
-`/session/status` + transcript level-check as the resume/stream-drop backstop. A
+`server` opt-in), mirroring how Copilot selects `acp`/`sdk`. The CLI adapter and
+onboarding share `lib/opencode-cli.mjs`'s version-specific command builder.
+OpenCode 1.x retains `--dir` and its opt-in permission flag; 2.x uses a private
+`--standalone` server and `--auto` only when explicitly configured. The child
+receives both the requested OS cwd and matching `PWD`: the 2.0.25 legacy-provider
+tool runtime otherwise reads from the inherited bridge directory. Readiness
+uses v2's native provider-connection metadata; a model omitted from its catalog
+stays unverified until a real run. One server adapter supports both HTTP contracts.
+It drives a single detached `opencode serve`: 1.x scopes sessions and SSE by
+`?directory=`, while 2.x creates sessions with a `location` and filters its global
+event stream by session id. The 2.x bootstrap password lives only in the private
+lease registry, survives bridge replacement and is omitted from public snapshots.
+Native step events feed partial output; the completed projected turn restores
+tool steps and usage missed during a bridge outage. Its paginated transcript is
+limited to the newest user turn and requires an idle outcome, rather than an
+intermediate tool step's completion timestamp. Active-session and transcript
+checks close subscription/stream-drop races. Since 2.x has no server-dispose API,
+the idle reaper authenticates the native process id and reconfirms its lease
+claim immediately before SIGTERM. A
 job records the adapter it started with (`opencodeAdapter`), and per-job
 `reply_available` / `resume_available` flags on the status response report what
 that specific job can do — independent of the current env.

@@ -1,6 +1,11 @@
 # MVP Tracker
 
-Last updated: 2026-09-11
+Last updated: 2026-10-09
+
+Current direction: maintenance. Closeout of the reviewer-profile experiment is
+recorded in item 9; v0.1.0 release preparation is item 10. Add a companion,
+profile or transport only for a recurring unmet workflow, with a reproduction
+or adoption check written first.
 
 ## MVP Definition
 
@@ -10,7 +15,7 @@ primary companion:
 - Generic `agent_*` MCP tools are the only subagent surface.
 - Users bring their harness; supported harnesses are Claude Code and Codex CLI.
 - Users attach their companion; supported companions are OpenCode, Copilot,
-  Codex, and Gemini.
+  Codex, and Google Antigravity.
 - Copilot keeps working as a first-class companion adapter (no legacy MCP
   aliases).
 - Repo docs and tests make the current state and remaining work recoverable.
@@ -36,9 +41,11 @@ primary companion:
 
 - Implemented OpenCode MVP adapter:
   - resolves `OPENCODE_BIN` or `opencode`.
-  - runs `opencode run --dir <cwd> --format json <prompt>`.
+  - runs `opencode run --format json <prompt>` at the requested cwd; 1.x
+    retains `--dir`, 2.x uses `--standalone` with matching `PWD`.
   - exposes permission mode and timeout via `agent_status().opencode_runtime`.
-  - supports `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip` for OpenCode's dangerous auto-approval flag.
+  - supports `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip` for 1.x's
+    `--dangerously-skip-permissions` or 2.x's `--auto`.
   - enforces `AGENT_COMPANION_OPENCODE_TIMEOUT_MS` with a 40-minute default.
   - supports send, wait, status, cancel.
   - parses NDJSON/text output into the standard terminal envelope without selecting tool output as the assistant message.
@@ -147,7 +154,7 @@ primary companion:
   mode they are unsupported and persisted nonterminal cli jobs are marked
   `unreachable` after bridge restart.
 - OpenCode `cli` permission auto-approval is opt-in via
-  `--dangerously-skip-permissions`; `server` mode follows OpenCode's own
+  `--dangerously-skip-permissions` on 1.x or `--auto` on 2.x; `server` mode follows OpenCode's own
   permission config (the bridge does not auto-approve).
 - OpenCode `acp` stdio mode is not implemented; server mode covers reply, resume,
   and streamed digests.
@@ -688,8 +695,9 @@ primary companion:
      operator asks for one; the `yolo` session mode is not set (the daemon's
      answer is the policy); the stderr usage frames are not read.
 
-9. Profile experiment: does a second companion get used? — RUNNING (started
-   2026-09-11, review on 2026-09-18). The assessment's own rule (§7 "Ledger")
+9. Profile experiment: does a second companion get used? — CLOSED (2026-10-09,
+   below the adoption threshold; started 2026-09-11, due 2026-09-18).
+   The assessment's own rule (§7 "Ledger")
    is that the case for a second companion strengthens only if one actually
    gets used, and its ledger evidence (§2) is one cell: Claude host → Codex →
    read-only review with a verdict. Before this item no `profiles.json`
@@ -771,6 +779,51 @@ primary companion:
      30 min and is satisfied by each `agent_wait` returning). Fixed in this
      change, with the operator's go-ahead, to the wording the Codex template
      already had plus a pointer to the pin.
+
+   - **Closeout (2026-10-09).** The Claude-host structured event log covers
+     2026-07-24 through 2026-09-29 and records two sends through
+     `antigravity-reviewer`: round 1 above on 2026-09-11 and
+     `antigravity-mu6oqx1p-5g9y` on 2026-09-18. The latter completed a real
+     code review in 267,725 ms with a `disagree` verdict, but has no matching
+     Codex comparison recorded; that day's Codex review had a different cwd
+     and subject. Only one qualifying pair is documented, below the five-pair
+     minimum. This is outcome 1 ("unused" under the prewritten adoption
+     rule), not a rejection on quality or latency. Round 1's valid, disjoint
+     findings remain evidence that the second reviewer can add coverage.
+   - **Configuration.** With operator approval, retired the sole Claude-host
+     experimental profile on 2026-10-09. Its private backup is
+     `~/.claude/agent-companion/profiles.retired-antigravity-reviewer-2026-10-09.json`
+     (0600). The default target remains `codex`; absent `profiles.json`, the
+     registry synthesizes the default profile. The Codex host had no authored
+     profile to remove. Antigravity remains a supported companion and can be
+     selected explicitly.
+   - **Evidence boundary.** Terminal job records expire after one hour when
+     the bridge's GC runs (`JOB_RETENTION_MS`); a surviving `jobs/*.json`
+     count is not complete usage history. Closeout used `*.send` events in
+     `daemon.log` as well as the surviving jobs and round 1's recorded pair.
+     The logs are rotated, so any future experiment must record each pair in
+     this tracker while the evidence is available.
+   - **Decision.** No new `fast_executor` experiment, Goose adapter, Claude
+     companion or additional transport is scheduled. Reopen one only for
+     recurring demand with success criteria agreed before implementation.
+
+10. v0.1.0 release preparation — PREPARED, manual gates and implementation CI passed (updated 2026-10-12). Both plugin
+    manifests use 0.1.0 and describe all four supported companions. Fresh
+    automated checks and remaining manual gates are recorded in
+    [RELEASE_READINESS.md](RELEASE_READINESS.md). Approved live Codex and
+    Antigravity checks passed; Copilot passed after preserving the native
+    ACP usage returned by CLI 1.0.94. The critic-footer repair now requires a
+    completed native call before displaying success; 703 tests and the
+    Copilot 1.0.95 live check pass. OpenCode 2.0.25 passes the default CLI
+    gate after repairing removed flags, inherited `PWD`, native readiness and
+    onboarding smoke validation. The same PR also migrates its 2.x HTTP API,
+    retaining v1 support: authentication, sessions, global streaming, native
+    usage, reply/cancel, restart recovery and idle disposal. The live HTTP
+    checks pass 16/16. The exec probe's unconditional digest
+    assertion remains a scoped follow-up in the release record. No public tag or release is
+    created until the published head's checks pass and publication is approved.
+    [Draft PR #12](https://github.com/thangaram611/agent-companion/pull/12)
+    holds the candidate for review; its final head must pass fresh GitHub CI.
 
 ## Validation Commands
 

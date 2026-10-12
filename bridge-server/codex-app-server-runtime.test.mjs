@@ -409,11 +409,12 @@ test('a delta spelt any way but the schema\'s cannot be written down', () => {
   assert.throws(() => note('item/agentMessage/delta', { threadId: TID, itemId: 'm1', text: 'hi' }), /carries `text`/);
 });
 
-test('the accumulator prefers the final answer over the commentary preamble', () => {
+test('the accumulator prefers the final answer over commentary and partial answers', () => {
   const acc = createCodexTurnAccumulator(TID);
   acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm1', text: 'Let me look at that.', phase: 'commentary' }) }));
   acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm2', text: 'THE ANSWER', phase: 'final_answer' }) }));
   acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm3', text: 'Anything else?', phase: 'commentary' }) }));
+  acc.push(note('item/completed', { threadId: TID, item: threadItem('agentMessage', { id: 'm4', text: 'PARTIAL ANSWER', phase: 'partial_answer' }) }));
   acc.push(note('turn/completed', { threadId: TID, turn: { status: 'completed' } }));
   assert.equal(acc.snapshot().message, 'THE ANSWER');
 });
@@ -1159,6 +1160,7 @@ test('thread/read salvages the final answer and says it has no tool record', asy
         turns: [{ items: [
           { type: 'agentMessage', text: 'preamble', phase: 'commentary' },
           { type: 'agentMessage', text: 'THE SALVAGED ANSWER', phase: 'final_answer' },
+          { type: 'agentMessage', text: 'partial answer', phase: 'partial_answer' },
         ] }],
       }),
     },

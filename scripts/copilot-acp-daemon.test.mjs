@@ -418,6 +418,30 @@ test('replyPrompt returns drain-timeout error and does NOT call startPromptBg wh
   assert.equal(state.status, 'cancelling');
 });
 
+test('Copilot 1.0.94 native prompt usage survives the terminal summary without an OTEL file', async (t) => {
+  const { manager, conn, teardown } = makeManager('sid-native-usage');
+  t.after(teardown);
+  const first = await manager.startPromptBg('sid-native-usage', 'hello');
+  const state = manager.inFlightPrompts.get(first.promptId);
+  // Captured from a real 1.0.94 session/prompt response on 2026-10-09.
+  conn.resolveSend({
+    stopReason: 'end_turn', message: 'READY', thoughts: '', toolCalls: [],
+    raw: { stopReason: 'end_turn', usage: {
+      inputTokens: 21135, outputTokens: 4, totalTokens: 21139,
+      thoughtTokens: 0, cachedReadTokens: 13694, cachedWriteTokens: 7437,
+    } },
+  });
+  for (let i = 0; i < 200 && state.status === 'running'; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(state.status, 'completed');
+  assert.deepEqual(state.summary.usage, {
+    source: 'copilot-acp', input_tokens: 21135, output_tokens: 4, total_tokens: 21139,
+    reasoning_output_tokens: 0, cached_input_tokens: 13694, cache_write_input_tokens: 7437,
+  });
+  const watched = await manager.watchPrompt(first.promptId, 0, { summaryOnly: true });
+  assert.deepEqual(watched.summary.usage, state.summary.usage, 'the bridge receives the same native counters');
+  assert.equal('raw' in watched.summary, false);
+});
+
 // The Copilot usage source, measured 2026-09-10 against Copilot CLI 1.0.77: the
 // ACP stream carries no usage kind and `session/prompt` answers `{stopReason}`
 // only, but the OTEL file exporter the daemon already enables writes one

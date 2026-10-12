@@ -277,6 +277,9 @@ test('formatPrompt and appendRubberDuckReview render template-specific instructi
   assert.match(wrapped, /CROSS-EXAMINATION STEP/);
   assert.match(wrapped, /RUBBER-DUCK: clean\./);
   assert.match(wrapped, /RUBBER-DUCK: revised/);
+  assert.match(wrapped, /RUBBER-DUCK: unavailable/);
+  assert.match(wrapped, /do not substitute another agent or claim the critique passed/);
+  assert.doesNotMatch(wrapped, /server-enforced, always-on quality gate/);
 });
 
 test('parallel strategy controls /fleet prefixes consistently across templates', () => {
