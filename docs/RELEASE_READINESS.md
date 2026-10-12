@@ -8,8 +8,10 @@ setup flow, and next backlog.
 
 ## v0.1.0 Candidate
 
-Status: candidate prepared; all nine manual gates passed.
-Fresh CI remains pending before publication.
+Status: candidate prepared; all nine manual gates and fresh implementation CI passed.
+The release is awaiting review and publication approval in
+[draft PR #12](https://github.com/thangaram611/agent-companion/pull/12).
+Checks on the final published head must pass before a public tag.
 Both plugin manifests use 0.1.0; the private bridge package already uses 0.1.0.
 The previous public tag,
 v0.0.1 (2026-06-23), precedes 84 implementation commits on main.
@@ -41,6 +43,7 @@ remain supported. Further expansion requires a recurring unmet workflow.
 | Claude plugin validation, Claude Code 2.1.296 | PASS — one advisory that root CLAUDE.md is repository context, not plugin context |
 | Codex marketplace build/install validation, Codex CLI 0.162.1 | PASS — isolated install reports version 0.1.0 and the declared MCP transport |
 | Doctor on both live host configurations | PASS — default target Codex, no authored reviewer profile or stale broker |
+| Fresh GitHub CI on implementation commit `d79538d` | PASS — [pull request run](https://github.com/thangaram611/agent-companion/actions/runs/38215199141); install, syntax, tests with coverage and dependency audit on Ubuntu/Node 22 |
 
 The initial suite reproduced three failures from a 0.154.0 wire pin against
 Codex 0.162.0. Regeneration found no routing moves: one removed unused request

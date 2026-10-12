@@ -807,7 +807,7 @@ primary companion:
      companion or additional transport is scheduled. Reopen one only for
      recurring demand with success criteria agreed before implementation.
 
-10. v0.1.0 release preparation — PREPARED, fresh CI pending (updated 2026-10-12). Both plugin
+10. v0.1.0 release preparation — PREPARED, manual gates and implementation CI passed (updated 2026-10-12). Both plugin
     manifests use 0.1.0 and describe all four supported companions. Fresh
     automated checks and remaining manual gates are recorded in
     [RELEASE_READINESS.md](RELEASE_READINESS.md). Approved live Codex and
@@ -819,7 +819,10 @@ primary companion:
     onboarding smoke validation. Its changed 2.x HTTP API remains a scoped
     follow-up; server mode is qualified against 1.x. The exec probe's unconditional digest
     assertion remains a scoped follow-up in the release record. No public tag or release is
-    created until those gates pass.
+    created until the published head's checks pass and publication is approved.
+    [Draft PR #12](https://github.com/thangaram611/agent-companion/pull/12)
+    holds the candidate for review; implementation commit `d79538d` passed fresh
+    GitHub CI.
 
 ## Validation Commands
 
