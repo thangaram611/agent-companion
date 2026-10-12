@@ -805,14 +805,15 @@ primary companion:
      companion or additional transport is scheduled. Reopen one only for
      recurring demand with success criteria agreed before implementation.
 
-10. v0.1.0 release preparation — PREPARED, remaining checks and critic follow-up pending (2026-10-09). Both plugin
+10. v0.1.0 release preparation — PREPARED, OpenCode and fresh CI pending (updated 2026-10-12). Both plugin
     manifests use 0.1.0 and describe all four supported companions. Fresh
     automated checks and remaining manual gates are recorded in
     [RELEASE_READINESS.md](RELEASE_READINESS.md). Approved live Codex and
     Antigravity checks passed; Copilot passed after preserving the native
-    ACP usage returned by CLI 1.0.94. The unavailable native rubber-duck
-    critic and the exec probe's unconditional digest assertion are recorded
-    there as scoped follow-ups. No public tag or release is
+    ACP usage returned by CLI 1.0.94. The critic-footer repair now requires a
+    completed native call before displaying success; 691 tests and the
+    Copilot 1.0.95 live check pass. The exec probe's unconditional digest
+    assertion remains a scoped follow-up in the release record. No public tag or release is
     created until those gates pass.
 
 ## Validation Commands

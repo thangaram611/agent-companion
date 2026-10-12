@@ -1490,7 +1490,8 @@ export function formatTerminalContent({
     : '';
   const taskHeader = rebirthBanner + `Task: ${truncate(task, 200)}\n\n`;
   const duration = durationMs || 0;
-  const rubberDuck = classifyRubberDuck(summary?.message);
+  const rubberDuck = rubberDuckTarget(target)
+    ? classifyRubberDuck(summary?.message, summary?.toolCalls) : null;
   const outText = typeof stdout === 'string' ? stdout
     : (typeof adapterResult?.stdout === 'string' ? adapterResult.stdout : '');
   const errText = typeof stderr === 'string' ? stderr
@@ -1512,6 +1513,10 @@ export function formatTerminalContent({
       rubberDuckFooter = '\n\n_Rubber-duck: ✓ clean_';
     } else if (rubberDuck === 'revised') {
       rubberDuckFooter = '\n\n_Rubber-duck: ↻ revised — see `RUBBER-DUCK:` in the message above._';
+    } else if (rubberDuck === 'unavailable') {
+      rubberDuckFooter = '\n\n_Rubber-duck: unavailable — Copilot reported that the native critic could not complete._';
+    } else if (rubberDuck === 'unverified') {
+      rubberDuckFooter = '\n\n_Rubber-duck: unverified — no completed native critic call was recorded._';
     }
     let verdictFooter = '';
     if (verdict !== undefined) {
@@ -1776,8 +1781,9 @@ export function emitNotification({
     }
   }
 
-  const rubberDuck = classifyRubberDuck(summary?.message);
-  if (status === 'completed') meta.rubber_duck = rubberDuck;
+  const rubberDuck = rubberDuckTarget(target)
+    ? classifyRubberDuck(summary?.message, summary?.toolCalls) : null;
+  if (status === 'completed' && rubberDuck !== null) meta.rubber_duck = rubberDuck;
   // Read against THIS call's status, not the job's: the remaps above are the
   // defensive boundary for reconciled/direct notifications, and a verdict must
   // never ride a status that is no longer `completed`.
@@ -1829,8 +1835,8 @@ export function emitNotification({
   });
 
   enqueueEvent({ kind: 'terminal', jobId, content, meta });
-  if (rubberDuckTarget(target) && status === 'completed' && rubberDuck === 'missing') {
-    log('WARN', 'emit:', jobId, 'rubber_duck verdict missing from completed message — Copilot output drifted from wrapper contract');
+  if (rubberDuckTarget(target) && status === 'completed' && ['missing', 'unavailable', 'unverified'].includes(rubberDuck)) {
+    log('WARN', 'emit:', jobId, `rubber_duck=${rubberDuck} — completed task has no verified native critique`);
   }
   log('INFO', 'emit:', jobId, `status=${status} duration_ms=${duration}${status === 'completed' ? ` rubber_duck=${rubberDuck}` : ''}${stuckReason ? ` stuck=${stuckReason}` : ''}${detail ? ` detail=${detail}` : ''}${bridgeReason ? ` bridge=${bridgeReason}` : ''}`);
 }
@@ -1840,22 +1846,27 @@ function truncate(s, n) { if (!s) return ''; return s.length > n ? s.slice(0, n 
 // Classify the rubber-duck verdict surfaced by Copilot in the final message.
 // The rubber-duck wrapper is appended to general/research prompts, so every
 // completed job from those templates should yield at least one
-// `RUBBER-DUCK: clean.` or `RUBBER-DUCK: revised …` line.
+// `RUBBER-DUCK: clean.`, `revised …`, or `unavailable …` line. Success markers
+// also require a completed native critic call in the captured tool stream;
+// a differently named reviewer is not evidence that rubber-duck ran.
 //
 // Multi-verdict handling: when /fleet dispatches sub-agents, each sub-agent
 // receives the wrapper instructions and may emit its own verdict line; the
 // orchestrator concatenates sub-agent outputs into the final message, so the
 // message can contain N verdicts. We scan ALL matches and fail-pessimistic:
-// if ANY verdict is `revised`, the overall classification is `revised`. This
-// avoids silently downgrading a sub-agent's `revised` finding to `clean` just
-// because an earlier sub-agent reported `clean`.
+// if ANY verdict is `unavailable`, it wins; otherwise `revised` wins over clean.
+// This avoids downgrading a sub-agent's unavailable or revised outcome just
+// because an earlier sub-agent reported clean.
 //
-// A 'missing' verdict means no marker at all — Copilot's output drifted from
-// the wrapper's contract. Logged at WARN for visibility.
-export function classifyRubberDuck(message) {
+// `missing` means no marker; `unverified` means success was claimed without a
+// completed native critic call. This verifies invocation, not critique quality
+// or which model the native agent selected.
+export function classifyRubberDuck(message, toolCalls = []) {
   if (!message) return 'missing';
-  const matches = [...String(message).matchAll(/(?:^|\n)\s*RUBBER-DUCK:\s*(clean|revised)\b/gi)];
+  const matches = [...String(message).matchAll(/(?:^|\n)\s*RUBBER-DUCK:\s*(clean|revised|unavailable)\b/gi)];
   if (matches.length === 0) return 'missing';
+  if (matches.some(m => m[1].toLowerCase() === 'unavailable')) return 'unavailable';
+  if (!(toolCalls || []).some(tc => tc?.input?.agent_type === 'rubber-duck' && tc.status === 'completed')) return 'unverified';
   for (const m of matches) {
     if (m[1].toLowerCase() === 'revised') return 'revised';
   }

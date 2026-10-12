@@ -176,6 +176,7 @@ test('server imports safely and dispatch handles the public boundary errors/stat
 
 test('rubber-duck classification and wait-budget clamping cover clean/revised/missing and bounds', async () => {
   const { classifyRubberDuck, clampWaitSec } = await bridge();
+  const nativeCritic = { name: 'Critique draft answer', input: { agent_type: 'rubber-duck' }, status: 'completed' };
   const cases = [
     ['Did the thing.\n\nRUBBER-DUCK: clean.', 'clean'],
     ['body\n rubber-duck: CLEAN', 'clean'],
@@ -187,8 +188,15 @@ test('rubber-duck classification and wait-budget clamping cover clean/revised/mi
     ['sub A\nRUBBER-DUCK: clean.\nsub B\nRUBBER-DUCK: clean.', 'clean'],
     ['sub A\nRUBBER-DUCK: clean.\nsub B\nRUBBER-DUCK: revised -- fixed.', 'revised'],
     ['RUBBER-DUCK: revised -- note.\nlater: RUBBER-DUCK: clean.', 'revised'],
+    ['RUBBER-DUCK: unavailable — no complementary model.', 'unavailable'],
+    ['RUBBER-DUCK: clean.\nRUBBER-DUCK: UNAVAILABLE — failed.\nRUBBER-DUCK: revised — fixed.', 'unavailable'],
   ];
-  for (const [input, expected] of cases) assert.equal(classifyRubberDuck(input), expected);
+  for (const [input, expected] of cases) assert.equal(classifyRubberDuck(input, [nativeCritic]), expected);
+  assert.equal(classifyRubberDuck('RUBBER-DUCK: clean.'), 'unverified');
+  assert.equal(classifyRubberDuck('RUBBER-DUCK: revised.', [{ ...nativeCritic, status: 'failed' }]), 'unverified');
+  assert.equal(classifyRubberDuck('RUBBER-DUCK: clean.', [{ ...nativeCritic, status: 'in_progress' }]), 'unverified');
+  assert.equal(classifyRubberDuck('RUBBER-DUCK: clean.', [{ ...nativeCritic, input: null }]), 'unverified');
+  assert.equal(classifyRubberDuck('RUBBER-DUCK: unavailable — absent.'), 'unavailable');
 
   assert.equal(clampWaitSec(700, 'ANALYZE'), 700);
   assert.equal(clampWaitSec(1200, 'EXECUTE'), 1200);
@@ -197,6 +205,53 @@ test('rubber-duck classification and wait-budget clamping cover clean/revised/mi
     assert.equal(clampWaitSec(value, 'EXECUTE'), 480);
   }
   assert.equal(clampWaitSec(0.4, 'EXECUTE'), 1);
+});
+
+test('a substituted Copilot critic cannot produce a verified rubber-duck footer or notification', async () => {
+  const mod = await bridge();
+  // Excerpt of the real Copilot 1.0.94 result captured on 2026-10-09.
+  const summary = {
+    message: "There's no `rubber-duck` agent available, so I'll use the read-only `reviewer` agent for the critique instead.\n\nRUBBER-DUCK: clean. There is no `rubber-duck` agent, so I used the read-only `reviewer` agent for the critique, and it approved the draft.",
+    toolCalls: [{
+      name: 'Critique draft answer', status: 'completed',
+      input: { agent_type: 'reviewer', name: 'rubber-duck-critique', model: 'claude-sonnet-5.5' },
+    }],
+  };
+  assert.equal(mod.classifyRubberDuck(summary.message, summary.toolCalls), 'unverified');
+  mod.jobs.set('job-substitute', terminalJob('job-substitute', 'completed', { summary }));
+  try {
+    const waited = parse(await mod.dispatch({ action: 'wait', job_id: 'job-substitute', max_wait_sec: 1 }));
+    assert.equal(waited.status, 'completed', 'the task result is preserved');
+    assert.match(waited.content, /_Rubber-duck: unverified/);
+    assert.doesNotMatch(waited.content, /_Rubber-duck: ✓ clean_/);
+    assert.ok(waited.content.includes(summary.message), 'the original answer is relayed unchanged');
+    await withQueue(async queueFile => {
+      mod.emitNotification({ jobId: 'job-substitute', target: 'copilot', status: 'completed', summary, task: 'X', mode: 'ANALYZE', duration: 1000 });
+      const event = readQueue(queueFile).at(-1);
+      assert.equal(event.meta.rubber_duck, 'unverified');
+      assert.match(event.content, /_Rubber-duck: unverified/);
+      assert.doesNotMatch(event.content, /_Rubber-duck: ✓ clean_/);
+    });
+  } finally { mod.jobs.delete('job-substitute'); }
+});
+
+test('rubber-duck footers distinguish completed native calls, unavailable critics, and missing evidence', async () => {
+  const { formatTerminalContent } = await bridge();
+  const nativeCritic = { input: { agent_type: 'rubber-duck' }, status: 'completed' };
+  for (const [marker, toolCalls, expected] of [
+    ['clean', [nativeCritic], '✓ clean'],
+    ['revised', [nativeCritic], '↻ revised'],
+    ['unavailable', [], 'unavailable'],
+    ['clean', [{ ...nativeCritic, status: 'failed' }], 'unverified'],
+    ['clean', [], 'unverified'],
+  ]) {
+    const summary = { message: `Answer.\nRUBBER-DUCK: ${marker}.`, toolCalls };
+    const fields = { jobId: 'critic-outcome', status: 'completed', task: 'X', target: 'copilot', summary };
+    assert.ok(formatTerminalContent(fields).includes(`_Rubber-duck: ${expected}`));
+    for (const target of ['codex', 'opencode', 'antigravity']) {
+      assert.doesNotMatch(formatTerminalContent({ ...fields, target }), /_Rubber-duck:/);
+    }
+  }
 });
 
 test('wait response formatting covers timeout, digest metadata, unreachable details, and clean terminal meta', async () => {
@@ -429,7 +484,9 @@ test('emitNotification writes queue rows with status remaps, detail/session meta
     await withEnv('CLAUDE_CODE_SESSION_ID', undefined, async () => {
       emitNotification({
         jobId: 'j-ok', status: 'completed',
-        summary: { stopReason: 'end_turn', message: 'All checks pass.\nRUBBER-DUCK: clean.' },
+        summary: { stopReason: 'end_turn', message: 'All checks pass.\nRUBBER-DUCK: clean.', toolCalls: [
+          { input: { agent_type: 'rubber-duck' }, status: 'completed' },
+        ] },
         duration: 2000, task: 'X', mode: 'EXECUTE', cwd: '/tmp',
       });
     });

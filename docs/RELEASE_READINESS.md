@@ -1,6 +1,6 @@
 # Release Readiness
 
-Last updated: 2026-10-09
+Last updated: 2026-10-12
 
 This page is the public-readiness checklist for the harness + companion launch.
 It records the source-backed compatibility assumptions behind the repo copy,
@@ -9,8 +9,7 @@ setup flow, and next backlog.
 ## v0.1.0 Candidate
 
 Status: candidate prepared; configured live transport and usage checks passed.
-OpenCode, the critic fallback follow-up below, and fresh CI remain pending
-before publication.
+OpenCode and fresh CI remain pending before publication.
 Both plugin manifests use 0.1.0; the private bridge package already uses 0.1.0.
 The previous public tag,
 v0.0.1 (2026-06-23), precedes 84 implementation commits on main.
@@ -31,16 +30,16 @@ The reviewer-profile experiment closed below its adoption threshold; see
 MVP_TRACKER item 9. Its local profile was retired. All four companion adapters
 remain supported. Further expansion requires a recurring unmet workflow.
 
-### Fresh validation (2026-10-09)
+### Fresh validation (2026-10-09; automated checks refreshed 2026-10-12)
 
 | Check | Result |
 | --- | --- |
-| Root-discovered tests with coverage, Node 24.18.0 | PASS — 689/689, no skips |
-| Same suite on CI's Node major, Node 22.23.3 | PASS — 689/689, no skips |
+| Root-discovered tests with coverage, Node 24.18.0 | PASS — 691/691, no skips |
+| Same suite on CI's Node major, Node 22.23.3 | PASS — 691/691, no skips |
 | Shell syntax, JavaScript syntax, `git diff --check` | PASS |
 | Production dependency audit at moderate or higher | PASS — zero vulnerabilities |
 | Claude plugin validation, Claude Code 2.1.295 | PASS — one advisory that root CLAUDE.md is repository context, not plugin context |
-| Codex marketplace build/install validation, Codex CLI 0.162.0 | PASS — isolated install reports version 0.1.0 and the declared MCP transport |
+| Codex marketplace build/install validation, Codex CLI 0.162.1 | PASS — isolated install reports version 0.1.0 and the declared MCP transport |
 | Doctor on both live host configurations | PASS — default target Codex, no authored reviewer profile or stale broker |
 
 The initial suite reproduced three failures from a 0.154.0 wire pin against
@@ -72,13 +71,13 @@ the older OTEL regressions remain green.
 | --- | --- |
 | 1 — Claude source install | PASS — isolated home, `--target none --skip-tests`; full suite checked separately |
 | 2 — Codex source install | PASS — isolated home, `--target none --skip-tests`; materialized role and accepted MCP transport |
-| 3 — OpenCode delegated send | NOT RUN — no provider configured on this machine |
-| 4 — Copilot delegated send | PASS — CLI 1.0.94; isolated default-target onboarding and a real README read |
+| 3 — OpenCode delegated send | NOT RUN — live OpenCode check remains pending; doctor now reports readiness on 2026-10-12 |
+| 4 — Copilot delegated send | PASS — CLI 1.0.95 on 2026-10-12; isolated default-target onboarding and a real README read |
 | 5 — Codex marketplace install | PASS — isolated release validator |
 | 6 — Claude marketplace install | PASS — isolated home, installed version 0.1.0 |
 | 7 — Codex exec delegated send with network | PASS — CLI 0.162.0; default-target onboarding, exec smoke 13/13, real `curl https://example.com` wrote `200` to NETCHECK.txt |
 | 8 — Codex app-server restart/control/review smokes | PASS — CLI 0.162.0; restart 17/17, control 18/18, review loop 16/16 |
-| 9 — Antigravity smoke and Copilot shared-daemon send | PASS — Antigravity ACP server 1.1.1: 24/24; Copilot CLI 1.0.94: 9/9 after the native usage repair |
+| 9 — Antigravity smoke and Copilot shared-daemon send | PASS — Antigravity ACP server 1.1.1: 24/24 on 2026-10-09; Copilot CLI 1.0.95: 11/11 on 2026-10-12, including recorded native critic execution and native usage |
 
 The user approved the real turns and the newly reproduced Copilot repair.
 Probe state and runtime sockets used separate private directories; native
@@ -92,15 +91,23 @@ All probe-owned brokers and ACP daemons were stopped, their sockets removed,
 and their pids verified exited. The live harness did not edit installed host
 config, authored profiles, the real default target or quarantine attributes.
 
-Copilot's output carried the required footer, but its native `rubber-duck`
-agent was unavailable on this account. It substituted a successful `code-review`
-critique and emitted `RUBBER-DUCK: clean`. This proves footer plumbing, not a
-native cross-model critique. Follow-up: make an unavailable native critic
-explicit in the footer instead of accepting a substitute as native evidence;
-reproduce with this captured response before changing the wrapper. That
-behavior change was outside the approved usage repair. Keep this as a release
-follow-up for the owner to scope before treating the wrapper as a verified
-quality guarantee.
+The 2026-10-09 Copilot 1.0.94 checks exposed a false success footer: the native
+`rubber-duck` agent was unavailable, another reviewer ran, and the model still
+emitted `RUBBER-DUCK: clean`. The captured response reproduced `clean` before
+the repair; it now yields `unverified` in both wait content and queued
+notification metadata/content. The user authorized this repair as the next
+item. A success marker now requires a recorded completed call whose
+`agent_type` is `rubber-duck`. An explicit `unavailable` marker takes
+precedence over other verdicts, including concatenated fleet output. The
+prompt forbids substituting another critic when the native one is unavailable.
+The task answer remains intact and its completed status is preserved.
+
+On 2026-10-12, Copilot 1.0.95 completed a real native critic call, and both the
+footer and notification reported `clean`; native ACP usage remained present.
+Tests also cover unavailable, failed and unrecorded critic calls, and ensure
+relay-only companions never receive this footer. This verifies invocation,
+not critique quality or the critic's chosen model. No account settings or
+installed plugin files were changed by the repair.
 
 Historical smoke evidence below belongs to its dated binary versions and does
 not certify this candidate. A public tag still requires all manual gates and

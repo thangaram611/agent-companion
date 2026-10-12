@@ -731,8 +731,13 @@ an ACP prompt that did not complete carry none.
 ### Output wrapper
 
 Copilot-target output for the `general` and `research` templates carries a
-server-appended `RUBBER-DUCK: clean|revised` verdict line. It is not
-configurable and there is no payload field controlling it. `plan_review` and
+native critic request and a server-appended footer. A reported `clean` or
+`revised` verdict gets a success footer only when a completed native
+`rubber-duck` call was recorded. A substitute reviewer cannot satisfy this
+check. Copilot reports `unavailable` when it cannot run the critic; a claimed
+success without recorded native evidence is shown as `unverified`.
+This verifies the invocation, not the critique's quality or model choice.
+The wrapper is not configurable and there is no payload field controlling it. `plan_review` and
 `review` have their own critique built in and skip the wrapper, and OpenCode,
 Codex and Antigravity output is relay-only so it never carries one.
 
