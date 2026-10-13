@@ -1,17 +1,56 @@
 # Release Readiness
 
-Last updated: 2026-10-12
+Last updated: 2026-10-13
 
 This page is the public-readiness checklist for the harness + companion launch.
 It records the source-backed compatibility assumptions behind the repo copy,
 setup flow, and next backlog.
 
-## v0.1.0 Candidate
+## v0.1.0 setup maintenance verification (2026-10-13)
 
-Status: candidate prepared; all ten manual gates passed. Fresh CI is tracked in
-the release PR; checks on the final published head must pass before a public tag.
-The release is awaiting review and publication approval in
-[draft PR #12](https://github.com/thangaram611/agent-companion/pull/12).
+The original v0.1.0 was published from merged PR #12. The maintainer requested
+replacing that release with this maintenance correction, retaining version
+0.1.0. The replacement must use the reviewed commit and regenerated archives;
+the original publication remains in place until the maintenance PR is merged.
+
+Success criteria: smoke requires a completed assistant `ready` reply; setup
+discovers all 47 root test files; prerequisite failures precede installation;
+existing configuration is preserved; partial installs report their completed
+stages and recover on rerun. The fake-CLI regressions cover empty and failed
+responses, missing authentication, ambiguous choices, profiles, preview-only
+runs, late failures and separate host defaults.
+
+Fresh live checks used private companion state/runtime directories and the
+native clients' existing logins. No real host default or profile was changed.
+
+| Check | Result |
+| --- | --- |
+| Focused setup, onboarding, profiles, diagnostics and Codex runtime tests | PASS — 118/118 |
+| Root-discovered suite with coverage, Node 24.18.0 | PASS — 724/724, no skips or failures |
+| Shell/JavaScript syntax, `git diff --check`, production dependency audit | PASS — zero vulnerabilities |
+| Codex marketplace install and Claude plugin validation | PASS — version 0.1.0; existing Claude repository-context advisory only |
+| Codex onboarding smoke, CLI 0.162.1 | PASS — completed assistant reply `ready`; temporary default persisted afterward |
+| OpenCode onboarding smoke, CLI 2.0.25, `ollama-cloud/gpt-oss:120b` | PASS — completed reply `ready`; temporary default persisted afterward |
+| Copilot ACP, CLI 1.0.95, `claude-sonnet-4.6` | PASS — completed reply `ready` |
+| Antigravity ACP server 1.1.1, native default model | PASS — completed reply `ready.` |
+| Real source install and recovery, both harnesses | PASS — controlled failure after Codex plugin installation retained Claude installation without writing defaults; rerun completed both hosts |
+| Real rerun with existing configuration | PASS — separate host defaults and profiles preserved byte-for-byte; fresh-session and hook-approval instructions shown |
+
+The real clean-install check exposed a missing prerequisite in the fake CLI:
+Codex refuses an explicit `CODEX_HOME` that does not exist. The fixture now
+reproduces that failure, and setup creates the selected directory only after
+the installation preview is accepted. The real recovery check then passed.
+Both probe-owned ACP daemons and their child processes exited after verification.
+
+These small live turns establish access to the tested providers/models. They
+do not requalify every model or the unchanged reply/recovery transports. Setup
+continues to report live delegation as unverified because it spends no quota.
+The earlier transport evidence below retains its original dates and versions.
+
+## Original v0.1.0 candidate evidence
+
+All ten manual gates passed before publication. The release was published from
+[merged PR #12](https://github.com/thangaram611/agent-companion/pull/12).
 Both plugin manifests use 0.1.0; the private bridge package already uses 0.1.0.
 The previous public tag,
 v0.0.1 (2026-06-23), precedes 84 implementation commits on main.

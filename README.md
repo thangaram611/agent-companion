@@ -355,9 +355,12 @@ the login keychain. Agent Companion does not ask for or store provider secrets.
 
 ## Fast Path
 
-From the repository root, pick the harness surface you actually use:
+From the repository root, preview setup or pick the harness surface you use:
 
 ```bash
+# Detect installed harnesses and preview changes without installing anything.
+bash setup.sh --dry-run
+
 # Codex source-checkout install, without selecting a default target yet.
 bash setup.sh --host codex --target none
 
@@ -383,12 +386,38 @@ bash setup.sh --host codex --target opencode
 # Claude only, Copilot default.
 bash setup.sh --host claude --target copilot
 
-# Harness/plugin surface only. Every send must select a companion explicitly.
+# Harness/plugin surface only. Keep any existing companion configuration.
 bash setup.sh --host both --target none
 ```
 
+Without `--host`, setup detects the installed CLI. If both are installed, it
+asks which to use in a terminal; non-interactive runs must pass `--host`.
+Without `--target`, existing defaults, profiles and model settings are preserved.
+On a clean install, the only ready companion is selected; multiple or zero ready
+companions require a choice (or `--target none` to attach one later).
+
 `setup.sh --host both --target auto` selects the only ready target for both
-hosts. If multiple targets are ready, pass the target explicitly.
+hosts explicitly. If multiple targets are ready, pass the target explicitly.
+`--target none` leaves existing configuration untouched; it does not clear a default.
+
+Setup checks prerequisites and companion readiness before installation and
+shows the intended changes. Interactive runs confirm that plan; `--yes` skips
+confirmation. Explicit flags also work without a terminal. `--dry-run` applies
+nothing. No setup path runs a quota-spending companion task.
+
+A new default is saved after installation and checks pass. A missing binary or
+authentication blocks the change unless `--no-target-check` explicitly defers
+readiness. An existing default profile or environment override that would mask
+the new target is explained instead of silently replaced. Use onboarding's
+`--set-default-profile` to change a profile default.
+
+If installation stops partway, setup lists completed stages and keeps the
+previous companion configuration. Fix the reported error and rerun the same
+command; completed installation steps are safe to repeat. A failure while
+configuring the second harness can leave the first harness configured, and the
+status shows each separately. User-owned agent files are preserved and require
+manual reconciliation. The final status distinguishes installation from live
+delegation verification and names the required fresh session/hook approval.
 
 ## Onboarding Commands
 
@@ -402,6 +431,7 @@ node scripts/onboard.mjs --target copilot --set-default
 node scripts/onboard.mjs --target codex --set-default
 node scripts/onboard.mjs --target antigravity --set-default
 node scripts/onboard.mjs --target opencode --smoke
+node scripts/onboard.mjs --target codex --set-default --plan --json
 ```
 
 Companion profiles (ids, models and strength labels only — never secrets):
@@ -428,6 +458,7 @@ Useful flags:
 | `--target` | Select `opencode`, `copilot`, `codex`, `antigravity`, `auto`, or `none`. |
 | `--set-default` | Write `~/.{claude,codex}/agent-companion/default-target`. |
 | `--json` | Emit machine-readable reports. |
+| `--plan` | Preview companion selection, existing configuration and readiness without writes or smoke tasks. |
 | `--no-target-check` | Persist the target even if readiness checks fail. |
 | `--smoke` | Run an opt-in target smoke task when supported. |
 | `--yes` / `-y` | Strict non-interactive mode: skip the smoke confirmation, and fail rather than prompt on an ambiguous target or warn on a strength conflict. |
@@ -435,6 +466,12 @@ Useful flags:
 For standalone host-specific writes, set `AGENT_COMPANION_HOST=codex` or
 `AGENT_COMPANION_HOST=claude` on the command. `setup.sh` does this for each
 host when it delegates to onboarding.
+
+An ordinary onboarding rerun preserves existing configuration unless `--target`
+explicitly selects a change. Readiness failure leaves the default untouched;
+`--no-target-check` can defer readiness, but a failed requested smoke never
+persists a new default. Codex smoke requires a completed assistant response
+matching `ready`, not just a successful CLI exit.
 
 `AGENT_COMPANION_DEFAULT_PROFILE` overrides the persisted `defaultProfile`, and
 `AGENT_COMPANION_DEFAULT_TARGET` overrides the persisted `default-target`. The
@@ -881,8 +918,8 @@ These are the shell-syntax, JavaScript-syntax and test steps
 `.github/workflows/ci.yml` runs; CI additionally runs `npm ci` and
 `npm audit --omit=dev --audit-level=moderate` in `bridge-server/`. Discovery is anchored at
 the repo root rather than an allow-list of directories, because an allow-list
-omitting `test/` skips the two cross-cutting guard suites — the `profiles.json`
-single-reader guard and the sync-exec timeout guard.
+omitting `test/` skips the three cross-cutting guard suites — the `profiles.json`
+single-reader guard, the sync-exec timeout guard, and the runtime sandbox guard.
 
 README diagram assets (the PNGs are build output; the SVGs are the source):
 

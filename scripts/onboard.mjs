@@ -20,9 +20,10 @@
 // unless --no-target-check is passed.
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import readline from 'node:readline/promises';
 
 import { TARGET_IDS, getTargetById } from '../lib/target-registry.mjs';
@@ -32,10 +33,12 @@ import {
   targetReadinessSummary,
   inspectProfiles,
   profileReadinessSummary,
+  memoizeProbe,
+  probeCommand,
 } from '../lib/target-diagnostics.mjs';
-import { writeDefaultTarget, readDefaultTarget, writeProfiles, isModelAllowedFor } from '../lib/state.mjs';
-import { buildDoctorReport, renderDoctorReport } from '../lib/doctor.mjs';
+import { BASE_DIR, writeDefaultTarget, readDefaultTarget, writeProfiles, isModelAllowedFor } from '../lib/state.mjs';
 import { startOpenCodeRun } from '../bridge-server/opencode-runtime.mjs';
+import { createCodexCollector } from '../bridge-server/codex-runtime.mjs';
 import {
   loadProfiles,
   VALID_STRENGTHS,
@@ -78,6 +81,7 @@ export function parseArgs(argv) {
       case '--set-default': opts.setDefault = true; break;
       case '--yes': case '-y': opts.yes = true; break;
       case '--json': opts.json = true; break;
+      case '--plan': opts.plan = true; break;
       case '--smoke': opts.smoke = true; break;
       case '--list-targets': opts.listTargets = true; break;
       case '--doctor': opts.doctor = true; break;
@@ -103,13 +107,34 @@ export function parseArgs(argv) {
 //   { kind: 'chosen', id, ready, report, writeDefault }
 //   { kind: 'ask', candidates }            // interactive selection required
 //   { kind: 'error', code, message, candidates? }
-export function planOnboard({ options, targets }) {
+export function planOnboard({ options, targets, configuration }) {
   const t = options.target;
 
   if (t === 'none') return { kind: 'host-only' };
+  if (!t && configuration?.exists) return { kind: 'preserved' };
 
   if (t && TARGET_IDS.has(t)) {
-    const report = targets[t];
+    if (options.setDefault && configuration) {
+      const profile = configuration.defaultProfile;
+      if (profile?.value && configuration.profiles.find((p) => p.id === profile.value)?.companion !== t) {
+        return { kind: 'error', code: 'profile_override', message: `default profile "${profile.value}" controls routing. Use --set-default-profile <id> to change it; profiles are preserved.` };
+      }
+      if (configuration.defaultTarget.source === 'env' && configuration.defaultTarget.target !== t) {
+        return { kind: 'error', code: 'env_override', message: 'AGENT_COMPANION_DEFAULT_TARGET overrides this choice. Change or unset it first.' };
+      }
+      if (configuration.errors.length) {
+        return { kind: 'error', code: 'invalid_configuration', message: 'Repair the existing profile configuration before changing its default. ' + configuration.errors.join(' ') };
+      }
+      if (configuration.hasProfiles && !profile?.value && configuration.profiles.filter((p) => p.companion === t).length !== 1) {
+        return { kind: 'error', code: 'profile_selection', message: `Existing profiles do not resolve ${t} uniquely. Choose a profile with --set-default-profile <id>; profiles are preserved.` };
+      }
+    }
+    let report = targets[t];
+    if (options.setDefault && configuration?.hasProfiles) {
+      const profile = configuration.profiles.find((p) => configuration.defaultProfile?.value
+        ? p.id === configuration.defaultProfile.value : p.companion === t);
+      if (profile) report = { ...report, ready: profile.ready, blockers: profile.blockers, warnings: profile.warnings };
+    }
     return { kind: 'chosen', id: t, ready: !!report?.ready, report, writeDefault: options.setDefault };
   }
 
@@ -121,11 +146,11 @@ export function planOnboard({ options, targets }) {
   const readyIds = Object.values(targets).filter((r) => r.ready).map((r) => r.id);
   if (readyIds.length === 1) {
     const id = readyIds[0];
-    return { kind: 'chosen', id, ready: true, report: targets[id], writeDefault: options.setDefault, autoSelected: true };
+    return { ...planOnboard({ options: { ...options, target: id }, targets, configuration }), autoSelected: true };
   }
   if (readyIds.length === 0) {
     if (options.yes) {
-      return { kind: 'error', code: 'no_ready_target', message: 'no target is ready. Install/authenticate one, or pass --target <id> to write the choice anyway. See --list-targets.' };
+      return { kind: 'error', code: 'no_ready_target', message: 'no target is ready. Install/authenticate one, use --target none for harness-only setup, or explicitly defer readiness with --target <id> --no-target-check. See --list-targets.' };
     }
     return { kind: 'ask', candidates: Object.keys(targets) };
   }
@@ -134,6 +159,29 @@ export function planOnboard({ options, targets }) {
     return { kind: 'error', code: 'ambiguous_target', message: `multiple targets ready (${readyIds.join(', ')}). Pass --target <id>.`, candidates: readyIds };
   }
   return { kind: 'ask', candidates: readyIds };
+}
+
+// Project from the registry; never parse profiles independently. File presence
+// also protects an empty or malformed authoring file from automatic selection.
+function inspectConfiguration(env, run) {
+  const registry = loadProfiles({ env });
+  const defaultTarget = readDefaultTarget(env);
+  const profiles = inspectProfiles({ env, run, load: registry });
+  const defaultProfile = registry.synthesized ? null : registry.defaultProfile;
+  const hasFile = existsSync(join(BASE_DIR, 'profiles.json'));
+  const errors = registry.loadErrors.map((e) => e.message);
+  if (hasFile && registry.synthesized) errors.push('profiles.json could not be loaded; preserved for manual repair.');
+  const profile = profiles.find((p) => p.id === defaultProfile?.value);
+  let summary = defaultProfile?.value
+    ? `profile ${defaultProfile.value} → ${profile?.companion || 'unknown'} (${defaultProfile.source})`
+    : defaultTarget.target
+      ? `${defaultTarget.target} (${defaultTarget.source})`
+      : `no default${profiles.length ? `; ${profiles.length} profiles available for explicit routing` : '; select a companion before delegating'}`;
+  const ready = defaultProfile?.value ? profile?.ready
+    : defaultTarget.target ? inspectTarget(defaultTarget.target, { env, run }).ready : null;
+  if (ready === false || errors.length) summary += '; needs attention';
+  return { exists: hasFile || !!defaultTarget.target || !!env.AGENT_COMPANION_DEFAULT_PROFILE, hasProfiles: !registry.synthesized,
+    defaultTarget, defaultProfile, profiles, errors, summary };
 }
 
 // Pure profile planner: validate a profile definition against the existing set
@@ -294,7 +342,16 @@ function runCodexSmoke(env) {
       killSignal: 'SIGKILL',
       env,
     });
-    return { supported: true, passed: true, detail: out.trim().split('\n').slice(-1)[0] || '(no output)' };
+    const collector = createCodexCollector();
+    collector.push(out);
+    const result = collector.finish();
+    const message = result.message.trim();
+    const error = result.turnFailedReason || result.fatalError;
+    return {
+      supported: true,
+      passed: result.turnCompleted && !error && /^ready[.!]?$/i.test(message),
+      detail: error || message || 'No assistant reply received.',
+    };
   } catch (err) {
     return { supported: true, passed: false, detail: String(err.stderr || err.message || 'smoke failed').trim() };
   } finally {
@@ -375,7 +432,7 @@ export function runProfileCommand(options, env = process.env, io = console) {
 const HELP = `agent-companion onboarding
 
   node scripts/onboard.mjs --target opencode|copilot|codex|antigravity|auto|none [--host claude|codex|both]
-                           [--set-default] [--yes] [--json] [--smoke] [--no-target-check]
+                           [--set-default] [--yes] [--json] [--plan] [--smoke] [--no-target-check]
   node scripts/onboard.mjs --list-targets [--json]
   node scripts/onboard.mjs --doctor [--json]
 
@@ -388,7 +445,11 @@ const HELP = `agent-companion onboarding
   node scripts/onboard.mjs --set-default-profile <id>
 
 Attach your companion. Supported now: opencode, copilot, codex, and antigravity. Onboarding never
-asks for or stores provider secrets — authenticate with the vendor tools.`;
+asks for or stores provider secrets — authenticate with the vendor tools.
+With no --target, existing configuration is preserved. --target none also preserves it.
+--plan previews selection and readiness without writes or smoke tasks.
+Defaults are written only after readiness/smoke succeeds; --no-target-check explicitly
+allows an unready target, but never overrides a failed smoke.`;
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
@@ -397,9 +458,13 @@ async function main() {
   if (options.help) { console.log(HELP); process.exit(0); }
   if (options.unknown) { console.error(`[FAIL] unknown argument: ${options.unknown}`); process.exit(2); }
   if (!VALID_HOSTS.has(options.host)) { console.error(`[FAIL] --host must be claude|codex|both (got ${options.host})`); process.exit(2); }
+  if (options.plan && (options.smoke || options.defineProfile !== undefined || options.assignStrength !== undefined || options.setDefaultProfile !== undefined)) {
+    console.error('[FAIL] --plan cannot be combined with --smoke or profile writes.'); process.exit(2);
+  }
 
   // --doctor: full environment report.
   if (options.doctor) {
+    const { buildDoctorReport, renderDoctorReport } = await import('../lib/doctor.mjs');
     const report = buildDoctorReport({ env });
     console.log(options.json ? JSON.stringify(report, null, 2) : renderDoctorReport(report));
     process.exit(report.ok ? 0 : 1);
@@ -410,7 +475,9 @@ async function main() {
   const profileExit = runProfileCommand(options, env);
   if (profileExit !== null) process.exit(profileExit);
 
-  const targets = inspectTargets({ env });
+  const run = memoizeProbe(probeCommand);
+  const targets = inspectTargets({ env, run });
+  const configuration = inspectConfiguration(env, run);
 
   // --list-targets: readiness for every supported target.
   if (options.listTargets) {
@@ -424,7 +491,18 @@ async function main() {
     process.exit(0);
   }
 
-  let plan = planOnboard({ options, targets });
+  let plan = planOnboard({ options, targets, configuration });
+
+  if (options.plan) {
+    const ok = plan.kind !== 'error' && plan.kind !== 'ask' && (plan.kind !== 'chosen' || plan.ready || options.noTargetCheck);
+    if (options.json) console.log(JSON.stringify({ ok, plan, configuration, targets }, null, 2));
+    else {
+      console.log(`Current companion: ${configuration.summary}`);
+      console.log(`Plan: ${plan.kind === 'chosen' ? `${plan.writeDefault ? 'set default to' : 'check'} ${plan.id}` : plan.message || 'preserve configuration'}`);
+      for (const report of Object.values(targets)) printTargetReport(report);
+    }
+    process.exit(ok ? 0 : plan.kind === 'chosen' ? 3 : 2);
+  }
 
   // Interactive target selection when required and a tty is available.
   if (plan.kind === 'ask') {
@@ -438,7 +516,7 @@ async function main() {
     const ans = (await rl.question(`\nTarget [${plan.candidates.join('/')}/none]: `)).trim().toLowerCase();
     rl.close();
     if (ans === 'none') plan = { kind: 'host-only' };
-    else if (TARGET_IDS.has(ans)) plan = { kind: 'chosen', id: ans, ready: !!targets[ans]?.ready, report: targets[ans], writeDefault: true };
+    else if (TARGET_IDS.has(ans)) plan = planOnboard({ options: { ...options, target: ans, setDefault: true }, targets, configuration });
     else { console.error(`[FAIL] invalid selection: ${ans}`); process.exit(2); }
   }
 
@@ -447,9 +525,9 @@ async function main() {
     process.exit(2);
   }
 
-  if (plan.kind === 'host-only') {
-    const msg = 'host/plugin surface only; no target configured. First send must pass an explicit target or run onboarding with --target.';
-    if (options.json) console.log(JSON.stringify({ ok: true, host: options.host, target: null, note: msg }, null, 2));
+  if (plan.kind === 'host-only' || plan.kind === 'preserved') {
+    const msg = `configuration preserved; companion: ${configuration.summary}.`;
+    if (options.json) console.log(JSON.stringify({ ok: true, host: options.host, target: null, wroteDefault: false, configuration, note: msg }, null, 2));
     else console.log(`[OK] ${msg}`);
     process.exit(0);
   }
@@ -457,9 +535,8 @@ async function main() {
   // plan.kind === 'chosen'
   const { id, report } = plan;
   let wrote = false;
-  if (plan.writeDefault) {
-    writeDefaultTarget(id);
-    wrote = true;
+  if (!options.json && plan.writeDefault) {
+    console.log(`Plan: default companion ${configuration.summary} → ${id}; profiles unchanged.`);
   }
 
   let smoke = null;
@@ -477,13 +554,22 @@ async function main() {
     }
   }
 
+  if (plan.writeDefault && (report.ready || options.noTargetCheck) && smoke?.passed !== false) {
+    if (readDefaultTarget({}).target !== id) {
+      writeDefaultTarget(id);
+      wrote = true;
+    }
+  }
+  const current = inspectConfiguration(env, run);
   if (options.json) {
-    console.log(JSON.stringify({ ok: report.ready && smoke?.passed !== false, host: options.host, target: id, wroteDefault: wrote, autoSelected: !!plan.autoSelected, report, smoke }, null, 2));
+    console.log(JSON.stringify({ ok: report.ready && smoke?.passed !== false, host: options.host, target: id, wroteDefault: wrote, autoSelected: !!plan.autoSelected, configuration: current, report, smoke }, null, 2));
   } else {
     if (plan.autoSelected) console.log(`[OK] auto-selected the only ready target: ${id}`);
     printTargetReport(report);
     if (wrote) console.log(`\n[OK] wrote default target: ${id}`);
-    else console.log(`\n[INFO] not persisted (pass --set-default to write it as the bridge default).`);
+    else console.log(`\n[INFO] configuration unchanged; companion: ${current.summary}.`);
+    if (!report.ready && options.noTargetCheck) console.log('[WARN] readiness deferred by --no-target-check; companion is not ready.');
+    if (!smoke) console.log('[INFO] live companion response remains unverified (no smoke requested).');
     if (smoke) console.log(`\nsmoke: ${smoke.supported ? (smoke.passed === null ? 'skipped' : smoke.passed ? 'passed' : 'failed') : 'unsupported'} — ${smoke.detail}`);
   }
 
@@ -492,6 +578,6 @@ async function main() {
 }
 
 // Only run the CLI when invoked directly, so tests can import the pure helpers.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   main().catch((err) => { console.error(`[FAIL] ${err.message}`); process.exit(1); });
 }

@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
@@ -23,6 +24,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(HERE);
 const AGENT_SENTINEL = '# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent-codex.sh) — edits will be overwritten on next session';
 const FIXTURE_PATHS = [
+  '.claude-plugin',
   '.codex-plugin',
   'assets',
   'bridge-server',
@@ -30,6 +32,7 @@ const FIXTURE_PATHS = [
   'lib',
   'scripts',
   'templates',
+  'test',
   'LICENSE',
   'README.md',
   'setup.sh',
@@ -60,6 +63,9 @@ function writeFakeToolchain(binDir) {
   writeExecutable(path.join(binDir, 'npm'), `#!/bin/sh
 if [ "\${1:-}" = "--version" ]; then
   echo 10.0.0
+else
+  [ -z "\${FAKE_NPM_LOG:-}" ] || printf '%s\\n' "$*" >> "$FAKE_NPM_LOG"
+  exit "\${FAKE_NPM_EXIT:-0}"
 fi
 exit 0
 `);
@@ -105,6 +111,11 @@ if (args.length === 1 && args[0] === '--version') {
   process.exit(0);
 }
 
+if (args.join(' ') === 'login status') {
+  process.exit(Number(process.env.FAKE_CODEX_AUTH_FAIL || 0) ||
+    (process.env.FAKE_CODEX_AUTH_EXPIRES === '1' && existsSync(marketplaceState) ? 1 : 0));
+}
+
 if (args.join(' ') === 'plugin marketplace add --help' || args.join(' ') === 'plugin add --help') {
   process.stdout.write('fake help\\n');
   process.exit(0);
@@ -117,7 +128,7 @@ if (args[0] === 'plugin' && args[1] === 'marketplace' && args[2] === 'add') {
     fail('missing marketplace root');
   }
   const alreadyAdded = existsSync(marketplaceState);
-  mkdirSync(codexHome, { recursive: true });
+  if (!existsSync(codexHome)) fail('CODEX_HOME must exist before marketplace registration');
   writeFileSync(marketplaceState, source);
   printJson({
     marketplaceName: 'agent-companion',
@@ -211,21 +222,24 @@ function seedLegacyHooks(codexHome) {
   return hooksPath;
 }
 
-function runSetup(sourceRoot, home, codexHome, binDir, logPath, extraEnv = {}) {
+function runSetup(sourceRoot, home, codexHome, binDir, logPath, extraEnv = {}, args = [
+  '--host', 'codex', '--target', 'none', '--skip-tests',
+]) {
   return spawnSync('/bin/bash', [
     path.join(sourceRoot, 'setup.sh'),
-    '--host', 'codex',
-    '--target', 'none',
-    '--skip-tests',
+    ...args,
   ], {
     cwd: sourceRoot,
     env: {
-      ...process.env,
-      ...extraEnv,
+      NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
       HOME: home,
       CODEX_HOME: codexHome,
+      AGENT_RUNTIME_DIR: path.join(home, 'runtime'),
+      OPENCODE_BIN: '/missing-opencode', COPILOT_BIN: '/missing-copilot',
+      ANTIGRAVITY_ACP_BIN: '/missing-antigravity',
       FAKE_CODEX_LOG: logPath,
       PATH: [binDir, '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(path.delimiter),
+      ...extraEnv,
     },
     encoding: 'utf8',
   });
@@ -280,11 +294,13 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
     assert.match(first.stdout, /start a fresh session/);
 
     const calls = readCalls(logPath);
-    const marketplaceRoot = path.join(sourceRoot, 'dist', 'codex-marketplace');
+    const marketplaceRoot = path.join(realpathSync(sourceRoot), 'dist', 'codex-marketplace');
     assert.deepEqual(calls.map((call) => call.args), [
       ['--version'],
       ['plugin', 'marketplace', 'add', '--help'],
       ['plugin', 'add', '--help'],
+      ['--version'],
+      ['login', 'status'],
       ['plugin', 'marketplace', 'add', marketplaceRoot, '--json'],
       ['plugin', 'add', 'agent-companion@agent-companion', '--json'],
       ['mcp', 'list', '--json'],
@@ -351,15 +367,45 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
     assert.equal(hookBackups(codexHome).length, 1);
 
     const allCalls = readCalls(logPath);
-    assert.equal(allCalls.length, 12);
+    assert.equal(allCalls.length, 16);
     assert.deepEqual(
-      allCalls.slice(6).map((call) => call.args),
+      allCalls.slice(8).map((call) => call.args),
       calls.map((call) => call.args),
       'repeat setup must refresh through the same Codex command sequence',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('setup discovers the same test files as root discovery, including cross-cutting guards', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'setup-discovery-'));
+  const source = path.join(tmp, 'source'), home = path.join(tmp, 'home');
+  const bin = path.join(tmp, 'bin'), capture = path.join(tmp, 'tests.json');
+  try {
+    copySourceFixture(source);
+    mkdirSync(home);
+    writeFakeToolchain(bin);
+    rmSync(path.join(bin, 'node'));
+    writeExecutable(path.join(bin, 'node'), `#!${process.execPath}
+      import { writeFileSync } from 'node:fs';
+      import { spawnSync } from 'node:child_process';
+      const args = process.argv.slice(2);
+      if (args[0] === '--test') {
+        writeFileSync(${JSON.stringify(capture)}, JSON.stringify(args.slice(1)));
+      } else {
+        const r = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' });
+        process.exit(r.status ?? 1);
+      }
+    `);
+    const result = runSetup(source, home, path.join(home, '.codex'), bin, path.join(tmp, 'calls'), {}, [
+      '--host', 'codex', '--target', 'none',
+    ]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const found = JSON.parse(readFileSync(capture)).map((f) => path.relative(realpathSync(source), f)).sort();
+    const expected = readdirSync(REPO_ROOT, { recursive: true }).filter((f) => f.endsWith('.test.mjs') && !f.startsWith('bridge-server/node_modules/')).sort();
+    assert.deepEqual(found, expected);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
 test('Codex source setup preserves legacy hooks when effective MCP registration is wrong', () => {
@@ -392,11 +438,170 @@ test('Codex source setup preserves legacy hooks when effective MCP registration 
     assert.equal(existsSync(path.join(codexHome, 'agent-companion', '.host')), false);
     assert.ok(existsSync(path.join(installedPluginRoot(codexHome), '.codex-plugin', 'plugin.json')));
     assert.deepEqual(readCalls(logPath).map((call) => call.args).slice(-3), [
-      ['plugin', 'marketplace', 'add', path.join(sourceRoot, 'dist', 'codex-marketplace'), '--json'],
+      ['plugin', 'marketplace', 'add', path.join(realpathSync(sourceRoot), 'dist', 'codex-marketplace'), '--json'],
       ['plugin', 'add', 'agent-companion@agent-companion', '--json'],
       ['mcp', 'list', '--json'],
     ]);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+function setupFixture(t) {
+  const tmp = realpathSync(mkdtempSync(path.join(tmpdir(), 'setup-flow-')));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const source = path.join(tmp, 'source checkout'), home = path.join(tmp, 'home');
+  const codexHome = path.join(tmp, 'custom codex'), bin = path.join(tmp, 'bin');
+  const log = path.join(tmp, 'codex.jsonl'), npmLog = path.join(tmp, 'npm.log');
+  copySourceFixture(source);
+  mkdirSync(home);
+  writeFakeToolchain(bin);
+  return {
+    tmp, source, home, codexHome, bin, log, npmLog,
+    run(args, env = {}) {
+      return runSetup(source, home, codexHome, bin, log, { FAKE_NPM_LOG: npmLog, ...env }, args);
+    },
+    state(host = 'codex') {
+      const dir = path.join(host === 'codex' ? codexHome : path.join(home, '.claude'), 'agent-companion');
+      mkdirSync(dir, { recursive: true });
+      return dir;
+    },
+    assertNoInstall() {
+      assert.equal(existsSync(npmLog), false, 'preflight must precede npm installation');
+      assert.equal(existsSync(installedPluginRoot(codexHome)), false);
+      if (existsSync(log)) assert.ok(readCalls(log).every(({ args }) => !args.includes('--json')), 'no plugin mutation');
+    },
+  };
+}
+
+test('clean setup detects the only harness/companion, previews changes and preserves its default on rerun', (t) => {
+  const f = setupFixture(t);
+  const first = f.run(['--skip-tests']);
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  assert.match(first.stdout, /detected harness: codex/);
+  assert.ok(first.stdout.indexOf('Intended installation changes:') < first.stdout.indexOf('Installing bridge server dependencies'));
+  assert.match(first.stdout, /companion: codex \(config\)/);
+  assert.match(first.stdout, /Unverified: live delegation/);
+  assert.match(first.stdout, /Approve.*plugin hooks/);
+  const file = path.join(f.state(), 'default-target');
+  assert.equal(readFileSync(file, 'utf8'), 'codex\n');
+  const time = new Date('2020-01-02T03:04:05Z');
+  utimesSync(file, time, time);
+  const second = f.run(['--skip-tests']);
+  assert.equal(second.status, 0, second.stdout + second.stderr);
+  assert.match(second.stdout, /preserve companion configuration/);
+  assert.equal(statSync(file).mtimeMs, time.getTime());
+  assert.ok(readCalls(f.log).every(({ args }) => !['exec', 'app-server'].includes(args[0])));
+});
+
+test('preflight refuses missing harnesses, missing authentication and ambiguous companions without installation', async (t) => {
+  for (const scenario of ['missing harness', 'authentication', 'multiple companions', 'none ready', 'both harnesses']) {
+    await t.test(scenario, (t) => {
+      const f = setupFixture(t);
+      let args = ['--host', 'codex', '--target', 'codex', '--skip-tests'];
+      const env = {};
+      let message;
+      if (scenario === 'missing harness') {
+        args = ['--host', 'claude', '--target', 'none']; message = /claude.*not found/;
+      } else if (scenario === 'authentication' || scenario === 'none ready') {
+        env.FAKE_CODEX_AUTH_FAIL = '1';
+        if (scenario === 'none ready') args = ['--host', 'codex', '--skip-tests'];
+        message = /authentication|codex login/;
+      } else if (scenario === 'multiple companions') {
+        writeExecutable(path.join(f.bin, 'copilot'), '#!/bin/sh\necho copilot-fake\n');
+        env.COPILOT_BIN = path.join(f.bin, 'copilot');
+        args = ['--host', 'codex', '--skip-tests']; message = /multiple targets ready/;
+      } else {
+        writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
+        args = ['--target', 'none', '--yes']; message = /Both harnesses are installed/;
+      }
+      const r = f.run(args, env);
+      assert.notEqual(r.status, 0, r.stdout + r.stderr);
+      assert.match(r.stdout, message);
+      f.assertNoInstall();
+      assert.equal(existsSync(path.join(f.codexHome, 'agent-companion/default-target')), false);
+    });
+  }
+});
+
+test('dry-run previews a clean install and --no-target-check explicitly defers authentication', (t) => {
+  const f = setupFixture(t);
+  const preview = f.run(['--host', 'codex', '--target', 'codex', '--dry-run']);
+  assert.equal(preview.status, 0, preview.stdout + preview.stderr);
+  assert.match(preview.stdout, /Plan \(codex\): set default companion to codex/);
+  assert.match(preview.stdout, /Preview only/);
+  f.assertNoInstall();
+  const deferred = f.run(['--host', 'codex', '--target', 'codex', '--no-target-check', '--skip-tests'], { FAKE_CODEX_AUTH_FAIL: '1' });
+  assert.equal(deferred.status, 0, deferred.stdout + deferred.stderr);
+  assert.match(deferred.stdout, /Readiness deferred/);
+  assert.match(deferred.stdout, /companion: codex \(config\); needs attention/);
+  assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'codex\n');
+});
+
+test('both harnesses preserve independent defaults/profiles and unrelated settings', (t) => {
+  const f = setupFixture(t);
+  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
+  const profiles = '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n';
+  writeFileSync(path.join(f.state(), 'profiles.json'), profiles);
+  writeFileSync(path.join(f.state(), 'default-target'), 'opencode\n');
+  writeFileSync(path.join(f.state('claude'), 'default-target'), 'codex\n');
+  const settings = path.join(f.home, '.claude/settings.json');
+  writeFileSync(settings, JSON.stringify({ theme: 'dark', permissions: { allow: ['Bash(custom)'], deny: ['Bash(blocked)'] } }));
+  const result = f.run(['--host', 'both', '--skip-tests']);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /companion: profile review → copilot.*needs attention/);
+  assert.match(result.stdout, /Claude: agent and permissions installed; companion: codex/);
+  assert.equal(readFileSync(path.join(f.state(), 'profiles.json'), 'utf8'), profiles);
+  assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'opencode\n');
+  assert.equal(readFileSync(path.join(f.state('claude'), 'default-target'), 'utf8'), 'codex\n');
+  const saved = JSON.parse(readFileSync(settings));
+  assert.equal(saved.theme, 'dark');
+  assert.ok(saved.permissions.allow.includes('Bash(custom)'));
+  assert.deepEqual(saved.permissions.deny, ['Bash(blocked)']);
+});
+
+test('partial installation reports completed stages, preserves defaults and succeeds on rerun', (t) => {
+  const f = setupFixture(t);
+  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
+  for (const host of ['claude', 'codex']) writeFileSync(path.join(f.state(host), 'default-target'), 'copilot\n');
+  const args = ['--host', 'both', '--target', 'codex', '--skip-tests'];
+  const failed = f.run(args, { FAKE_CODEX_BAD_MCP: '1' });
+  assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+  assert.match(failed.stdout, /Setup incomplete: Codex plugin installation/);
+  assert.match(failed.stdout, /Claude: agent and permissions installed/);
+  assert.match(failed.stdout, /Codex: plugin installed; MCP, agent and hooks pending verification/);
+  assert.match(failed.stdout, /rerun the same command/);
+  for (const host of ['claude', 'codex']) assert.equal(readFileSync(path.join(f.state(host), 'default-target'), 'utf8'), 'copilot\n');
+  const repaired = f.run(args);
+  assert.equal(repaired.status, 0, repaired.stdout + repaired.stderr);
+  for (const host of ['claude', 'codex']) assert.equal(readFileSync(path.join(f.state(host), 'default-target'), 'utf8'), 'codex\n');
+});
+
+test('failed dependency install and user-owned agents never replace companion configuration', async (t) => {
+  for (const owned of [false, true]) await t.test(owned ? 'user-owned agent' : 'npm failure', (t) => {
+    const f = setupFixture(t);
+    writeFileSync(path.join(f.state(), 'default-target'), 'copilot\n');
+    const agent = path.join(f.codexHome, 'agents/agent-companion.toml');
+    if (owned) {
+      mkdirSync(path.dirname(agent), { recursive: true });
+      writeFileSync(agent, '# user-owned\n');
+    }
+    const r = f.run(['--host', 'codex', '--target', 'codex', '--skip-tests'], owned ? {} : { FAKE_NPM_EXIT: '1' });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stdout, owned ? /User-owned agent preserved/ : /Setup incomplete: bridge dependencies/);
+    assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'copilot\n');
+    if (owned) { f.assertNoInstall(); assert.equal(readFileSync(agent, 'utf8'), '# user-owned\n'); }
+    assert.equal(existsSync(installedPluginRoot(f.codexHome)), false);
+  });
+});
+
+test('readiness lost after installation is explained without replacing the previous default', (t) => {
+  const f = setupFixture(t);
+  writeFileSync(path.join(f.state(), 'default-target'), 'copilot\n');
+  const r = f.run(['--host', 'codex', '--target', 'codex', '--skip-tests'], { FAKE_CODEX_AUTH_EXPIRES: '1' });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /Setup incomplete: companion configuration/);
+  assert.match(r.stdout, /Codex CLI has no configured authentication/);
+  assert.match(r.stdout, /codex login/);
+  assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'copilot\n');
 });
