@@ -373,6 +373,7 @@ export function createCodexCollector({ onSession = () => {} } = {}) {
   const toolCalls = [];
   let fatalError = null;
   let turnFailedReason = null;
+  let turnCompleted = false;
   let usage = null;
   // Turn counter + in-flight command index. `item.id` alone is not a key: it
   // restarts at `item_0` every turn, so `${turnSeq}:${item.id}` is the
@@ -398,6 +399,7 @@ export function createCodexCollector({ onSession = () => {} } = {}) {
         toolCalls,
         fatalError,
         turnFailedReason,
+        turnCompleted,
         usage,
       };
     },
@@ -425,9 +427,11 @@ export function createCodexCollector({ onSession = () => {} } = {}) {
     }
     if (type === 'turn.started') {
       turnSeq++;
+      turnCompleted = false;
       return;
     }
     if (type === 'turn.completed') {
+      turnCompleted = true;
       usage = usageFromCodexExecUsage(event.usage) ?? usage;
       return;
     }

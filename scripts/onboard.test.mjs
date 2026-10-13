@@ -6,7 +6,7 @@ import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,14 +99,24 @@ test('planOnboard: no target, interactive → ask', () => {
 
 // --- CLI exit-code paths (subprocess) ---
 
-function run(args, env = {}) {
+function run(args, env = {}, files = {}) {
   const home = mkdtempSync(join(tmpdir(), 'agent-onboard-home-'));
   try {
+    for (const [name, bytes] of Object.entries(files)) writeFileSync(join(home, name), bytes);
     const r = spawnSync(process.execPath, [SCRIPT, ...args], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: home, AGENT_COMPANION_HOME: home, PATH: '/usr/bin:/bin', ...env },
+      env: {
+        HOME: home, CODEX_HOME: join(home, '.codex'), AGENT_COMPANION_HOME: home,
+        AGENT_RUNTIME_DIR: join(home, 'runtime'), PATH: '/usr/bin:/bin',
+        NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
+        OPENCODE_BIN: '/missing-opencode', COPILOT_BIN: '/missing-copilot',
+        CODEX_BIN: '/missing-codex', ANTIGRAVITY_ACP_BIN: '/missing-antigravity', ...env,
+      },
     });
-    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+    const stored = Object.fromEntries(['default-target', 'profiles.json', 'default-model'].map((name) => [
+      name, existsSync(join(home, name)) ? readFileSync(join(home, name), 'utf8') : null,
+    ]));
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr, stored };
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -145,7 +155,7 @@ test('CLI --target codex --smoke runs `codex exec` with --ignore-user-config --e
     'if (args[0] === "exec") {',
     `  writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(args));`,
     '  process.stdin.on("data", () => {});',
-    '  process.stdin.on("end", () => { console.log(JSON.stringify({ type: "turn.completed", usage: {} })); process.exit(0); });',
+    '  process.stdin.on("end", () => { console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "ready" } })); console.log(JSON.stringify({ type: "turn.completed", usage: {} })); process.exit(0); });',
     '} else {',
     '  process.exit(1);',
     '}',
@@ -167,6 +177,40 @@ test('CLI --target codex --smoke runs `codex exec` with --ignore-user-config --e
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('Codex smoke requires a completed assistant ready reply, not exit zero or tool output', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-smoke-replies-'));
+  const bin = join(dir, 'codex');
+  writeFileSync(bin, `#!${process.execPath}
+    if (process.argv[2] === '--version') { console.log('codex-cli fake'); process.exit(0); }
+    if (process.argv[2] === 'login') process.exit(0);
+    process.stdout.write(process.env.SMOKE_OUTPUT || '');
+    process.exit(Number(process.env.SMOKE_EXIT || 0));
+  `, { mode: 0o700 });
+  const reply = (text) => ({ type: 'item.completed', item: { type: 'agent_message', text } });
+  const done = { type: 'turn.completed', usage: {} };
+  const cases = [
+    ['empty', [], false],
+    ['completion only', [done], false],
+    ['wrong reply', [reply('not ready'), done], false],
+    ['tool only', [{ type: 'item.completed', item: { type: 'command_execution', aggregated_output: 'ready' } }, done], false],
+    ['unfinished', [reply('ready')], false],
+    ['failed turn', [reply('ready'), { type: 'turn.failed', error: { message: 'failed' } }], false],
+    ['fatal error', [reply('ready'), { type: 'error', message: 'failed' }, done], false],
+    ['nonzero exit', [reply('ready'), done], false, 1],
+    ['ready', [reply('ready'), done], true],
+    ['case and punctuation', [reply(' READY!\n'), done], true],
+  ];
+  try {
+    for (const [name, events, passed, exit = 0] of cases) {
+      const r = run(['--target', 'codex', '--yes', '--smoke', '--json'], {
+        CODEX_BIN: bin, SMOKE_OUTPUT: events.map(JSON.stringify).join('\n'), SMOKE_EXIT: String(exit),
+      });
+      assert.equal(JSON.parse(r.stdout).smoke.passed, passed, name);
+      assert.equal(r.code, passed ? 0 : 3, name);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('CLI --target none --yes is host-only and exits 0', () => {
@@ -212,11 +256,82 @@ test('CLI unknown target exits 2', () => {
   assert.match(r.stderr, /unknown target/);
 });
 
-test('CLI --target opencode --yes on a clean PATH is not ready → exit 3, writes default', () => {
-  const r = run(['--target', 'opencode', '--set-default', '--yes', '--json']);
+test('CLI unavailable target fails without replacing an existing default', () => {
+  const r = run(['--target', 'opencode', '--set-default', '--yes', '--json'], {}, { 'default-target': 'copilot\n' });
   assert.equal(r.code, 3, r.stderr);
   const out = JSON.parse(r.stdout);
   assert.equal(out.target, 'opencode');
-  assert.equal(out.wroteDefault, true);
+  assert.equal(out.wroteDefault, false);
   assert.equal(out.report.ready, false);
+  assert.equal(r.stored['default-target'], 'copilot\n');
+});
+
+test('CLI explicit --no-target-check allows deferred configuration and labels it unready', () => {
+  const r = run(['--target', 'opencode', '--set-default', '--no-target-check', '--yes', '--json']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).ok, false);
+  assert.equal(r.stored['default-target'], 'opencode\n');
+});
+
+test('CLI plan and ordinary reruns preserve existing defaults, models and profiles', () => {
+  const files = {
+    'default-target': 'copilot\n', 'default-model': 'custom-model\n',
+    'profiles.json': '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n',
+  };
+  for (const args of [['--plan'], [], ['--target', 'none']]) {
+    const r = run([...args, '--set-default', '--yes', '--json'], {}, files);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(r.stored, files);
+    assert.match(JSON.parse(r.stdout).configuration.summary, /review.*copilot/);
+  }
+});
+
+test('failed smoke and read-only plans never commit a default', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'onboard-commit-'));
+  const bin = join(dir, 'codex');
+  writeFileSync(bin, `#!${process.execPath}
+    if (process.argv[2] === '--version') console.log('codex-cli fake');
+    process.exit(0);
+  `, { mode: 0o700 });
+  try {
+    for (const flags of [['--smoke'], ['--smoke', '--no-target-check'], ['--plan']]) {
+      const r = run(['--target', 'codex', '--set-default', '--yes', '--json', ...flags], { CODEX_BIN: bin }, { 'default-target': 'copilot\n' });
+      assert.equal(r.code, flags.includes('--plan') ? 0 : 3, r.stderr);
+      assert.equal(r.stored['default-target'], 'copilot\n');
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('plans explain conflicting defaults and preserve invalid or ambiguous profiles', () => {
+  const cases = [
+    [{ 'default-target': 'copilot\n' }, { AGENT_COMPANION_DEFAULT_TARGET: 'opencode' }, 'env_override'],
+    [{ 'profiles.json': '{bad json\n' }, {}, 'invalid_configuration'],
+    [{ 'profiles.json': JSON.stringify({ profiles: [{ id: 'review', companion: 'copilot' }], defaultProfile: 'review' }) }, {}, 'profile_override'],
+    [{ 'profiles.json': JSON.stringify({ profiles: [{ id: 'a', companion: 'codex' }, { id: 'b', companion: 'codex' }] }) }, {}, 'profile_selection'],
+  ];
+  for (const [files, env, code] of cases) {
+    const r = run(['--plan', '--target', 'codex', '--set-default', '--yes', '--json'], env, files);
+    assert.equal(r.code, 2, r.stderr);
+    assert.equal(JSON.parse(r.stdout).plan.code, code);
+    for (const [name, bytes] of Object.entries(files)) assert.equal(r.stored[name], bytes);
+  }
+  const preserved = run(['--plan', '--yes', '--json'], {}, { 'profiles.json': '{bad json\n' });
+  assert.equal(preserved.code, 0, preserved.stderr);
+  assert.equal(preserved.stored['profiles.json'], '{bad json\n');
+  assert.match(JSON.parse(preserved.stdout).configuration.summary, /needs attention/);
+});
+
+test('preflight includes readiness of the profile that will actually receive work', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'onboard-profile-readiness-'));
+  const bin = join(dir, 'copilot');
+  writeFileSync(bin, '#!/bin/sh\necho copilot-fake\n', { mode: 0o700 });
+  try {
+    const profiles = JSON.stringify({ profiles: [{ id: 'review', companion: 'copilot', model: 'not-a-real-model' }], defaultProfile: 'review' });
+    const r = run(['--plan', '--target', 'copilot', '--set-default', '--yes', '--json'], { COPILOT_BIN: bin }, { 'profiles.json': profiles });
+    assert.equal(r.code, 3, r.stdout + r.stderr);
+    assert.equal(JSON.parse(r.stdout).plan.ready, false);
+    assert.match(JSON.stringify(JSON.parse(r.stdout).plan.report.blockers), /model_invalid/);
+    assert.equal(r.stored['profiles.json'], profiles);
+    assert.equal(r.stored['default-target'], null);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
