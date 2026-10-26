@@ -69,9 +69,7 @@ test('role does not attempt to add MCP authority', () => {
   assert.doesNotMatch(text, /^\[mcp_servers(?:\.|\])/m);
   assert.doesNotMatch(text, /\$\{CLAUDE_PLUGIN_ROOT\}/);
   assert.doesNotMatch(text, /MCP_TOOL_TIMEOUT/);
-  // The Claude template tells the agent to forward CLAUDE_CODE_SESSION_ID
-  // by hand. The Codex template must NOT carry that instruction, since
-  // session id is read server-side from MCP _meta.
+  // Codex's session id arrives in MCP _meta; Claude's variable has no business here.
   assert.doesNotMatch(text, /CLAUDE_CODE_SESSION_ID/,
     'Codex template should not mention CLAUDE_CODE_SESSION_ID');
 });
@@ -127,8 +125,10 @@ test('template forbids re-routing a dispatch the bridge refused to route', () =>
 
 // Same contract as the Claude template; on Codex the bridge reads the caller's
 // own thread id from MCP _meta, never a mapping keyed by the root session.
-test('Codex template leaves the thread to the host: a spawn starts a conversation, send_input continues it', () => {
+test('Codex template leaves thread and session id to the host: a spawn starts a conversation, send_input continues it', () => {
   assert.doesNotMatch(text, /by-host-session|MY_THREAD/);
+  // Nor a session id: Codex sends it in _meta.
+  assert.doesNotMatch(text, /host_session_id/);
   assert.doesNotMatch(text, /"thread":/);
   const prose = text.replace(/\s+/g, ' ');
   assert.match(prose, /send_input to the same agent-companion to continue it/);

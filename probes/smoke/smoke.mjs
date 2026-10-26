@@ -47,7 +47,7 @@ srv.stdout.on('data', (chunk) => {
 });
 
 const callTool = async (name, args) => {
-  const r = await rpc('tools/call', { name, arguments: { ...args, host_session_id: SID } });
+  const r = await rpc('tools/call', { name, arguments: args });
   const text = r?.content?.find((c) => c.type === 'text')?.text ?? '';
   try { return { parsed: JSON.parse(text), raw: r }; } catch { return { parsed: null, text, raw: r }; }
 };

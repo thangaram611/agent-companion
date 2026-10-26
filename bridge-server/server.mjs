@@ -232,17 +232,14 @@ function rewriteQueueByMoveAside(suffix, transform) {
   }
 }
 
-// The bridge's resolved host session id. Three sources, in precedence:
+// The bridge's resolved host session id, supplied by the host and never by the
+// model. Two sources, in precedence:
 //   1. MCP _meta["x-codex-turn-metadata"].session_id — Codex injects this
-//      on every CallToolRequest (PR openai/codex#15190); adopted in
-//      server.mjs's CallToolRequestSchema handler before dispatch.
-//   2. The host_session_id MCP arg —
-//      forwarded by the agent. Used by the Claude subagent because Claude
-//      Code does NOT expand ${VAR} in MCP env: blocks at spawn time, so
-//      env-var injection is unavailable. Codex falls back here only if
-//      _meta is absent (e.g. older Codex versions).
-//   3. CLAUDE_CODE_SESSION_ID env var — backstop for tests and direct
-//      Claude invocations that do set it.
+//      on every CallToolRequest (PR openai/codex#15190); adopted by callArgs
+//      before dispatch.
+//   2. CLAUDE_CODE_SESSION_ID — Claude Code's bridge inherits it from the
+//      session that spawned it (every bridge start logged since 2026-08-12
+//      carries it).
 let _bridgeHostSid = null;
 
 export function getHostSessionId() {
@@ -3062,7 +3059,7 @@ async function handleSend(args) {
     return asJson({
       ok: false,
       action: 'send',
-      error: 'CLAUDE_CODE_SESSION_ID not set in bridge environment — bridge cannot tag events for hook delivery. Verify the subagent template forwards it via the env: block.',
+      error: 'no host session id: neither Codex _meta nor an inherited CLAUDE_CODE_SESSION_ID reached the bridge, so it cannot tag events for hook delivery.',
     });
   }
 
@@ -3873,15 +3870,6 @@ mcp.setRequestHandler(ReadResourceRequestSchema, async (req) => (
   readDigestResource(req.params.uri)
 ));
 
-const HOST_SESSION_FIELDS = {
-  host_session_id: {
-    type: 'string',
-    description:
-      "Caller's host session id, used to scope queue writes and persisted jobs. " +
-      'Claude companion agents forward $CLAUDE_CODE_SESSION_ID under this key on every call; Codex normally uses MCP _meta instead.',
-  },
-};
-
 const JOB_ID_FIELD = {
   type: 'string',
   description: 'Target agent companion job id.',
@@ -4001,7 +3989,6 @@ const AGENT_TOOLS = [
           enum: ['auto', 'always', 'never'],
           description: 'Parallel orchestration strategy. Defaults to auto.',
         },
-        ...HOST_SESSION_FIELDS,
       },
       required: ['cwd'],
     },
@@ -4017,7 +4004,6 @@ const AGENT_TOOLS = [
       properties: {
         job_id: JOB_ID_FIELD,
         max_wait_sec: MAX_WAIT_FIELD,
-        ...HOST_SESSION_FIELDS,
       },
       required: ['job_id'],
     },
@@ -4034,7 +4020,6 @@ const AGENT_TOOLS = [
         job_id: JOB_ID_FIELD,
         verbose: { type: 'boolean', description: 'Include full activity timeline for a specific job.' },
         diagnostics: { type: 'boolean', description: 'Include environment/runtime doctor output in the status response.' },
-        ...HOST_SESSION_FIELDS,
       },
     },
     outputSchema: AGENT_OUTPUT_SCHEMA,
@@ -4054,7 +4039,6 @@ const AGENT_TOOLS = [
             + 'into the running turn with nothing cancelled; otherwise the bridge cancels and restarts the current '
             + 'turn with this continuation.',
         },
-        ...HOST_SESSION_FIELDS,
       },
       required: ['job_id', 'message'],
     },
@@ -4068,7 +4052,6 @@ const AGENT_TOOLS = [
       additionalProperties: false,
       properties: {
         job_id: JOB_ID_FIELD,
-        ...HOST_SESSION_FIELDS,
       },
       required: ['job_id'],
     },
@@ -4085,11 +4068,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 // Codex (PR openai/codex#15190) injects per-turn metadata on every MCP tool
 // call as `_meta["x-codex-turn-metadata"]`: `session_id` is the ROOT session
 // for every agent in it, `thread_id` the calling agent's own thread (measured
-// on codex-cli 0.164.0). The session id is adopted BEFORE validation so even
-// callers that don't forward host_session_id get correctly tagged; this is
-// the primary host→bridge session-id channel on Codex, and arg-based
-// forwarding is the fallback for hosts that don't expose _meta (Claude does
-// not).
+// on codex-cli 0.164.0). The session id is adopted BEFORE validation: it is
+// the only host→bridge session-id channel on Codex. Claude does not send
+// _meta; its bridge inherits CLAUDE_CODE_SESSION_ID (getHostSessionId).
 //
 // One agent-companion instance is one companion conversation, so a send's
 // thread is named after the calling agent and never after the host session:
@@ -4139,25 +4120,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 // Exported dispatcher lets tests drive the action handlers directly without
 // going through MCP transport plumbing. Tests that want to exercise the
-// MCP `_meta` path call `adoptHostSessionId(metaSid)` directly before
-// invoking dispatch — this matches the MCP handler's own ordering.
+// MCP `_meta` path go through callArgs, as the MCP handler does.
 export async function dispatch(normalized) {
-  // Arg-based session-id adoption (host_session_id is the host-neutral
-  // session-id field, validated by validation.mjs::normalizeHostSid).
-  // Skipped if _meta already adopted a sid for this process — adoptHostSessionId
-  // is no-op-on-match / throws BRIDGE_SID_CONFLICT on conflict, so the
-  // precedence holds. We catch the conflict here so direct callers (tests,
-  // and any non-MCP consumer) get the same structured error the MCP handler
-  // returns rather than an unhandled rejection.
-  try {
-    if (normalized.host_session_id) adoptHostSessionId(normalized.host_session_id);
-  } catch (err) {
-    if (err && err.code === 'BRIDGE_SID_CONFLICT') {
-      log('ERROR', 'sid conflict on dispatch:', err.message);
-      return asJson({ ok: false, error: err.message, code: 'BRIDGE_SID_CONFLICT' });
-    }
-    throw err;
-  }
   switch (normalized.action) {
     case 'send':   return handleSend(normalized);
     case 'wait':   return handleWait(normalized);
@@ -4458,11 +4422,9 @@ if (isMain) {
   const { detectHost } = await import('../lib/host.mjs');
   logEvent('info', 'bridge.startup', { host_detected: detectHost() });
 
-  // Only run eager hydrate/sweep when the env actually carries a real sid.
-  // In production, Claude Code passes the literal string `${CLAUDE_CODE_SESSION_ID}`
-  // through to the env block (no ${VAR} expansion at MCP-spawn time), so
-  // sanitizeSid returns null and we wait for the subagent to forward the
-  // sid via the first MCP call's `host_session_id` arg.
+  // Eager hydrate/sweep when the sid is already known: on Claude Code it is
+  // inherited. Codex's arrives in _meta with the first call, which runs both
+  // lazily (adoptHostSessionId).
   if (getHostSessionId()) {
     hydrateJobsFromLedger();
     sweepOwnSessionStaleQueueRows();

@@ -539,8 +539,7 @@ again". The allow-list shape is:
       "mcp__agent-bridge__agent_wait",
       "mcp__agent-bridge__agent_status",
       "mcp__agent-bridge__agent_reply",
-      "mcp__agent-bridge__agent_cancel",
-      "Bash(echo \"$CLAUDE_CODE_SESSION_ID\")"
+      "mcp__agent-bridge__agent_cancel"
     ]
   }
 }

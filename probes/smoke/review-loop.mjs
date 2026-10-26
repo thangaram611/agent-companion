@@ -89,7 +89,7 @@ function startBridge(tag) {
     p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: i, method, params }) + '\n');
   });
   const tool = async (name, args) => {
-    const r = await rpc('tools/call', { name, arguments: { ...args, host_session_id: SID } });
+    const r = await rpc('tools/call', { name, arguments: args });
     const text = r?.content?.find((c) => c.type === 'text')?.text ?? '';
     try { return JSON.parse(text); } catch { return { _raw: text }; }
   };
