@@ -104,9 +104,8 @@ primary companion:
     companion profiles as shipped rather than future.
   - `setup.sh` install copy maps `--host` to harness and `--target` to today's
     companion selector without renaming stable flags.
-  - Copilot default-model fallback now uses a currently documented Copilot CLI
-    model (`claude-sonnet-4.6`), and Copilot model validation is separated from
-    the Codex subagent role model allow-list.
+  - Copilot default-model fallback uses a currently documented Copilot CLI
+    model (`claude-sonnet-4.6`).
 
 - Added the Codex CLI companion adapter (send-only v1):
   - `bridge-server/codex-runtime.mjs` spawns `codex exec --json` (resolves

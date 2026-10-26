@@ -32,18 +32,16 @@ test('Codex template lists every prompt template the bridge accepts, and the rev
 
 const topLevel = text;
 
-test('role fields stay top-level and use an allowlisted model', async () => {
+test('role fields stay top-level and the role inherits the session model', async () => {
   assert.match(topLevel, /^name\s*=\s*"agent-companion"\s*$/m);
   assert.match(topLevel, /^description\s*=\s*"""/m);
   // Keep this as a role-level field; moving it into a table silently changes
   // its meaning in TOML.
   assert.match(topLevel, /^developer_instructions\s*=\s*"""/m);
 
-  const match = topLevel.match(/^model\s*=\s*"([^"]+)"\s*$/m);
-  assert.ok(match, 'model field present at top level');
-  const state = await import('../lib/state.mjs');
-  assert.equal(state.isCodexAgentModelAllowed(match[1]), true,
-    `model ${match[1]} must be in CODEX_AGENT_MODELS`);
+  // A pinned id goes stale with the catalog: `gpt-5.5` answered model_not_found
+  // on codex-cli 0.164.0. Without a pin the role runs on the user's own model.
+  assert.doesNotMatch(topLevel, /^model\s*=/m);
 
   const di = topLevel.match(/^developer_instructions\s*=\s*"""([\s\S]*?)"""/m);
   assert.ok(di, 'developer_instructions block extractable');

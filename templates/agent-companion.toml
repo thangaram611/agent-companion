@@ -100,8 +100,6 @@ is incompatible with this plugin.
 See `README.md` for the parallel-task pattern.
 """
 
-model = "gpt-5.5"
-
 # MCP registration deliberately does not live in this role file. Current Codex
 # prevents an agent role from adding MCP authority; .codex-plugin/plugin.json
 # registers the bridge at plugin/session scope and this role inherits it.
