@@ -517,7 +517,14 @@ test('P4 status strengths[] stays id-free with a codex profile in the mix', asyn
   }
 });
 
-test('REGRESSION codex model: a profile model reaches `codex exec -m` spawn args', async () => {
+test('REGRESSION codex model: a profile model reaches `codex exec -m` spawn args', async (t) => {
+  const priorAdapter = process.env.CODEX_RUNTIME_ADAPTER;
+  t.after(() => {
+    if (priorAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER;
+    else process.env.CODEX_RUNTIME_ADAPTER = priorAdapter;
+  });
+  process.env.CODEX_RUNTIME_ADAPTER = 'exec';
+
   reset();
   const { dispatch, jobs, _resetForTest } = server;
   _resetForTest();

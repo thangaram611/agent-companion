@@ -1152,7 +1152,14 @@ test('OpenCode timeout is terminal and target-specific', async () => {
 // `run --format json` NDJSON. Per the safety contract, this NEVER invokes a
 // real `codex` binary — CODEX_BIN always points at a fake script.
 
-test('Codex companion adapter runs a fake CLI and surfaces terminal job state', async () => {
+test('Codex companion adapter runs a fake CLI and surfaces terminal job state', async (t) => {
+  const priorAdapter = process.env.CODEX_RUNTIME_ADAPTER;
+  t.after(() => {
+    if (priorAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER;
+    else process.env.CODEX_RUNTIME_ADAPTER = priorAdapter;
+  });
+  process.env.CODEX_RUNTIME_ADAPTER = 'exec';
+
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
   _resetForTest();
@@ -1270,7 +1277,14 @@ test('Codex companion adapter runs a fake CLI and surfaces terminal job state', 
   }
 });
 
-test("Codex cancel kills the codex child via codex-runtime (not OpenCode's maps) and returns a standard terminal envelope", async () => {
+test("Codex cancel kills the codex child via codex-runtime (not OpenCode's maps) and returns a standard terminal envelope", async (t) => {
+  const priorAdapter = process.env.CODEX_RUNTIME_ADAPTER;
+  t.after(() => {
+    if (priorAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER;
+    else process.env.CODEX_RUNTIME_ADAPTER = priorAdapter;
+  });
+  process.env.CODEX_RUNTIME_ADAPTER = 'exec';
+
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
   _resetForTest();
@@ -1327,7 +1341,14 @@ test("Codex cancel kills the codex child via codex-runtime (not OpenCode's maps)
   }
 });
 
-test('Codex timeout is terminal, tagged codex_timeout, and names the codex timeout env var', async () => {
+test('Codex timeout is terminal, tagged codex_timeout, and names the codex timeout env var', async (t) => {
+  const priorAdapter = process.env.CODEX_RUNTIME_ADAPTER;
+  t.after(() => {
+    if (priorAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER;
+    else process.env.CODEX_RUNTIME_ADAPTER = priorAdapter;
+  });
+  process.env.CODEX_RUNTIME_ADAPTER = 'exec';
+
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
   _resetForTest();
@@ -4090,7 +4111,14 @@ test('antigravity: end to end through a real detached daemon, then session/load 
 // id the moment `thread.started` arrives, not when the run resolves. Same
 // fakeBin discipline as the codex adapter tests above — CODEX_BIN never points
 // at a real binary.
-test('a codex job persists its thread id while still running, not only at terminal', async () => {
+test('a codex job persists its thread id while still running, not only at terminal', async (t) => {
+  const priorAdapter = process.env.CODEX_RUNTIME_ADAPTER;
+  t.after(() => {
+    if (priorAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER;
+    else process.env.CODEX_RUNTIME_ADAPTER = priorAdapter;
+  });
+  process.env.CODEX_RUNTIME_ADAPTER = 'exec';
+
   const mod = await bridge();
   const { dispatch, jobs, _resetForTest } = mod;
   _resetForTest();
