@@ -47,7 +47,7 @@ test('role fields stay top-level and the role inherits the session model', async
   assert.ok(di, 'developer_instructions block extractable');
   const body = di[1];
   assert.match(body, /spawn_agent/);
-  assert.match(body, /send_input/);
+  assert.match(body, /followup_task/);
   assert.match(body, /Status \/ acknowledgement envelope/);
   assert.match(body, /`ok: true` with no `content` \+ `meta`/);
   // Same per-job-status gap as the Claude template — see its suite for why.
@@ -123,12 +123,23 @@ test('template forbids re-routing a dispatch the bridge refused to route', () =>
 
 // Same contract as the Claude template; on Codex the bridge reads the caller's
 // own thread id from MCP _meta, never a mapping keyed by the root session.
-test('Codex template leaves thread and session id to the host: a spawn starts a conversation, send_input continues it', () => {
+test('Codex template leaves thread and session id to the host: a spawn starts a conversation, followup_task continues it', () => {
   assert.doesNotMatch(text, /by-host-session|MY_THREAD/);
   // Nor a session id: Codex sends it in _meta.
   assert.doesNotMatch(text, /host_session_id/);
   assert.doesNotMatch(text, /"thread":/);
   const prose = text.replace(/\s+/g, ' ');
-  assert.match(prose, /send_input to the same agent-companion to continue it/);
+  assert.match(prose, /followup_task to the same agent-companion to continue it/);
   assert.match(prose, /spawn a new one to start fresh/);
+});
+
+test('Codex 0.164.0 invocation uses the current collaboration tool schemas and mailbox wait', () => {
+  const description = text.match(/^description\s*=\s*"""([\s\S]*?)"""/m)[1].replace(/\s+/g, ' ');
+  assert.match(description, /spawn_agent.*`task_name`.*`agent_type`.*`message`/);
+  assert.match(description, /followup_task.*`target`.*`message`/);
+  assert.match(description, /JSON-encoded STRING/);
+  assert.match(description, /wait_agent.*`timeout_ms`/);
+  assert.match(description, /send_message.*does not (?:start|trigger) a (?:new )?turn/);
+  assert.match(description, /list_agents/);
+  assert.doesNotMatch(text, /send_input|resume_agent|0\.130\.0|under-development|trigger_turn|spawn_agent `prompt`/);
 });

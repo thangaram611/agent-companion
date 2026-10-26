@@ -11,7 +11,7 @@
 # This is the Claude Code variant of the agent-companion subagent. The
 # Codex CLI variant lives at templates/agent-companion.toml (TOML schema
 # required by Codex's `agent_roles.rs`) and carries the same body adapted
-# for `spawn_agent`/`send_input`.
+# for `spawn_agent`/`followup_task`.
 # Runtime behavior is host-specific; the bridge MCP server is identical.
 name: agent-companion
 description: |
