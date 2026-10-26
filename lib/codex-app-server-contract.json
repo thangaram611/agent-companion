@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.162.0",
+  "codexVersion": "0.164.0",
   "clientRequests": [
     {
       "method": "account/gatewayOAuth/cancel",
@@ -179,6 +179,14 @@
       "required": [
         "itemTypeResults",
         "providerId"
+      ]
+    },
+    {
+      "method": "feedback/save",
+      "paramsRequired": true,
+      "required": [
+        "classification",
+        "savePath"
       ]
     },
     {
@@ -745,7 +753,7 @@
       "optional": false,
       "params": {
         "authMode": "enum:apikey|chatgpt|chatgptAuthTokens|headers|agentIdentity|personalAccessToken|bedrockApiKey|bedrockAccessKeys?",
-        "planType": "enum:free|go|plus|pro|prolite|promax|team|self_serve_business_prolite|self_serve_business_usage_based|business|ent26|enterprise_cbp_automation|enterprise_cbp_usage_based|enterprise|edu|edu_plus|edu_pro|unknown?"
+        "planType": "enum:free|go|plus|pro|prolite|promax|team|self_serve_business_prolite|self_serve_business_usage_based|business|ent26|enterprise_cbp_automation|enterprise_cbp_usage_based|enterprise|edu|edu_plus|edu_pro|sci|sci_plus|unknown?"
       }
     },
     {
@@ -1370,6 +1378,16 @@
       }
     },
     {
+      "method": "thread/readState/changed",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "readState": "ThreadReadState",
+        "threadId": "string"
+      }
+    },
+    {
       "method": "thread/realtime/closed",
       "routing": "threadId",
       "key": "params.threadId",
@@ -1773,7 +1791,7 @@
     "imageGeneration": {
       "failure": "ImageGenerationFailure?",
       "id": "string",
-      "result": "string",
+      "inputImages": "ImageGenerationInputImage[]?",
       "revisedPrompt": "string?",
       "savedPath": "string?",
       "status": "string",
@@ -1945,7 +1963,7 @@
       "displayOrder": "integer",
       "durationMs": "integer?",
       "entries": "HookOutputEntry[]",
-      "eventName": "enum:preToolUse|permissionRequest|postToolUse|preCompact|postCompact|sessionStart|sessionEnd|userPromptSubmit|subagentStart|subagentStop|stop|interrupt",
+      "eventName": "enum:preModelRequest|postModelRequest|preToolUse|permissionRequest|postToolUse|preCompact|postCompact|sessionStart|sessionEnd|userPromptSubmit|subagentStart|subagentStop|stop|interrupt",
       "executionMode": "enum:sync|async",
       "handlerType": "enum:command|mcpTool|prompt|agent",
       "id": "string",
@@ -2064,6 +2082,10 @@
         "type": "enum:failed"
       }
     ],
+    "ThreadReadState": {
+      "firstUnread": "ThreadUnreadPosition?",
+      "revision": "string"
+    },
     "ThreadRealtimeAudioChunk": {
       "data": "string",
       "itemId": "string?",
