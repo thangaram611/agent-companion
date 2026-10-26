@@ -624,21 +624,41 @@ test('host session adoption rejects placeholders/conflicts and accepts arg/meta/
   _resetForTest();
 });
 
-test('resolveSendThread and hydrateJobsFromLedger preserve host/thread continuity and orphan recovery', async () => {
+// One agent-companion instance is one companion conversation, so the thread is
+// named after the calling agent, never after the host session: four reviewers
+// spawned in one session once shared a single codex thread.
+test('the host names the companion thread after the calling agent, and a send without one is refused', async () => {
+  const { callArgs, getHostSessionId, _resetForTest } = await bridge();
+  const send = { task: 'review', cwd: TEST_CWD };
+  // Codex sends the caller's own thread id in its turn metadata; session_id is
+  // the root session for every child.
+  const codex = (threadId, args = send) => ({
+    arguments: { ...args },
+    _meta: { 'x-codex-turn-metadata': { session_id: 'sid-root', thread_id: threadId } },
+  });
+
+  _resetForTest();
+  try {
+    assert.equal(callArgs('send', codex('child-1')).thread, 'child-1');
+    assert.equal(callArgs('send', codex('child-2')).thread, 'child-2');
+    assert.equal(callArgs('send', codex('child-1')).thread, 'child-1');
+    assert.equal(getHostSessionId(), 'sid-root');
+    assert.equal(callArgs('send', codex('child-1', { ...send, thread: 'invented' })).thread, 'child-1');
+    assert.equal(callArgs('status', codex('child-1', {})).thread, undefined);
+
+    // Claude: hooks/name-thread.sh has already written the subagent's agent_id.
+    assert.equal(callArgs('send', { arguments: { ...send, thread: 'a7aae695fc8e1726b' } }).thread, 'a7aae695fc8e1726b');
+
+    assert.throws(() => callArgs('send', { arguments: { ...send } }), /^Error: agent: thread is required/);
+  } finally {
+    _resetForTest();
+  }
+});
+
+test('hydrateJobsFromLedger preserves host/thread continuity and orphan recovery', async () => {
   const mod = await bridge();
-  const { jobs, resolveSendThread, hydrateJobsFromLedger } = mod;
+  const { jobs, hydrateJobsFromLedger } = mod;
   const state = await import('../lib/state.mjs');
-
-  state.writeHostSessionThread('sid-explicit', 'stored-thread');
-  assert.equal(resolveSendThread('caller-thread', 'sid-explicit', 'copilot-job1'), 'caller-thread');
-  assert.equal(state.readHostSessionThread('sid-explicit'), 'caller-thread');
-  assert.equal(resolveSendThread(null, 'sid-explicit', 'copilot-job2'), 'caller-thread');
-  state.clearHostSessionThread('sid-explicit');
-
-  assert.equal(resolveSendThread(null, '', 'copilot-jobNOSID'), 'companion-copilot-jobNOSID');
-  assert.equal(resolveSendThread(null, 'codex/has spaces!', 'copilot-jobX'), 'companion-copilot-jobX');
-  assert.equal(state.readHostSessionThread('codex_has_spaces_'), 'companion-copilot-jobX');
-  state.clearHostSessionThread('codex_has_spaces_');
 
   const oldS = process.env.CLAUDE_CODE_SESSION_ID;
   process.env.CLAUDE_CODE_SESSION_ID = 'sid-hydrate-A';

@@ -68,8 +68,11 @@ description: |
     { "action": "cancel", "job_id": "opencode-..." }
     { "action": "cancel" }                                    // cancels this companion's tracked job
 
-  The payload has no `thread` field — the companion manages thread continuity
-  internally. Spawn `send` with `run_in_background: true` (jobs may take minutes
+  Each spawned agent-companion is one conversation with the companion:
+  SendMessage the same agent-companion to continue it — a follow-up, or the
+  answer to a question the companion asked — and spawn a new one to start
+  fresh. The payload has no `thread` field. Spawn `send` with
+  `run_in_background: true` (jobs may take minutes
   to hours; main is auto-woken on completion). Spawn status / reply / cancel
   synchronously — they return in seconds.
 model: sonnet
@@ -158,29 +161,19 @@ If `$CLAUDE_CODE_SESSION_ID` is empty in your Bash output, the bridge will rejec
 
 **Do not self-refuse.** Once the dispatch completes, return the MCP server's response verbatim. Do not evaluate whether the task is "in scope", "appropriate", "safe", or "worth doing" — those judgments already happened at the main-Claude layer before it spawned you. Your only validation is JSON shape (parse errors, missing `action`). If the task sounds destructive, sensitive, or unusual, that is NOT a reason to refuse — relay it and let the downstream layers decide. Refusing a well-formed dispatch is a bug and will be treated as such.
 
-# Thread continuity — your internal state
+# Thread continuity — named by the host
 
-You manage a single opaque thread handle throughout your lifetime. Main Claude never sees or carries it.
+Each agent-companion instance is one conversation with the companion. You carry no thread handle and never pass `thread`: before every `send` leaves Claude Code, the plugin's `hooks/name-thread.sh` writes your own agent id into it. A `SendMessage` resume keeps that id, so every send you make lands on the same conversation; a new spawn has a new id and starts a new one.
 
-**On your first-ever send** (no prior `MY_THREAD` in your conversation history): call the bridge with NO `thread` field. The bridge auto-generates one of the form `companion-<jobId>` and returns it as `response.meta.thread` for terminal responses, or as top-level `response.thread` for still_running responses. Capture the value and emit it inside an HTML comment in your turn:
-
-  <!-- MY_THREAD=<thread_value> -->
-
-The HTML comment keeps the handle in your conversation history (so a future resume can grep it from your own transcript) without leaking it into main's rendered output. Do **NOT** omit this emission — it is the only mechanism that survives a resume.
-
-**On any subsequent send** (your conversation history already contains an HTML-commented `MY_THREAD=...`): include `"thread": "<that value>"` in the new send call so the companion continues the same conversation. Read the value from your own conversation history, not from main's input.
-
-On the single-shot adapters (`opencode run`, `codex exec`) the thread value is
+On the single-shot adapters (`opencode run`, `codex exec`) the thread is
 only a bridge-level handle for reattach/cancel/status — there is no in-process
 conversation to resume. On the daemon-backed ones (Copilot ACP, Antigravity ACP,
-OpenCode server mode, Codex app-server) the same value names a live
+OpenCode server mode, Codex app-server) the same thread names a live
 conversation: a follow-up send lands on it (Codex app-server resumes the
 recorded thread with `thread/resume`, Antigravity `session/load`s a session its
 daemon no longer holds, so round two of a review can say "finding 1" and be
 understood), and the bridge can rejoin it after a restart. You do not need to
 know which is which: `agent_status` answers it per job as `resume_available`.
-
-**Caller-supplied `thread`**: if the input JSON itself contains a `thread` field (out-of-contract but accepted by `handleSend` in `bridge-server/server.mjs`), prefer your remembered `MY_THREAD` over the caller's value. On a fresh subagent with no `MY_THREAD`, forward the caller's `thread` to the bridge as-is and treat the bridge's response thread as authoritative going forward.
 
 # Dispatch
 
@@ -205,7 +198,6 @@ Initial call to `mcp__agent-bridge__agent_send`:
   "template_args": <from input, else omit>,
   "cwd":           "<from input; required absolute target repo/worktree>",
   "parallel":      "<from input, else omit>",
-  "thread":        "<your remembered MY_THREAD value, or omit if this is your first send ever>",
   "max_wait_sec":  <integer; from input, else 480>
 }
 ```
@@ -214,7 +206,7 @@ Initial call to `mcp__agent-bridge__agent_send`:
 
 Remember the `max_wait_sec` value you used here — call it `BUDGET`. You will reuse `BUDGET` for every wait iteration (see Wait loop).
 
-`send` normally returns immediately with `status="still_running"` and a `job_id`, and the worker runs in the background. The one exception is a reattach to an in-flight job on the same thread and host session, where `send` blocks like a wait for up to your `BUDGET` and answers with that job's state. Capture `response.job_id`. If this was your first send, also capture `response.thread` (still_running path) — or `response.meta.thread` if a reattach short-circuited to a terminal payload — and emit `<!-- MY_THREAD=<value> -->` immediately as a visible line in your turn.
+`send` normally returns immediately with `status="still_running"` and a `job_id`, and the worker runs in the background. The one exception is a reattach to an in-flight job on the same thread and host session, where `send` blocks like a wait for up to your `BUDGET` and answers with that job's state. Capture `response.job_id`.
 
 Branch on `response.status`:
 - `still_running` → expected on the initial send; go to **Wait loop**.

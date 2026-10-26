@@ -87,7 +87,6 @@ import {
   ALLOWED_MODELS,
   DEFAULT_MODEL,
   readThreadSid, writeThreadSid, clearThread, listThreads,
-  readHostSessionThread, writeHostSessionThread,
   writeJob, readJob, listJobsForSession, deleteJob,
 } from '../lib/state.mjs';
 import {
@@ -99,7 +98,6 @@ import {
   flatStrengths,
   STRENGTH_CAPABILITY_REQUIREMENTS,
 } from '../lib/profile-registry.mjs';
-import { sanitizeHostSessionId } from '../lib/host.mjs';
 import { queuePath, promptEventsPath, runtimeDir, bridgeLogFile, daemonLogFile, digestDir, appendPrivateFile } from '../lib/runtime-paths.mjs';
 import { createReqId, withReq, logEvent } from '../lib/log.mjs';
 import { writeDigest, digestPath } from '../lib/prompt-digest.mjs';
@@ -454,31 +452,6 @@ function persistJob(jobId) {
 export function clampWaitSec(input) {
   const cap = 1200;
   return Math.max(1, Math.min(Number(input) || 480, cap));
-}
-
-// Resolve the thread name for a send. Three sources, in precedence:
-//   1. Explicit `args.thread` from caller (Claude's MY_THREAD-comment trick).
-//   2. Server-side host-session→thread state file (Codex path: subagent has
-//      no transcript-replay mechanism, so the bridge resolves continuity
-//      keyed by the host session id from MCP _meta). Harmless on Claude
-//      because the agent always passes its remembered thread, so this
-//      branch only fires when the caller deliberately omits it.
-//   3. Auto-generated `companion-<jobId>` for first-ever sends.
-// On every send we persist the (host_session_id → thread) mapping so a
-// future bridge respawn can rehydrate the same Copilot session.
-export function resolveSendThread(explicitThread, hostSidRaw, jobId) {
-  let thread = explicitThread || null;
-  const hostSidKey = hostSidRaw ? sanitizeHostSessionId(hostSidRaw) : '';
-  if (!thread && hostSidKey) {
-    try { thread = readHostSessionThread(hostSidKey); }
-    catch (err) { log('WARN', 'readHostSessionThread failed:', err.message); }
-  }
-  if (!thread) thread = `companion-${jobId}`;
-  if (hostSidKey) {
-    try { writeHostSessionThread(hostSidKey, thread); }
-    catch (err) { log('WARN', 'writeHostSessionThread failed:', err.message); }
-  }
-  return thread;
 }
 
 function getJob(jobId) { gcExpiredJobs(); return jobs.get(jobId) || null; }
@@ -2455,9 +2428,9 @@ function runCodexWorker(args) {
 // exactly as Copilot's is) and `thread/start` otherwise. That is what makes a
 // follow-up send a follow-up: round two of a review lands on the conversation
 // round one had, instead of a cold thread that has to be told everything again.
-// A thread with no recorded id is what opens fresh. (Omitting `thread` does not
-// mean fresh: handleSend maps a host session to its thread, as it always has
-// for Copilot.)
+// A thread with no recorded id is what opens fresh — and the host names the
+// thread after the calling agent (callArgs), so a new agent-companion spawn is
+// what opens fresh.
 //
 // The connection is per-job and lives from that open through the terminal:
 // `startCodexTurn` skips its status probe only for a thread THIS connection
@@ -3129,12 +3102,10 @@ async function handleSend(args) {
   const profileId = routing.resolved.profileId;
   const routedStrength = routing.resolved.strength;
 
-  // The bridge auto-generates a thread name if the caller (the companion
-  // subagent) did not pass one. This is how the companion gets a stable
-  // handle it can remember across resumes — main never sees or carries it.
-  // Pre-compute the jobId first so we can derive thread = companion-<jobId>.
+  // Over MCP the host has named the thread after the calling agent (callArgs);
+  // a direct dispatch caller that names none gets a conversation of its own.
   const jobId = `${target}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  const thread = resolveSendThread(args.thread || null, getHostSessionId(), jobId);
+  const thread = args.thread || `companion-${jobId}`;
 
   // Reattach guard. When the MCP bridge dies mid-send and Claude Code respawns
   // it, the same tool call lands again with the same thread + host session.
@@ -4021,7 +3992,7 @@ const AGENT_TOOLS = [
         },
         thread: {
           type: 'string',
-          description: 'Optional thread name for conversation continuity where the companion supports it.',
+          description: 'Set by the host, never by you: it names the companion conversation after the calling agent.',
           pattern: '^[a-zA-Z0-9._-]+$',
         },
         max_wait_sec: MAX_WAIT_FIELD,
@@ -4109,25 +4080,50 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: AGENT_TOOLS,
 }));
 
+// Turn one MCP tool call into validated dispatch args.
+//
+// Codex (PR openai/codex#15190) injects per-turn metadata on every MCP tool
+// call as `_meta["x-codex-turn-metadata"]`: `session_id` is the ROOT session
+// for every agent in it, `thread_id` the calling agent's own thread (measured
+// on codex-cli 0.164.0). The session id is adopted BEFORE validation so even
+// callers that don't forward host_session_id get correctly tagged; this is
+// the primary host→bridge session-id channel on Codex, and arg-based
+// forwarding is the fallback for hosts that don't expose _meta (Claude does
+// not).
+//
+// One agent-companion instance is one companion conversation, so a send's
+// thread is named after the calling agent and never after the host session:
+// Codex's thread_id here, and on Claude the subagent's agent_id, which only
+// hooks can see — hooks/name-thread.sh writes it into `thread` before the call
+// leaves the host. The host's name wins over anything the model wrote. A send
+// that arrives with no name is refused rather than given a conversation
+// nobody could continue.
+export function callArgs(action, params) {
+  const turn = params?._meta?.['x-codex-turn-metadata'];
+  if (turn?.session_id && typeof turn.session_id === 'string') adoptHostSessionId(turn.session_id);
+  const toolArgs = params?.arguments || {};
+  if (Object.prototype.hasOwnProperty.call(toolArgs, 'action')) {
+    throw new Error('agent: split MCP tools do not accept an action field; choose the agent_* tool that matches the operation');
+  }
+  const args = { action, ...toolArgs };
+  if (action === 'send') {
+    if (turn?.thread_id && typeof turn.thread_id === 'string') args.thread = turn.thread_id;
+    if (!args.thread) {
+      throw new Error(
+        'agent: thread is required — the host names it after the calling agent ' +
+        "(Claude: hooks/name-thread.sh writes the subagent's agent_id; Codex: _meta thread_id), " +
+        'and neither reached the bridge',
+      );
+    }
+  }
+  return validateAgentArgs(args);
+}
+
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const action = TOOL_ACTIONS[req.params.name];
   if (!action) throw new Error(`unknown tool: ${req.params.name}`);
   try {
-    // Codex (PR openai/codex#15190) injects per-turn metadata on every MCP
-    // tool call as `_meta["x-codex-turn-metadata"]`, including a stable
-    // session_id. Adopt that BEFORE validation/dispatch so even callers
-    // that don't forward host_session_id get correctly tagged. This is
-    // the primary host→bridge session-id channel on Codex; arg-based
-    // forwarding is the fallback for hosts that don't expose _meta
-    // (Claude does not).
-    const metaSid = req?.params?._meta?.['x-codex-turn-metadata']?.session_id;
-    if (metaSid && typeof metaSid === 'string') adoptHostSessionId(metaSid);
-    const toolArgs = req.params.arguments || {};
-    if (Object.prototype.hasOwnProperty.call(toolArgs, 'action')) {
-      throw new Error('agent: split MCP tools do not accept an action field; choose the agent_* tool that matches the operation');
-    }
-    const normalized = validateAgentArgs({ action, ...toolArgs });
-    return await dispatch(normalized);
+    return await dispatch(callArgs(action, req.params));
   } catch (err) {
     if (err && err.code === 'BRIDGE_SID_CONFLICT') {
       log('ERROR', 'sid conflict on MCP call:', err.message);

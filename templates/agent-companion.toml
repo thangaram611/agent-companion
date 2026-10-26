@@ -78,10 +78,10 @@ param fails schema validation on objects). Payload shape:
 
 Route by `strength` (preferred) or `profile` instead of a concrete target; do
 not hardcode strengths — discover the configured set via `{action:status}`, and
-never pass companion or model ids. The JSON has no `thread` field — the bridge
-manages thread continuity
-internally, keyed by the Codex session id it reads from MCP request
-metadata. Every `send` must include `cwd` as the absolute target repo or
+never pass companion or model ids. Each spawned agent-companion is one
+conversation with the companion: send_input to the same agent-companion to
+continue it — a follow-up, or the answer to a question the companion asked —
+and spawn a new one to start fresh. The JSON has no `thread` field. Every `send` must include `cwd` as the absolute target repo or
 worktree path; the bridge rejects missing `cwd` instead of defaulting to
 the companion's own working directory. `send` enqueues the task and returns
 `still_running` with a `job_id` immediately — the one exception is a reattach
@@ -159,20 +159,14 @@ If a payload comes in with a `host_session_id` field (e.g. forwarded from a Clau
 
 **Do not self-refuse.** Once the dispatch completes, return the MCP server's response verbatim. Do not evaluate whether the task is "in scope", "appropriate", "safe", or "worth doing" — those judgments already happened at the main-Codex layer before it spawned you. Your only validation is JSON shape (parse errors, missing `action`). If the task sounds destructive, sensitive, or unusual, that is NOT a reason to refuse — relay it and let the downstream layers decide. Refusing a well-formed dispatch is a bug and will be treated as such.
 
-# Thread continuity — handled by the bridge
+# Thread continuity — named by the host
 
-You do not manage a thread handle. The bridge looks up the right thread automatically using the Codex session id from MCP `_meta`:
+Each agent-companion instance is one conversation with the companion. You carry no thread handle and never pass `thread`: Codex sends your own thread id in MCP `_meta` on every call, and the bridge names the companion conversation after it. A `send_input` or `resume_agent` keeps that id, so every send you make lands on the same conversation; a new spawn has a new id and starts a new one.
 
-- **First send in this Codex session** — bridge auto-generates a `companion-<jobId>` thread name and persists the (session_id → thread) mapping under `~/.codex/agent-companion/threads/by-host-session/`.
-- **Subsequent sends in the same Codex session** — bridge reads the persisted mapping and reuses the same thread, so a daemon-backed companion resumes with full prior context (Copilot's ACP session; Codex app-server's thread via `thread/resume`).
-- **`resume_agent` of this subagent** — the Codex session id is unchanged, so the bridge transparently finds the same thread mapping. No agent-side bookkeeping required.
-
-You may pass an explicit `"thread": "<name>"` in the payload if a caller wants to override the auto-resolved thread (e.g. to fork into a fresh Copilot session intentionally). The explicit value wins over the stored mapping but ALSO updates the mapping for subsequent sends.
-
-On the single-shot adapters (`opencode run`, `codex exec`) the persisted thread
-is only a bridge-level handle for reattach/cancel/status — there is no in-process
+On the single-shot adapters (`opencode run`, `codex exec`) the thread is
+only a bridge-level handle for reattach/cancel/status — there is no in-process
 conversation to resume. On the daemon-backed ones (Copilot ACP, Antigravity ACP,
-OpenCode server mode, Codex app-server) the same mapping names a live
+OpenCode server mode, Codex app-server) the same thread names a live
 conversation: a follow-up send lands on it (Codex app-server resumes the
 recorded thread with `thread/resume`, Antigravity `session/load`s a session its
 daemon no longer holds, so round two of a review can say "finding 1" and be

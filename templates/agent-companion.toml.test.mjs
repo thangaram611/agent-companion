@@ -124,3 +124,13 @@ test('template forbids re-routing a dispatch the bridge refused to route', () =>
     /Do NOT re-send the task with a `target`, `profile`, or `strength` the parent did not supply/);
   assert.match(body, /and do NOT drop the one it did supply/);
 });
+
+// Same contract as the Claude template; on Codex the bridge reads the caller's
+// own thread id from MCP _meta, never a mapping keyed by the root session.
+test('Codex template leaves the thread to the host: a spawn starts a conversation, send_input continues it', () => {
+  assert.doesNotMatch(text, /by-host-session|MY_THREAD/);
+  assert.doesNotMatch(text, /"thread":/);
+  const prose = text.replace(/\s+/g, ' ');
+  assert.match(prose, /send_input to the same agent-companion to continue it/);
+  assert.match(prose, /spawn a new one to start fresh/);
+});

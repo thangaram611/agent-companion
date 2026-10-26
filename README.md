@@ -204,10 +204,10 @@ Notes:
     follow-up send on the same `thread` resumes the codex thread the last job
     on it recorded (its id is the thread's `.sid`, exactly as Copilot's ACP
     session id is), so the conversation continues instead of restarting cold.
-    A thread name with no recorded id is what opens fresh — note that omitting
-    `thread` on a host session that already has a thread mapped continues that
-    thread, as it always has for Copilot. A
-    recorded id that no longer resumes on a healthy broker fails that send
+    A thread name with no recorded id is what opens fresh, and the thread is
+    named after the calling agent-companion (see "One agent-companion, one
+    companion conversation"), so a new spawn opens fresh and a message to the
+    same one continues. A recorded id that no longer resumes on a healthy broker fails that send
     explicitly and retires the sid — there is no silent fallback to a fresh
     thread.
   - Under `appserver` the approval policy is pinned to `never` and is not
@@ -549,24 +549,19 @@ again". The allow-list shape is:
 Use `.claude/settings.local.json` if you want these permissions scoped to one
 repository.
 
-### Optional: `SendMessage` subagent resume
+### One agent-companion, one companion conversation
 
-Nothing in this plugin requires it. The bridge implements its own reply, wait,
-status and restart-resume over HTTP (`agent_reply` / `agent_wait` /
-`agent_status`, plus the `reply_available` / `resume_available` flags described
-in `docs/ARCHITECTURE.md`) — none of which goes through Claude Code's
-`SendMessage`.
-
-If you separately want Claude Code's built-in subagent resume — reattaching to
-a *completed* subagent's thread with its context intact — that is gated behind
-an experimental flag you can set yourself:
-
-```bash
-export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
-```
-
-`setup.sh` does **not** set this for you. It is an experimental Claude Code
-flag with effects well beyond this plugin, so opting in is your call.
+Each spawned `agent-companion` is one conversation with the companion. To
+continue it — a follow-up, or the answer to a question the companion asked —
+main sends the same agent-companion a message (`SendMessage` on Claude Code,
+`send_input` on Codex); to start fresh, it spawns a new one. Neither main nor
+the subagent carries a thread: the host names it after the calling agent.
+Claude Code shows a subagent's `agent_id` only to hooks, so the plugin's
+`PreToolUse` hook (`hooks/name-thread.sh`) writes it into `agent_send`'s
+`thread`; Codex sends the caller's own thread id in MCP `_meta`, which the
+bridge reads. A send that reaches the bridge with neither is refused. Measured
+on Claude Code 2.1.310 and codex-cli 0.164.0: two spawns get two ids, a resume
+keeps its id, and `SendMessage` needs no experimental flag.
 
 ## Install For Codex CLI
 
@@ -653,7 +648,7 @@ agent_send({
   mode?,
   template?,
   template_args?,
-  thread?,
+  thread?,         // set by the host after the calling agent; never by the caller
   max_wait_sec?,
   parallel?
 })

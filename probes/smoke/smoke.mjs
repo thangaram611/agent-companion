@@ -72,7 +72,7 @@ try {
 
   // --- 1. Routing contract: an unconfigured strength must hard-fail, not fall back.
   const strengthRes = await callTool('agent_send', {
-    task: 'noop', cwd: work, strength: 'reviewer', mode: 'ANALYZE', max_wait_sec: 5,
+    task: 'noop', cwd: work, thread: `${SID}-strength`, strength: 'reviewer', mode: 'ANALYZE', max_wait_sec: 5,
   });
   const sp = strengthRes.parsed;
   check('unconfigured strength returns STRENGTH_UNCONFIGURED (no silent fallback)',
@@ -85,7 +85,7 @@ try {
   log('dispatching a real codex job into', work);
   const send = await callTool('agent_send', {
     task: 'Read README.md in the current directory and reply with ONLY the magic word it names. No preamble, no punctuation.',
-    cwd: work, mode: 'ANALYZE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    cwd: work, thread: `${SID}-magic`, mode: 'ANALYZE', template: 'general', parallel: 'never', max_wait_sec: 5,
   });
   const jobId = send.parsed?.job_id || send.parsed?.jobId;
   check('agent_send accepted and returned a job_id', !!jobId, `job_id=${jobId}`);

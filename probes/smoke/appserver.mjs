@@ -151,7 +151,7 @@ try {
       + 'Then run these three shell commands one after another, each as its own command: '
       + '`sleep 20 && echo STEP1`, then `sleep 20 && echo STEP2`, then `sleep 20 && echo STEP3`. '
       + `When all three have finished, reply with ONLY the word ${ANSWER} — that final message must contain nothing else.`,
-    cwd: work, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    cwd: work, thread: `${SID}-steps`, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
   });
   const jobId = send.job_id || send.jobId;
   check('bridge A dispatched a codex job on the app-server adapter', !!jobId, `job=${jobId}`);

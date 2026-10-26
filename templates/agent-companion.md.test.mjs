@@ -134,3 +134,14 @@ test('Claude template forbids re-routing a dispatch the bridge refused to route'
     /Do NOT re-send the task with a `target`, `profile`, or `strength` the parent did not supply/);
   assert.match(text, /and do NOT drop the one it did supply/);
 });
+
+// One agent-companion instance is one companion conversation, and the host
+// names it (hooks/name-thread.sh writes the subagent's agent_id into `thread`),
+// so the subagent carries no thread and main learns spawn-vs-continue instead.
+test('Claude template leaves the thread to the host: a spawn starts a conversation, SendMessage continues it', () => {
+  assert.doesNotMatch(text, /MY_THREAD/);
+  assert.doesNotMatch(text, /"thread":/);
+  const prose = text.replace(/\s+/g, ' ');
+  assert.match(prose, /SendMessage the same agent-companion to continue it/);
+  assert.match(prose, /spawn a new one to start fresh/);
+});

@@ -156,7 +156,7 @@ fi
 # register as live. `: >` replaces `touch`: same result for the only consumer,
 # which reads mtime and expects a zero-byte file.
 [ -d "$HEARTBEAT_DIR" ] || mkdir -p "$HEARTBEAT_DIR" 2>/dev/null || true
-# Sanitized for use as a filename — mirrors lib/host.mjs:sanitizeHostSessionId.
+# Sanitized for use as a filename: every character outside [a-zA-Z0-9._-] becomes _.
 # The raw id is kept in MY_SID for jq's --arg; only the filename is folded.
 HB_SID="${MY_SID//[^a-zA-Z0-9._-]/_}"
 { : > "$HEARTBEAT_DIR/$HB_SID.heartbeat"; } 2>/dev/null || true

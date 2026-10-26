@@ -338,7 +338,6 @@ State lives under the host-routed companion home `~/.{claude,codex}/agent-compan
   session the last job on that thread recorded — a Copilot ACP session id, or a
   codex app-server thread id — namespaced by profile. It is what a follow-up
   send resumes. The exec adapter never reads or writes it.
-- `threads/by-host-session/`: Codex host-session to companion-thread mapping.
 - `jobs/`: persisted in-flight/recent jobs for restart recovery. OpenCode
   server jobs persist their `ses_` session id (under the target-neutral
   `companionSessionId` key) and the server `baseUrl` so a respawned bridge can
@@ -472,6 +471,20 @@ because the cost of re-deriving them is a day each.
   `mach_continuous_time()`, which counts sleep. Linux's `CLOCK_MONOTONIC` does not, so the
   two platforms have *opposite* semantics and ubuntu CI cannot exercise production behaviour
   even in principle. That, not flakiness, is why durations go through an injectable clock.
+- **The host session id does not identify the caller.** It names the *main* session, which
+  every subagent in it shares. Companion continuity keyed on it put four reviewers and an
+  author, each spawned separately in one Claude session, on a single codex thread; one job
+  carried 2.1M input tokens. Measured 2026-10-26:
+  - Claude Code 2.1.310 shows the bridge only main's `CLAUDE_CODE_SESSION_ID` in its env, and
+    `claudecode/toolUseId` and `progressToken` in `_meta`.
+  - The subagent's `agent_id` reaches hooks only. It differs per spawn and is unchanged
+    across `SendMessage`. That is why `hooks/name-thread.sh` writes it into `agent_send`'s
+    `thread` from `PreToolUse`.
+  - On codex-cli 0.164.0, `_meta["x-codex-turn-metadata"].session_id` is also the root
+    session for every child. Its `thread_id` is the caller's own, and the bridge names the
+    thread from that.
+
+  On both hosts the id comes from the host, so no model has to carry it.
 
 **Blast radius**
 
