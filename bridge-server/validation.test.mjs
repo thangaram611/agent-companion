@@ -1,4 +1,4 @@
-// Validation tests for the single `copilot` tool. Pure-function:
+// Validation tests for the five agent_* tools. Pure-function:
 // no sockets, no daemon, no state-layer side effects.
 
 import '../test/sandbox-home.mjs';

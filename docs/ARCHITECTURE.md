@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-10-09
+Last updated: 2026-10-26
 
 ## Goal
 
@@ -27,10 +27,9 @@ Agent Companion is organized around a harness + companion model:
 | Companion profile | `profiles.json` entry | A configured runtime/model instance, such as a Copilot model profile or OpenCode provider/model profile. |
 | Strength | `agent_send({ strength })` | A public capability label such as `reviewer`, `web_researcher`, `planner`, or `fast_executor`. |
 
-The current public flags and schema keep `host` and `target` for compatibility:
+The public flags and schema use `host` and `target`:
 `setup.sh --host claude|codex|both` selects harness surfaces, and
-`agent_send({ target })` still names a companion runtime directly, with
-`default-target` behind it as the pre-profile default (see Public MCP Surface).
+`agent_send({ target })` names a companion runtime directly (see Public MCP Surface).
 
 ## Flow
 
@@ -56,9 +55,9 @@ flowchart LR
   Subagent --> Main
 ```
 
-The dotted edges are the ones that survive a bridge replacement. Everything else in this
-diagram dies with the bridge process, which is the whole reason the broker and the ACP
-daemons exist.
+The broker and ACP daemons survive bridge replacement; their clients reconnect.
+OpenCode server mode likewise uses a detached `opencode serve`. The job ledger,
+queue and digests persist on disk.
 
 ### MCP registration boundary
 
@@ -79,27 +78,20 @@ pre-approved so an inherited call works under headless approval policy
 
 ## Public MCP Surface
 
-The only tools are the generic `agent_*` set:
+The five `agent_*` tools and their invocation contract are documented in
+[README.md](../README.md).
 
-- `agent_send`
-- `agent_wait`
-- `agent_status`
-- `agent_reply`
-- `agent_cancel`
-
-`agent_send` accepts an optional `target` (`opencode` | `copilot` | `codex`).
-When it is omitted, resolution starts at the default **profile**
+`agent_send` accepts an optional `target` (`opencode` | `copilot` | `codex` | `antigravity`).
+With no explicit target, profile or strength, resolution starts at the default **profile**
 (`AGENT_COMPANION_DEFAULT_PROFILE`, else `profiles.json`'s `defaultProfile`) and
 routes to that profile's companion; a default profile that names no configured
 profile fails loudly with `PROFILE_UNKNOWN` rather than falling through to a
 target. Only when no default profile is configured does resolution fall back to
 `AGENT_COMPANION_DEFAULT_TARGET`, then the `default-target` state file. With no
-`profiles.json` the bridge synthesizes its one profile from `default-target`, so
-a legacy install resolves identically either way. **There is no silent
-fallback** — if nothing is configured and no `target` is passed, `agent_send`
-returns a `TARGET_UNCONFIGURED` error pointing at onboarding. There are no legacy
-`copilot_*` aliases and no legacy env overrides; the rename to the `agent-*`
-identity is complete.
+`profiles.json` the bridge synthesizes one profile from `default-target` /
+`default-model`. **There is no silent fallback** — if nothing is configured and
+no routing input is passed, `agent_send` returns `TARGET_UNCONFIGURED`, pointing
+at onboarding.
 
 ## Companion Matrix
 
@@ -111,15 +103,6 @@ identity is complete.
 | Codex CLI (exec) | Implemented `codex exec` adapter (default, send-only) | yes | yes | yes | yes | no | no |
 | Codex CLI (app-server) | Implemented broker + JSON-RPC adapter | yes | yes | yes | yes | yes | yes |
 | Google Antigravity | Implemented ACP adapter (generic daemon, Antigravity descriptor; spawns the registry's `agy_acp_server.par`) | yes | yes | yes | yes | yes (cancel + re-prompt) | yes with ACP and `session/load` |
-| Goose | Planned — an ACP row, a descriptor away | no | no | no | no | no | no |
-
-Aider was dropped from the plan (2026-09-09 assessment: stalled upstream, no ACP
-or MCP surface). Gemini CLI was built on the generic daemon and dropped before
-shipping (2026-09-11): consumer "Login with Google" ended on 2026-06-18. The
-same day Google's own ACP server for Antigravity — the registry's
-`antigravity-acp`, published by Google on 2026-08-20 — became the second ACP
-companion; the `agy` CLI itself still has no ACP mode. `docs/MVP_TRACKER.md`
-items 7 and 8 keep the measurements, the terms reading and the handoff.
 
 The ACP transport is one daemon implementation, `scripts/acp-daemon.mjs`, run
 as **one detached process per ACP companion per host home**
@@ -149,7 +132,7 @@ prompt failed `ACP_PROTOCOL_MISMATCH`, job settled `unreachable` with
 `session/load` to `session/resume`. Reply is cancel + re-prompt on the same
 session (ACP has no mid-turn steer, and the acknowledgement says so); restart
 resume is the daemon outliving the bridge, plus `session/load` for a session
-the daemon no longer holds when the descriptor declares `acp.loadSession` AND
+the daemon does not hold when the descriptor declares `acp.loadSession` AND
 the agent advertises it (Copilot's declares false: process-local sessions;
 Antigravity's declares true: its sessions are SQLite files under
 `~/.gemini/antigravity-acp/conversations/` and a loaded one remembers,
@@ -183,21 +166,20 @@ that specific job can do — independent of the current env.
 
 The Codex adapter is selected the same way, by `CODEX_RUNTIME_ADAPTER` (`exec`
 default, `appserver` opt-in), and records `codexAdapter` on the job for the same
-reason. `appserver` mode talks JSON-RPC over a unix socket to a **detached,
+reason. `appserver` mode talks JSON-RPC over a unix socket to a **detached
 broker** — one per host home, shared by every bridge on the machine that
 resolves to it — that owns one `codex app-server` over stdio. The broker
-exists because `codex app-server` dies with its stdio parent (measured): the
-transport buys nothing on its own, so the survival property comes from the broker
-being long-lived and detached from every bridge. Reply is `turn/steer` (real
-mid-flight injection, no restart), cancel is `turn/interrupt` (the thread stays
+provides the survival boundary measured in
+[`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#2-app-server-and-broker-evidence).
+Reply is `turn/steer` (real mid-flight injection, no restart), cancel is `turn/interrupt` (the thread stays
 live), restart resume is `thread/resume` (which rejoins a *running* thread), and
 salvage is `thread/read` over RPC. A follow-up send on a thread whose last job
 recorded a thread id also goes through `thread/resume` — every app-server send
 on an existing thread, not only `review` — and `thread/start` opens only a
 thread with no recorded id; a recorded id that fails to resume on a healthy
-broker fails the job explicitly and retires the sid rather than opening fresh. `approvalPolicy` is pinned to `never` and is
-not configurable — a client that accepts one approval escalates past the sandbox
-(measured) — so the sandbox is the hard boundary. Two reapers stop the broker
+broker fails the job explicitly and retires the sid rather than opening fresh.
+`approvalPolicy` is pinned to `never`; §2 records the sandbox-escalation measurement.
+Two reapers stop the broker
 when nothing is using it: its own inactivity timer and the bridge-side lease
 reaper in `lib/shared-runtime-registry.mjs`. `thread/loaded/list` supplies the
 candidate ids, but is not itself an activity signal: each reaper reads those
@@ -219,12 +201,27 @@ the existing client/lease/active-turn disposal guards. A `thread/start`
 configuration `EPERM` or dead-broker signature gets the same guarded replacement
 and exactly one retry.
 
-The one capability the transport does **not** change is the sandbox: both codex
-adapters resolve it from the same `AGENT_COMPANION_CODEX_SANDBOX_MODE`, and the
-app-server sends it on `thread/resume` as well as `thread/start` (omitting it
-there silently de-escalates a resumed turn — measured on the exec transport).
+Both Codex adapters share the sandbox resolver. The app-server sends mode
+and approval policy on start and resume, and network policy on `turn/start`.
+The measured default differences and extra-writable-root limitation are in
+[`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#sandbox-and-configuration).
 
 ## Routing Contract
+
+**One agent-companion instance is one companion conversation.** The host names
+its thread: Claude's `PreToolUse` hook (`hooks/name-thread.sh`) supplies the
+subagent's `agent_id`; Codex's `callArgs` reads
+`_meta["x-codex-turn-metadata"].thread_id`. A resumed subagent keeps that identity;
+a fresh spawn gets a distinct conversation. An MCP send without a thread is
+refused. The host session id comes from Claude's inherited env or the same
+Codex metadata object's `session_id`; it scopes completion delivery, not
+companion continuity.
+
+On a thread with an in-flight job, only a matching retry reattaches: host session,
+target, profile, cwd, task, mode, template and template arguments must match.
+A different request with the same routing is refused as `thread_busy`, naming
+the job and the wait/cancel/reply options. Target, profile and cwd conflicts
+have their own mismatch responses.
 
 `agent_send` is routed by the sole routing brain `resolveRouting({target,
 profile, strength})` (`bridge-server/server.mjs`). A harness picks **at most one
@@ -249,18 +246,10 @@ and `MODEL_NOT_ALLOWED` adds `model` and a `hint`. Every one of them ships in th
 `TARGET_UNCONFIGURED` envelope shape, carrying the public `targets` and
 `profiles` lists so the harness can see what *is* configured.
 
-The invariant is two-sided, and the subagent half is the one that broke in the
-field: on any of those codes the companion subagent must return the error
-envelope and **stop**. It may not re-send with a `target`, `profile`, or
-`strength` the harness did not supply. A bridge that refuses to guess is worth
-nothing if the layer above it guesses instead — observed once as a
-`STRENGTH_UNCONFIGURED` rejection re-sent 30s later against an unnamed target.
-Both agent templates carry the prohibition, and both template test suites assert
-it.
-
-When no `profiles.json` exists, the bridge synthesizes a single degenerate
-profile from `default-target` / `default-model`, so a legacy one-to-one install
-routes byte-identically (same job object, same `<thread>.sid` filename).
+The companion subagent must return any routing refusal and stop. It may not
+substitute a `target`, `profile`, or `strength` the harness did not supply.
+Both template suites assert this; the measured failure is
+[`RELIABILITY_REMEDIATION.md` F5](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
 
 ## Strength Router
 
@@ -270,27 +259,17 @@ those profiles. Harnesses see only the strength names (via `agent_status`); they
 never need to know whether a strength is backed by Copilot, OpenCode, another
 companion, or a specific model behind one of them.
 
-```jsonc
-{
-  "profiles": [
-    { "id": "cop-review",  "companion": "copilot",  "model": "claude-sonnet-4.6",            "strengths": ["reviewer", "planner"] },
-    { "id": "cop-fast",    "companion": "copilot",  "model": "claude-haiku-4.5",             "strengths": ["fast_executor"] },
-    { "id": "oc-research", "companion": "opencode", "model": "anthropic/claude-sonnet-4.6", "adapter": "server", "strengths": ["web_researcher"] }
-  ],
-  "defaultProfile": "cop-review"
-}
-```
-
 A profile **inherits** its companion's capabilities (it never re-declares
-capability booleans); model is a per-prompt argument, so two profiles differing
-only by model reuse the same detached server. Multiple profiles may declare the
+capability booleans). OpenCode server and Codex app-server profiles can select
+models while sharing the runtime. An ACP daemon replaces its agent child when
+cwd or model changes, and refuses the switch while a prompt is active.
+Multiple profiles may declare the
 same strength — the top-level `defaultProfile` breaks the tie **only if it itself
 declares that strength**, otherwise the send returns `STRENGTH_AMBIGUOUS`.
-Authoring is non-interactive: `node scripts/onboard.mjs --define-profile <id>
---companion <c> [--model <m>] [--adapter <that companion's transport: opencode
-cli|server, codex exec|appserver>] [--strength <labels>]`,
-`--assign-strength`, `--set-default-profile`, and `--list-profiles`. Only ids,
-model names, and strength labels are persisted — never secrets.
+
+Profile authoring and examples belong in [README.md](../README.md); the
+single reader is `lib/profile-registry.mjs`. Only ids, model names and strength
+labels are persisted — never secrets.
 
 The router is capability-driven: a strength label never implies a capability the
 backing profile lacks, and the design avoids assuming every companion supports
@@ -298,12 +277,8 @@ reply, resume, parallelism, streaming, or model selection.
 
 ## Companion Adapter Contract
 
-Current MVP adapters are not yet formal classes. The stable contract is visible through job fields and handlers:
+The runtime boundary is expressed through job fields and handlers:
 
-- A companion send creates a job with `target`, `jobId`, `task`, `cwd`,
-  `thread`, `mode`, `template`, `parallelStrategy`, `status`, and `startedAt`.
-- Terminal adapters call `retainTerminalJob` with `status`, `summary`, `error`, `detail`, `durationMs`, and `terminalAt`.
-- `summary.message` is the user-visible terminal message. `summary.toolCalls` is optional.
 - Every adapter puts the turn's token usage, when its transport reports one,
   on the summary it builds, in the one shape `lib/usage.mjs` defines (six
   counters, `source`, optional `model`/`cost`/`cost_unit`, `partial` for a
@@ -330,12 +305,14 @@ Current MVP adapters are not yet formal classes. The stable contract is visible 
 
 ## State
 
-State lives under the host-routed companion home `~/.{claude,codex}/agent-companion/`:
+State defaults to the host-routed companion home `~/.{claude,codex}/agent-companion/`
+(`CODEX_HOME` relocates the Codex home; `AGENT_COMPANION_HOME` overrides the state dir):
 
 - `default-model`: Copilot model config.
 - `default-target`: configured default target (written by onboarding).
+- `profiles.json`: companion profiles, strengths and the default profile.
 - `threads/`: logical companion thread names, each holding the companion
-  session the last job on that thread recorded — a Copilot ACP session id, or a
+  session the last job on that thread recorded — an ACP session id, or a
   codex app-server thread id — namespaced by profile. It is what a follow-up
   send resumes. The exec adapter never reads or writes it.
 - `jobs/`: persisted in-flight/recent jobs for restart recovery. OpenCode
@@ -348,18 +325,13 @@ State lives under the host-routed companion home `~/.{claude,codex}/agent-compan
   `opencode serve` process so a respawned bridge reattaches instead of
   re-spawning.
 - `runtime/<companion>-acp.sock`: each ACP daemon's unix socket (copilot
-  today), a fixed short path like the broker's; `runtime/acp-daemons.json`
+  and antigravity), a fixed short path like the broker's; `runtime/acp-daemons.json`
   records the daemon's pid, leases, `lastUsedAt` and disposal claim per
   companion — bookkeeping, not an address book, for the same reason as the
   broker's file.
 - `runtime/codex-app-server.sock`: the codex broker's unix socket. Its path is
   fixed and short on purpose — unix paths truncate silently at `SUN_LEN`
-  (~104 bytes on darwin). **Socket presence is not liveness:** SIGKILL skips the
-  broker's unlink handler, so every start connect-probes the path and unlinks
-  only on an `absent` verdict — `ECONNREFUSED`, `ENOENT`, or `ENOTSOCK` (a plain
-  file left at the path). Any other code, such as `EMFILE` under a wide fan-out
-  or `EACCES`, is a probe that failed rather than an answer, and the start
-  refuses with `BROKER_SOCKET_INDETERMINATE` instead of guessing.
+  (~104 bytes on darwin). Startup uses the connect-probe verdict described below.
 - `runtime/codex-broker.json`: running launch metadata, leases, `lastUsedAt`
   and the two-phase disposal claim for that broker. Unlike the OpenCode registry
   — which holds the only record of an ephemeral `--port 0` address — this file
@@ -369,44 +341,37 @@ State lives under the host-routed companion home `~/.{claude,codex}/agent-compan
 ## Negative Results
 
 Things that are **not** true, that a reader of this repo would reasonably assume are.
-Each was believed here at some point and overturned by measurement; the plan that
-records the experiments is [`RELIABILITY_REMEDIATION.md`](RELIABILITY_REMEDIATION.md)
+The measured evidence is in [`RELIABILITY_REMEDIATION.md`](RELIABILITY_REMEDIATION.md)
 and the harnesses are in [`probes/`](../probes/README.md). They are listed as negatives
 because the cost of re-deriving them is a day each.
 
 **Transport and process lifetime**
 
-- **"`codex exec resume` cannot reattach to an in-flight turn"** — true of the **exec
-  CLI**, and false of **codex**. `codex app-server`'s `thread/resume` explicitly rejoins
-  a *running* thread: a turn was driven to completion across a client that was SIGKILLed
-  mid-turn, same `turnId` throughout, zero re-prompting. The limits the exec adapter
-  reports are transport limits, and `lib/target-registry.mjs` says so.
-- **`detached: true` is not what makes a child survive.** File-backed stdout is
-  (2×2 matrix against the real binary). The orphan risk belongs to *"the child's stdout is
-  no longer a live bridge pipe"* — so any change that hands codex a file or `'ignore'`, or
-  stops draining the pipe, ships an orphan with nobody deciding to.
-- **No signal reaches a codex child when its bridge dies.** Disposing a stdio MCP server
-  sends SIGINT **to that process only**; a non-detached grandchild is never signalled and
-  dies of EPIPE at its next stdout write (measured 1 ms for a 1 Hz writer, 56 s for a turn
-  that writes rarely). "Alive" from a pid probe therefore describes a window of seconds,
-  which is why the app-server path uses `thread/loaded/list` instead.
-- **`codex app-server` over stdio buys no survival by itself.** Spawned as a bridge child
-  it dies with its stdio parent and the turn ends `turn_aborted`. The **broker** buys the
-  survival, not the protocol.
-- **A present socket is not a live broker.** SIGKILL skips the unlink handler. Connect-probe;
-  only an `absent` verdict — `ECONNREFUSED`, `ENOENT`, `ENOTSOCK` — authorises the unlink. An
-  indeterminate code (`EMFILE`, `EACCES`) refuses it, because it says nothing about liveness.
-- **`thread not found` does not mean the thread is gone.** It means "not loaded into this
-  process", and `thread/resume` fixes it. Classifying it as unrecoverable would report a
-  broker restart — the exact case this transport was chosen for — as lost work. The guard is
-  structural: resume before interrupting or steering a thread this connection did not start.
-- **`turn/start` on a busy thread does not reject.** It succeeds and returns a *second*
-  turn id: two turns, two bills, two sets of edits. Status must be checked first.
-- **A thread being loaded does not mean it is active.** Completed and interrupted
-  threads remain in `thread/loaded/list` for reuse. Treating list length as a
-  busy bit kept the 2026-09-02 pre-upgrade broker alive indefinitely. Both
-  reapers now read each thread and protect active or unknown state, but allow a
-  positively idle/terminal set to retire.
+- **Exec's resume limit is not a Codex limit.** App-server `thread/resume` rejoins
+  a running turn across bridge death. See
+  [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#running-thread-recovery--measured-2026-08-10).
+- **`detached: true` is not what makes a child survive.** File-backed stdout is;
+  the measured 2×2 matrix is
+  [`RELIABILITY_REMEDIATION.md` S3](RELIABILITY_REMEDIATION.md#0-host-and-process-constraints).
+- **No signal reaches a codex child when its bridge dies.** It dies at its next
+  stdout write, so pid liveness does not prove recoverability. See
+  [`RELIABILITY_REMEDIATION.md` F1](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
+- **`codex app-server` over stdio buys no survival by itself.** The detached broker
+  owns that lifetime. Both durability tiers are measured in
+  [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#broker-lifetime-and-routing).
+- **A present socket is not a live broker.** Only a definitive absent verdict
+  authorises unlink; an indeterminate probe must refuse. The measured stale-socket
+  case and error classes are in
+  [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#broker-lifetime-and-routing).
+- **`thread not found` does not mean the thread is gone.** Resume before steering
+  or interrupting a thread this connection did not start; see
+  [`RELIABILITY_REMEDIATION.md` Error taxonomy](RELIABILITY_REMEDIATION.md#error-taxonomy).
+- **`turn/start` on a busy thread does not reject.** It can double-dispatch work;
+  the adapter checks activity first. See
+  [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#error-taxonomy).
+- **A thread being loaded does not mean it is active.** Both reapers need positive
+  idle/terminal evidence, not list length. See
+  [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#broker-lifetime-and-routing).
 - **An alive broker is not necessarily the installed broker.** A detached
   app-server can keep a deleted Homebrew Caskroom image mapped across
   `brew upgrade codex`. Socket readiness therefore proves transport liveness,
@@ -424,11 +389,10 @@ because the cost of re-deriving them is a day each.
 
 **Host budgets and observability**
 
-- **"The 600 s figure appears nowhere in this repo"** — it did, in `server.mjs`'s own header,
-  and it was wrong. The budget that bounds a wait is the MCP **tool idle** timeout: the
-  stdio default is **1,800,000 ms** (30 min) polled on a 30 s tick, satisfied by each
-  `agent_wait` *returning*, not by any mid-call emission. So `clampWaitSec`'s 1200 s ceiling
-  has 600 s of headroom — never raise it past 1500 s without a per-server `timeout`.
+- **A wait is bounded by the host's MCP tool-idle budget.** `clampWaitSec`'s
+  1200 s ceiling has 600 s of headroom against the measured stdio default — never
+  raise it past 1500 s without a per-server `timeout`. The host measurement is in
+  [`RELIABILITY_REMEDIATION.md` §0](RELIABILITY_REMEDIATION.md#0-host-and-process-constraints).
 - **The two Claude Code budget variables, pinned** (docs read 2026-09-11; both names are
   present in the 2.1.268 binary; neither has been set or measured on this host).
   `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` (v2.1.187+, stdio servers included from v2.1.203) is
@@ -449,13 +413,13 @@ because the cost of re-deriving them is a day each.
 - **`env: { MCP_TOOL_TIMEOUT }` in agent frontmatter is inert.** The variable reaches the
   bridge child; the host ignores it. The fields that work are a sibling `timeout` (Claude,
   milliseconds) and `tool_timeout_sec` in the Codex plugin manifest (seconds).
-- **MCP progress notifications are not a model channel.** They *do* reset the idle watchdog
-  (a 70 s silent call aborts; the same call with progress completes), but on this host the
-  payload lands in the TUI spinner and the model never sees it.
-- **A digest is not a salvage artefact on the exec transport.** Codex emits its substance as
-  one atomic message at turn end; an aborted job's digest holds ~0.2 % of the work product.
-  On the app-server transport `thread/read` is the salvage channel — and it returns
-  **messages only**, no tool activity, though the rollout for the same thread has both.
+- **MCP progress notifications are not a model channel.** They reset the idle
+  watchdog and reach the spinner. The silent/progress control is in
+  [`RELIABILITY_REMEDIATION.md` §0](RELIABILITY_REMEDIATION.md#0-host-and-process-constraints).
+- **A digest is not a salvage artefact on the exec transport.** The answer arrives
+  atomically at turn end. App-server `thread/read` salvages messages, not a measured
+  tool-activity history. See
+  [`RELIABILITY_REMEDIATION.md` F7 and evidence limits](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
 - **Protocol completion is not always a task verdict.** Codex can emit
   `turn/completed` after its subordinate command runner failed before any command
   executed. Conversely, many valid conversational turns use zero tools and
@@ -464,13 +428,12 @@ because the cost of re-deriving them is a day each.
   command blocker; for recovered `thread/read`, it requires an explicit
   named-runner-unavailable message instead. Prose merely quoting such an error
   is not enough.
-- **`--output-last-message` is not a salvage channel.** It is never written on SIGTERM or
-  `turn.failed`. The ThreadEvent stream likewise emits **no abort marker** on SIGTERM, and
-  `codex exec --json` silently omits some `command_execution` items the rollout records.
-- **`setTimeout` is already a correct wall deadline across suspend on macOS** — libuv uses
-  `mach_continuous_time()`, which counts sleep. Linux's `CLOCK_MONOTONIC` does not, so the
-  two platforms have *opposite* semantics and ubuntu CI cannot exercise production behaviour
-  even in principle. That, not flakiness, is why durations go through an injectable clock.
+- **`--output-last-message` is not a salvage channel.** Neither it nor the exec
+  event stream reliably records an aborted turn; see
+  [`RELIABILITY_REMEDIATION.md` F7](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
+- **`setTimeout` counts suspend on macOS, but not Linux.** The measured wake timing
+  and libuv clock difference are in
+  [`RELIABILITY_REMEDIATION.md` S5 / F9](RELIABILITY_REMEDIATION.md#0-host-and-process-constraints).
 - **The host session id does not identify the caller.** It names the *main* session, which
   every subagent in it shares. Companion continuity keyed on it put four reviewers and an
   author, each spawned separately in one Claude session, on a single codex thread; one job
@@ -488,25 +451,23 @@ because the cost of re-deriving them is a day each.
 
 **Blast radius**
 
-- **The bridge runs no git and writes nothing inside a job's cwd.** A repo index that moved
-  during a delegated job was moved by something else. (Note for future fingerprinting: a bare
-  `git status` rewrites `.git/index` to refresh the stat cache.)
-- **`handleStatus` performs no lifecycle mutation.** Both hydrate and host-sid adoption are
-  latched, so a status call on an already-adopted bridge re-runs nothing. Status was blamed
-  for killing jobs. On Claude's agent-local MCP lifecycle, overlapping subagents can share one
-  bridge process that is SIGINT'd when the first of them finishes; Status is only special
-  because it is the fastest thing that can finish. Codex's plugin/session-scoped registration
-  does not use that agent-local teardown boundary. Detached companion runtimes remain the
-  durability boundary on both hosts.
-- **"No thread id" does not mean "broadcast".** The distiller classified every notification
-  without a thread id as `global`, and the broker fanned those out to every bridge. Read against
+- **The bridge runs no git and writes nothing inside a job's cwd.** An index hash
+  alone does not identify its mutator; see the incident's git-command and stat-cache
+  evidence in [`RELIABILITY_REMEDIATION.md` F4](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
+- **`handleStatus` performs no lifecycle mutation.** Hydrate and host-sid adoption
+  are latched; status on an adopted bridge re-runs neither. Claude's shared inline
+  teardown is measured in
+  [`RELIABILITY_REMEDIATION.md` S2 / F1](RELIABILITY_REMEDIATION.md#0-host-and-process-constraints).
+  Codex's plugin/session-scoped registration has a different lifetime. Detached
+  runtimes supply durability on both hosts.
+- **"No thread id" does not mean "broadcast".** Read against
   the codex source (rust-v0.150.1, 2026-08-28): codex has three delivery paths, not two — thread
   subscribers, **one connection** (`send_server_notification_to_connection`), and broadcast —
   and five pinned notifications take the middle one: `mcpServer/event/stream/notification`
   (`subscriptionId`), `command/exec/outputDelta` (`processId`), `process/outputDelta` /
   `process/exited` (`processHandle`), `fs/changed` (`watchId`). Through a broker that owns the
   single connection they are addressed to nobody, and "global" would have handed one job's
-  process output or hosted-app events to every other job. They are now a third routing class,
+  process output or hosted-app events to every other job. They have a third routing class,
   `connection`: declined at the handshake via `capabilities.optOutNotificationMethods` (honoured
   per connection; unknown capability fields are ignored — both measured) and dropped with a WARN
   if one arrives anyway. Dormant today — `mcpServer/event/stream/*` is `#[experimental]` and the
@@ -520,68 +481,54 @@ because the cost of re-deriving them is a day each.
   `$HOME`, so every run of its thirteen tests wrote five fixture-session heartbeats (`sid-A`,
   `sid-B`, `sess_abc_def`, `café-1`, `agent_main_01HX`) into the operator's real
   `runtime/heartbeats/`, and `HOST_LIVENESS_TTL_MS` (30 min) then counted each as a live host.
-  Measured 2026-08-28. The suite now sandboxes `AGENT_RUNTIME_DIR` at module level, and the
+  Measured 2026-08-28. The suite sandboxes `AGENT_RUNTIME_DIR` at module level, and the
   guard is structural, not a list: `node --test` sets `NODE_TEST_CONTEXT` in every test child
   and everything a test spawns inherits it, so `lib/host.mjs`'s `refuseRealHomeUnderTest` —
   called from `runtimeDir()`, from `state.mjs`'s `BASE_DIR` at import, and mirrored in
   `hooks/drain-completions.sh` — throws on any path under the real account home
-  (`os.userInfo()`, not `$HOME`; anything under `os.tmpdir()` passes). A textual guard over the
-  test sources was tried first and had four holes. If a daemon looks immortal, list the
+  (`os.userInfo()`, not `$HOME`; anything under `os.tmpdir()` passes). A textual guard over test sources missed four cases. If a daemon looks immortal, list the
   heartbeats dir before suspecting the reaper.
-- **Auto-accepting an approval defeats the sandbox.** A `read-only` thread that accepted one
-  approval **wrote a file**. Under `approvalPolicy: 'never'` no approval request is ever sent
-  and the sandbox is authoritative — which is why the app-server adapter pins it structurally
-  rather than exposing it as a setting.
-- **Confining `plan_path` to the plans dir is not a boundary.** An audit finding once had
-  `plan_review` reject any plan whose real path fell outside `~/.{claude,codex}/plans`, so a
-  symlink there could not point Copilot at `/etc/passwd`. But the path only ever reaches the
+- **Auto-accepting an approval defeats the sandbox.** The adapter pins `never`;
+  the read-only write experiment is in
+  [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#sandbox-and-configuration).
+- **Confining `plan_path` to the plans dir is not a boundary.** The path only reaches the
   companion *inside a prompt*, and every shipped companion reads the whole filesystem on its
   own (Copilot runs `--allow-all-paths`; codex `workspace-write` confines writes, not reads;
   OpenCode is unsandboxed) — and the caller is the subagent, which has `Bash` and copies the
   file in anyway. Measured 2026-08-28: the check cost one bounced dispatch per scratchpad plan
   plus a duplicate under `~/.claude/plans` that the harness then edited out of sync with the
-  copy the companion reviewed. An explicit `plan_path` is now accepted anywhere (still
+  copy the companion reviewed. An explicit `plan_path` is accepted anywhere (still
   absolute, existing, a file, and realpath-canonicalised); the plans dir remains only the
   lookup scope for `plan_path: "latest"`.
 - **The agent file must be materialized into `~/.claude/agents/`.** Plugin subagents silently
   lose `mcpServers` / `hooks` / `permissionMode`.
-- **A codex version bump is not a wire-contract change.** The contract fixture used to pin
-  `codex --version` and fail the drift test on any other version, on the theory that the
-  protocol carries no version field so the version string was the only early warning. Measured
-  2026-08-28: 0.147.0 → 0.150.1 added 9 notifications, widened enums, added one required
-  `Thread` field, and moved nothing — and the pin had turned that into a red build with nothing
-  to review, as it would for a pure bug-fix release. The only thing that can say whether an
-  upgrade changed the wire is the wire's own schema (`codex app-server generate-json-schema`,
-  ~90 ms, ~4 MB), so that is what the drift test and the broker's boot probe compare
-  (`compareContracts`), classified with routing moves first. The version is recorded as
-  provenance only.
-- **Config inheritance works — do not pin the model.** With no `model`, `turn_context` records
-  exactly `~/.codex/config.toml`'s model and effort. Passing `model: null` is *not* the same
-  as omitting the key.
+- **A codex version bump is not a wire-contract change.** Measured 2026-08-28:
+  0.147.0 → 0.150.1 added nine notifications, widened enums and added one required
+  `Thread` field without moving routing. The schema, not the version string,
+  identifies what changed; the version is provenance only. The current fixture and
+  drift policy are in
+  [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#transport-and-contract).
+- **Config inheritance works — do not pin the model.** Omit the key unless a
+  profile selects an override; see
+  [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#sandbox-and-configuration).
 - **An agent's yolo flag is not yolo.** Measured 2026-09-11 on Gemini CLI 0.59.0 under
-  `--acp`, while it was being evaluated as the second companion: "Approval mode
+  `--acp`: "Approval mode
   overridden to \"default\" because the current folder is not trusted", after which
   every edit and shell call arrives as a `session/request_permission` request. A
   client that only passes a flag hangs its agent on the first tool; the generic daemon
   therefore answers the request itself, from the descriptor's policy, whatever any
   flag said.
-- **`notifications/initialized` is not ACP.** It is MCP's post-handshake notification;
-  the Copilot daemon sent it for a year and Copilot ignored it, but Gemini's SDK
-  answers it `-32601 "Method not found"` on stderr. The spec's key for what the client
-  can do is `clientCapabilities`, not `capabilities`. Both were corrected in the generic
-  daemon and the live Copilot job afterwards was unaffected.
-- **Per-turn usage is not on the ACP stream, for either agent measured.** Gemini CLI
-  0.59.0 emits no `usage_update`; its turn tokens are on the prompt RESPONSE under
-  `_meta.quota.token_count`. Copilot CLI 1.0.83 does emit `usage_update`, and it is the
-  protocol's context-occupancy signal (`used`/`size`), not the turn's tokens — the OTEL
-  span stays Copilot's source. Google's agy_acp_server 1.1.1 has it nowhere on ACP
-  (measured 2026-09-11): the prompt response is `{stopReason}` alone and no
-  `usage_update` is emitted; the internal harness's `usageUpdate` frames
-  (promptTokenCount, candidatesTokenCount, thoughtsTokenCount) are echoed on its
-  stderr log as debug output, which this bridge does not read — Antigravity jobs
-  carry no `usage`. The protocol's own `PromptResponse.usage` (six counters)
-  is still marked unstable in the v1 schema; a descriptor's `acp.usage` reader is where
-  any of these shapes is read.
+- **`notifications/initialized` is not ACP.** It is MCP's post-handshake notification.
+  Copilot ignores it, but Gemini's SDK answers `-32601 "Method not found"` on stderr
+  (measured 2026-09-11). ACP uses `clientCapabilities`, not `capabilities`.
+- **Stream occupancy is not per-turn usage.** Copilot CLI 1.0.83's `usage_update`
+  reports context occupancy (`used`/`size`). Its native prompt response on 1.0.94
+  supplies turn counters (measured 2026-10-09); the descriptor reads those through
+  `usageFromCopilotAcp`, with OTEL `invoke_agent` spans as fallback. Gemini 0.59.0
+  reports turn tokens under the response's `_meta.quota.token_count`, not an
+  update. Google's agy_acp_server 1.1.1 reports neither: its response is only
+  `{stopReason}` and internal usage frames appear on stderr, which the bridge
+  does not parse (measured 2026-09-11). Antigravity jobs carry no `usage`.
 - **An agent advertising `loadSession: true` does not mean its sessions survive its
   process.** Copilot CLI 1.0.83 advertises it (measured) and its sessions are
   process-local (github/copilot-cli#1767). Which is why `session/load` is a
@@ -596,25 +543,12 @@ because the cost of re-deriving them is a day each.
   agy_acp_server 1.1.1 does the opposite: it answers 1 when asked 1 and 2 when asked 2
   (measured 2026-09-11), so a forum report that it "negotiates protocolVersion 2" was
   the client asking for 2. Either way the pin holds at the handshake.
-- **Homebrew's `gemini-cli` is not the latest Gemini CLI, and Antigravity CLI is not a
-  Gemini CLI with a new name.** The formula is deprecated at 0.46.0 (disabled
-  2026-12-18) with the `antigravity-cli` cask as its replacement; npm carries 0.59.0 and
-  the ACP registry launches that package. `agy` is a closed-source rewrite with no
-  `--acp` (feature request open since 2026-05-20), Google's FAQ forbids "third party
-  software, tools, or services" on an Antigravity login and recommends "a Vertex or AI
-  Studio API key" for third-party coding agents, and the registry's `antigravity-acp`
-  entry is Google's IDE-extension server on that same login. And Gemini CLI itself
-  refuses "Login with Google" for individual, AI Pro and AI Ultra accounts since
-  2026-06-18 (screenshot evidence, 2026-09-11) — only Code Assist Standard/Enterprise
-  licenses and API keys remain. Neither CLI is a companion this bridge can ship.
-  **Corrected the same day for the server half:** the registry's `antigravity-acp` is
-  Google's own signed server (`agy_acp_server.par`; PR #542 by Google on 2026-08-20,
-  bumped to 1.1.1 from a google.com address on 2026-09-03), published to a registry
-  whose stated purpose is any client that speaks the protocol; Google's terms and FAQ
-  prohibit software that piggybacks on the OAuth token to reach Google's backend, which
-  a stdio client of Google's own server does not do. That server is the second ACP
-  companion; `agy` still is not. `docs/MVP_TRACKER.md` item 8 carries the quotes, the
-  reading and its caveats.
+- **Antigravity's CLI and ACP server are different products.** Measured 2026-09-11:
+  `agy` has no ACP mode; the registry's `antigravity-acp` launches Google's signed
+  `agy_acp_server.par`, which is the second ACP companion. The Gemini CLI comparison
+  also depends on distribution and authentication: Homebrew supplied 0.46.0 while
+  npm supplied 0.59.0, and consumer “Login with Google” was refused. The distribution,
+  authentication and terms evidence belongs in `docs/MVP_TRACKER.md` item 8.
 - **A model is not always a spawn flag.** Google's agy_acp_server 1.1.1 takes the model
   as a session config option (`session/set_config_option`, id `model`; `session/set_model`
   answers too) and a `session/load`ed session comes back on the default model (measured
@@ -641,20 +575,17 @@ because the cost of re-deriving them is a day each.
 Root-caused from process/file inspection, persisted jobs and upstream Codex
 source:
 
-- The detached broker deliberately outlived its launching terminal and still
-  had the removed 0.151.0 Caskroom image mapped after the upgrade. Its previous
-  health check proved only socket/app-server readiness, and terminal loaded
-  threads prevented the old reaper from retiring it. The replacement logic now
-  checks executable identity and actual turn activity.
+- The detached broker outlived its launching terminal with a deleted 0.151.0
+  Caskroom image still mapped. Terminal loaded threads kept it alive. Socket
+  readiness alone cannot establish executable freshness or turn activity.
 - The affected local 0.152.0 payload had no `codex-code-mode-host`. Codex's
   resolver consequently reached its final invoked-directory candidate,
   `/opt/homebrew/bin/codex-code-mode-host`, which Homebrew had not installed.
   There is no local helper-path setting to inject instead.
 - Job `codex-mtjptuj4-89gw` persisted `completed` even though its terminal text
   said every command failed before execution and explicitly withheld a review
-  verdict. The bridge had accepted protocol completion without interpreting the
-  narrowly identifiable runtime blocker; that propagation defect is now
-  normalized before persistence and notification.
+  verdict. Protocol completion alone cannot establish that a review ran; the
+  runtime-blocker classifier requires the specific evidence described above.
 
 Evidence boundaries retained as inference or unknown:
 
@@ -668,31 +599,13 @@ Evidence boundaries retained as inference or unknown:
   parent and restarting stopped the Gatekeeper dialog, while changing the helper
   did not. The exact Gatekeeper responsibility/inheritance mechanism remains an
   inference, so quarantine is detected and surfaced rather than rewritten.
-  There is no install-time pre-emption either: Homebrew removed `--no-quarantine`
-  (Homebrew/brew#20755, closed 2025-11-05; brew 6.0.22 lists no such option and
-  `HOMEBREW_CASK_OPTS` would fail on it), so the attribute returns with every
+  Homebrew 6.0.22 has no `--no-quarantine` option (Homebrew/brew#20755;
+  `HOMEBREW_CASK_OPTS` fails on it), so the attribute returns with every
   cask upgrade and the doctor and inspector warnings name the operator's
   `xattr -d` as the remedy (checked 2026-09-11).
-- The currently published [0.152.0](https://github.com/openai/codex/releases/tag/rust-v0.152.0)
+- The inspected [0.152.0](https://github.com/openai/codex/releases/tag/rust-v0.152.0)
   and [0.152.1](https://github.com/openai/codex/releases/tag/rust-v0.152.1)
   package archives both contain the helper and use the same lookup
   implementation. Why the historical local
   0.152.0 payload lacked it is not established; 0.152.1 must not be described as
   an upstream helper-lookup fix.
-
-## Naming
-
-The product identity is uniformly `agent-*`, with no backward-compatibility shims:
-
-- MCP server: `agent-bridge`.
-- Digest URIs: `agent-digest://<jobId>`.
-- Env prefix: `AGENT_COMPANION_*` (and `AGENT_RUNTIME_DIR` / `AGENT_BRIDGE_LOG_FILE` / `AGENT_DIGEST_DIR` / etc. for runtime paths).
-- Repo / package / plugin / subagent / template names: `agent-companion`.
-
-The Copilot *companion adapter* keeps its own `copilot-*` identifiers
-(`copilot-acp-daemon.mjs` — the Copilot binding of the generic daemon —
-`copilot-acp.sock`, `COPILOT_BIN`, `COPILOT_RUNTIME_ADAPTER`, the
-`~/.copilot/agents/reviewer.agent.md` reviewer) — those name the Copilot
-companion, not the product. The generic pieces are `acp-*`
-(`scripts/acp-daemon.mjs`, `bridge-server/acp-runtime.mjs`,
-`runtime/<companion>-acp.sock`, `AGENT_ACP_DAEMON_PATH`).

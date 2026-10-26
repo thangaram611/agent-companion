@@ -21,10 +21,8 @@ jobs:
         run: bash -n setup.sh hooks/*.sh
       - name: JavaScript syntax
         run: find . -name '*.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 -n1 node --check
-      # Discover from the repo root rather than an allowlist of directories:
-      # the old list omitted test/, so both cross-cutting guard suites (the
-      # profiles.json single-reader guard and the sync-exec timeout guard) never
-      # ran in CI. This matches the command in the README.
+      # Root discovery includes all three guards in test/: profiles.json
+      # single-reader, sync-exec timeout, and runtime sandbox. Matches README.
       - name: Tests with coverage
         run: |
           find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 \

@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## What this is
 
 A delegation plugin: a **harness** (Claude Code or Codex CLI) spawns an isolated
@@ -15,59 +13,14 @@ across that matrix is the product, not an implementation detail.
 Read `README.md` for the user-facing contract and `docs/ARCHITECTURE.md` before any non-trivial
 change. `docs/ARCHITECTURE.md` carries a **Negative Results** section: things that look wrong
 in this code but are deliberate because a measurement overturned the obvious design. Check it
-before "fixing" something surprising — each entry cost about a day to derive.
+before "fixing" something surprising.
 
 ## Commands
 
-Dependencies (only `bridge-server/` has a `package.json`; there are no npm scripts):
-
-```bash
-cd bridge-server && npm ci --no-audit --no-fund
-```
-
-Full check, matching CI (`.github/workflows/ci.yml`):
-
-```bash
-bash -n setup.sh hooks/*.sh
-find . -name '*.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 -n1 node --check
-find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 node --test
-cd bridge-server && npm audit --omit=dev --audit-level=moderate
-```
-
-Test discovery must start at the repo root, not an allowlist of directories — an allowlist
-silently omits `test/`, so both cross-cutting guard suites never run. Measured 2026-08-13: the
-root-anchored form discovers 39 files, an allowlist without `test/` discovers 37. README's
-*Development* section, `docs/RELEASE_READINESS.md`'s release gates and `docs/MVP_TRACKER.md`'s
-*Validation Commands* all use the root-anchored form; keep it that way.
-
-One file / one test:
-
-```bash
-node --test lib/state.test.mjs
-node --test --test-name-pattern 'default-target is unset' lib/state.test.mjs
-```
-
-Diagnostics and onboarding (also the fastest way to see live config):
-
-```bash
-node scripts/doctor.mjs [--json]
-node scripts/onboard.mjs --list-targets | --doctor | --list-profiles
-node scripts/onboard.mjs --target opencode --set-default        # AGENT_COMPANION_HOST=claude|codex to scope
-```
-
-Install a harness surface from this checkout (idempotent):
-
-```bash
-bash setup.sh --host claude|codex|both --target opencode|copilot|codex|auto|none [--skip-tests]
-```
-
-Packaging validation:
-
-```bash
-node scripts/build-codex-marketplace.mjs --out dist/codex-marketplace
-node scripts/validate-codex-release.mjs      # end-to-end in an isolated CODEX_HOME
-claude plugin validate .
-```
+Use [README.md — Development](README.md#development) for checks, packaging and
+README asset rendering. Discover tests from the repo root: directory allowlists
+can omit the three cross-cutting guards in `test/`. CI's command is in
+`.github/workflows/ci.yml`.
 
 Regenerate the pinned codex wire contract (the only sanctioned way that fixture changes; the
 generator prints what moved, classified — read the `ROUTING MOVED` block first, a moved thread
@@ -80,36 +33,10 @@ boots either way and reports `contractStatus: match|drift|unverified`, never ref
 node scripts/gen-codex-app-server-contract.mjs
 ```
 
-README diagram assets — `assets/readme/*.svg` is the source, the `.png` beside it is committed
-build output because GitHub will not render local SVG in Markdown. Edit the SVG, then:
-
-```bash
-bash scripts/render-readme-assets.sh          # all three, byte-deterministic
-```
-
-Nothing in CI compares an SVG to its PNG, so re-render in the same commit as the edit.
-
-`probes/` are **not** tests — hand-run harnesses that spawn real `codex` runs and cost tokens.
-See `probes/README.md`; re-run them when the codex CLI or Claude Code is upgraded.
+`probes/` are hand-run harnesses that can spend Codex or Antigravity tokens and
+write live runtime state. They are outside `node --test`; see `probes/README.md`.
 
 ## Architecture
-
-```
-harness (claude|codex)
-  └─ agent-companion subagent          templates/agent-companion.{md,toml}
-       └─ agent-bridge MCP server      bridge-server/server.mjs
-            (agent-local on Claude; inherited plugin MCP on Codex)
-            ├─ resolveRouting          → one profile → {companion, model, adapter}
-            └─ adapter                 bridge-server/<companion>[-<transport>]-runtime.mjs
-                                       (acp-runtime.mjs serves every ACP companion)
-                 └─ detached shared runtime, when the transport has one
-                      acp-daemon (one per ACP companion: copilot, antigravity) | opencode serve | codex-app-server-broker
-```
-
-**Layers.** `lib/` is host-neutral and importable from both the MCP server and standalone CLI
-scripts. `bridge-server/` is the MCP server plus one file per companion×transport.
-`scripts/` holds the long-lived daemons and the install/onboard/package CLIs. `hooks/` holds
-lifecycle shell hooks for both harnesses.
 
 **The bridge is disposable; the runtimes are not.** Claude owns it through the standalone
 agent's MCP frontmatter; Codex owns it through the plugin/session registration inherited by the
@@ -123,21 +50,24 @@ memory. This is the single most load-bearing fact in the repo.
 `PROFILE_UNKNOWN`, `PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`, `CAPABILITY_UNAVAILABLE`,
 `MODEL_NOT_ALLOWED`). Treat that list as closed — both agent templates enumerate all nine, and
 both forbid the subagent from re-sending with a target the harness never supplied. Both template
-suites pin the list, so a new code must land in four places: `resolveRouting`, both templates,
-and both template suites. The envelope echoes candidate ids only where candidates exist; the
+suites pin the list, so update `resolveRouting`, both templates and both template suites
+when adding a routing refusal. The envelope echoes candidate ids only where candidates exist; the
 capability-gate refusals (`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED`)
 carry none.
 
-**Capability-driven where a capability exists.** Reply, resume, `serverMode`, and model
-selection are per-companion×transport capabilities resolved from `lib/target-registry.mjs`;
-prefer a registry lookup over a companion-id branch when adding to that set. The daemon path
-is keyed the same way: `isAcpTarget` reads `capabilities.acp`, `/fleet` reads
-`capabilities.parallel === 'fleet'`, the rubber-duck wrapper reads `acp.rubberDuck` — so a
-second ACP companion (Antigravity) shares every branch and Copilot alone keeps its extras. One exception is
-still real: there is no `streaming` capability key at all. Per-job `reply_available` /
-`resume_available` pin **opencode and codex** to the adapter the job started with
-(`opencodeAdapter` / `codexAdapter`); an ACP companion has no recorded per-job adapter —
-copilot re-reads live `COPILOT_RUNTIME_ADAPTER` on every call.
+**Conversation identity comes from the host.** Claude's `hooks/name-thread.sh`
+writes the subagent's `agent_id` into the send's `thread`; Codex's
+`_meta["x-codex-turn-metadata"].thread_id` wins in `callArgs`. MCP sends without a
+thread are refused. A new spawn starts a conversation; a message to the same
+agent continues it. On a busy thread, only the same task, mode, template and
+`template_args` can reattach, after target/profile/cwd checks. Different work
+returns `thread_busy`; it must wait, cancel or use a supported reply.
+
+**Capabilities and runtime selection are distinct.** Read capabilities from
+`lib/target-registry.mjs`. A profile's `adapter` declares capabilities but does
+not choose the spawned transport; the runtime environment does. OpenCode and
+Codex record the starting adapter per job for reply/resume. ACP jobs do not;
+Copilot re-reads `COPILOT_RUNTIME_ADAPTER` on each call.
 
 ## Single-source-of-truth modules
 
@@ -147,18 +77,10 @@ second reader/definition is how these break.
 | Module | Owns |
 | --- | --- |
 | `lib/host.mjs` | The only place that chooses claude-vs-codex conventions. `AGENT_COMPANION_HOST` is authoritative; `.host` marker files are diagnostic only, never a fallback. |
-| `lib/state.mjs` | All durable state under `~/.{claude,codex}/agent-companion/`. Atomic tmp+rename, 0600. |
-| `lib/runtime-paths.mjs` | All transient runtime paths — logs, sockets, prompt streams, digests. |
 | `lib/target-registry.mjs` | What a companion can do (capabilities) **and** what it takes to be ready (onboarding). Two concerns, one descriptor, deliberately. For the ACP companions the `acp` block is also everything the daemon needs to run them. |
-| `scripts/acp-daemon.mjs` | The only ACP daemon. Every companion-shaped decision — argv, env, client name, `session/load`, the permission answer, the usage reader, the declared update kinds — is a descriptor read; `scripts/copilot-acp-daemon.mjs` is its Copilot binding, kept so the Copilot daemon suite runs unchanged. Pins ACP v1 and refuses any other answer. |
 | `lib/profile-registry.mjs` | The **only** reader of `profiles.json`. `test/profile-registry-guard.test.mjs` fails on any other reference to `readProfilesRaw` / `PROFILES_FILE`. |
 | `lib/command-probe.mjs` | `probeCommand` is the **only** sanctioned synchronous shell-out from bridge code. It stays dependency-free so broker preflight does not initialize durable state. `test/exec-timeout-guard.test.mjs` fails on any duplicate or unbounded one. |
-| `lib/target-diagnostics.mjs` | Target/profile readiness inspection; re-exports the shared `probeCommand` for existing callers. |
 | `lib/shared-runtime-registry.mjs` | Leases + two-phase disposal for the detached shared runtimes (one per host home). A `dispose` that does anything before the destructive act must call `confirmDisposal()` as late as possible and abort when it returns false. |
-| `lib/usage.mjs` | The one per-job `usage` shape and every transport's reader into it (codex `ThreadTokenUsage` with the turn baseline, exec `turn.completed.usage`, Copilot OTEL `invoke_agent` spans, OpenCode message info). Adapters put it on their summary; `retainTerminalJob` moves it to `job.usage`, which every surface reads. Absent when nothing was reported, never zeroed. |
-| `lib/codex-app-server-contract.json` | The pinned `codex app-server` wire contract. **Generated** — change it only via `scripts/gen-codex-app-server-contract.mjs`; the sibling test re-derives it from the installed codex and fails on schema drift — a version-only bump passes; the fixture's `codexVersion` is provenance, not a gate. Test fakes build every frame through it, so a fixture claiming a field the schema does not declare fails to build. |
-| `lib/codex-app-server-contract.mjs` | Hand-written: the loader, `distillAppServerSchema`, `serializeContract`, and the routing / contract-violation checkers. The generator imports it, so edit here to change a distillation rule or add a check. |
-| `resolveRouting` (`bridge-server/server.mjs`) | The sole SEND routing brain. |
 
 ## Things that will bite you
 
@@ -177,51 +99,32 @@ second reader/definition is how these break.
   own `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` (30 min default for stdio; pinned with
   `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` in `docs/ARCHITECTURE.md` "Host budgets"). Never raise
   `clampWaitSec` past 1500 s without a per-server timeout.
-- **Tests sandbox `$HOME` by env** — `import '../test/sandbox-home.mjs';` as the **first** import
-  sets `AGENT_COMPANION_HOME` and `AGENT_RUNTIME_DIR` to a tmpdir before anything else evaluates
-  (ESM evaluates imports in statement order). That matters because `lib/state.mjs` binds
-  `BASE_DIR` at import time and now throws under `node --test` if it resolves to the real home —
-  so a plain `process.env.X = …` line in the suite body is too late for a static import that
-  reaches state through `validation.mjs`, `profile-registry`, `onboard.mjs` or a daemon. The
-  older pattern (set the env, then `await import('./x.mjs')`) still works. `lib/runtime-paths.mjs`
-  and `lib/log.mjs` re-read their env per call — deliberately, so a statically-importing suite
-  can redirect them.
-- **Under `node --test`, the real `~/.{claude,codex}/agent-companion` is refused.**
-  `lib/host.mjs`'s `refuseRealHomeUnderTest` keys on `NODE_TEST_CONTEXT` (set by the runner in
-  every test child, inherited by everything a test spawns) and throws from `runtimeDir()`,
-  from `state.mjs` at import, and from `hooks/drain-completions.sh` (exit 78) on any path
-  under the real account home. So a suite that touches runtime or state must sandbox
-  (`AGENT_RUNTIME_DIR` / `AGENT_COMPANION_HOME`, or `HOME`) at module level — a per-test env
-  only covers the tests someone remembered, and the rest once wrote fixture heartbeats into
-  the real dir and kept the shared brokers' idle reapers extended 30 min per run. Anything
-  under `os.tmpdir()` passes. `test/runtime-sandbox-guard.test.mjs` proves the precondition.
+- **Sandbox tests before imports.** Put `import '../test/sandbox-home.mjs';` first
+  in suites that reach state/runtime code. `lib/state.mjs` binds `BASE_DIR` at
+  import time, so setting env in the test body is too late for static imports.
+  Setting env before a dynamic `await import(...)` also works. Under `node --test`,
+  state/runtime access beneath the real account home throws; the completion
+  hook exits 78. `test/runtime-sandbox-guard.test.mjs` enforces this. Runtime
+  paths and logs deliberately re-read their env per call.
 - **`bridge-server/server.test.mjs`'s fake-OpenCode-CLI test is timing-sensitive** (a 5 s poll
   budget). It has been observed failing under full-suite concurrency and passing in ~0.6 s alone
   — re-run the file before treating it as a real regression.
-- **Naming:** the product identity is uniformly `agent-*` with no back-compat shims
-  (`agent-bridge`, `agent-digest://`, `AGENT_COMPANION_*`). `copilot-*` identifiers name the
-  Copilot *adapter*, not the product, and stay as they are.
+- **Never write into the installed Codex plugin.** codex-cli 0.164 fingerprints the plugin
+  bundle before running any of its hooks and rejects symlinks: a `bridge-server/node_modules`
+  link there made every hook fail. On Codex, `hooks/install-deps.sh` keeps dependencies in
+  plugin data and `hooks/launch-agent-bridge.mjs` resolves the SDK imports from there.
 - **Codex sandbox defaults are deliberately not codex's defaults** (`workspace-write` with
   network **on**), and under the app-server transport `approvalPolicy: 'never'` is structural —
   accepting one approval was measured escalating past the sandbox. Do not make it configurable.
-- **The ACP daemon answers `session/request_permission` itself.** Gemini CLI, evaluated and
-  dropped on 2026-09-11, downgraded `--approval-mode yolo` to `default` in any folder it did
-  not trust, so a client that only passes a flag hangs its agent on the first tool. The
-  answer comes from the descriptor's `acp.permission(env)`; do not remove that handler on the
-  theory that Copilot's flags make it dead code. And do not send MCP's
-  `notifications/initialized` on ACP — it is not part of the protocol.
-- **Antigravity is the second ACP companion, and its daemon spawns Google's registry
-  server, never `agy`.** `agy` (cask 1.2.0) has no ACP mode; the descriptor's binary is
-  the ACP registry's `agy_acp_server.par`, installed by
-  `scripts/install-antigravity-acp.mjs` under `~/.local/share/agent-companion/antigravity-acp/`
-  (signature-checked on macOS) and signed in with `--login`. Its credentials live in
-  `~/.gemini/antigravity-acp/` plus the login keychain and are shared with nothing else.
-  Its model is a per-session config option that `session/load` forgets — hence
-  `acp.setModel`, the one daemon hook Copilot does not use; its ACP surface carries no
-  usage; permission requests are answered per `AGENT_COMPANION_ANTIGRAVITY_PERMISSION`.
-  The terms reading (a stdio client of Google's own signed server, as Zed and Xcode
-  are; never the OAuth token, never Google's backend) and its caveats are tracker
-  item 8 — re-read it before widening what the bridge does with that login.
+- **The ACP daemon answers `session/request_permission` itself.** Passing an
+  approval flag does not guarantee an agent will stop asking. The answer comes
+  from the descriptor's `acp.permission(env)`; leaving a request unanswered hangs
+  the turn. Do not send MCP's `notifications/initialized` on ACP.
+- **Antigravity model selection is per session.** `session/load` forgets it,
+  so the daemon applies the descriptor's `acp.setModel` after both new and loaded
+  sessions. The server is Google's `agy_acp_server.par`, installed by
+  `scripts/install-antigravity-acp.mjs`. Re-read `docs/MVP_TRACKER.md` item 8's
+  account/terms assessment before widening what the bridge does with that login.
 
 ## Docs
 
@@ -231,9 +134,8 @@ second reader/definition is how these break.
 | `docs/RELIABILITY_REMEDIATION.md` | The measured evidence behind the codex/app-server design. Cited by name from source comments. |
 | `docs/MVP_TRACKER.md` | What is done, what the current limitations are, what is next. |
 | `docs/RELEASE_READINESS.md` | Release gates and source-backed vendor compatibility notes. |
-| `docs/STRENGTH_ROUTING_HANDOFF.md`, `docs/ONBOARDING_HANDOFF.md` | Design records for the profile/strength router and onboarding. |
-| `docs/DIRECTION_ASSESSMENT.md` | 2026-09 direction evidence and shipped review-loop handoff; the 2026-10 closeout puts the project in maintenance. `docs/MVP_TRACKER.md` item 9 closes the profile experiment and item 10 tracks v0.1.0 release preparation. |
-| `probes/README.md` | What each probe proves, and the dead ends already ruled out. |
+| `docs/DIRECTION_ASSESSMENT.md` | Maintenance scope and review-loop design evidence. |
+| `probes/README.md` | Probe coverage, prerequisites and operating caveats. |
 
 Commit subjects follow `type(scope): lowercase description of what changed and why`, often with
 two clauses joined by "and".

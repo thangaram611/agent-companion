@@ -678,10 +678,7 @@ function resolveZeroInput(load, env) {
   if (dp) {
     const prof = getProfile(load, dp);
     if (prof) return { ok: true, prof };
-    // A configured defaultProfile that names no profile is a loud error, not a
-    // silent fall-through to default-target — the cardinal no-silent-fallback
-    // rule (handoff §"never silently ignored"). The synthesized registry's
-    // defaultProfile always resolves, so this only fires on a real typo.
+    // A configured defaultProfile must resolve; falling back would hide a configuration error.
     return {
       ok: false, code: 'PROFILE_UNKNOWN',
       error: `defaultProfile "${dp}" names no configured profile`,
@@ -4093,8 +4090,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 // call as `_meta["x-codex-turn-metadata"]`: `session_id` is the ROOT session
 // for every agent in it, `thread_id` the calling agent's own thread (measured
 // on codex-cli 0.164.0). The session id is adopted BEFORE validation: it is
-// the only host→bridge session-id channel on Codex. Claude does not send
-// _meta; its bridge inherits CLAUDE_CODE_SESSION_ID (getHostSessionId).
+// the only host→bridge session-id channel on Codex. Claude's _meta carries
+// claudecode/toolUseId and progressToken, but no session id; its bridge
+// inherits CLAUDE_CODE_SESSION_ID (getHostSessionId).
 //
 // One agent-companion instance is one companion conversation, so a send's
 // thread is named after the calling agent and never after the host session:
