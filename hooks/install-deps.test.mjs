@@ -309,6 +309,27 @@ test('installs once, links node_modules, then no-ops on an unchanged manifest', 
   }
 });
 
+test('Codex installs dependencies outside the trusted plugin bundle and leaves its contents unchanged', () => {
+  const ctx = makeRoot({ npmBody: '#!/bin/bash\nmkdir -p node_modules/@modelcontextprotocol/sdk && : > node_modules/@modelcontextprotocol/sdk/package.json\n' });
+  const snapshot = () => readdirSync(ctx.root, { recursive: true }).sort().map((name) => {
+    const file = join(ctx.root, name);
+    // Codex 0.164.0 plugin_fingerprint.rs rejects symlinks before running ANY hook.
+    assert.equal(lstatSync(file).isSymbolicLink(), false, `unsupported plugin entry type: ${file}`);
+    return [name, lstatSync(file).isFile() ? readFileSync(file, 'utf8') : null];
+  });
+  try {
+    const before = snapshot();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = runSync(ctx, { AGENT_COMPANION_HOST: 'codex', PLUGIN_DATA: ctx.data });
+      assert.equal(result.code, 0, result.stderr);
+      assert.ok(existsSync(join(ctx.persist, SDK_MARKER)));
+      assert.deepEqual(snapshot(), before, 'installing or reusing deps must not invalidate hook trust');
+    }
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
 test('a failing npm reports the failure, clears the hash, and releases the lock', () => {
   const ctx = makeRoot({ npmBody: '#!/bin/bash\necho boom >&2\nexit 1\n' });
   try {

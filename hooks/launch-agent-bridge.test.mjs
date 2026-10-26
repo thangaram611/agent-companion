@@ -32,6 +32,9 @@ function makeFixture() {
   mkdirSync(hooks, { recursive: true });
   mkdirSync(bridge, { recursive: true });
   copyFileSync(LAUNCHER, path.join(hooks, 'launch-agent-bridge.sh'));
+  for (const file of ['launch-agent-bridge.mjs', 'resolve-codex-deps.mjs']) {
+    copyFileSync(path.join(HERE, file), path.join(hooks, file));
+  }
   chmodSync(path.join(hooks, 'launch-agent-bridge.sh'), 0o755);
   writeFileSync(path.join(bridge, 'server.mjs'), '// fake server\n');
   writeFileSync(path.join(hooks, 'node-tools.sh'), `
@@ -44,8 +47,8 @@ count=$((count + 1))
 printf '%s\\n' "$count" > "$TEST_CALLS"
 printf 'dependency attempt %s\\n' "$count"
 if [ "\${READY_ON_ATTEMPT:-0}" -gt 0 ]; then
-  mkdir -p "$CLAUDE_PLUGIN_ROOT/bridge-server/node_modules/@modelcontextprotocol/sdk"
-  printf '{}\\n' > "$CLAUDE_PLUGIN_ROOT/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
+  mkdir -p "$PLUGIN_DATA/bridge-server/node_modules/@modelcontextprotocol/sdk"
+  printf '{}\\n' > "$PLUGIN_DATA/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
 fi
 if [ "\${READY_ON_ATTEMPT:-0}" -le 0 ] || [ "$count" -lt "$READY_ON_ATTEMPT" ]; then
   exit 75
@@ -54,7 +57,7 @@ exit 0
 `);
   chmodSync(path.join(hooks, 'install-deps.sh'), 0o755);
   writeFileSync(fakeNode, `#!/bin/bash
-printf 'node exec: %s\\n' "$1"
+printf 'node exec: %s\\n' "$@"
 `);
   chmodSync(fakeNode, 0o755);
   return { dir, root, calls, fakeNode, launcher: path.join(hooks, 'launch-agent-bridge.sh') };
@@ -79,11 +82,42 @@ test('ignores an early SDK file until the contended install reports complete', (
     const result = run(fixture, 2);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(fixture.calls, 'utf8').trim(), '2');
-    assert.match(result.stdout, /node exec: .*bridge-server\/server\.mjs/);
+    assert.match(result.stdout, /node exec: --import\nnode exec: .*hooks\/launch-agent-bridge\.mjs\nnode exec: .*bridge-server\/server\.mjs/);
     assert.doesNotMatch(result.stdout, /dependency attempt/,
       'dependency chatter must never corrupt MCP stdout');
     assert.match(result.stderr, /dependency attempt 1/);
     assert.match(result.stderr, /dependency attempt 2/);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('loads static and dynamic SDK imports from plugin data with ESM conditions and source-relative imports intact', () => {
+  const fixture = makeFixture();
+  try {
+    fixture.fakeNode = process.execPath;
+    const data = path.join(fixture.dir, 'codex home', 'plugins/data/agent-companion-agent-companion');
+    const sdk = path.join(data, 'bridge-server/node_modules/@test/sdk');
+    mkdirSync(sdk, { recursive: true });
+    writeFileSync(path.join(sdk, 'package.json'), JSON.stringify({
+      name: '@test/sdk', type: 'module', exports: { import: './index.mjs', require: './wrong.cjs' },
+    }));
+    writeFileSync(path.join(sdk, 'index.mjs'), 'export const value = "SDK";');
+    writeFileSync(path.join(fixture.root, 'bridge-server/local.mjs'), 'export const local = "local";');
+    writeFileSync(path.join(fixture.root, 'bridge-server/server.mjs'), `
+import { value } from '@test/sdk';
+import { local } from './local.mjs';
+import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+// server.mjs starts MCP only when it is the entry point, not when imported.
+assert.equal(process.argv[1], fileURLToPath(import.meta.url));
+assert.equal((await import('@test/sdk')).value, value);
+console.log(value, local);
+`);
+    const result = run(fixture, 1);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'SDK local\n');
+    assert.equal(existsSync(path.join(fixture.root, 'bridge-server/node_modules')), false);
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });
   }

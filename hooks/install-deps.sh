@@ -8,7 +8,9 @@
 # NODE_PATH does NOT work for ESM bare imports (Node >= 22 — verified
 # empirically). We install to plugin data when the host provides it for update
 # persistence and symlink it into the plugin root's bridge-server/ so
-# ESM's ancestor-directory resolver finds the deps.
+# ESM's ancestor-directory resolver finds the deps on Claude. Codex's launcher
+# resolves SDK imports from plugin data instead: its hook-trust fingerprint
+# rejects symlinks and any runtime mutation of the installed bundle.
 #
 # Exits silently on the fast path. Emits a one-line summary on install; writes
 # full npm output to install.log.
@@ -35,6 +37,9 @@ fi
 # For --plugin-dir local-dev runs, fall back to a sibling dir under the
 # plugin root (not pretty, but keeps local-dev functional).
 DATA="${CLAUDE_PLUGIN_DATA:-${PLUGIN_DATA:-$ROOT/.plugin-data}}"
+if [ "${AGENT_COMPANION_HOST:-claude}" = "codex" ]; then
+  DATA="${PLUGIN_DATA:-${CODEX_HOME:-$HOME/.codex}/plugins/data/agent-companion-agent-companion}"
+fi
 
 BUNDLED_PKG="$ROOT/bridge-server/package.json"
 BUNDLED_LOCK="$ROOT/bridge-server/package-lock.json"
@@ -212,9 +217,9 @@ if installed_ok && [ "$EXPECT_HASH" = "$STORED_HASH" ]; then
   DEPS_OK=1
 fi
 
-# Fast path: deps current AND the link genuinely resolves to them. Silent, no
-# npm, no writes — this runs on every SessionStart of every session.
-if [ "$DEPS_OK" = 1 ] && link_ok; then
+# Fast path: deps current, and on Claude the link genuinely resolves to them.
+# Codex imports directly from plugin data. No npm or bundle writes.
+if [ "$DEPS_OK" = 1 ] && { [ "${AGENT_COMPANION_HOST:-claude}" = "codex" ] || link_ok; }; then
   exit 0
 fi
 
@@ -282,6 +287,14 @@ if [ "$DEPS_OK" = 0 ]; then
   # root-owned directory — re-ran the entire `npm ci` on every SessionStart
   # forever, inside a 55s budget, for an install that was already complete.
   echo "$EXPECT_HASH" > "$MANIFEST_HASH"
+fi
+
+# Codex fingerprints the entire plugin before running each hook. Keep all
+# generated dependencies in PLUGIN_DATA; even a node_modules symlink in ROOT
+# makes every hook fail before its command starts (codex-cli 0.164.0).
+if [ "${AGENT_COMPANION_HOST:-claude}" = "codex" ]; then
+  [ "$DEPS_OK" = 0 ] && echo "agent-companion: deps ready"
+  exit 0
 fi
 
 # Point ROOT's bridge-server/node_modules at the managed install so ESM's

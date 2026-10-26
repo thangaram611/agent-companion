@@ -40,7 +40,7 @@ for _attempt in 1 2; do
   fi
   # The same file install-deps.sh's `installed_ok` requires before it calls the
   # managed install current: keep the two spelled identically.
-  SDK_PACKAGE="$PLUGIN_PACKAGE_ROOT/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
+  SDK_PACKAGE="$PLUGIN_DATA/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
   if [ -r "$SDK_PACKAGE" ]; then
     DEPS_READY=1
     break
@@ -64,4 +64,5 @@ NODE_BIN="$(resolve_node 2>/dev/null || true)"
   exit 1
 }
 
-exec "$NODE_BIN" "$PLUGIN_PACKAGE_ROOT/bridge-server/server.mjs"
+exec "$NODE_BIN" --import "$PLUGIN_PACKAGE_ROOT/hooks/launch-agent-bridge.mjs" \
+  "$PLUGIN_PACKAGE_ROOT/bridge-server/server.mjs"
