@@ -192,7 +192,7 @@ Initial call to `mcp__agent-bridge__agent_send`:
 
 Remember the `max_wait_sec` value you used here — call it `BUDGET`. You will reuse `BUDGET` for every wait iteration (see Wait loop).
 
-`send` normally returns immediately with `status="still_running"` and a `job_id`, and the worker runs in the background. The one exception is a reattach to an in-flight job on the same thread and host session, where `send` blocks like a wait for up to your `BUDGET` and answers with that job's state. Capture `response.job_id`.
+`send` normally returns immediately with `status="still_running"` and a `job_id`, and the worker runs in the background. The one exception is a retry of the same send while its job is still in flight, which reattaches: `send` blocks like a wait for up to your `BUDGET` and answers with that job's state. A *different* send while your job is in flight answers `thread_busy` — render it via the error envelope; it names what main can do. Capture `response.job_id`.
 
 Branch on `response.status`:
 - `still_running` → expected on the initial send; go to **Wait loop**.

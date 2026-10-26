@@ -673,9 +673,10 @@ Important rules:
   state file. With no `profiles.json` the bridge synthesizes one profile from
   `default-target`, so a legacy install resolves identically.
 - `agent_send` returns `still_running` immediately with a `job_id` — except when
-  it reattaches to an in-flight job on the same thread and host session (a
-  respawned bridge hydrates persisted jobs at startup), where it blocks like
-  `agent_wait` up to `max_wait_sec`.
+  it is a retry of the same send while its job is still in flight on that
+  thread and host session (a respawned bridge hydrates persisted jobs at
+  startup): that reattaches and blocks like `agent_wait` up to `max_wait_sec`.
+  A different send on that busy thread is refused as `thread_busy`.
 - `agent_wait` blocks in bounded intervals. The wait defaults to 480 seconds and
   is capped at 1200 seconds.
 - `agent_status({ diagnostics: true })` embeds the same environment report as
@@ -938,8 +939,8 @@ claude plugin validate .
   it; main Codex can see the schemas but must delegate through the subagent.
 - Bridge process lifetime belongs to the host; detached companion runtimes own
   any state that must survive a bridge replacement.
-- Sends are non-blocking — the one exception is reattaching to an in-flight job
-  on the same thread, which blocks like a wait — and every wait is bounded.
+- Sends are non-blocking — the one exception is a retried send reattaching to
+  its in-flight job, which blocks like a wait — and every wait is bounded.
 - Orphan completions are stored in `completions.jsonl` and drained by hooks.
 - Model choice is configuration, not a public tool parameter.
 - Node dependencies persist under plugin data; bundled source updates with the

@@ -568,6 +568,13 @@ function canonicalPathForCompare(path) {
   try { return realpathSync(path); }
   catch { return String(path); }
 }
+
+// The fields that make a send the same request; template_args is {} once validated.
+function sameRequest(job, args) {
+  return job.task === args.task && job.mode === args.mode && job.template === args.template &&
+    JSON.stringify(job.template_args ?? {}) === JSON.stringify(args.template_args ?? {});
+}
+
 function sameRequiredCwd(a, b) {
   const ca = canonicalPathForCompare(a);
   const cb = canonicalPathForCompare(b);
@@ -3167,6 +3174,23 @@ async function handleSend(args) {
           'Refusing to reattach or start the target in the wrong workspace; wait/cancel the existing job or use a different thread.',
       });
     }
+    // Only a retry of the same call reattaches. A different request is new
+    // work, and folding it into the running job would drop it unseen — which is
+    // what happened to a follow-up sent to an agent-companion mid-job.
+    if (!sameRequest(existing, args)) {
+      return asJson({
+        ok: false,
+        action: 'send',
+        status: 'thread_busy',
+        job_id: existing.jobId,
+        target,
+        current_status: existing.status || 'running',
+        thread,
+        error:
+          `job ${existing.jobId} is still running on this conversation, and this send is a different request. ` +
+          'Wait for it, cancel it, or steer it with agent_reply where its reply_available is true.',
+      });
+    }
     existing.reattached = true;
     persistJob(existing.jobId);
     const maxWait = clampWaitSec(args.max_wait_sec);
@@ -3208,7 +3232,7 @@ async function handleSend(args) {
     strength: routedStrength,
     claudeSessionId: getHostSessionId(),
     task: args.task, mode: args.mode,
-    template: args.template, cwd: args.cwd,
+    template: args.template, template_args: args.template_args, cwd: args.cwd,
     thread,
     parallelStrategy: args.parallel,
     fleet,

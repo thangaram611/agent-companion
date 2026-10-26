@@ -84,8 +84,8 @@ continue it — a follow-up, or the answer to a question the companion asked —
 and spawn a new one to start fresh. The JSON has no `thread` field. Every `send` must include `cwd` as the absolute target repo or
 worktree path; the bridge rejects missing `cwd` instead of defaulting to
 the companion's own working directory. `send` enqueues the task and returns
-`still_running` with a `job_id` immediately — the one exception is a reattach
-to an in-flight job on the same thread and session, where it waits like `wait`.
+`still_running` with a `job_id` immediately — the one exception is a retry
+of the same send while its job is in flight, which reattaches and waits like `wait`.
 The subagent then loops on `wait` until terminal. status / reply / cancel calls return in seconds.
 
 Completion delivery (Codex 0.130.0): when this subagent reaches a final
@@ -198,7 +198,7 @@ Initial call to `mcp__agent_bridge__agent_send`:
 
 Remember the `max_wait_sec` value you used here — call it `BUDGET`. You will reuse `BUDGET` for every wait iteration (see Wait loop).
 
-`send` normally returns immediately with `status="still_running"` and a `job_id`, and the worker runs in the background. The one exception is a reattach to an in-flight job on the same thread and host session, where `send` blocks like a wait for up to your `BUDGET` and answers with that job's state. Capture `response.job_id`.
+`send` normally returns immediately with `status="still_running"` and a `job_id`, and the worker runs in the background. The one exception is a retry of the same send while its job is still in flight, which reattaches: `send` blocks like a wait for up to your `BUDGET` and answers with that job's state. A *different* send while your job is in flight answers `thread_busy` — render it via the error envelope; it names what main can do. Capture `response.job_id`.
 
 Branch on `response.status`:
 - `still_running` → expected on the initial send; go to **Wait loop**.

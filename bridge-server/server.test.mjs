@@ -777,7 +777,7 @@ test('sweepOwnSessionStaleQueueRows drops only stale rows for the current host s
   });
 });
 
-test('handleSend returns immediately and reattaches to existing jobs without daemon calls', async () => {
+test('handleSend returns immediately, reattaches a retried send, and refuses a new request on a busy thread', async () => {
   const mod = await bridge();
   const { dispatch, jobs, retainTerminalJob, _resetForTest } = mod;
   _resetForTest();
@@ -809,6 +809,7 @@ test('handleSend returns immediately and reattaches to existing jobs without dae
       target: 'copilot',
       claudeSessionId: 'sid-send',
       thread: 'thread-reattach',
+      task: 'reattach me', mode: 'EXECUTE', template: 'general',
       cwd: TEST_CWD,
       status: 'running',
       promptId: 'prompt-existing-1',
@@ -834,6 +835,27 @@ test('handleSend returns immediately and reattaches to existing jobs without dae
     assert.equal(reattached.job_id, 'copilot-existing-1');
     assert.equal(reattached.reattached, true);
     assert.equal(socketCalls, 0);
+
+    // A different request on that busy conversation is refused, never folded
+    // into the running job, where it would vanish without being run.
+    const busy = await withDaemonStubs(
+      {
+        ensureDaemon: async () => { throw new Error('a busy thread must refuse before daemon startup'); },
+        sendToSocket: async () => { throw new Error('a busy thread must not touch the daemon'); },
+      },
+      async () => parse(await dispatch({
+        action: 'send', task: 'and also check the tests',
+        mode: 'EXECUTE', template: 'general',
+        thread: 'thread-reattach',
+        cwd: TEST_CWD,
+        max_wait_sec: 1,
+        parallel: 'never',
+      })),
+    );
+    assert.equal(busy.ok, false);
+    assert.equal(busy.status, 'thread_busy');
+    assert.equal(busy.job_id, 'copilot-existing-1');
+    assert.match(busy.error, /agent_reply/);
 
     jobs.set('copilot-existing-mismatch', {
       jobId: 'copilot-existing-mismatch',
@@ -870,6 +892,7 @@ test('handleSend returns immediately and reattaches to existing jobs without dae
       target: 'copilot',
       claudeSessionId: 'sid-send',
       thread: 'thread-terminal',
+      task: 'reattach terminal', mode: 'EXECUTE', template: 'general',
       cwd: TEST_CWD,
       status: 'running',
       promptId: 'prompt-existing-2',
