@@ -43,12 +43,11 @@ const {
 const { pidAlive } = await import(join(REPO, 'lib/shared-runtime-registry.mjs'));
 
 const SID = `appserver-control-${Date.now().toString(36)}`;
-// Two jobs, two threads, named explicitly. Without a `thread` the bridge maps
-// every send on one host session to the same thread, and since a codex
-// app-server send on an existing thread RESUMES the codex thread its last job
-// recorded (the `.sid`, as for Copilot), the cancel job would otherwise land on
-// the steer job's thread — and this probe's assertions hang off them being
-// two threads. A thread name with no recorded id is what opens fresh.
+// Two jobs, two threads, named explicitly — as the host would for two
+// agent-companion spawns. A codex app-server send on an existing thread
+// RESUMES the codex thread its last job recorded (the `.sid`, as for Copilot),
+// and this probe's assertions hang off the two jobs being two threads. A
+// thread name with no recorded id is what opens fresh.
 const STEER_THREAD = `${SID}-steer`;
 const CANCEL_THREAD = `${SID}-cancel`;
 const STEER_WORD = 'PINEAPPLE';
@@ -100,7 +99,7 @@ function startBridge(tag) {
     p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: i, method, params }) + '\n');
   });
   const tool = async (name, args) => {
-    const r = await rpc('tools/call', { name, arguments: { ...args, host_session_id: SID } });
+    const r = await rpc('tools/call', { name, arguments: args });
     const text = r?.content?.find((c) => c.type === 'text')?.text ?? '';
     try { return JSON.parse(text); } catch { return { _raw: text }; }
   };

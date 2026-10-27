@@ -399,7 +399,7 @@ test('REGRESSION golden: synthesized bare send keeps profileId null and writes t
   try {
     const send = JSON.parse((await dispatch({
       action: 'send', task: 'golden', mode: 'EXECUTE', template: 'general',
-      thread: 'golden-thread', cwd: TEST_CWD, host_session_id: 'sid-golden',
+      thread: 'golden-thread', cwd: TEST_CWD,
       max_wait_sec: 5, parallel: 'never',
     })).content[0].text);
     assert.equal(send.target, 'copilot');
@@ -483,7 +483,7 @@ test('REGRESSION copilot daemon model: a profile model reaches the daemon prompt
   try {
     const send = JSON.parse((await dispatch({
       action: 'send', strength: 'fast_executor', task: 'fast', mode: 'EXECUTE', template: 'general',
-      cwd: TEST_CWD, host_session_id: 'sid-copmodel', max_wait_sec: 5, parallel: 'never',
+      cwd: TEST_CWD, max_wait_sec: 5, parallel: 'never',
     })).content[0].text);
     assert.equal(send.ok, true);
     assert.equal(send.target, 'copilot');
@@ -517,7 +517,14 @@ test('P4 status strengths[] stays id-free with a codex profile in the mix', asyn
   }
 });
 
-test('REGRESSION codex model: a profile model reaches `codex exec -m` spawn args', async () => {
+test('REGRESSION codex model: a profile model reaches `codex exec -m` spawn args', async (t) => {
+  const priorAdapter = process.env.CODEX_RUNTIME_ADAPTER;
+  t.after(() => {
+    if (priorAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER;
+    else process.env.CODEX_RUNTIME_ADAPTER = priorAdapter;
+  });
+  process.env.CODEX_RUNTIME_ADAPTER = 'exec';
+
   reset();
   const { dispatch, jobs, _resetForTest } = server;
   _resetForTest();
@@ -543,11 +550,11 @@ test('REGRESSION codex model: a profile model reaches `codex exec -m` spawn args
   try {
     const send = JSON.parse((await dispatch({
       action: 'send', profile: 'cx-pin', task: 'pin the model', mode: 'EXECUTE', template: 'general',
-      cwd: TEST_CWD, host_session_id: 'sid-cxmodel', max_wait_sec: 5, parallel: 'never',
+      cwd: TEST_CWD, max_wait_sec: 5, parallel: 'never',
     })).content[0].text);
     assert.equal(send.ok, true);
     assert.equal(send.target, 'codex');
-    JSON.parse((await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-cxmodel', max_wait_sec: 5 })).content[0].text);
+    JSON.parse((await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 })).content[0].text);
     const args = JSON.parse(readFileSync(argvFile, 'utf8'));
     const i = args.indexOf('-m');
     assert.ok(i >= 0, `-m not in args: ${args.join(' ')}`);
@@ -586,11 +593,11 @@ test('REGRESSION opencode CLI model: a profile model reaches `opencode run --mod
   try {
     const send = JSON.parse((await dispatch({
       action: 'send', profile: 'oc-pin', task: 'pin the model', mode: 'EXECUTE', template: 'general',
-      cwd: TEST_CWD, host_session_id: 'sid-ocmodel', max_wait_sec: 5, parallel: 'never',
+      cwd: TEST_CWD, max_wait_sec: 5, parallel: 'never',
     })).content[0].text);
     assert.equal(send.ok, true);
     assert.equal(send.target, 'opencode');
-    JSON.parse((await dispatch({ action: 'wait', job_id: send.job_id, host_session_id: 'sid-ocmodel', max_wait_sec: 5 })).content[0].text);
+    JSON.parse((await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 })).content[0].text);
     const args = JSON.parse(readFileSync(argvFile, 'utf8'));
     const i = args.indexOf('--model');
     assert.ok(i >= 0, `--model not in args: ${args.join(' ')}`);

@@ -87,7 +87,6 @@ import {
   ALLOWED_MODELS,
   DEFAULT_MODEL,
   readThreadSid, writeThreadSid, clearThread, listThreads,
-  readHostSessionThread, writeHostSessionThread,
   writeJob, readJob, listJobsForSession, deleteJob,
 } from '../lib/state.mjs';
 import {
@@ -99,7 +98,6 @@ import {
   flatStrengths,
   STRENGTH_CAPABILITY_REQUIREMENTS,
 } from '../lib/profile-registry.mjs';
-import { sanitizeHostSessionId } from '../lib/host.mjs';
 import { queuePath, promptEventsPath, runtimeDir, bridgeLogFile, daemonLogFile, digestDir, appendPrivateFile } from '../lib/runtime-paths.mjs';
 import { createReqId, withReq, logEvent } from '../lib/log.mjs';
 import { writeDigest, digestPath } from '../lib/prompt-digest.mjs';
@@ -234,17 +232,14 @@ function rewriteQueueByMoveAside(suffix, transform) {
   }
 }
 
-// The bridge's resolved host session id. Three sources, in precedence:
+// The bridge's resolved host session id, supplied by the host and never by the
+// model. Two sources, in precedence:
 //   1. MCP _meta["x-codex-turn-metadata"].session_id — Codex injects this
-//      on every CallToolRequest (PR openai/codex#15190); adopted in
-//      server.mjs's CallToolRequestSchema handler before dispatch.
-//   2. The host_session_id MCP arg —
-//      forwarded by the agent. Used by the Claude subagent because Claude
-//      Code does NOT expand ${VAR} in MCP env: blocks at spawn time, so
-//      env-var injection is unavailable. Codex falls back here only if
-//      _meta is absent (e.g. older Codex versions).
-//   3. CLAUDE_CODE_SESSION_ID env var — backstop for tests and direct
-//      Claude invocations that do set it.
+//      on every CallToolRequest (PR openai/codex#15190); adopted by callArgs
+//      before dispatch.
+//   2. CLAUDE_CODE_SESSION_ID — Claude Code's bridge inherits it from the
+//      session that spawned it (every bridge start logged since 2026-08-12
+//      carries it).
 let _bridgeHostSid = null;
 
 export function getHostSessionId() {
@@ -456,31 +451,6 @@ export function clampWaitSec(input) {
   return Math.max(1, Math.min(Number(input) || 480, cap));
 }
 
-// Resolve the thread name for a send. Three sources, in precedence:
-//   1. Explicit `args.thread` from caller (Claude's MY_THREAD-comment trick).
-//   2. Server-side host-session→thread state file (Codex path: subagent has
-//      no transcript-replay mechanism, so the bridge resolves continuity
-//      keyed by the host session id from MCP _meta). Harmless on Claude
-//      because the agent always passes its remembered thread, so this
-//      branch only fires when the caller deliberately omits it.
-//   3. Auto-generated `companion-<jobId>` for first-ever sends.
-// On every send we persist the (host_session_id → thread) mapping so a
-// future bridge respawn can rehydrate the same Copilot session.
-export function resolveSendThread(explicitThread, hostSidRaw, jobId) {
-  let thread = explicitThread || null;
-  const hostSidKey = hostSidRaw ? sanitizeHostSessionId(hostSidRaw) : '';
-  if (!thread && hostSidKey) {
-    try { thread = readHostSessionThread(hostSidKey); }
-    catch (err) { log('WARN', 'readHostSessionThread failed:', err.message); }
-  }
-  if (!thread) thread = `companion-${jobId}`;
-  if (hostSidKey) {
-    try { writeHostSessionThread(hostSidKey, thread); }
-    catch (err) { log('WARN', 'writeHostSessionThread failed:', err.message); }
-  }
-  return thread;
-}
-
 function getJob(jobId) { gcExpiredJobs(); return jobs.get(jobId) || null; }
 function updateJob(jobId, patch) {
   const j = jobs.get(jobId);
@@ -598,6 +568,13 @@ function canonicalPathForCompare(path) {
   try { return realpathSync(path); }
   catch { return String(path); }
 }
+
+// The fields that make a send the same request; template_args is {} once validated.
+function sameRequest(job, args) {
+  return job.task === args.task && job.mode === args.mode && job.template === args.template &&
+    JSON.stringify(job.template_args ?? {}) === JSON.stringify(args.template_args ?? {});
+}
+
 function sameRequiredCwd(a, b) {
   const ca = canonicalPathForCompare(a);
   const cb = canonicalPathForCompare(b);
@@ -701,10 +678,7 @@ function resolveZeroInput(load, env) {
   if (dp) {
     const prof = getProfile(load, dp);
     if (prof) return { ok: true, prof };
-    // A configured defaultProfile that names no profile is a loud error, not a
-    // silent fall-through to default-target — the cardinal no-silent-fallback
-    // rule (handoff §"never silently ignored"). The synthesized registry's
-    // defaultProfile always resolves, so this only fires on a real typo.
+    // A configured defaultProfile must resolve; falling back would hide a configuration error.
     return {
       ok: false, code: 'PROFILE_UNKNOWN',
       error: `defaultProfile "${dp}" names no configured profile`,
@@ -2455,9 +2429,9 @@ function runCodexWorker(args) {
 // exactly as Copilot's is) and `thread/start` otherwise. That is what makes a
 // follow-up send a follow-up: round two of a review lands on the conversation
 // round one had, instead of a cold thread that has to be told everything again.
-// A thread with no recorded id is what opens fresh. (Omitting `thread` does not
-// mean fresh: handleSend maps a host session to its thread, as it always has
-// for Copilot.)
+// A thread with no recorded id is what opens fresh — and the host names the
+// thread after the calling agent (callArgs), so a new agent-companion spawn is
+// what opens fresh.
 //
 // The connection is per-job and lives from that open through the terminal:
 // `startCodexTurn` skips its status probe only for a thread THIS connection
@@ -3089,7 +3063,7 @@ async function handleSend(args) {
     return asJson({
       ok: false,
       action: 'send',
-      error: 'CLAUDE_CODE_SESSION_ID not set in bridge environment — bridge cannot tag events for hook delivery. Verify the subagent template forwards it via the env: block.',
+      error: 'no host session id: neither Codex _meta nor an inherited CLAUDE_CODE_SESSION_ID reached the bridge, so it cannot tag events for hook delivery.',
     });
   }
 
@@ -3129,12 +3103,10 @@ async function handleSend(args) {
   const profileId = routing.resolved.profileId;
   const routedStrength = routing.resolved.strength;
 
-  // The bridge auto-generates a thread name if the caller (the companion
-  // subagent) did not pass one. This is how the companion gets a stable
-  // handle it can remember across resumes — main never sees or carries it.
-  // Pre-compute the jobId first so we can derive thread = companion-<jobId>.
+  // Over MCP the host has named the thread after the calling agent (callArgs);
+  // a direct dispatch caller that names none gets a conversation of its own.
   const jobId = `${target}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  const thread = resolveSendThread(args.thread || null, getHostSessionId(), jobId);
+  const thread = args.thread || `companion-${jobId}`;
 
   // Reattach guard. When the MCP bridge dies mid-send and Claude Code respawns
   // it, the same tool call lands again with the same thread + host session.
@@ -3199,6 +3171,23 @@ async function handleSend(args) {
           'Refusing to reattach or start the target in the wrong workspace; wait/cancel the existing job or use a different thread.',
       });
     }
+    // Only a retry of the same call reattaches. A different request is new
+    // work, and folding it into the running job would drop it unseen — which is
+    // what happened to a follow-up sent to an agent-companion mid-job.
+    if (!sameRequest(existing, args)) {
+      return asJson({
+        ok: false,
+        action: 'send',
+        status: 'thread_busy',
+        job_id: existing.jobId,
+        target,
+        current_status: existing.status || 'running',
+        thread,
+        error:
+          `job ${existing.jobId} is still running on this conversation, and this send is a different request. ` +
+          'Wait for it, cancel it, or steer it with agent_reply where its reply_available is true.',
+      });
+    }
     existing.reattached = true;
     persistJob(existing.jobId);
     const maxWait = clampWaitSec(args.max_wait_sec);
@@ -3240,7 +3229,7 @@ async function handleSend(args) {
     strength: routedStrength,
     claudeSessionId: getHostSessionId(),
     task: args.task, mode: args.mode,
-    template: args.template, cwd: args.cwd,
+    template: args.template, template_args: args.template_args, cwd: args.cwd,
     thread,
     parallelStrategy: args.parallel,
     fleet,
@@ -3902,15 +3891,6 @@ mcp.setRequestHandler(ReadResourceRequestSchema, async (req) => (
   readDigestResource(req.params.uri)
 ));
 
-const HOST_SESSION_FIELDS = {
-  host_session_id: {
-    type: 'string',
-    description:
-      "Caller's host session id, used to scope queue writes and persisted jobs. " +
-      'Claude companion agents forward $CLAUDE_CODE_SESSION_ID under this key on every call; Codex normally uses MCP _meta instead.',
-  },
-};
-
 const JOB_ID_FIELD = {
   type: 'string',
   description: 'Target agent companion job id.',
@@ -4021,7 +4001,7 @@ const AGENT_TOOLS = [
         },
         thread: {
           type: 'string',
-          description: 'Optional thread name for conversation continuity where the companion supports it.',
+          description: 'Set by the host, never by you: it names the companion conversation after the calling agent.',
           pattern: '^[a-zA-Z0-9._-]+$',
         },
         max_wait_sec: MAX_WAIT_FIELD,
@@ -4030,7 +4010,6 @@ const AGENT_TOOLS = [
           enum: ['auto', 'always', 'never'],
           description: 'Parallel orchestration strategy. Defaults to auto.',
         },
-        ...HOST_SESSION_FIELDS,
       },
       required: ['cwd'],
     },
@@ -4046,7 +4025,6 @@ const AGENT_TOOLS = [
       properties: {
         job_id: JOB_ID_FIELD,
         max_wait_sec: MAX_WAIT_FIELD,
-        ...HOST_SESSION_FIELDS,
       },
       required: ['job_id'],
     },
@@ -4063,7 +4041,6 @@ const AGENT_TOOLS = [
         job_id: JOB_ID_FIELD,
         verbose: { type: 'boolean', description: 'Include full activity timeline for a specific job.' },
         diagnostics: { type: 'boolean', description: 'Include environment/runtime doctor output in the status response.' },
-        ...HOST_SESSION_FIELDS,
       },
     },
     outputSchema: AGENT_OUTPUT_SCHEMA,
@@ -4083,7 +4060,6 @@ const AGENT_TOOLS = [
             + 'into the running turn with nothing cancelled; otherwise the bridge cancels and restarts the current '
             + 'turn with this continuation.',
         },
-        ...HOST_SESSION_FIELDS,
       },
       required: ['job_id', 'message'],
     },
@@ -4097,7 +4073,6 @@ const AGENT_TOOLS = [
       additionalProperties: false,
       properties: {
         job_id: JOB_ID_FIELD,
-        ...HOST_SESSION_FIELDS,
       },
       required: ['job_id'],
     },
@@ -4109,25 +4084,49 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: AGENT_TOOLS,
 }));
 
+// Turn one MCP tool call into validated dispatch args.
+//
+// Codex (PR openai/codex#15190) injects per-turn metadata on every MCP tool
+// call as `_meta["x-codex-turn-metadata"]`: `session_id` is the ROOT session
+// for every agent in it, `thread_id` the calling agent's own thread (measured
+// on codex-cli 0.164.0). The session id is adopted BEFORE validation: it is
+// the only host→bridge session-id channel on Codex. Claude's _meta carries
+// claudecode/toolUseId and progressToken, but no session id; its bridge
+// inherits CLAUDE_CODE_SESSION_ID (getHostSessionId).
+//
+// One agent-companion instance is one companion conversation, so a send's
+// thread is named after the calling agent and never after the host session:
+// Codex's thread_id here, and on Claude the subagent's agent_id, which only
+// hooks can see — hooks/name-thread.sh writes it into `thread` before the call
+// leaves the host. The host's name wins over anything the model wrote. A send
+// that arrives with no name is refused rather than given a conversation
+// nobody could continue.
+export function callArgs(action, params) {
+  const turn = params?._meta?.['x-codex-turn-metadata'];
+  if (turn?.session_id && typeof turn.session_id === 'string') adoptHostSessionId(turn.session_id);
+  const toolArgs = params?.arguments || {};
+  if (Object.prototype.hasOwnProperty.call(toolArgs, 'action')) {
+    throw new Error('agent: split MCP tools do not accept an action field; choose the agent_* tool that matches the operation');
+  }
+  const args = { action, ...toolArgs };
+  if (action === 'send') {
+    if (turn?.thread_id && typeof turn.thread_id === 'string') args.thread = turn.thread_id;
+    if (!args.thread) {
+      throw new Error(
+        'agent: thread is required — the host names it after the calling agent ' +
+        "(Claude: hooks/name-thread.sh writes the subagent's agent_id; Codex: _meta thread_id), " +
+        'and neither reached the bridge',
+      );
+    }
+  }
+  return validateAgentArgs(args);
+}
+
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const action = TOOL_ACTIONS[req.params.name];
   if (!action) throw new Error(`unknown tool: ${req.params.name}`);
   try {
-    // Codex (PR openai/codex#15190) injects per-turn metadata on every MCP
-    // tool call as `_meta["x-codex-turn-metadata"]`, including a stable
-    // session_id. Adopt that BEFORE validation/dispatch so even callers
-    // that don't forward host_session_id get correctly tagged. This is
-    // the primary host→bridge session-id channel on Codex; arg-based
-    // forwarding is the fallback for hosts that don't expose _meta
-    // (Claude does not).
-    const metaSid = req?.params?._meta?.['x-codex-turn-metadata']?.session_id;
-    if (metaSid && typeof metaSid === 'string') adoptHostSessionId(metaSid);
-    const toolArgs = req.params.arguments || {};
-    if (Object.prototype.hasOwnProperty.call(toolArgs, 'action')) {
-      throw new Error('agent: split MCP tools do not accept an action field; choose the agent_* tool that matches the operation');
-    }
-    const normalized = validateAgentArgs({ action, ...toolArgs });
-    return await dispatch(normalized);
+    return await dispatch(callArgs(action, req.params));
   } catch (err) {
     if (err && err.code === 'BRIDGE_SID_CONFLICT') {
       log('ERROR', 'sid conflict on MCP call:', err.message);
@@ -4143,25 +4142,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 // Exported dispatcher lets tests drive the action handlers directly without
 // going through MCP transport plumbing. Tests that want to exercise the
-// MCP `_meta` path call `adoptHostSessionId(metaSid)` directly before
-// invoking dispatch — this matches the MCP handler's own ordering.
+// MCP `_meta` path go through callArgs, as the MCP handler does.
 export async function dispatch(normalized) {
-  // Arg-based session-id adoption (host_session_id is the host-neutral
-  // session-id field, validated by validation.mjs::normalizeHostSid).
-  // Skipped if _meta already adopted a sid for this process — adoptHostSessionId
-  // is no-op-on-match / throws BRIDGE_SID_CONFLICT on conflict, so the
-  // precedence holds. We catch the conflict here so direct callers (tests,
-  // and any non-MCP consumer) get the same structured error the MCP handler
-  // returns rather than an unhandled rejection.
-  try {
-    if (normalized.host_session_id) adoptHostSessionId(normalized.host_session_id);
-  } catch (err) {
-    if (err && err.code === 'BRIDGE_SID_CONFLICT') {
-      log('ERROR', 'sid conflict on dispatch:', err.message);
-      return asJson({ ok: false, error: err.message, code: 'BRIDGE_SID_CONFLICT' });
-    }
-    throw err;
-  }
   switch (normalized.action) {
     case 'send':   return handleSend(normalized);
     case 'wait':   return handleWait(normalized);
@@ -4462,11 +4444,9 @@ if (isMain) {
   const { detectHost } = await import('../lib/host.mjs');
   logEvent('info', 'bridge.startup', { host_detected: detectHost() });
 
-  // Only run eager hydrate/sweep when the env actually carries a real sid.
-  // In production, Claude Code passes the literal string `${CLAUDE_CODE_SESSION_ID}`
-  // through to the env block (no ${VAR} expansion at MCP-spawn time), so
-  // sanitizeSid returns null and we wait for the subagent to forward the
-  // sid via the first MCP call's `host_session_id` arg.
+  // Eager hydrate/sweep when the sid is already known: on Claude Code it is
+  // inherited. Codex's arrives in _meta with the first call, which runs both
+  // lazily (adoptHostSessionId).
   if (getHostSessionId()) {
     hydrateJobsFromLedger();
     sweepOwnSessionStaleQueueRows();

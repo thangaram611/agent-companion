@@ -32,24 +32,22 @@ test('Codex template lists every prompt template the bridge accepts, and the rev
 
 const topLevel = text;
 
-test('role fields stay top-level and use an allowlisted model', async () => {
+test('role fields stay top-level and the role inherits the session model', async () => {
   assert.match(topLevel, /^name\s*=\s*"agent-companion"\s*$/m);
   assert.match(topLevel, /^description\s*=\s*"""/m);
   // Keep this as a role-level field; moving it into a table silently changes
   // its meaning in TOML.
   assert.match(topLevel, /^developer_instructions\s*=\s*"""/m);
 
-  const match = topLevel.match(/^model\s*=\s*"([^"]+)"\s*$/m);
-  assert.ok(match, 'model field present at top level');
-  const state = await import('../lib/state.mjs');
-  assert.equal(state.isCodexAgentModelAllowed(match[1]), true,
-    `model ${match[1]} must be in CODEX_AGENT_MODELS`);
+  // A pinned id goes stale with the catalog: `gpt-5.5` answered model_not_found
+  // on codex-cli 0.164.0. Without a pin the role runs on the user's own model.
+  assert.doesNotMatch(topLevel, /^model\s*=/m);
 
   const di = topLevel.match(/^developer_instructions\s*=\s*"""([\s\S]*?)"""/m);
   assert.ok(di, 'developer_instructions block extractable');
   const body = di[1];
   assert.match(body, /spawn_agent/);
-  assert.match(body, /send_input/);
+  assert.match(body, /followup_task/);
   assert.match(body, /Status \/ acknowledgement envelope/);
   assert.match(body, /`ok: true` with no `content` \+ `meta`/);
   // Same per-job-status gap as the Claude template — see its suite for why.
@@ -69,9 +67,7 @@ test('role does not attempt to add MCP authority', () => {
   assert.doesNotMatch(text, /^\[mcp_servers(?:\.|\])/m);
   assert.doesNotMatch(text, /\$\{CLAUDE_PLUGIN_ROOT\}/);
   assert.doesNotMatch(text, /MCP_TOOL_TIMEOUT/);
-  // The Claude template tells the agent to forward CLAUDE_CODE_SESSION_ID
-  // by hand. The Codex template must NOT carry that instruction, since
-  // session id is read server-side from MCP _meta.
+  // Codex's session id arrives in MCP _meta; Claude's variable has no business here.
   assert.doesNotMatch(text, /CLAUDE_CODE_SESSION_ID/,
     'Codex template should not mention CLAUDE_CODE_SESSION_ID');
 });
@@ -123,4 +119,27 @@ test('template forbids re-routing a dispatch the bridge refused to route', () =>
   assert.match(body,
     /Do NOT re-send the task with a `target`, `profile`, or `strength` the parent did not supply/);
   assert.match(body, /and do NOT drop the one it did supply/);
+});
+
+// Same contract as the Claude template; on Codex the bridge reads the caller's
+// own thread id from MCP _meta, never a mapping keyed by the root session.
+test('Codex template leaves thread and session id to the host: a spawn starts a conversation, followup_task continues it', () => {
+  assert.doesNotMatch(text, /by-host-session|MY_THREAD/);
+  // Nor a session id: Codex sends it in _meta.
+  assert.doesNotMatch(text, /host_session_id/);
+  assert.doesNotMatch(text, /"thread":/);
+  const prose = text.replace(/\s+/g, ' ');
+  assert.match(prose, /followup_task to the same agent-companion to continue it/);
+  assert.match(prose, /spawn a new one to start fresh/);
+});
+
+test('Codex 0.164.0 invocation uses the current collaboration tool schemas and mailbox wait', () => {
+  const description = text.match(/^description\s*=\s*"""([\s\S]*?)"""/m)[1].replace(/\s+/g, ' ');
+  assert.match(description, /spawn_agent.*`task_name`.*`agent_type`.*`message`/);
+  assert.match(description, /followup_task.*`target`.*`message`/);
+  assert.match(description, /JSON-encoded STRING/);
+  assert.match(description, /wait_agent.*`timeout_ms`/);
+  assert.match(description, /send_message.*does not (?:start|trigger) a (?:new )?turn/);
+  assert.match(description, /list_agents/);
+  assert.doesNotMatch(text, /send_input|resume_agent|0\.130\.0|under-development|trigger_turn|spawn_agent `prompt`/);
 });

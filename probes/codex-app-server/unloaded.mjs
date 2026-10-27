@@ -1,7 +1,7 @@
 // What does a FRESH `codex app-server` say about a thread that is on disk but not
-// loaded into this process? That is the broker-restart case, and `errs.mjs` could
-// not answer it: every call there uses the all-zero id, a thread that exists
-// nowhere, so it measured "unknown thread" and not "known thread, wrong process".
+// loaded into this process? That is the broker-restart case. `errs.mjs` tests
+// an all-zero unknown thread id and a real thread in the same process; this
+// probe checks a persisted thread from a fresh process.
 //
 //   node probes/codex-app-server/unloaded.mjs /tmp/somedir
 //

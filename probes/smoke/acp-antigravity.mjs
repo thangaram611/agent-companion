@@ -59,7 +59,7 @@ function startBridge(label) {
     }
   });
   const callTool = async (name, args) => {
-    const r = await rpc('tools/call', { name, arguments: { ...args, host_session_id: SID } });
+    const r = await rpc('tools/call', { name, arguments: args });
     const text = r?.content?.find((c) => c.type === 'text')?.text ?? '';
     try { return { parsed: JSON.parse(text), raw: r }; } catch { return { parsed: null, text, raw: r }; }
   };
@@ -95,7 +95,7 @@ try {
   // --- 1. A real Antigravity job: send, ledger while running, no usage on this surface.
   log('dispatching a real antigravity job into', work);
   const send = await A.callTool('agent_send', {
-    target: 'antigravity', cwd: work, mode: 'ANALYZE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    target: 'antigravity', cwd: work, thread: `${SID}-magic`, mode: 'ANALYZE', template: 'general', parallel: 'never', max_wait_sec: 5,
     task: 'Read README.md in the current directory and reply with ONLY the magic word it names. No preamble, no punctuation.',
   });
   const jobId = send.parsed?.job_id;
@@ -143,7 +143,7 @@ try {
 
   // --- 3. Reply: cancel + re-prompt on the same session, said so, follow-up wins.
   const send3 = await A.callTool('agent_send', {
-    target: 'antigravity', cwd: work, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    target: 'antigravity', cwd: work, thread: `${SID}-reply`, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
     task: 'Run the shell command `sleep 40` (wait for it to finish), then reply with ONLY the word SLEPT.',
   });
   const job3 = send3.parsed?.job_id;
@@ -159,7 +159,7 @@ try {
 
   // --- 4. Cancel settles cancelled.
   const send4 = await A.callTool('agent_send', {
-    target: 'antigravity', cwd: work, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    target: 'antigravity', cwd: work, thread: `${SID}-cancel`, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
     task: 'Run the shell command `sleep 45`, then reply with ONLY the word FINISHED.',
   });
   const job4 = send4.parsed?.job_id;
@@ -171,7 +171,7 @@ try {
 
   // --- 5. Restart survival: bridge A SIGKILLed mid-turn, bridge B rejoins the same prompt.
   const send5 = await A.callTool('agent_send', {
-    target: 'antigravity', cwd: work, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    target: 'antigravity', cwd: work, thread: `${SID}-restart`, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
     task: 'Run the shell command `sleep 30` (wait for it to finish), then reply with ONLY the word SURVIVED.',
   });
   const job5 = send5.parsed?.job_id;

@@ -1,4 +1,4 @@
-// Validation tests for the single `copilot` tool. Pure-function:
+// Validation tests for the five agent_* tools. Pure-function:
 // no sockets, no daemon, no state-layer side effects.
 
 import '../test/sandbox-home.mjs';
@@ -75,7 +75,7 @@ test('action schemas reject malformed inputs and normalize valid cancel/wait/sta
   assert.throws(() => validateAgentArgs({ action: 'launch' }), /action must be one of/);
 
   const cancel = validateAgentArgs({ action: 'cancel', job_id: 'abc-123' });
-  assert.deepEqual(cancel, { action: 'cancel', job_id: 'abc-123', host_session_id: null });
+  assert.deepEqual(cancel, { action: 'cancel', job_id: 'abc-123' });
   assert.throws(() => validateAgentArgs({ action: 'cancel' }), /job_id/);
   assert.throws(() => validateAgentArgs({ action: 'cancel', job_id: 'x', model: 'm' }), /unknown field "model"/);
 
@@ -347,26 +347,21 @@ test('scope_hint is accepted only for general prompts and bounded by type and le
   });
 });
 
-test('host_session_id normalizes across actions and rejects invalid values', () => {
+// The host supplies the session id (Codex _meta, Claude's inherited env), so no
+// action has a field for the model to forward one in.
+test('no action takes a session id argument', () => {
   const actions = [
-    { action: 'send', task: 'X', cwd: TEST_CWD, host_session_id: 'sid-abc' },
-    { action: 'wait', job_id: 'j1', host_session_id: 'sid-abc' },
-    { action: 'status', host_session_id: 'sid-abc' },
-    { action: 'reply', job_id: 'j1', message: 'hi', host_session_id: 'sid-abc' },
-    { action: 'cancel', job_id: 'j1', host_session_id: 'sid-abc' },
+    { action: 'send', task: 'X', cwd: TEST_CWD },
+    { action: 'wait', job_id: 'j1' },
+    { action: 'status' },
+    { action: 'reply', job_id: 'j1', message: 'hi' },
+    { action: 'cancel', job_id: 'j1' },
   ];
-  for (const action of actions) {
-    assert.equal(validateAgentArgs(action).host_session_id, 'sid-abc', `${action.action} normalized host_session_id`);
+  for (const args of actions) {
+    for (const key of ['host_session_id', 'claude_session_id']) {
+      assert.throws(() => validateAgentArgs({ ...args, [key]: 'sid-abc' }), new RegExp(`unknown field "${key}"`), `${args.action} ${key}`);
+    }
   }
-
-  assert.throws(() => validateAgentArgs({ action: 'status', host_session_id: 42 }),
-    /host_session_id must be a non-empty string/);
-  assert.throws(() => validateAgentArgs({ action: 'status', host_session_id: '' }),
-    /host_session_id must be a non-empty string/);
-  assert.equal(validateAgentArgs({ action: 'status' }).host_session_id, null);
-  // claude_session_id was collapsed into host_session_id — it is now an unknown key.
-  assert.throws(() => validateAgentArgs({ action: 'status', claude_session_id: 'x' }),
-    /unknown field "claude_session_id"/);
 });
 
 test('review template: read-only reviewer prompt with a required verdict line, task-driven, no template_args, no wrapper, no auto-fleet', () => {

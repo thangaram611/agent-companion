@@ -23,7 +23,6 @@ const REQUIRED_PERMISSIONS = [
   'mcp__agent-bridge__agent_status',
   'mcp__agent-bridge__agent_reply',
   'mcp__agent-bridge__agent_cancel',
-  'Bash(echo "$CLAUDE_CODE_SESSION_ID")',
 ];
 
 function withHome(fn) {

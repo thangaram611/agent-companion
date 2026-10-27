@@ -10,8 +10,8 @@
 // ships for ACP clients is `agy_acp_server.par`, published to the ACP registry
 // as `antigravity-acp` for Zed, JetBrains and Xcode — no brew formula, no npm
 // package, a 316 MB zip per platform. This does what those editors' registry
-// installers do: read the registry, fetch the platform archive, verify the
-// Developer ID signature on macOS, unpack under a versioned directory and
+// installers do: read the registry, fetch and verify the platform archive's
+// SHA-256, unpack under a versioned directory, verify the macOS signature and
 // point `current` at it. It writes nothing outside that directory; the login
 // writes to the server's own home (`~/.gemini/antigravity-acp/`, by the
 // server itself).
@@ -20,7 +20,8 @@
 // the registry document, child_process for `curl`, `unzip` and `codesign`.
 
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { createReadStream, existsSync, mkdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,8 +34,7 @@ export const AGENT_ID = 'antigravity-acp';
 // 1.1.1: `Authority=Developer ID Application: Google LLC (EQHXZ8M8AV)`).
 export const EXPECTED_AUTHORITY = 'Developer ID Application: Google LLC (EQHXZ8M8AV)';
 
-// The registry keys its binaries by `<os>-<arch>` in Rust's vocabulary; the
-// darwin entry is aarch64 only (no Intel Mac build on 2026-09-11).
+// Supported installer platforms, keyed by the registry's Rust vocabulary.
 const PLATFORM_KEYS = {
   'darwin-arm64': 'darwin-aarch64',
   'linux-x64': 'linux-x86_64',
@@ -52,7 +52,10 @@ export function selectDistribution(registry, platform = process.platform, arch =
   if (!entry) {
     throw new Error(`no ${AGENT_ID} binary for ${platform}-${arch}; the registry has: ${Object.keys(binaries).join(', ') || '(none)'}`);
   }
-  return { version: String(agent.version), archive: entry.archive, cmd: entry.cmd, args: entry.args || [] };
+  if (typeof entry.sha256 !== 'string' || !/^[a-fA-F0-9]{64}$/.test(entry.sha256)) {
+    throw new Error(`registry archive for ${key} has no valid SHA-256 checksum`);
+  }
+  return { version: String(agent.version), archive: entry.archive, cmd: entry.cmd, args: entry.args || [], sha256: entry.sha256.toLowerCase() };
 }
 
 export function installedVersion(paths) {
@@ -80,6 +83,13 @@ function download(url, dest) {
   execFileSync('curl', ['-fL', progress, '-o', dest, url], { stdio: ['ignore', 'inherit', 'inherit'], timeout: DOWNLOAD_TIMEOUT_MS, killSignal: 'SIGKILL' });
 }
 
+async function verifyArchive(file, expected) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  const actual = hash.digest('hex');
+  if (actual !== expected) throw new Error(`SHA-256 mismatch for ${file}: expected ${expected}, got ${actual}`);
+}
+
 function unzip(zip, dir) {
   mkdirSync(dir, { recursive: true });
   try {
@@ -90,12 +100,10 @@ function unzip(zip, dir) {
   }
 }
 
-// macOS: the archive carries no checksum, so the code signature is the only
-// provenance check available — and it is a strong one. Refuse anything that
-// does not verify as Google's Developer ID. codesign writes its report to
-// stderr, hence the shell redirect.
+// macOS also verifies Google's Developer ID on the extracted binary.
+// codesign writes its report to stderr, hence the shell redirect.
 export function verifySignature(binary, { platform = process.platform, run = execFileSync } = {}) {
-  if (platform !== 'darwin') return { verified: false, detail: `no signature check on ${platform} (the registry publishes no checksums)` };
+  if (platform !== 'darwin') return { verified: false, detail: `no signature check on ${platform}` };
   run('codesign', ['--verify', '--strict', binary], { stdio: ['ignore', 'ignore', 'pipe'], timeout: SIGN_TIMEOUT_MS, killSignal: 'SIGKILL' });
   const report = String(run('sh', ['-c', 'codesign -dv --verbose=2 "$1" 2>&1', 'sh', binary], { encoding: 'utf8', timeout: SIGN_TIMEOUT_MS, killSignal: 'SIGKILL' }));
   return { verified: report.includes(EXPECTED_AUTHORITY), detail: EXPECTED_AUTHORITY };
@@ -117,6 +125,8 @@ export async function install({ paths = antigravityAcpPaths(), registryUrl = REG
     log(`downloading ${dist.archive}`);
     try {
       download(dist.archive, zip);
+      await verifyArchive(zip, dist.sha256);
+      log(`SHA-256 verified: ${dist.sha256}`);
       rmSync(versionDir, { recursive: true, force: true });
       unzip(zip, versionDir);
     } finally {

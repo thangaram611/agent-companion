@@ -48,13 +48,8 @@ flags for the MVP.
 Current implementation status lives in [docs/MVP_TRACKER.md](docs/MVP_TRACKER.md).
 Architecture details live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Public release gates live in [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.md).
-The delivered onboarding design record lives in
-[docs/ONBOARDING_HANDOFF.md](docs/ONBOARDING_HANDOFF.md).
-
-The project is in maintenance as of 2026-10-09. The supported review and
-delegation workflows remain available; new companions, profiles or transports
-require a recurring unmet workflow. The reviewer-profile experiment closeout
-and v0.1.0 release preparation are recorded in the tracker.
+The project is in maintenance; new companions, profiles or transports require
+a recurring unmet workflow.
 
 ## What It Does
 
@@ -76,17 +71,6 @@ digest links.
 
 ![Agent Companion architecture](assets/readme/architecture.png)
 
-## Supported Harnesses
-
-| Harness | Install selector | Status |
-| --- | --- | --- |
-| Claude Code | `--host claude` | implemented |
-| Codex CLI | `--host codex` | implemented |
-
-Future harnesses should add a host install surface, subagent template, hook or
-completion delivery path, and session-routing adapter without changing the
-companion runtime boundary.
-
 ## Supported Companions
 
 ![Agent Companion companion matrix](assets/readme/target-matrix.png)
@@ -102,190 +86,58 @@ companion runtime boundary.
 
 Notes:
 
-- OpenCode ships two adapters, selected by `OPENCODE_RUNTIME_ADAPTER`:
-  - `cli` (default) is the single-shot `opencode run` adapter. OpenCode 1.x
-    uses `--dir`; 2.x uses a private `--standalone` server and a matching
-    `PWD`. Permission mode `skip` maps to 1.x's
-    `--dangerously-skip-permissions` or 2.x's `--auto`.
-  - `server` drives a long-lived `opencode serve` HTTP server and adds in-flight
-    reply/re-steer, restart resume, and streamed event digests. One shared server
-    roots each job at its own `cwd` via 1.x's `?directory=` query or 2.x's
-    session `location`. The server
-    is detached and survives bridge restarts (like the Copilot daemon) so a
-    respawned bridge reattaches instead of re-spawning.
-  - Server mode binds `127.0.0.1`. OpenCode 2.x generates a private server
-    password, retained in the owner's runtime registry for restart recovery
-    and omitted from status and digests; 1.x remains unsecured. Permission handling follows
-    OpenCode's own config (the `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip`
-    flag applies to the cli adapter only). Job timeout defaults to 40 minutes,
-    override with `AGENT_COMPANION_OPENCODE_TIMEOUT_MS`; in server mode the
-    shared server's idle TTL is derived from it rather than set directly.
-  - `AGENT_COMPANION_OPENCODE_MODEL=provider/model` pins a model. In server mode
-    it is the fallback for any job whose profile pins none; on `cli` it reaches
-    the job as the synthesized default profile's model. A profile's own `model`
-    wins either way, and unset leaves OpenCode's configured default in place.
-- Copilot keeps `/fleet` parallel orchestration. `parallel: "auto"` can prepend
-  `/fleet` for broad Copilot tasks; OpenCode, Codex and Antigravity remain single-job.
-- The two ACP companions share one daemon implementation,
-  `scripts/acp-daemon.mjs`, run as one detached process **per companion** per
-  host home (`--companion copilot|antigravity`), each with its own socket, log
-  and prompt streams and an
-  entry in `runtime/acp-daemons.json` with leases and a two-phase disposal
-  claim — the codex broker's shape. Everything companion-shaped is the
-  descriptor's `acp` block in `lib/target-registry.mjs`: the spawn argv, extra
-  env, `clientInfo.name`, the default model, whether `session/load` is
-  honoured, the answer to `session/request_permission`, the usage reader, the
-  `session/update` kinds the agent was measured to emit and, where the agent
-  takes its model per session rather than as a flag, the request that sets it.
-  So a native ACP agent is a descriptor plus an install/auth block, not a
-  daemon — Antigravity is one.
-  The daemon pins ACP **v1**; an agent answering another version is refused
-  (`ACP_PROTOCOL_MISMATCH`, the job settles `unreachable`), never adapted. It
-  answers `session/request_permission` itself, from the descriptor's policy,
-  so an agent that asks is never left hanging. Reply on an ACP companion is a
-  cancelled turn plus a new prompt on the same session, told why — ACP has no
-  mid-turn steer and the acknowledgement says so.
-- Google Antigravity (`agy_acp_server.par` 1.1.1, measured 2026-09-11):
-  - The daemon spawns **Google's own ACP server** from the ACP registry
-    (`antigravity-acp` — the binary Zed, JetBrains and Xcode launch), never the
-    `agy` CLI, which has no ACP mode (cask 1.2.0; antigravity-cli#31 is open).
-    Install it with `node scripts/install-antigravity-acp.mjs` (reads the
-    registry, downloads the platform archive, verifies the Google LLC
-    Developer ID signature on macOS, unpacks under
-    `~/.local/share/agent-companion/antigravity-acp/<version>/`); override the
-    path with `ANTIGRAVITY_ACP_BIN`.
-  - Sign in with `node scripts/install-antigravity-acp.mjs --login`: the
-    server prints a Google sign-in URL and opens the browser (any Antigravity
-    plan, including the free tier, or `--method gemini-api-key` with
-    `GEMINI_API_KEY`). Credentials are the server's own — `auth.type` in
-    `~/.gemini/antigravity-acp/settings.json`, the token in the login
-    keychain — shared with neither `agy` nor Gemini CLI; `node
-    scripts/onboard.mjs --list-targets` reads that state without a turn.
-  - Terms: the bridge is a stdio client of Google's signed server, exactly
-    what the editors Google documents are. It never holds the OAuth token and
-    never calls Google's backend, which is the conduct the Antigravity terms
-    and FAQ prohibit ("third party software, tools, or services to access the
-    Service (e.g. using OpenClaw with Antigravity OAuth)"). The reading, its
-    quotes and its caveats are `docs/MVP_TRACKER.md` item 8; the account risk
-    is yours. On the free tier Google staff may review your Interactions
-    unless the account opts out in Antigravity's own settings.
-  - Permissions: the daemon is the user. The server asks
-    `session/request_permission` for `execute` and `edit` tool calls in its
-    default mode and never for reads; `AGENT_COMPANION_ANTIGRAVITY_PERMISSION=
-    all|edit|none` (default `all`) is the daemon's answer (allow everything /
-    allow edits only / allow nothing that asks — a rejected tool tells the
-    model). The tool sandbox is derived from the session `cwd` with symlinks
-    resolved, so `cwd` must be the real project directory.
-  - A profile `model` (`gemini-3.7-flash-high`, `gemini-3.8-flash-low`,
-    `gemini-pro-agent`, …) is a per-session config option the server
-    validates itself (an unknown id fails the job, naming the available ones);
-    unset leaves the account's default. A session the daemon no longer holds
-    is `session/load`ed — the server keeps sessions on disk and a loaded one
-    remembers — and told its model again, because a loaded session comes
-    back on the default.
-  - Usage: none. The ACP surface carries no usage (the prompt response is
-    `{stopReason}` only, no `usage_update`), so Antigravity jobs have no
-    `usage` key. No `/fleet`, no rubber-duck wrapper: output is relay-only.
-- Codex ships two adapters, selected by `CODEX_RUNTIME_ADAPTER`:
-  - `exec` is the single-shot `codex exec --json` adapter — the *code* default,
-    but not what you get: both agent templates set
-    `CODEX_RUNTIME_ADAPTER=appserver` in the bridge's MCP `env`, so a real
-    install runs the app-server row above. Select it explicitly with
-    `CODEX_RUNTIME_ADAPTER=exec`. It is
-    send-only: that pipe has no live control channel and leaves no daemon to
-    reattach to after a bridge restart. The limit is the **transport**, not codex.
-  - `appserver` talks JSON-RPC to a shared broker that owns one long-lived
-    `codex app-server`, and adds in-flight reply (`turn/steer` injects into the
-    running turn — nothing is cancelled and no work is discarded), restart
-    resume (`thread/resume` rejoins a *running* thread; if the broker itself
-    died, the rollout on disk still yields the transcript and only the in-flight
-    turn is lost) and real sub-turn streamed digests. Cancel becomes
-    `turn/interrupt`, which ends the turn and leaves the thread live. A
-    follow-up send on the same `thread` resumes the codex thread the last job
-    on it recorded (its id is the thread's `.sid`, exactly as Copilot's ACP
-    session id is), so the conversation continues instead of restarting cold.
-    A thread name with no recorded id is what opens fresh — note that omitting
-    `thread` on a host session that already has a thread mapped continues that
-    thread, as it always has for Copilot. A
-    recorded id that no longer resumes on a healthy broker fails that send
-    explicitly and retires the sid — there is no silent fallback to a fresh
-    thread.
-  - Under `appserver` the approval policy is pinned to `never` and is not
-    configurable: a client that accepts one approval escalates past the sandbox
-    (measured), so the sandbox stays the hard boundary. The broker is detached
-    and shared by every bridge on the machine that resolves to the same host
-    home — its socket lives under `~/.{claude,codex}/agent-companion/runtime/`,
-    so the two harnesses get one broker each — and it is reaped once it has been
-    idle with no live job on that host. A loaded completed thread is history,
-    not activity: both reapers read the thread state and refuse to stop only for
-    an active turn or a state they cannot prove idle.
-  - Before starting or reusing that broker, the bridge inspects Codex as an
-    executable pair. `CODEX_BIN` (or `codex` on `PATH`) remains the desired
-    installed version; the inspector retains its invoked and canonical paths,
-    version and file identity, and requires an executable
-    `codex-code-mode-host` from the package resources, canonical binary
-    directory, or final invoked-directory fallback. If that pair is incomplete
-    or its parent is quarantined, a complete, same-version, unquarantined pair
-    under `$CODEX_HOME/plugins/.plugin-appserver/` (default
-    `~/.codex/plugins/.plugin-appserver/`) is preferred. A complete quarantined
-    configured pair remains usable with an advisory when no such fallback is
-    available. A failed xattr probe is reported as indeterminate, never silently
-    treated as “not quarantined.” Agent Companion creates no helper symlink and
-    removes no xattr. The remedy is the operator's: `xattr -d
-    com.apple.quarantine` on the cask's `codex` and `codex-code-mode-host`,
-    repeated after each cask upgrade, because Homebrew removed its
-    `--no-quarantine` install switch (Homebrew/brew#20755, closed 2025-11-05)
-    and `HOMEBREW_CASK_OPTS` no longer accepts it.
-  - Every send compares the running app-server's path, version and file identity
-    with the pair a fresh broker would select. A stale broker is replaced only
-    after the client, lease and active-turn guards all prove it idle; otherwise
-    replacement is deferred rather than risking live work. A dead-broker or
-    configuration-`EPERM` failure during `thread/start` gets one guarded restart
-    and one retry, never a retry loop.
-- Both codex adapters resolve the sandbox mode and network flag the same way,
-    with one exception: `bypass` is an exec-only escape hatch. On `exec` it
-    swaps `--sandbox` for `--dangerously-bypass-approvals-and-sandbox`, removing
-    the sandbox; on `appserver` there is no such flag, so it collapses onto
-    `danger-full-access`, which is still a sandbox. Sandbox defaults to
-  `workspace-write` with network **ON** by default — the inverse of codex's own
-  `codex exec` default (network OFF) — because a companion that can't `npm
-  install` fails tasks confusingly; opt out per job with
-  `AGENT_COMPANION_CODEX_NETWORK=off`. Override the sandbox mode with
+- OpenCode defaults to `OPENCODE_RUNTIME_ADAPTER=cli`; select `server` for
+  in-flight reply and restart resume. Server mode binds `127.0.0.1`; 2.x uses
+  a private password, while 1.x is unsecured. Server permissions follow
+  OpenCode's config; `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip` applies
+  only to CLI mode. `AGENT_COMPANION_OPENCODE_MODEL=provider/model` supplies
+  the default model; a profile's model wins. Job timeout defaults to 40 minutes,
+  configurable with `AGENT_COMPANION_OPENCODE_TIMEOUT_MS`.
+- Copilot and Antigravity use detached ACP daemons. Their reply operation
+  cancels the running turn and re-prompts the same session; it is not mid-turn
+  steering. Copilot can use `/fleet` for broad tasks.
+- Install and sign in to Google's Antigravity ACP server with
+  `node scripts/install-antigravity-acp.mjs --login`. It verifies Google's
+  signature on macOS and installs under
+  `~/.local/share/agent-companion/antigravity-acp/`; `ANTIGRAVITY_ACP_BIN`
+  overrides the binary path. Credentials belong to the server under
+  `~/.gemini/antigravity-acp/` and the login keychain.
+  `AGENT_COMPANION_ANTIGRAVITY_PERMISSION=all|edit|none` controls permission
+  answers (default `all`). Use the real project directory as `cwd`: its
+  sandbox resolves symlinks. A profile can pin a model; unset uses the account
+  default. The account/terms assessment is in
+  [docs/MVP_TRACKER.md](docs/MVP_TRACKER.md), item 8.
+- Installed Codex surfaces set `CODEX_RUNTIME_ADAPTER=appserver`. The broker
+  survives bridge restarts, supports live steering and cancellation, and
+  continues the recorded Codex conversation on a follow-up send. If the broker
+  itself dies, the transcript survives on disk but its in-flight turn is lost.
+  A recorded thread that cannot resume fails explicitly. `CODEX_RUNTIME_ADAPTER=exec`
+  selects the one-shot transport, which cannot reply or resume after a bridge
+  restart. A bare bridge without the installed configuration defaults to `exec`.
+- Codex defaults to `workspace-write` with network access enabled. Set
+  `AGENT_COMPANION_CODEX_NETWORK=off` to disable network access, or
   `AGENT_COMPANION_CODEX_SANDBOX_MODE=read-only|workspace-write|danger-full-access|bypass`
-  (`danger-full-access` and `bypass` are both dangerous and flagged as such;
-  `bypass` exists for environments that already sandbox the bridge itself,
-  since macOS Seatbelt sandboxes do not nest). `.git`/`.codex`/`.agents` stay
-  read-only inside the workspace even under `workspace-write` (a carve-out that
-  wins over any extra writable roots); jobs that must write git internals need
-  `danger-full-access` or `bypass`. Every delegated job persists a full rollout
-  transcript under `$CODEX_HOME/sessions` (default `~/.codex/sessions`) with no
-  auto-cleanup in v1 — that rollout is what `appserver` recovery reads back
-  (`thread/resume` re-loads a thread from it even after the broker dies). The
-  `codex exec resume <thread_id>` lever this once anticipated was dropped when
-  the app-server transport landed; see
-  [docs/RELIABILITY_REMEDIATION.md](docs/RELIABILITY_REMEDIATION.md) "Wave 3".
-  Codex inherits the user's own `~/.codex/config.toml` by default (no
-  `--ignore-user-config` for real jobs): every enabled MCP server
-  boots on each spawn and can stall the first turn up to its configured
-  `startup_timeout_sec`, and shell env is inherited into the child minus
-  `*KEY*`/`*SECRET*`/`*TOKEN*` names. Optional model pin for the default
-  profile: `AGENT_COMPANION_CODEX_MODEL=<model id>` (a profile's own `model`
-  wins); timeout default 40 minutes, override with
+  to choose the sandbox mode. `.git`/`.codex`/`.agents` remain read-only under
+  `workspace-write`, even with extra writable roots. `danger-full-access`
+  permits unrestricted filesystem access; `bypass` also bypasses approvals on
+  exec and maps to `danger-full-access` on app-server. The app-server approval
+  policy is fixed at `never`: accepting an approval was measured to permit a
+  write outside a read-only sandbox.
+- Codex inherits the user's configuration, including enabled MCP servers;
+  their startup timeouts can delay the first turn. Rollouts persist under
+  `$CODEX_HOME/sessions` (default `~/.codex/sessions`) without automatic cleanup.
+  `AGENT_COMPANION_CODEX_MODEL` supplies the default profile's model; a profile's
+  own model wins. Job timeout defaults to 40 minutes, configurable with
   `AGENT_COMPANION_CODEX_TIMEOUT_MS`.
-- Gemini CLI was built on the generic daemon and dropped before shipping on
-  2026-09-11 (Google closed "Login with Google" for individual accounts on
-  2026-06-18); Google's own ACP server for Antigravity took its place as the
-  second ACP companion the same day — `docs/MVP_TRACKER.md` items 7 and 8 keep
-  the evidence. Goose is an ACP row; Aider was dropped (stalled, no ACP or MCP).
+
+Transport internals and measured constraints live in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For Codex installation or broker
+problems, see [Diagnostics](#diagnostics).
 
 ## Strength Routing
 
-Shipped 2026-06-23. `resolveRouting` is the bridge's only routing brain, and it
-never falls back silently: every request it cannot resolve comes back as a named
-error. Ambiguity and unknown-key errors echo the candidate ids; the
-capability-gate refusals (`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`,
-`MODEL_NOT_ALLOWED`) name the offending companion in `target` instead. Every
-envelope carries the public `targets` and `profiles` lists.
+Unresolvable requests return named errors with the configured targets and
+profiles, plus candidate ids when available. Routing never falls back silently.
 
 One `agent_send` resolves to exactly one companion profile. A send may carry:
 
@@ -294,25 +146,21 @@ One `agent_send` resolves to exactly one companion profile. A send may carry:
 | `strength` | Preferred. Route to the configured profile that declares this label. |
 | `profile` | A specific configured profile id. Mutually exclusive with `strength`. |
 | `target` | A bare companion: `opencode`, `copilot`, `codex`, or `antigravity`. |
-| *(none)* | The configured default profile wins — see Internal MCP Surface for the full zero-input order. |
+| *(none)* | The configured default profile wins — see [Onboarding Commands](#onboarding-commands) for precedence. |
 
 Passing both `strength` and `profile` is `ROUTING_CONFLICT`. A `target` passed
 *alongside* one of them is read as an assertion, not a selector: if it disagrees
 with the resolved profile's companion, that is `ROUTING_CONFLICT` too.
 
-A profile pins one companion, optionally a model and an adapter, and declares
+A profile pins one companion, optionally a model, and declares
 strengths drawn from a closed vocabulary: `reviewer`, `web_researcher`,
 `planner`, `fast_executor`. Profiles inherit capabilities from their companion
 and never re-declare them. Author them with onboarding:
 
 ```bash
-node scripts/onboard.mjs --define-profile copilot_claude_sonnet_4_6 \
-  --companion copilot --model claude-sonnet-4.6 --strength web_researcher
-node scripts/onboard.mjs --define-profile copilot_gpt_5_4 \
-  --companion copilot --model gpt-5.4 --strength reviewer
-node scripts/onboard.mjs --define-profile opencode_provider_model \
-  --companion opencode --model provider/model --strength fast_executor
-node scripts/onboard.mjs --set-default-profile copilot_gpt_5_4
+AGENT_COMPANION_HOST=claude node scripts/onboard.mjs --define-profile code_reviewer \
+  --companion codex --strength reviewer
+AGENT_COMPANION_HOST=claude node scripts/onboard.mjs --set-default-profile code_reviewer
 ```
 
 Ambiguity is an error rather than a coin flip. When several profiles declare the
@@ -320,16 +168,11 @@ same strength — or several target the same bare companion — the configured
 `defaultProfile` breaks the tie only when it is itself one of the candidates —
 it has to declare that strength, or target that companion. Otherwise the send
 fails `STRENGTH_AMBIGUOUS` or `PROFILE_AMBIGUOUS`. With no `profiles.json` at all the
-bridge synthesizes a single profile from `default-target`, so an install that
-never authored a profile routes exactly as it did before.
+bridge synthesizes a single profile from `default-target`.
 
-Two open items:
-
-- `STRENGTH_CAPABILITY_REQUIREMENTS` ships empty: no strength yet demands a
-  capability, so the pre-spawn capability gate is fully wired but inert.
-- A profile's `adapter` field is a capability *declaration*. The transport a job
-  actually starts on is still whatever `OPENCODE_RUNTIME_ADAPTER` /
-  `CODEX_RUNTIME_ADAPTER` says at spawn, frozen per job from there.
+A profile's `adapter` field declares capabilities; it does not select the
+transport. Set `OPENCODE_RUNTIME_ADAPTER` / `CODEX_RUNTIME_ADAPTER` on the bridge
+to choose the transport. OpenCode and Codex jobs retain their starting adapter.
 
 ## Requirements
 
@@ -421,47 +264,13 @@ delegation verification and names the required fresh session/hook approval.
 
 ## Onboarding Commands
 
-Targets:
+Inspect configured profiles with `node scripts/onboard.mjs --list-profiles`;
+see [Diagnostics](#diagnostics) for readiness checks.
 
-```bash
-node scripts/onboard.mjs --list-targets
-node scripts/onboard.mjs --doctor
-node scripts/onboard.mjs --target opencode --set-default
-node scripts/onboard.mjs --target copilot --set-default
-node scripts/onboard.mjs --target codex --set-default
-node scripts/onboard.mjs --target antigravity --set-default
-node scripts/onboard.mjs --target opencode --smoke
-node scripts/onboard.mjs --target codex --set-default --plan --json
-```
-
-Companion profiles (ids, models and strength labels only — never secrets):
-
-```bash
-node scripts/onboard.mjs --list-profiles
-node scripts/onboard.mjs --define-profile <id> --companion opencode|copilot|codex \
-  [--model <m>] [--adapter <transport>] [--strength <labels>]
-node scripts/onboard.mjs --assign-strength <id> --strength <labels>
-node scripts/onboard.mjs --set-default-profile <id>
-```
-
-`--adapter` takes `cli|server` for OpenCode and `exec|appserver` for Codex.
-Copilot and Antigravity have no profile-selectable adapter; the ACP daemon is
-their one transport.
-`--strength` takes a comma-separated subset of `reviewer`, `web_researcher`,
-`planner`, `fast_executor`.
-
-Useful flags:
-
-| Flag | Purpose |
-| --- | --- |
-| `--host` | Label/scope onboarding output as `claude`, `codex`, or `both`. |
-| `--target` | Select `opencode`, `copilot`, `codex`, `antigravity`, `auto`, or `none`. |
-| `--set-default` | Write `~/.{claude,codex}/agent-companion/default-target`. |
-| `--json` | Emit machine-readable reports. |
-| `--plan` | Preview companion selection, existing configuration and readiness without writes or smoke tasks. |
-| `--no-target-check` | Persist the target even if readiness checks fail. |
-| `--smoke` | Run an opt-in target smoke task when supported. |
-| `--yes` / `-y` | Strict non-interactive mode: skip the smoke confirmation, and fail rather than prompt on an ambiguous target or warn on a strength conflict. |
+Profile setup is covered in [Strength Routing](#strength-routing). For the full
+flag reference, run `node scripts/onboard.mjs --help`. `--plan --json` previews
+selection and readiness without writes; `--smoke` explicitly opts into a real
+companion task that can spend quota.
 
 For standalone host-specific writes, set `AGENT_COMPANION_HOST=codex` or
 `AGENT_COMPANION_HOST=claude` on the command. `setup.sh` does this for each
@@ -475,8 +284,9 @@ matching `ready`, not just a successful CLI exit.
 
 `AGENT_COMPANION_DEFAULT_PROFILE` overrides the persisted `defaultProfile`, and
 `AGENT_COMPANION_DEFAULT_TARGET` overrides the persisted `default-target`. The
-default profile is consulted first; `default-target` answers only when no
-default profile is configured. With nothing configured at all and `agent_send`
+default profile is consulted first; an unknown default profile fails with
+`PROFILE_UNKNOWN`. `default-target` answers only when no default profile is
+configured. With nothing configured at all and `agent_send`
 omitting `target`, the bridge refuses the send instead of guessing.
 
 ## Install For Claude Code
@@ -505,19 +315,8 @@ materializing `templates/agent-companion.md` to:
 
 The standalone materialized Claude agent owns its private MCP bridge.
 
-The MCP call deadline is set per host, on the server entry itself:
-`timeout: 1320000` (milliseconds) in the Claude frontmatter, `tool_timeout_sec =
-1320` in the Codex plugin manifest. Both clear the bridge's own 1200s wait cap
-(`clampWaitSec`) so the bridge always answers before the host abandons the call.
-On the Claude side this must be a **sibling of `command`/`args`**, not an `env:`
-entry — an `MCP_TOOL_TIMEOUT` environment variable reaches the bridge child
-process but the host ignores it, and it silently buys nothing. The per-server
-field also floors the MCP idle window, which is what keeps a long silent
-`agent_wait` from being cut at the host's watchdog tick. That idle window is
-Claude Code's own `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` (30 minutes by default for
-stdio servers), a variable of the shell that launches `claude`, never of the
-agent frontmatter; `docs/ARCHITECTURE.md` "Host budgets and observability" pins
-it together with `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`.
+For MCP timeout configuration and the host idle watchdog, see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), "Host budgets and observability".
 
 ### Claude Permissions
 
@@ -529,44 +328,24 @@ node scripts/install-permissions.mjs --host claude --yes
 ```
 
 Marketplace installs can also approve the first prompt with "Yes, don't ask
-again". The allow-list shape is:
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__agent-bridge__agent_send",
-      "mcp__agent-bridge__agent_wait",
-      "mcp__agent-bridge__agent_status",
-      "mcp__agent-bridge__agent_reply",
-      "mcp__agent-bridge__agent_cancel",
-      "Bash(echo \"$CLAUDE_CODE_SESSION_ID\")"
-    ]
-  }
-}
-```
+again". The permission installer owns the allow-list.
 
 Use `.claude/settings.local.json` if you want these permissions scoped to one
 repository.
 
-### Optional: `SendMessage` subagent resume
+### One agent-companion, one companion conversation
 
-Nothing in this plugin requires it. The bridge implements its own reply, wait,
-status and restart-resume over HTTP (`agent_reply` / `agent_wait` /
-`agent_status`, plus the `reply_available` / `resume_available` flags described
-in `docs/ARCHITECTURE.md`) — none of which goes through Claude Code's
-`SendMessage`.
-
-If you separately want Claude Code's built-in subagent resume — reattaching to
-a *completed* subagent's thread with its context intact — that is gated behind
-an experimental flag you can set yourself:
-
-```bash
-export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
-```
-
-`setup.sh` does **not** set this for you. It is an experimental Claude Code
-flag with effects well beyond this plugin, so opting in is your call.
+Each spawned `agent-companion` is one conversation with the companion. To
+continue it — a follow-up, or the answer to a question the companion asked —
+main sends the same agent-companion a message (`SendMessage` on Claude Code,
+`followup_task` on Codex); to start fresh, it spawns a new one. Neither main nor
+the subagent carries a thread: the host names it after the calling agent.
+Claude Code shows a subagent's `agent_id` only to hooks, so the plugin's
+`PreToolUse` hook (`hooks/name-thread.sh`) writes it into `agent_send`'s
+`thread`; Codex sends the caller's own thread id in MCP `_meta`, which the
+bridge reads. A send that reaches the bridge with neither is refused. Measured
+on Claude Code 2.1.310 and codex-cli 0.164.0: two spawns get two ids, a resume
+keeps its id, and `SendMessage` needs no experimental flag.
 
 ## Install For Codex CLI
 
@@ -643,62 +422,24 @@ such as `any updates?`.
 You normally do not call these tools yourself. The host reads the subagent
 description and spawns it when you ask for delegation, status, reply, or cancel.
 
-```text
-agent_send({
-  task,
-  cwd,
-  target?,
-  strength?,       // preferred routing input; mutually exclusive with profile
-  profile?,        // a specific configured profile id; mutually exclusive with strength
-  mode?,
-  template?,
-  template_args?,
-  thread?,
-  max_wait_sec?,
-  parallel?
-})
+Every send requires an absolute target repo/worktree `cwd`. The host supplies
+conversation identity as described in
+[One agent-companion, one companion conversation](#one-agent-companion-one-companion-conversation).
+Tool fields are defined in `bridge-server/server.mjs`; routing choices are
+covered in [Strength Routing](#strength-routing).
 
-agent_wait({ job_id, max_wait_sec? })
-agent_status({ job_id?, verbose?, diagnostics? })
-agent_reply({ job_id, message })
-agent_cancel({ job_id })
-```
-
-Important rules:
-
-- `cwd` is required on every send and must be an absolute target repo/worktree
-  path.
-- `target` may be `opencode`, `copilot`, `codex`, or `antigravity`. Prefer `strength`, or
-  `profile` when you need one specific configured profile.
-- With `target`, `strength` and `profile` all omitted, resolution uses the
-  default profile — `AGENT_COMPANION_DEFAULT_PROFILE`, else the `defaultProfile`
-  key in `profiles.json` — and routes to that profile's companion. A default
-  profile naming no configured profile fails with `PROFILE_UNKNOWN` rather than
-  falling through. Only when no default profile is configured does resolution
-  fall back to `AGENT_COMPANION_DEFAULT_TARGET`, then the host `default-target`
-  state file. With no `profiles.json` the bridge synthesizes one profile from
-  `default-target`, so a legacy install resolves identically.
-- `agent_send` returns `still_running` immediately with a `job_id` — except when
-  it reattaches to an in-flight job on the same thread and host session (a
-  respawned bridge hydrates persisted jobs at startup), where it blocks like
-  `agent_wait` up to `max_wait_sec`.
-- `agent_wait` blocks in bounded intervals. The wait defaults to 480 seconds and
-  is capped at 1200 seconds.
-- `agent_status({ diagnostics: true })` embeds the same environment report as
-  `node scripts/doctor.mjs --json`.
+`agent_send` returns `still_running` immediately with a `job_id`. An identical
+retry on the same in-flight job reattaches and waits up to `max_wait_sec`.
+A different task, mode, template or template arguments on that busy conversation
+returns `thread_busy`; changes to target, profile or cwd have their own mismatch
+errors. Wait, cancel, or use `agent_reply` when the job's `reply_available` is true.
+`agent_wait` defaults to 480 seconds and is capped at 1200 seconds per call.
 
 Terminal statuses are `completed`, `failed`, `cancelled`, `stuck`, `timeout`,
-and `unreachable`. An unreachable status also carries a machine-readable
-`failure_class` on job/status responses and terminal metadata. In particular,
-Codex may emit protocol `turn/completed` after its command runner failed before
-execution. A live, known-zero-tool turn is remapped only for an explicit
-universal command-execution blocker; a recovered `thread/read` transcript has
-no tool history, so it is remapped only when it explicitly names the unavailable
-runner. The bridge records `unreachable`, detail
-`codex_code_mode_host_unavailable`, and `failure_class: runtime_unavailable`.
-The assistant text is retained as partial runtime evidence, not presented as a
-review/build/test verdict. Zero tool calls alone are valid and never trigger
-this remap.
+and `unreachable`. An unreachable job includes a machine-readable
+`failure_class`. For `codex_code_mode_host_unavailable`, the assistant text is
+partial runtime evidence, not a review/build/test verdict: repair the command
+runner and resend. See [Diagnostics](#diagnostics).
 
 ## Templates, Modes, And Parallelism
 
@@ -713,7 +454,7 @@ Templates:
 
 ### Review loop
 
-`review` is the template for the loop the ledger shows in use: the parent
+`review` is the template for a review loop: the parent
 asks a companion to judge a change, a claim, a plan or a diff, acts on the
 findings, and asks again. The task is the subject under review; the prompt is
 read-only whatever `mode` says, never auto-fleets on Copilot (one reviewer,
@@ -732,44 +473,25 @@ disagree). A null verdict is never guessed and never remaps the job: the turn
 `completed`; the review did not conclude. The same verdict lands in the digest
 header (`**Verdict:**`) and as a footer on the terminal body.
 
-On a daemon-backed adapter — Codex app-server today — a follow-up send on the
-same `thread` continues the same conversation, so round two can be "finding 1
-is addressed; re-verdict" and be understood. The protocol the parent is
-expected to follow is blind commitment: record your own verdict on the subject
-before reading the companion's, so agreement is evidence rather than
-anchoring. The bridge does not enforce that; it is documented, not policed.
+For Codex app-server and the ACP companions, send the follow-up to the same
+agent-companion to continue the conversation: "finding 1 is addressed;
+re-verdict" can rely on round one's context. Record your own verdict before
+reading the companion's to avoid anchoring; the bridge does not enforce this.
 
 ### Usage
 
-Every job that its transport can meter carries a `usage` object — on the
-terminal `meta`, the wait envelope, `agent_status`, the ledger row and both
-digests (`**Usage:**`). It is one shape for every companion, defined once in
-`lib/usage.mjs`:
+Metered jobs carry `usage` on terminal metadata, wait/status responses, the
+ledger and digests. Missing counters are `null`; a job with no reported usage
+has no `usage` key. Transport readers and the shared shape are defined in
+`lib/usage.mjs`.
 
-```jsonc
-{ "source": "codex-app-server",       // which transport signal it came from
-  "input_tokens": 1000, "output_tokens": 100,
-  "cached_input_tokens": 900, "cache_write_input_tokens": null,
-  "reasoning_output_tokens": 10, "total_tokens": 1100,
-  "model": "…", "cost": 1, "cost_unit": "copilot_premium_requests"  // only when reported
-}
-```
-
-A counter the transport does not report is `null`; a job whose transport
-reported nothing has no `usage` key at all, never zeros. Where it comes from:
-
-| Transport | Signal |
-| --- | --- |
-| Codex app-server | `thread/tokenUsage/updated`, baselined so a follow-up send on a resumed thread reports its own turn, not the thread. Streams into the digest mid-turn. |
-| Codex exec | `turn.completed.usage` (no total, no model on that stream). |
-| Copilot | Native `session/prompt` token, cache and thought counters on CLI 1.0.94 (`source: copilot-acp`), with no model or cost reported. Older CLIs fall back to the `invoke_agent` OTEL span keyed by the ACP session id, which also carries model and premium-request cost (`source: copilot-otel`). The stream's `usage_update` is context occupancy, not turn tokens. |
-| Antigravity | Nothing: the ACP surface carries no usage (measured 2026-09-11 on 1.1.1 — the prompt response is `{stopReason}` only, no `usage_update`), so its jobs have no `usage` key. |
-| OpenCode server | Native tokens, cost (USD) and model, live and from the transcript on resume. 1.x uses assistant info; 2.x uses step events and the projected current turn, including all tool steps. A vendor-reported `total` is carried as reported. |
-| OpenCode CLI | The `step-finish` part on the `--format json` stream: tokens and cost, no model on that stream. |
-
-A codex app-server turn resumed mid-flight by a fresh bridge reports only the
-model calls it observed, flagged `"partial": true`; a `thread/read` salvage and
-an ACP prompt that did not complete carry none.
+Codex app-server follow-ups report the current turn's usage, not the thread's
+cumulative total. A fresh bridge resuming mid-turn reports only the model calls
+it observed, flagged `partial: true`; transcript-only salvage carries no usage.
+Copilot uses native prompt counters when available and falls back to OTEL;
+`usage_update` measures context occupancy, not turn tokens. Antigravity's ACP
+surface reports no usage (measured on 1.1.1). OpenCode reports tokens and cost
+from its native events.
 
 ### Output wrapper
 
@@ -784,11 +506,6 @@ The wrapper is not configurable and there is no payload field controlling it. `p
 `review` have their own critique built in and skip the wrapper, and OpenCode,
 Codex and Antigravity output is relay-only so it never carries one.
 
-This lives here rather than in the subagent descriptions because it describes
-what the caller *receives*, not how to construct a call — and the server
-already appends a self-explaining footer next to the verdict at the point of
-consumption.
-
 General modes:
 
 | Mode | Purpose |
@@ -797,15 +514,9 @@ General modes:
 | `PLAN` | Produce a plan without changing code. |
 | `ANALYZE` | Diagnose or review without implementation. |
 
-Parallelism:
-
-```jsonc
-agent_send({ task: "audit auth, billing, and API routes", target: "copilot", parallel: "always" })
-agent_send({ task: "fix the typo in src/foo.ts", target: "opencode", parallel: "never" })
-```
-
-`parallel: "auto"` is the default. It can use Copilot `/fleet` only for broad
-Copilot tasks.
+`parallel: "auto"` is the default and can use Copilot `/fleet` for broad tasks.
+Use `always` to request `/fleet` or `never` for a single Copilot agent. Other
+companions do not use `/fleet`.
 
 ## Runtime State And Digests
 
@@ -816,47 +527,9 @@ Per-host state lives under:
 ~/.codex/agent-companion/
 ```
 
-Configuration and the job ledger sit at that state root:
-
-```text
-.host                                   install marker
-default-target                          persisted bare-companion default
-default-model                           persisted Copilot model default
-profiles.json                           companion profiles and `defaultProfile`
-threads/                                thread → companion session ids
-jobs/                                   persisted job ledger, replayed on hydrate
-daemon.log                              structured JSONL event log, rotated at 10 MB
-```
-
-`daemon.log` is the one the Diagnostics section greps. Everything else lives one
-level down, under each host's `runtime/` directory:
-
-```text
-agent-bridge.log                        human-readable bridge trace
-copilot-acp.sock                        Copilot ACP daemon socket
-copilot-acp-daemon.log                  Copilot ACP daemon log
-copilot-otel-traces.jsonl               Copilot OTEL traces
-antigravity-acp.sock                    Antigravity ACP daemon socket
-antigravity-acp-daemon.log              Antigravity ACP daemon log
-acp-daemons.json                        per-companion ACP daemon identity, leases and disposal claim
-codex-app-server.sock                   codex app-server broker socket
-codex-app-server-broker.log             codex app-server broker log
-codex-broker.json                       codex running identity, leases and disposal claim
-opencode-servers.json                   pooled `opencode serve` registry
-heartbeats/                             host-liveness files the daemons reap against
-prompts/<companion>-acp-<promptId>.jsonl  per-prompt event stream (copilot, antigravity)
-digests/agent-digest-<jobId>.md         rendered progress digests
-completions.jsonl                       orphan completion queue
-```
-
-Both shared-runtime registries survive bridge restarts, for different reasons.
-`opencode-servers.json` holds the only record of a server's ephemeral `--port 0`
-address, so it is how a respawned bridge reattaches to a still-listening
-`opencode serve` instead of spawning a duplicate. The broker's address is the
-fixed socket above, so a bridge finds it by connect-probing the socket and
-re-records what it adopted; `codex-broker.json` is bookkeeping — the running
-launch metadata, leases, `lastUsedAt` and disposal claim that keep a broker
-still in use from being reaped and expose a stale executable after an upgrade.
+Configuration, the job ledger and the structured `daemon.log` live at the state
+root. Runtime logs and digests live under `runtime/`. The full layout and
+recovery rules are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), "State".
 
 The bridge surfaces progress as:
 
@@ -874,8 +547,6 @@ without another raw filesystem read.
 ```bash
 node scripts/doctor.mjs
 node scripts/doctor.mjs --json
-node scripts/onboard.mjs --doctor
-node scripts/onboard.mjs --list-targets
 ```
 
 With `CODEX_RUNTIME_ADAPTER=appserver`, doctor reports the configured and
@@ -921,20 +592,16 @@ the repo root rather than an allow-list of directories, because an allow-list
 omitting `test/` skips the three cross-cutting guard suites — the `profiles.json`
 single-reader guard, the sync-exec timeout guard, and the runtime sandbox guard.
 
-README diagram assets (the PNGs are build output; the SVGs are the source):
+README diagram assets (the PNGs are build output; the SVGs are the source).
+Re-render after SVG edits: CI does not check that the PNGs match.
 
 ```bash
 bash scripts/render-readme-assets.sh              # all three
 bash scripts/render-readme-assets.sh architecture # or one, by basename
 ```
 
-Package validation:
-
-```bash
-node scripts/build-codex-marketplace.mjs --out dist/codex-marketplace
-node scripts/validate-codex-release.mjs
-claude plugin validate .
-```
+Validate Claude packaging with `claude plugin validate .`; Codex packaging and
+isolated validation commands are in [Install For Codex CLI](#install-for-codex-cli).
 
 ## Design Invariants
 
@@ -944,47 +611,14 @@ claude plugin validate .
   it; main Codex can see the schemas but must delegate through the subagent.
 - Bridge process lifetime belongs to the host; detached companion runtimes own
   any state that must survive a bridge replacement.
-- Sends are non-blocking — the one exception is reattaching to an in-flight job
-  on the same thread, which blocks like a wait — and every wait is bounded.
+- Sends are non-blocking — the one exception is a retried send reattaching to
+  its in-flight job, which blocks like a wait — and every wait is bounded.
 - Orphan completions are stored in `completions.jsonl` and drained by hooks.
 - Model choice is configuration, not a public tool parameter.
 - Node dependencies persist under plugin data; bundled source updates with the
-  plugin package.
-
-## Not Supported
-
-- Direct parent-agent use of the bridge, including on Codex where plugin-scope
-  registration necessarily exposes its schemas to main.
-- Slash commands or skills as the public surface.
-- Session opt-in or pause.
-- OpenCode CLI in-flight reply/re-steer (server mode supports it).
-- OpenCode CLI restart resume (server mode supports it).
-- Codex `exec` in-flight reply/re-steer (app-server mode supports it via
-  `turn/steer`).
-- Codex `exec` restart resume (app-server mode supports it via `thread/resume`).
-- MCP elicitation or `NEEDS_USER_INPUT` flows.
-- Mid-turn steering on the ACP companions (Copilot, Antigravity): `agent_reply`
-  cancels the running turn and re-prompts the same session, and says so.
-- ACP over HTTP or WebSocket (still an RFD upstream; stdio is the only stable
-  transport, which is why the daemons exist).
-
-## Repository Map
-
-```text
-.claude-plugin/        Claude plugin manifest and local marketplace manifest
-.codex-plugin/         Codex plugin manifest
-.github/workflows/     CI: shell syntax, JS syntax, tests with coverage, prod audit
-assets/readme/         README diagrams: *.svg sources plus rendered *.png
-bridge-server/         MCP server plus companion runtime adapters
-docs/                  Architecture, tracker, onboarding, and release readiness
-hooks/                 Claude and Codex lifecycle hooks
-lib/                   Shared state, host routing, diagnostics, prompt helpers
-probes/                Hand-run codex app-server and smoke harnesses, outside CI
-scripts/               Setup, onboarding, marketplace build, release validation
-templates/             Claude Markdown and Codex TOML subagent templates
-test/                  Cross-cutting guard suites and codex app-server doubles
-setup.sh               Host install and target onboarding entry point
-```
+  plugin package. Claude Code's bridge reaches them through a
+  `bridge-server/node_modules` link; Codex's launcher resolves them from plugin
+  data, because Codex refuses a plugin bundle that contains a symlink.
 
 ## License
 

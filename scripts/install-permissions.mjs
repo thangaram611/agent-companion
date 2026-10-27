@@ -36,10 +36,6 @@ const PERMISSIONS = [
   'mcp__agent-bridge__agent_status',
   'mcp__agent-bridge__agent_reply',
   'mcp__agent-bridge__agent_cancel',
-  // Required by the Claude subagent to forward CLAUDE_CODE_SESSION_ID into
-  // each MCP call. Without this, non-interactive/default-permission sessions
-  // deny the probe and send calls fail validation.
-  'Bash(echo "$CLAUDE_CODE_SESSION_ID")',
 ];
 const SETTINGS = path.join(homedir(), '.claude', 'settings.json');
 const args = process.argv.slice(2);

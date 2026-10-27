@@ -70,20 +70,13 @@ export const DEFAULT_MODE    = 'EXECUTE';
 export const DEFAULT_PARALLEL = 'auto';
 
 // Field surface per action. Anything outside these is an "unknown key" error.
-//
-// Session-id input field: host_session_id — the host-neutral session id a caller
-// forwards. The Claude subagent forwards $CLAUDE_CODE_SESSION_ID under this key
-// (Claude Code does NOT expand ${VAR} in MCP env: blocks); Codex callers and
-// tests use it too. On Codex, the bridge also reads
-// request.params._meta["x-codex-turn-metadata"].session_id directly in
-// server.mjs's MCP handler — that path bypasses the per-arg field entirely
-// (host-injected, can't be spoofed by the agent).
+// There is no session-id field: the host supplies it (server.mjs getHostSessionId).
 const ALLOWED_FIELDS = {
-  send:   new Set(['action', 'task', 'mode', 'template', 'template_args', 'cwd', 'thread', 'target', 'profile', 'strength', 'max_wait_sec', 'parallel', 'host_session_id']),
-  wait:   new Set(['action', 'job_id', 'max_wait_sec', 'host_session_id']),
-  status: new Set(['action', 'job_id', 'verbose', 'diagnostics', 'host_session_id']),
-  reply:  new Set(['action', 'job_id', 'message', 'host_session_id']),
-  cancel: new Set(['action', 'job_id', 'host_session_id']),
+  send:   new Set(['action', 'task', 'mode', 'template', 'template_args', 'cwd', 'thread', 'target', 'profile', 'strength', 'max_wait_sec', 'parallel']),
+  wait:   new Set(['action', 'job_id', 'max_wait_sec']),
+  status: new Set(['action', 'job_id', 'verbose', 'diagnostics']),
+  reply:  new Set(['action', 'job_id', 'message']),
+  cancel: new Set(['action', 'job_id']),
 };
 
 // Per-template allowed keys. Plan_review and general have disjoint key sets;
@@ -446,18 +439,6 @@ export function validateAgentArgs(rawArgs) {
   }
 }
 
-// Validate and return the host session id — the host-neutral session id a
-// caller forwards (the Claude subagent forwards $CLAUDE_CODE_SESSION_ID under
-// this key). Null when absent.
-function normalizeHostSid(args) {
-  const raw = args.host_session_id;
-  if (raw == null) return null;
-  if (typeof raw !== 'string' || !raw) {
-    throw new Error('agent: host_session_id must be a non-empty string when provided');
-  }
-  return raw;
-}
-
 function validateReply(args) {
   // v6.1 D4: peer-steering. Both fields strictly required — there is no
   // sensible default for either.
@@ -466,12 +447,12 @@ function validateReply(args) {
   if (args.message.length > 8000) {
     throw new Error(`agent: reply.message too long (${args.message.length} > 8000 chars)`);
   }
-  return { action: 'reply', job_id: args.job_id, message: args.message, host_session_id: normalizeHostSid(args) };
+  return { action: 'reply', job_id: args.job_id, message: args.message };
 }
 
 function validateCancel(args) {
   assertString('job_id', args.job_id);
-  return { action: 'cancel', job_id: args.job_id, host_session_id: normalizeHostSid(args) };
+  return { action: 'cancel', job_id: args.job_id };
 }
 
 function validateWait(args) {
@@ -479,7 +460,7 @@ function validateWait(args) {
   if (args.max_wait_sec !== undefined && typeof args.max_wait_sec !== 'number') {
     throw new Error('agent: max_wait_sec must be a number');
   }
-  return { action: 'wait', job_id: args.job_id, max_wait_sec: args.max_wait_sec, host_session_id: normalizeHostSid(args) };
+  return { action: 'wait', job_id: args.job_id, max_wait_sec: args.max_wait_sec };
 }
 
 function validateStatus(args) {
@@ -491,7 +472,6 @@ function validateStatus(args) {
     job_id: args.job_id || null,
     verbose: !!args.verbose,
     diagnostics: !!args.diagnostics,
-    host_session_id: normalizeHostSid(args),
   };
 }
 
@@ -645,6 +625,5 @@ function validateSend(args) {
     strength: strength || null,
     max_wait_sec: args.max_wait_sec,
     parallel,
-    host_session_id: normalizeHostSid(args),
   };
 }
