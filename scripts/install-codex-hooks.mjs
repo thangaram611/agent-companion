@@ -147,7 +147,6 @@ const MANAGED_ENTRIES = {
     {
       hooks: [
         bashEntry('hooks/install-agent-codex.sh', 5),
-        bashEntry('hooks/prewarm-target.sh', 5),
         bashEntry('hooks/install-deps.sh', 55),
         bashEntry('hooks/drain-completions.sh', 5),
       ],

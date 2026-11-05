@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// HTTP shapes follow opencode-server-runtime.test.mjs and the measured 2.2.5
+// HTTP shapes follow bridge-server/adapters/opencode.test.mjs and the measured 2.2.5
 // contract. Native history is a fixture file so a second process can resume it.
 import { createServer } from 'node:http';
 import { fork } from 'node:child_process';

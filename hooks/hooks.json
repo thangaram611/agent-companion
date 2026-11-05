@@ -55,11 +55,6 @@
           },
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/prewarm-target.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/install-deps.sh\"",
             "timeout": 55
           },

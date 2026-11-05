@@ -2,7 +2,7 @@ import '../sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { ProcessSupervisor, readProcessTable } from '../../bridge-server/controller/process-supervisor.mjs';
+import { ProcessSupervisor, readProcessTable, pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
 import { ManualClock, until } from './helpers.mjs';
 import { fixtureSupervisor } from './fixture-table.mjs';
 
@@ -119,4 +119,15 @@ test('handoff quiescence includes an already pending adapter descendant lookup',
   scan.resolve(new Map([[91234, { pid: 91234, pgid: 91234, birthTime: 'reported' }]]));
   await pending; await quiescent;
   assert.equal(supervisor.serialize().processes[0].pid, 91234);
+});
+
+test('pidAlive treats a foreign-owned pid as alive, not as dead', () => {
+  assert.equal(pidAlive(process.pid), true);
+  // pid 1 exists on every POSIX box and is root-owned, so an unprivileged probe
+  // gets EPERM. Reporting that as dead is what would make the hydrate guard
+  // declare a live companion child orphaned on a multi-user machine.
+  assert.equal(pidAlive(1), true);
+  assert.equal(pidAlive(0), false);
+  assert.equal(pidAlive(-1), false);
+  assert.equal(pidAlive('4242'), false);
 });

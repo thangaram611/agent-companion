@@ -19,7 +19,7 @@
       "timeout": 1320000,
       "env": {
         "AGENT_COMPANION_HOST": "claude",
-        "CODEX_RUNTIME_ADAPTER": "appserver"
+        "AGENT_COMPANION_OWNER_GRACE_MS": "120000"
       }
     }
   },

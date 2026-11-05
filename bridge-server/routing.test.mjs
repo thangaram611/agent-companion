@@ -30,13 +30,6 @@ test('per-companion model defaults inherit when unset and explicit overrides win
   assert.equal(resolveRouting({ target: 'codex' }, { AGENT_COMPANION_CODEX_MODEL: 'gpt-5.4' }).resolved.model, 'gpt-5.4');
 });
 
-test('capabilities come from the selected adapter', () => {
-  for (const [target, key, adapter] of [['codex', 'CODEX_RUNTIME_ADAPTER', 'appserver'], ['opencode', 'OPENCODE_RUNTIME_ADAPTER', 'server']]) {
-    assert.equal(resolveRouting({ target }, {}).resolved.capabilities.reply, false);
-    assert.equal(resolveRouting({ target }, { [key]: adapter }).resolved.capabilities.reply, true);
-  }
-});
-
 test('a model override is refused when the selected companion cannot select models', () => {
   const caps = getTarget('copilot').capabilities;
   const previous = caps.modelSelection;

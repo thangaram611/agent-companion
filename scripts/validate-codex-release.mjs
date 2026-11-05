@@ -109,7 +109,7 @@ function validateMarketplaceTree(marketplaceRoot) {
   assert(manifest.mcpServers?.['agent-bridge']?.args?.length === 1 && manifest.mcpServers['agent-bridge'].args[0] === 'hooks/launch-agent-bridge.sh', 'plugin MCP launcher arguments mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.cwd === '.', 'plugin MCP launcher cwd mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.env?.AGENT_COMPANION_HOST === 'codex', 'plugin MCP host mismatch');
-  assert(manifest.mcpServers?.['agent-bridge']?.env?.CODEX_RUNTIME_ADAPTER === 'appserver', 'plugin MCP Codex adapter mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.env?.AGENT_COMPANION_OWNER_GRACE_MS === '120000', 'plugin MCP owner grace mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.default_tools_approval_mode === 'approve', 'plugin MCP approval mode mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.startup_timeout_sec === 120, 'plugin MCP startup timeout mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.tool_timeout_sec === 1320, 'plugin MCP tool timeout mismatch');
@@ -120,6 +120,18 @@ function validateMarketplaceTree(marketplaceRoot) {
   assert(roleTemplate.includes('mcp__agent_bridge__agent_send'), 'Codex role does not use normalized agent_bridge tool names');
   assert(!roleTemplate.includes('mcp__agent-bridge__'), 'Codex role contains unsanitized agent-bridge tool names');
   assertExists(path.join(pluginRoot, 'bridge-server', 'server.mjs'), 'bridge server');
+  for (const name of ['codex', 'opencode', 'acp']) {
+    assertExists(path.join(pluginRoot, 'bridge-server', 'adapters', `${name}-protocol.mjs`));
+  }
+  for (const retired of [
+    'bridge-server/codex-runtime.mjs', 'bridge-server/codex-app-server-runtime.mjs',
+    'bridge-server/opencode-runtime.mjs', 'bridge-server/opencode-server-runtime.mjs',
+    'bridge-server/copilot-sdk-runtime.mjs', 'bridge-server/acp-runtime.mjs', 'bridge-server/daemon-client.mjs',
+    'scripts/codex-app-server-broker.mjs', 'scripts/acp-daemon.mjs', 'scripts/copilot-acp-daemon.mjs',
+    'scripts/copilot-acp-client.mjs', 'scripts/probe-codex-broker.mjs',
+    'lib/shared-runtime-registry.mjs', 'hooks/prewarm-target.sh', 'probes/codex-app-server',
+  ]) assertMissing(path.join(pluginRoot, retired), 'retired runtime');
+
   assertExists(path.join(pluginRoot, 'assets', 'readme', 'hero.png'), 'README assets');
   assertExists(path.join(pluginRoot, 'assets', 'readme', 'architecture.png'), 'README architecture asset');
   assertExists(path.join(pluginRoot, 'assets', 'readme', 'target-matrix.png'), 'README target matrix asset');
@@ -201,7 +213,7 @@ function main() {
   assert(bridge.transport?.command === '/bin/bash', 'installed agent-bridge launcher command mismatch');
   assert(bridge.transport?.args?.length === 1 && bridge.transport.args[0] === 'hooks/launch-agent-bridge.sh', 'installed agent-bridge launcher arguments mismatch');
   assert(bridge.transport?.env?.AGENT_COMPANION_HOST === 'codex', 'installed agent-bridge host environment mismatch');
-  assert(bridge.transport?.env?.CODEX_RUNTIME_ADAPTER === 'appserver', 'installed agent-bridge adapter environment mismatch');
+  assert(bridge.transport?.env?.AGENT_COMPANION_OWNER_GRACE_MS === '120000', 'installed agent-bridge owner grace mismatch');
   assert(Array.isArray(bridge.transport?.env_vars) && bridge.transport.env_vars.length === 0, 'installed agent-bridge must not inherit host environment variables');
   assert(realpathSync(bridge.transport?.cwd) === realpathSync(addPlugin.installedPath), 'installed agent-bridge cwd is not the plugin root');
   assert(bridge.startup_timeout_sec === 120, 'installed agent-bridge startup timeout mismatch');

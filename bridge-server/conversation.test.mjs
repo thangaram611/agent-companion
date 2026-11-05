@@ -5,9 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync, existsSync, rmSync } from 'node:fs';
 import { validateAgentArgs } from './validation.mjs';
-import { callArgs, mcp, resolveRouting, dispatch, jobs, getHostSessionId, _resetForTest } from './server.mjs';
-import { BASE_DIR, writeJob, writeTargetChecks, writeDefaultTarget, writeDefaultModel } from '../lib/state.mjs';
-import { _setForTest, _resetForTest as resetDaemon } from './daemon-client.mjs';
+import { callArgs, mcp, resolveRouting, dispatch, getHostSessionId, _resetForTest } from './server.mjs';
+import { BASE_DIR, writeTargetChecks, writeDefaultTarget, writeDefaultModel } from '../lib/state.mjs';
 
 test('conversational send accepts exact text and an explicit model, with no framing fields', () => {
   const task = '  Compare these lines.\n\nKeep the trailing whitespace.  \n';
@@ -52,8 +51,6 @@ test('catalog is ownerless and leaves cold and populated state/runtime directori
   _resetForTest();
   const prior = process.env.CLAUDE_CODE_SESSION_ID;
   delete process.env.CLAUDE_CODE_SESSION_ID;
-  let runtimeCalls = 0;
-  _setForTest({ ensureDaemon: async () => { runtimeCalls++; }, sendToSocket: async () => { runtimeCalls++; throw new Error('catalog contacted runtime'); } });
   const call = (sid) => mcp._requestHandlers.get('tools/call')({ method: 'tools/call', params: {
     name: 'agent_catalog', arguments: {}, _meta: { 'x-codex-turn-metadata': { session_id: sid, thread_id: 'catalog-caller' } },
   } });
@@ -71,8 +68,9 @@ test('catalog is ownerless and leaves cold and populated state/runtime directori
     writeDefaultTarget('codex');
     writeDefaultModel('gpt-5.4', 'codex');
     writeTargetChecks({ codex: { ready: true, version: 'codex-cli cached', checkedAt: '2026-11-05T00:00:00Z' } });
-    writeJob('legacy-active', { jobId: 'legacy-active', claudeSessionId: 'catalog-owner-b', target: 'copilot',
-      thread: 'old-thread', companionSessionId: 'old-session', promptId: 'old-prompt', status: 'running', startedAt: Date.now() });
+    mkdirSync(join(BASE_DIR, 'jobs'), { recursive: true });
+    writeFileSync(join(BASE_DIR, 'jobs', 'legacy-active.json'), JSON.stringify({ jobId: 'legacy-active', claudeSessionId: 'catalog-owner-b', target: 'copilot',
+      thread: 'old-thread', companionSessionId: 'old-session', promptId: 'old-prompt', status: 'running', startedAt: Date.now() }));
     mkdirSync(join(BASE_DIR, 'threads'), { recursive: true });
     writeFileSync(join(BASE_DIR, 'threads', 'old-thread.sid'), 'old-session\n');
     mkdirSync(process.env.AGENT_RUNTIME_DIR, { recursive: true });
@@ -80,7 +78,6 @@ test('catalog is ownerless and leaves cold and populated state/runtime directori
       writeFileSync(join(process.env.AGENT_RUNTIME_DIR, name), `unchanged ${name}\n`);
     }
     const before = [snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)];
-    const count = jobs.size;
     const result = (await call('catalog-owner-b')).structuredContent;
     assert.equal(result.default_target.target, 'codex');
     const codex = result.targets.find((t) => t.id === 'codex');
@@ -88,11 +85,8 @@ test('catalog is ownerless and leaves cold and populated state/runtime directori
     assert.equal(codex.installed_version, 'codex-cli cached');
     assert.equal(codex.readiness.checked_at, '2026-11-05T00:00:00Z');
     assert.equal(getHostSessionId(), null, 'no host adoption or ownership conflict from either caller');
-    assert.equal(jobs.size, count, 'no ledger hydration');
-    assert.equal(runtimeCalls, 0, 'no runtime spawn, socket call or session creation');
     assert.deepEqual([snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)], before);
   } finally {
-    resetDaemon();
     if (prior === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = prior;
     _resetForTest();
   }

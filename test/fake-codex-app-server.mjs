@@ -1,6 +1,6 @@
 // The fake `codex app-server`, shared by both halves of the codex app-server
 // work: scripts/codex-app-server-broker.test.mjs (the server side of the wire
-// protocol) and bridge-server/codex-app-server-runtime.test.mjs (the client
+// protocol) and bridge-server/adapters/codex.test.mjs (the client
 // side). It is a fixture, not a test — `node --test` only collects `*.test.mjs`.
 //
 // It lives here rather than in either suite because the two suites must agree on
@@ -9,7 +9,7 @@
 // and the broker really do talk to each other" would be running against an
 // app-server the broker's own tests never saw.
 //
-// Driven through `CODEX_BIN`, the idiom already in bridge-server/codex-runtime.test.mjs.
+// Driven through `CODEX_BIN`, the idiom already in bridge-server/adapters/codex.test.mjs.
 // It never runs a model and never spends a token; a test orders it around with
 // three `fake/*` methods that the broker forwards like any other unknown method.
 //

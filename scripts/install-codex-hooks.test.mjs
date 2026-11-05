@@ -122,11 +122,10 @@ test('fresh install writes the expected managed hook bundle with baked absolute 
     assert.doesNotMatch(cmds.join('\n'), /\$\{CLAUDE_PLUGIN_ROOT\}/,
       'no ${VAR} placeholder because Codex does not expand user-scope hook env');
     assert.match(cmds[0], /install-agent-codex\.sh/);
-    assert.match(cmds[1], /prewarm-target\.sh/);
-    assert.match(cmds[2], /install-deps\.sh/);
-    assert.match(cmds[3], /drain-completions\.sh/);
-    assert.equal(sessionStart.hooks[2].timeout, 55);
-    for (const i of [0, 1, 3]) assert.equal(sessionStart.hooks[i].timeout, 5);
+    assert.match(cmds[1], /install-deps\.sh/);
+    assert.match(cmds[2], /drain-completions\.sh/);
+    assert.equal(sessionStart.hooks[1].timeout, 55);
+    for (const i of [0, 2]) assert.equal(sessionStart.hooks[i].timeout, 5);
 
     const postToolUse = managedEntries(cfg, 'PostToolUse')[0];
     assert.equal(postToolUse.matcher, '.*');

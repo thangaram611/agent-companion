@@ -1,5 +1,5 @@
 import { once } from 'node:events';
-import { pidAlive } from '../../lib/shared-runtime-registry.mjs';
+import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
 import { ProcessSupervisor } from '../../bridge-server/controller/process-supervisor.mjs';
 
 // This is deliberately test-only: identities and group ancestry come from our
