@@ -164,7 +164,7 @@ try {
   // 1. agent_reply steers a RUNNING turn, and the turn obeys the new order.
   // ======================================================================
   const send1 = await A.tool('agent_send', {
-    task: task(ORIGINAL_WORD), cwd: work, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    task: task(ORIGINAL_WORD), cwd: work, max_wait_sec: 5,
     thread: STEER_THREAD,
   });
   const steerJob = send1.job_id || send1.jobId;
@@ -240,7 +240,7 @@ try {
   // 2. agent_cancel interrupts a RUNNING turn — and the THREAD survives.
   // ======================================================================
   const send2 = await A.tool('agent_send', {
-    task: task(ORIGINAL_WORD), cwd: work, mode: 'EXECUTE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    task: task(ORIGINAL_WORD), cwd: work, max_wait_sec: 5,
     thread: CANCEL_THREAD,
   });
   const cancelJob = send2.job_id || send2.jobId;

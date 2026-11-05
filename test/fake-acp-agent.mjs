@@ -76,7 +76,7 @@ export function fakeAcpDescriptor({ id = 'fake-acp', loadSession = true, updates
     id,
     displayName: 'Fake ACP agent',
     implemented: true,
-    capabilities: { send: true, wait: true, status: true, cancel: true, reply: true, resume: true, jsonEvents: true, acp: true, serverMode: false, parallel: 'planned', modelSelection: true },
+    capabilities: { send: true, wait: true, status: true, cancel: true, reply: true, resume: true, jsonEvents: true, acp: true, serverMode: false, modelSelection: true },
     binaryEnv: 'FAKE_ACP_BIN',
     binaryNames: ['fake-acp-agent'],
     versionArgs: ['--version'],
@@ -92,7 +92,6 @@ export function fakeAcpDescriptor({ id = 'fake-acp', loadSession = true, updates
       permission: (env) => env.FAKE_ACP_POLICY || 'all',
       usage: fakeAcpUsage,
       updates,
-      rubberDuck: false,
     },
   };
 }

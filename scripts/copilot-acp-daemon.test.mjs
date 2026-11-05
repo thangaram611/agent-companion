@@ -121,10 +121,10 @@ function patchAcpConnection(t) {
   const kills = [];
   let seq = 0;
 
-  AcpConnection.prototype.spawn = async function spawnForTest(cwd) {
+  AcpConnection.prototype.spawn = async function spawnForTest(cwd, model = null) {
     this.cwd = cwd;
     this.cwdReal = realpathSync(cwd);
-    this.model = 'claude-sonnet-4.6';
+    this.model = model;
     this.dead = false;
     this.child = {
       exitCode: null,

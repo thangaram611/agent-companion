@@ -175,17 +175,11 @@ export function writeOpenCodeDigest(job, result = null, { carriedForward = null 
   lines.push('');
   lines.push(`**Updated:** ${new Date().toISOString()}`);
   if (job?.status) lines.push(`**Status:** \`${job.status}\``);
-  if (job?.mode) lines.push(`**Mode:** ${job.mode}`);
-  if (job?.template) lines.push(`**Template:** ${job.template}`);
   // The job's usage once it has settled, or the streamed snapshot's while it
   // runs (the codex app-server reports token usage mid-turn). Absent when the
   // transport reported nothing.
   const usage = job?.usage ?? result?.summary?.usage;
   if (usage) lines.push(`**Usage:** ${formatUsage(usage)}`);
-  // Set only on a completed `review` job (see retainTerminalJob in server.mjs):
-  // the parsed verdict, or `none` with the parser's reason when the line was
-  // missing, malformed or conflicting.
-  if (job?.verdict !== undefined) lines.push(`**Verdict:** ${job.verdict ?? `none (${job.verdictReason || 'unknown'})`}`);
   if (job?.thread) lines.push(`**Thread:** \`${job.thread}\``);
   if (job?.promptId) lines.push(`**Prompt:** \`${job.promptId}\``);
   if (job?.cwd) lines.push(`**CWD:** \`${job.cwd}\``);

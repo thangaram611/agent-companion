@@ -21,8 +21,7 @@ jobs:
         run: bash -n setup.sh hooks/*.sh
       - name: JavaScript syntax
         run: find . -name '*.mjs' -not -path './bridge-server/node_modules/*' -print0 | xargs -0 -n1 node --check
-      # Root discovery includes all three guards in test/: profiles.json
-      # single-reader, sync-exec timeout, and runtime sandbox. Matches README.
+      # Root discovery includes the sync-exec timeout and runtime sandbox guards.
       - name: Tests with coverage
         run: |
           find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 \

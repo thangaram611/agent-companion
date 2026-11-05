@@ -68,24 +68,20 @@ try {
 
   const tools = await rpc('tools/list', {});
   const names = (tools.tools || []).map((t) => t.name).sort();
-  check('MCP surface is the five agent_* tools', names.join(',') === 'agent_cancel,agent_reply,agent_send,agent_status,agent_wait', names.join(','));
+  check('MCP surface is the six agent_* tools', names.join(',') === 'agent_cancel,agent_catalog,agent_reply,agent_send,agent_status,agent_wait', names.join(','));
 
-  // --- 1. Routing contract: an unconfigured strength must hard-fail, not fall back.
-  const strengthRes = await callTool('agent_send', {
-    task: 'noop', cwd: work, thread: `${SID}-strength`, strength: 'reviewer', mode: 'ANALYZE', max_wait_sec: 5,
-  });
-  const sp = strengthRes.parsed;
-  check('unconfigured strength returns STRENGTH_UNCONFIGURED (no silent fallback)',
-    sp?.ok === false && sp?.code === 'STRENGTH_UNCONFIGURED', `code=${sp?.code}`);
-  check('W2.1 one-liner: empty candidates list is withheld, not shipped as []',
-    !('candidates' in (sp || {})) || (Array.isArray(sp.candidates) && sp.candidates.length > 0),
-    `candidates=${JSON.stringify(sp?.candidates)}`);
+  // --- 1. Routing contract: an invalid model must hard-fail before dispatch.
+  const refusal = (await callTool('agent_send', {
+    target: 'codex', model: 'invalid model', task: 'noop', cwd: work, thread: `${SID}-refusal`,
+  })).parsed;
+  check('invalid model returns MODEL_NOT_ALLOWED (no silent fallback)',
+    refusal?.ok === false && refusal?.code === 'MODEL_NOT_ALLOWED', `code=${refusal?.code}`);
 
   // --- 2. Real codex dispatch.
   log('dispatching a real codex job into', work);
   const send = await callTool('agent_send', {
     task: 'Read README.md in the current directory and reply with ONLY the magic word it names. No preamble, no punctuation.',
-    cwd: work, thread: `${SID}-magic`, mode: 'ANALYZE', template: 'general', parallel: 'never', max_wait_sec: 5,
+    cwd: work, thread: `${SID}-magic`, max_wait_sec: 5,
   });
   const jobId = send.parsed?.job_id || send.parsed?.jobId;
   check('agent_send accepted and returned a job_id', !!jobId, `job_id=${jobId}`);
