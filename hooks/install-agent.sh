@@ -2,24 +2,14 @@
 # install-agent.sh — SessionStart hook
 #
 # Installs the agent-companion subagent to ~/.claude/agents/agent-companion.md
-# with ${CLAUDE_PLUGIN_ROOT} substituted to its absolute value at install time.
-#
-# Why we need this: the canonical way to scope an MCP server to a specific
-# subagent only (so the parent session never sees it) is the agent's inline
-# `mcpServers` frontmatter — but Claude Code silently ignores `mcpServers` /
-# `hooks` / `permissionMode` for plugin-shipped agents. The official workaround
-# in the docs is to copy the agent into `~/.claude/agents/` (user scope) where
-# those fields are honored. This hook automates that copy on every session
-# start, idempotently.
-#
-# After this runs, the standalone agent at ~/.claude/agents/agent-companion.md
-# spawns the bridge MCP server inline ONLY when the subagent is invoked. Main
-# Claude has no `mcp__agent-bridge__agent_*` in its tool surface — there is
-# no plugin-level .mcp.json registration anywhere.
+# referencing the plugin/session MCP server by its registered name. Claude
+# ignores mcpServers on plugin-shipped agents, so the user-scoped copy remains
+# necessary even though the server now belongs to the session. The parent sees
+# its tools; the bridge refuses owner-bound calls without a native child owner.
 #
 # Idempotent, but not short-circuited: there is no checksum and no fast path.
-# Every session regenerates the file in full (template → sentinel → path and
-# node substitution) and byte-compares it against the destination, replacing it
+# Every session regenerates the file in full (template → sentinel → plugin
+# namespace) and byte-compares it against the destination, replacing it
 # only if they differ. So the destination's mtime is stable across no-op runs,
 # which is all that matters here — Claude Code hot-reloads agents on mtime.
 #
@@ -58,55 +48,14 @@ if [ -f "$DEST" ] && ! grep -qF "$SENTINEL" "$DEST"; then
   exit 0
 fi
 
-# Resolve an absolute path to a `node` binary so the MCP frontmatter's
-# `command:` field doesn't depend on whatever PATH Claude Code inherits.
-# This matters for nvm / mise / asdf users: their `node` is a shell function
-# or shim only loadable via shell init. Claude Code spawns the MCP server
-# via `child_process.spawn(command, args)` directly — NO shell, so
-# .zshenv/.bashrc/etc are never sourced for that spawn. The spawn fails
-# and the tool surfaces as "not available in this environment".
-#
-# The resolution order and the stripped-env validation that canonicalizes shims
-# to their underlying binary both live in hooks/node-tools.sh. This script used
-# to carry its own hand-copy of that logic; the copy drifted and lost the
-# AGENT_COMPANION_NODE override, so the one escape hatch a user has when
-# auto-detection picks the wrong Node silently did nothing here. Sourcing the
-# shared resolver is the only way that stays fixed.
-#
-# If nothing resolves, leave the template's literal `node` in place.
-TOOLS="$ROOT/hooks/node-tools.sh"
-NODE_BIN=""
-if [ -r "$TOOLS" ]; then
-  # shellcheck source=/dev/null
-  . "$TOOLS"
-  NODE_BIN="$(resolve_node 2>/dev/null || true)"
-fi
-
-# Materialize: insert sentinel as a YAML-comment line right after the opening
-# `---` of the frontmatter, substitute ${CLAUDE_PLUGIN_ROOT}, and (if we
-# resolved one) rewrite `command: node` → absolute path so the MCP server
-# spawn doesn't depend on PATH. awk insertion preserves the file starting
-# with `---` so Claude Code's frontmatter parser sees a valid YAML block.
+# Materialize the short source reference using Claude Code's plugin namespace.
+# The launcher owns Node resolution now that transport is session-scoped.
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
-SED_ROOT="$(printf '%s' "$ROOT" | sed 's/[\/&|]/\\&/g')"
-
-# The node rewrite is anchored to the YAML pattern (whitespace + `command:` +
-# space + `node` + end-of-line) so it can't touch `command:` fields outside the
-# MCP block, and is a no-op if the template ever switches to an absolute path.
-# When no node resolved it degrades to an expression that matches nothing, which
-# keeps this a single pipeline — the previous second-temp-file dance leaked a
-# /tmp file whenever the script was killed mid-rewrite.
-NODE_SED='s|^$||'
-if [ -n "$NODE_BIN" ]; then
-  SED_NODE_BIN="$(printf '%s' "$NODE_BIN" | sed 's/[\/&|]/\\&/g')"
-  NODE_SED="s|^\([[:space:]]*command:\) node[[:space:]]*\$|\1 ${SED_NODE_BIN}|"
-fi
 
 set -o pipefail
 awk -v sentinel="$SENTINEL" 'NR==1 { print; print sentinel; next } { print }' "$TEMPLATE" \
-  | sed "s|\${CLAUDE_PLUGIN_ROOT}|$SED_ROOT|g" \
-  | sed "$NODE_SED" \
+  | sed 's|^mcpServers: \[agent-bridge\]$|mcpServers: [plugin:agent-companion:agent-bridge]|; s|mcp__agent-bridge__|mcp__plugin_agent-companion_agent-bridge__|g' \
   > "$TMP"
 RENDER_STATUS=$?
 set +o pipefail

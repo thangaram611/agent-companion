@@ -64,59 +64,21 @@ test('Claude role relays answers, status, metadata and orphan events without req
   assert.match(prose, /agent_status` with `diagnostics: true` first/);
 });
 
-test('Claude template sets the MCP deadline as a per-server field, not an env var', () => {
-  const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
-  assert.ok(fm, 'frontmatter block extractable');
-  const frontmatter = fm[1];
-
-  // Measured: an `env: MCP_TOOL_TIMEOUT` does reach the bridge child process
-  // and the Claude Code host ignores it outright. It is a no-op that reads like
-  // a configured deadline, so it must not come back as a live key. The
-  // template's own YAML comment names it on purpose (that is the warning), so
-  // strip comment lines before asserting rather than banning the string.
-  const active = frontmatter.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
-  assert.doesNotMatch(active, /MCP_TOOL_TIMEOUT/,
-    'the inert MCP_TOOL_TIMEOUT env var must not return as a live frontmatter key');
-
-  // The field the host honours is a SIBLING of command/args, so anchor the
-  // assertion to command's own indentation rather than to any leading space.
-  const command = frontmatter.match(/^(\s*)command:\s*node\s*$/m);
-  assert.ok(command, 'agent-bridge server entry declares `command: node`');
-  const timeout = frontmatter.match(new RegExp(`^${command[1]}timeout:\\s*(\\d+)\\s*$`, 'm'));
-  assert.ok(timeout, 'per-server `timeout` declared as a sibling of `command`');
-
-  // It must clear clampWaitSec's 1200s cap (bridge-server/server.mjs) so the
-  // bridge always answers before the host abandons the call. The field both
-  // raises the per-call wall clock and floors the MCP idle window.
-  assert.ok(Number(timeout[1]) > 1200 * 1000,
-    `timeout ${timeout[1]}ms must exceed clampWaitSec's 1200s cap`);
-});
-
-test('Claude template names itself as the source and SETS the adapter knob', () => {
-  // hooks/install-agent.sh regenerates ~/.claude/agents/agent-companion.md from
-  // this file on every session start, so the warning has to live where the edit
-  // that would be lost gets made.
+test('Claude references the plugin session server by name and preserves its budget and env', () => {
+  const manifest = JSON.parse(readFileSync(join(HERE, '..', '.claude-plugin/plugin.json'), 'utf8'));
+  const server = manifest.mcpServers?.['agent-bridge'];
+  assert.ok(server, 'Claude plugin must register the session server');
+  assert.match(frontmatter, /^mcpServers: \[agent-bridge\]$/m);
+  assert.doesNotMatch(frontmatter, /^\s+(command|args|timeout|env):/m);
+  assert.equal(server.type, 'stdio');
+  assert.equal(server.command, '/bin/bash');
+  assert.deepEqual(server.args, ['${CLAUDE_PLUGIN_ROOT}/hooks/launch-agent-bridge.sh']);
+  assert.equal(server.timeout, 1320000);
+  assert.ok(server.timeout > 1200 * 1000);
+  assert.equal(server.env.MCP_TOOL_TIMEOUT, undefined);
+  assert.equal(server.env.CODEX_RUNTIME_ADAPTER, 'appserver');
   assert.match(text, /THIS FILE IS THE SOURCE/);
   assert.match(text, /re-materializes/);
-
-  const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
-  assert.ok(fm, 'frontmatter block extractable');
-  const frontmatter = fm[1];
-  assert.match(frontmatter, /takes effect on the NEXT session/);
-  // SET, not merely documented — and set as a live `env:` key rather than a
-  // commented example. It was documentation-only while the app-server transport
-  // was new; it is now the shipped default, because on `exec` a codex job dies
-  // with the bridge that started it (measured: probes/smoke/orphan.mjs) and on
-  // the app-server it survives (probes/smoke/appserver.mjs).
-  //
-  // The value itself is asserted against the Codex manifest's twin in
-  // templates/host-parity.test.mjs — this file only checks the Claude host's
-  // mechanism, which is a YAML `env:` mapping under the agent-bridge server.
-  const active = frontmatter.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
-  assert.match(active, /^\s{6}env:\s*$/m,
-    'the bridge server needs a live `env:` block, not a commented example');
-  assert.match(active, /^\s{8}CODEX_RUNTIME_ADAPTER:\s*appserver\s*$/m,
-    'the adapter must be a live env key under that block');
 });
 
 test('Claude role relays the four refusals and leaves failed work with the companion', () => {

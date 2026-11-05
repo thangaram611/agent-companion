@@ -26,46 +26,10 @@ description: |
   and cancel requests return in seconds.
 model: sonnet
 tools: mcp__agent-bridge__agent_catalog, mcp__agent-bridge__agent_send, mcp__agent-bridge__agent_wait, mcp__agent-bridge__agent_status, mcp__agent-bridge__agent_reply, mcp__agent-bridge__agent_cancel, Bash, Read, Write, Edit, Grep, Glob, WebFetch, TodoWrite
-mcpServers:
-  - agent-bridge:
-      type: stdio
-      command: node
-      args:
-        - ${CLAUDE_PLUGIN_ROOT}/bridge-server/server.mjs
-      # Per-server MCP deadline, in MILLISECONDS, and a sibling of command/args
-      # — NOT an `env:` entry. An env var named MCP_TOOL_TIMEOUT is inert here:
-      # measured, it reaches the bridge child and the host ignores it. This
-      # field both raises the per-call wall clock and floors the MCP idle window
-      # (measured: with no per-server timeout a 70s silent call aborts at the
-      # 30s watchdog tick; with it set, the same call completes). 1320000 sits
-      # deliberately above clampWaitSec's 1200s cap, so the bridge always
-      # answers first. Codex expresses the same budget in seconds, as
-      # `tool_timeout_sec = 1320` — see .codex-plugin/plugin.json.
-      timeout: 1320000
-      # Bridge behaviour is configured HERE, as `env:` entries on this server —
-      # a sibling of command/args/timeout, honoured because this file is
-      # user-scoped (a plugin-shipped agent's frontmatter is ignored, which is
-      # why the installer copies it here at all).
-      #
-      # Every key below must have a twin in .codex-plugin/plugin.json, whose
-      # `env` object is the Codex host's equivalent of this block. The two hosts
-      # express it differently — YAML mapping vs JSON object — but a knob
-      # that changes what the END USER can do belongs in both or neither, which
-      # templates/host-parity.test.mjs enforces. The mechanism may diverge; the
-      # capability may not.
-      #
-      # The bridge reads these per dispatch out of the env it was SPAWNED with,
-      # and this file is read when a session starts the MCP server, so a change
-      # takes effect on the NEXT session — not in the one where the edit is made.
-      env:
-        # Moves codex jobs off the single-shot `codex exec` pipe onto the shared
-        # app-server broker: in-flight `agent_reply` (`turn/steer`), restart
-        # resume (`thread/resume` rejoins a RUNNING thread), and streamed
-        # sub-turn digests. On `exec` a job dies with the bridge that started it
-        # — measured, and the reason this is the shipped default rather than an
-        # opt-in (README.md, "Codex ships two adapters"). Set to `exec` to go
-        # back to the pipe.
-        CODEX_RUNTIME_ADAPTER: appserver
+# The plugin manifest owns the session transport, timeout and env. Changes to
+# those settings take effect on the NEXT session. The installer qualifies the
+# reference and tool names for Claude's plugin namespace; no second server.
+mcpServers: [agent-bridge]
 ---
 
 # Identity
@@ -112,9 +76,9 @@ reply. Other errors, including `unknown_job` and `ok: false`, go back to the par
 ## Thread continuity — named by the host
 
 Each instance is one companion conversation. The host supplies `thread`;
-you carry no thread handle. Before each send, `hooks/name-thread.sh` writes your
-agent id into it. A SendMessage to this agent keeps that id; a new spawn gets a
-new id and starts a new conversation.
+you carry no thread handle. Before each send, wait, reply or cancel,
+`hooks/name-thread.sh` writes your agent id into it. A SendMessage to this agent
+keeps that id; a new spawn gets a new id and starts a new conversation.
 
 On the single-shot adapters (`opencode run`, `codex exec`), the thread is a
 bridge handle for reattach, cancel and status; there is no in-process conversation

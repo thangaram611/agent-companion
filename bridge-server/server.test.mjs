@@ -6,6 +6,9 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 
 const STATE_SANDBOX = mkdtempSync(join(tmpdir(), 'copilot-state-server-'));
 process.env.AGENT_COMPANION_HOME = STATE_SANDBOX;
@@ -548,7 +551,7 @@ test('the host names the companion thread after the calling agent, and a send wi
   // the root session for every child.
   const codex = (threadId, args = send) => ({
     arguments: { ...args },
-    _meta: { 'x-codex-turn-metadata': { session_id: 'sid-root', thread_id: threadId } },
+    _meta: { 'x-codex-turn-metadata': { session_id: 'sid-root', thread_id: threadId, thread_source: 'subagent' } },
   });
 
   _resetForTest();
@@ -563,11 +566,94 @@ test('the host names the companion thread after the calling agent, and a send wi
     // Claude: hooks/name-thread.sh has already written the subagent's agent_id.
     assert.equal(callArgs('send', { arguments: { ...send, thread: 'a7aae695fc8e1726b' } }).thread, 'a7aae695fc8e1726b');
 
-    assert.throws(() => callArgs('send', { arguments: { ...send } }), /^Error: agent: thread is required/);
+    assert.throws(() => callArgs('send', { arguments: { ...send } }), { code: 'NATIVE_OWNER_REQUIRED' });
   } finally {
     _resetForTest();
   }
 });
+
+test('all owner-bound MCP calls require a native child owner before adopting a session', async () => {
+  const mod = await bridge();
+  const call = mod.mcp._requestHandlers.get('tools/call');
+  const inputs = { send: { task: 'review', cwd: TEST_CWD }, wait: { job_id: 'missing' }, reply: { job_id: 'missing', message: 'hi' }, cancel: { job_id: 'missing' } };
+  await withEnv('CLAUDE_CODE_SESSION_ID', undefined, async () => {
+    mod._resetForTest();
+    try {
+      for (const [action, args] of Object.entries(inputs)) {
+        for (const params of [
+          { arguments: args },
+          { arguments: { ...args, thread: '' } },
+          { arguments: { ...args, thread: 'invented' }, _meta: { 'x-codex-turn-metadata': { session_id: 'untrusted-root', thread_id: 'root', thread_source: 'user' } } },
+          { arguments: { ...args, thread: 'invented' }, _meta: { 'x-codex-turn-metadata': { thread_id: 'missing-source' } } },
+          { arguments: { ...args, thread: 'invented' }, _meta: { 'x-codex-turn-metadata': { thread_source: 'subagent' } } },
+        ]) {
+          const result = parse(await call({ method: 'tools/call', params: { name: `agent_${action}`, ...params } }));
+          assert.equal(result.ok, false);
+          assert.equal(result.status, 'NATIVE_OWNER_REQUIRED', `${action}: ${JSON.stringify(result)}`);
+          assert.equal(mod.getHostSessionId(), null, 'refusal must precede session adoption/hydration');
+        }
+        assert.equal(mod.callArgs(action, { arguments: { ...args, thread: 'claude-child' } }).thread, 'claude-child');
+        assert.equal(mod.callArgs(action, { arguments: { ...args, thread: 'invented' }, _meta: { 'x-codex-turn-metadata': { thread_source: 'subagent', thread_id: 'codex-child' } } }).thread, 'codex-child');
+      }
+      for (const args of [{}, { job_id: 'missing' }]) {
+        assert.notEqual(parse(await call({ method: 'tools/call', params: { name: 'agent_status', arguments: args } })).status, 'NATIVE_OWNER_REQUIRED');
+      }
+      assert.equal(mod.callArgs('catalog', { arguments: {} }).action, 'catalog');
+      const host = await import('../lib/host.mjs');
+      await withEnv('AGENT_COMPANION_HOST', 'codex', async () => {
+        host._resetHostCacheForTests();
+        try {
+          for (const [action, args] of Object.entries(inputs)) {
+            assert.throws(() => mod.callArgs(action, { arguments: { ...args, thread: 'fabricated-without-meta' } }), { code: 'NATIVE_OWNER_REQUIRED' });
+          }
+        } finally { host._resetHostCacheForTests(); }
+      });
+    } finally { mod._resetForTest(); }
+  });
+});
+
+for (const trigger of ['SIGINT', 'SIGTERM', 'EOF']) {
+  test(`bridge loss: ${trigger} invokes the registered async hook once and waits before exit`, { timeout: 15_000 }, async (t) => {
+    const server = new URL('./server.mjs', import.meta.url);
+    const preload = `
+      import { registerBridgeLossHandler } from ${JSON.stringify(server.href)};
+      registerBridgeLossHandler(async () => {
+        process.send('loss-start');
+        await new Promise(resolve => process.once('message', resolve));
+        process.send('loss-finished');
+      });
+      process.send('ready');
+    `;
+    const env = { ...process.env };
+    delete env.CLAUDE_CODE_SESSION_ID;
+    const child = spawn(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(preload)}`, fileURLToPath(server)], { env, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
+    t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+    const messages = [];
+    child.on('message', (msg) => messages.push(msg));
+    let stderr = '';
+    child.stderr.on('data', (part) => { stderr += part; });
+    const exited = once(child, 'exit');
+    const nextMessage = () => Promise.race([
+      once(child, 'message').then(([message]) => message),
+      exited.then(([code, signal]) => { throw new Error(`bridge exited early (${code ?? signal}): ${stderr}`); }),
+    ]);
+    assert.equal(await nextMessage(), 'ready');
+    const started = nextMessage();
+    if (trigger === 'EOF') child.stdin.end();
+    else child.kill(trigger);
+    assert.equal(await started, 'loss-start');
+    // Exercise duplicates and the signal/EOF race while cleanup is awaiting.
+    child.kill('SIGINT');
+    child.kill('SIGTERM');
+    child.stdin.end();
+    assert.equal(child.exitCode, null);
+    child.send('finish');
+    const [code, signal] = await exited;
+    assert.equal(signal, null);
+    assert.equal(code, { SIGINT: 130, SIGTERM: 143, EOF: 0 }[trigger]);
+    assert.deepEqual(messages, ['ready', 'loss-start', 'loss-finished']);
+  });
+}
 
 test('hydrateJobsFromLedger preserves host/thread continuity and orphan recovery', async () => {
   const mod = await bridge();

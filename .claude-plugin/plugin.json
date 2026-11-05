@@ -11,6 +11,18 @@
   "homepage": "https://github.com/thangaram611/agent-companion",
   "repository": "https://github.com/thangaram611/agent-companion",
   "license": "MIT",
+  "mcpServers": {
+    "agent-bridge": {
+      "type": "stdio",
+      "command": "/bin/bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/launch-agent-bridge.sh"],
+      "timeout": 1320000,
+      "env": {
+        "AGENT_COMPANION_HOST": "claude",
+        "CODEX_RUNTIME_ADAPTER": "appserver"
+      }
+    }
+  },
   "keywords": [
     "opencode",
     "copilot",

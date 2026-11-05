@@ -1,22 +1,25 @@
 #!/bin/bash
-# Codex plugin MCP launcher.
+# Plugin/session MCP launcher for both hosts.
 #
-# Codex intentionally does not let an agent role add MCP servers that its
-# parent did not have. The Codex-only plugin manifest therefore registers the
-# bridge at session scope, and the agent role inherits it. This launcher keeps
+# Both plugin manifests register the bridge at session scope. This launcher keeps
 # that registration independent of a GUI process's PATH and makes a first run
 # wait for the bridge dependencies instead of racing the SessionStart hook.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || exit 1
 PLUGIN_PACKAGE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)" || exit 1
-CODEX_DATA_ROOT="${CODEX_HOME:-$HOME/.codex}"
 
 # Legacy Codex plugins do not receive the Agent Plugins PLUGIN_DATA overlay.
 # Use Codex's documented cache-independent data layout for this fixed plugin
 # id so this launcher and the SessionStart installer converge on one install.
 export PLUGIN_ROOT="$PLUGIN_PACKAGE_ROOT"
-export PLUGIN_DATA="${PLUGIN_DATA:-$CODEX_DATA_ROOT/plugins/data/agent-companion-agent-companion}"
-export AGENT_COMPANION_HOST="codex"
+export AGENT_COMPANION_HOST="${AGENT_COMPANION_HOST:-codex}"
+if [ "$AGENT_COMPANION_HOST" = "codex" ]; then
+  CODEX_DATA_ROOT="${CODEX_HOME:-$HOME/.codex}"
+  export PLUGIN_DATA="${PLUGIN_DATA:-$CODEX_DATA_ROOT/plugins/data/agent-companion-agent-companion}"
+  SDK_PACKAGE="$PLUGIN_DATA/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
+else
+  SDK_PACKAGE="$PLUGIN_PACKAGE_ROOT/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
+fi
 
 # stdout belongs exclusively to MCP framing. Dependency notices and failures
 # must go to stderr or they corrupt the protocol before initialize.
@@ -38,9 +41,7 @@ for _attempt in 1 2; do
   if [ "$INSTALL_STATUS" -ne 0 ]; then
     exit 1
   fi
-  # The same file install-deps.sh's `installed_ok` requires before it calls the
-  # managed install current: keep the two spelled identically.
-  SDK_PACKAGE="$PLUGIN_DATA/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
+  # Check the SDK where this host loads it (Claude's link or Codex's data).
   if [ -r "$SDK_PACKAGE" ]; then
     DEPS_READY=1
     break
@@ -64,5 +65,8 @@ NODE_BIN="$(resolve_node 2>/dev/null || true)"
   exit 1
 }
 
-exec "$NODE_BIN" --import "$PLUGIN_PACKAGE_ROOT/hooks/launch-agent-bridge.mjs" \
-  "$PLUGIN_PACKAGE_ROOT/bridge-server/server.mjs"
+if [ "$AGENT_COMPANION_HOST" = "codex" ]; then
+  exec "$NODE_BIN" --import "$PLUGIN_PACKAGE_ROOT/hooks/launch-agent-bridge.mjs" \
+    "$PLUGIN_PACKAGE_ROOT/bridge-server/server.mjs"
+fi
+exec "$NODE_BIN" "$PLUGIN_PACKAGE_ROOT/bridge-server/server.mjs"
