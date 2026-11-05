@@ -1,12 +1,21 @@
 # MVP Tracker
 
-Last updated: 2026-10-26
+Last updated: 2026-11-05
 
-Current direction: maintenance. Add a companion, profile or transport only for
-a recurring unmet workflow, with a reproduction or adoption check written first.
+Current direction: active development of the approved conversational redesign.
+Phase 1 removes the dispatch protocol and adds read-only discovery. Ownership,
+lifetime and recovery changes have separate later gates.
 
 ## Current State
 
+- The parent delegates in plain language: task, absolute repo/worktree path and
+  optional companion/model preference. The child asks for a missing path.
+- The ownerless catalog reports enabled companions, the default, model
+  configuration, capabilities, readiness and the last checked version. An open
+  choice uses a ready companion; model omission preserves its configuration.
+- The bridge passes the child's message verbatim. The child relays the answer
+  and questions, with its own focused checks kept separate. Refusals and failures
+  do not authorize self-completion or a silent companion/model substitution.
 - Claude Code and Codex CLI support OpenCode, Copilot, Codex, and Google
   Antigravity. The [companion matrix](ARCHITECTURE.md#companion-matrix) records
   transport capabilities.
@@ -20,10 +29,14 @@ a recurring unmet workflow, with a reproduction or adoption check written first.
 
 ## MVP Limitations
 
-- A profile's `adapter` declares capabilities; it does not select the transport
-  at spawn. The runtime-adapter environment setting selects it. Strengths use
-  the fixed vocabulary in `lib/profile-registry.mjs`; none currently requires
-  a particular transport capability.
+- The runtime-adapter environment setting selects the transport at spawn.
+  Reply availability is per job; the catalog's companion capabilities do not
+  establish that a particular job can accept a reply.
+- Catalog readiness reflects the last check. Models that require session
+  creation to enumerate are reported as such; a catalog read starts no session.
+- Phase 1 does not fix the existing ownership, timeout or recovery defects.
+  Live conversational acceptance follows integration. Codex desktop remains
+  an unqualified host target for the later host-qualification phase.
 - OpenCode `cli` and Codex `exec` cannot steer a running job or recover it
   after bridge restart.
   Copilot recovery depends on its ACP daemon surviving; Antigravity can load a
@@ -42,8 +55,9 @@ a recurring unmet workflow, with a reproduction or adoption check written first.
 1. Release validation belongs in [RELEASE_READINESS.md](RELEASE_READINESS.md):
    readiness must be established on the candidate commit and installed versions.
 
-2. Strength-routed profiles are supported with explicit refusal for ambiguous
-   or unavailable routes; the harness must not silently choose another companion.
+2. **Historical, superseded 2026-11-05:** strength-routed profiles selected a
+   configured route. Phase 1 replaces them with companion/model preferences and
+   the catalog. Explicit refusal and no silent substitution remain the rule.
    Routing contract: [ARCHITECTURE.md](ARCHITECTURE.md#routing-contract).
 
 3. OpenCode uses its HTTP server for reply, resume and streaming; an additional
@@ -52,9 +66,10 @@ a recurring unmet workflow, with a reproduction or adoption check written first.
 4. Codex uses the detached app-server broker for resumable work; the `exec`
    transport is for single-shot jobs because it has no live control channel.
 
-5. Keep the independent review loop: structured verdicts and conversation
-   continuity let the caller verify findings over several rounds. Acceptance
-   criteria: [DIRECTION_ASSESSMENT.md §5](DIRECTION_ASSESSMENT.md#5-review-loop).
+5. **Historical, superseded 2026-11-05:** the review loop required parsed
+   verdicts. Reviews now use ordinary conversation and the parent's requested
+   answer format. Same-conversation follow-ups remain supported by the transports
+   documented above. Former criteria: [DIRECTION_ASSESSMENT.md §5](DIRECTION_ASSESSMENT.md#5-review-loop).
 
 6. Keep vendor-reported usage in one shared shape; model and cost are carried
    only when reported, so routing decisions cannot rely on invented prices.
@@ -78,8 +93,8 @@ a recurring unmet workflow, with a reproduction or adoption check written first.
    Account risk stays with the operator; recheck this boundary before widening
    the integration.
 
-9. Additional default profiles require recurring use and an adoption check;
-   the available paired-review evidence is insufficient to justify expansion.
+9. Additional companions or transports require recurring use and an adoption
+   check; the available paired-review evidence is insufficient to justify expansion.
 
 10. Both plugin manifests and the private bridge package declare `0.1.0`.
     Build release artifacts from the reviewed commit; version metadata alone

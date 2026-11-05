@@ -1,7 +1,7 @@
 {
   "name": "agent-companion",
   "version": "0.1.0",
-  "description": "Attach an OpenCode, GitHub Copilot, Codex CLI, or Google Antigravity companion to the Codex CLI harness. Agent Companion delegates through a dedicated subagent and MCP bridge so token-heavy coding work leaves the parent context clean.",
+  "description": "Delegate in plain language from Codex CLI to an OpenCode, GitHub Copilot, Codex CLI, or Google Antigravity companion. Give the subagent a task, an absolute repo or worktree path, and any companion or model preference. Continue the same subagent for follow-ups.",
   "author": {
     "name": "thangaram611",
     "email": "thangaram611@gmail.com",
@@ -39,8 +39,8 @@
   "hooks": "./hooks/hooks-codex.json",
   "interface": {
     "displayName": "Agent Companion",
-    "shortDescription": "Attach OpenCode, Copilot, Codex, or Antigravity companions.",
-    "longDescription": "Adds a Codex subagent that delegates implementation, review, and research work to a chosen companion runtime, currently OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity, through an internal MCP bridge, per-host runtime state, and completion drain hooks. Codex registers the bridge at plugin scope so the subagent can inherit it; the subagent remains the supported caller. The public direction is harness plus companion, with strength-routed companion profiles that map labels such as reviewer, web_researcher, planner, and fast_executor onto the configured companions.",
+    "shortDescription": "Delegate to a companion coding agent in plain language.",
+    "longDescription": "Adds a subagent that hands work to OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity and brings the answer back. Give it a task, an absolute repo or worktree path, and optionally a companion or model. Ask for available choices through the read-only catalog. Send follow-ups to the same subagent to continue the conversation; spawn a new one for independent work. Run long work in the background. Codex registers the internal bridge at plugin scope so the subagent can inherit it.",
     "developerName": "thangaram611",
     "category": "Engineering",
     "capabilities": [

@@ -1,22 +1,21 @@
 # Agent Companion Architecture
 
-Last updated: 2026-10-26
+Last updated: 2026-11-05
 
 ## Goal
 
-Agent Companion is organized around a harness + companion model:
+The parent speaks naturally to an `agent-companion` subagent. It supplies the
+task, an absolute repo or worktree path and any companion or model preference.
+The companion does the work. The subagent supplies context, relays answers and
+questions, and can check a specific suspect finding. Failure leaves the task
+with the companion and is reported truthfully to the parent.
 
-- **Harnesses outward:** Claude Code and Codex CLI install surfaces today; future
-  harnesses should plug in at the host/template/hook/session-routing boundary.
-- **MCP middle:** one subagent-oriented MCP server with generic `agent_*` tools.
-- **Companion adapters inward:** OpenCode, Copilot, Codex, and Google Antigravity
-  behind a small runtime boundary.
-- **Strength routing:** installs can expose strengths to the harness while the
-  bridge maps each strength to one configured companion profile (see
-  `profiles.json` and `resolveRouting`).
-- **Harness scope is explicit:** Claude keeps the bridge agent-local. Codex
-  registers it at plugin/session scope so its agent role can inherit it; direct
-  parent use is unsupported even though main Codex can see the tool schemas.
+Claude Code and Codex CLI are the current install surfaces. Claude keeps the
+bridge agent-local; Codex registers it at plugin/session scope so the child can
+inherit it. The six private `agent_*` tools connect that child to OpenCode,
+Copilot, Codex or Antigravity. The ownerless catalog provides read-only discovery.
+Phase 1 changes this interface; runtime ownership, lifetime and recovery stay
+as described below until their later phases are qualified.
 
 ## Product Vocabulary
 
@@ -24,12 +23,12 @@ Agent Companion is organized around a harness + companion model:
 | --- | --- | --- |
 | Harness | host | Parent coding-agent surface, currently Claude Code or Codex CLI. |
 | Companion | target | Downstream agent runtime, currently OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity. |
-| Companion profile | `profiles.json` entry | A configured runtime/model instance, such as a Copilot model profile or OpenCode provider/model profile. |
-| Strength | `agent_send({ strength })` | A public capability label such as `reviewer`, `web_researcher`, `planner`, or `fast_executor`. |
+| Model preference | optional `agent_send` `model` | An explicit choice for this conversation; omission uses the companion's configuration. |
+| Catalog | `agent_catalog` | Read-only companion/model configuration, capabilities and readiness. |
 
-The public flags and schema use `host` and `target`:
+The CLI and private tool schema keep `host` and `target`:
 `setup.sh --host claude|codex|both` selects harness surfaces, and
-`agent_send({ target })` names a companion runtime directly (see Public MCP Surface).
+`agent_send({ target })` names a companion runtime directly (see Private MCP Surface).
 
 ## Flow
 
@@ -67,7 +66,8 @@ intentionally rejects `mcp_servers` from a custom agent role: a child may
 inherit its parent's authority but may not expand it. The Codex-only plugin
 manifest therefore registers `agent-bridge` at session scope, and the
 `agent-companion` child inherits it. This makes the schemas visible to main
-Codex; the role remains the only supported caller. A root `.mcp.json` is not
+Codex; the role remains the supported caller for delegated work. The catalog
+is ownerless and available for discovery. A root `.mcp.json` is not
 used because this repository is also a Claude plugin root. Codex sanitizes the
 raw hyphenated server id into the model-visible namespace
 `mcp__agent_bridge__*`, exposed as a deferred tool through `functions.exec`;
@@ -76,22 +76,32 @@ Claude's agent-local registration retains
 pre-approved so an inherited call works under headless approval policy
 `never`; user and managed plugin policy may still restrict it.
 
-## Public MCP Surface
+## Private MCP Surface
 
-The five `agent_*` tools and their invocation contract are documented in
-[README.md](../README.md).
+The parent supplies plain-language requests to the subagent. The six tools are
+`agent_catalog`, `agent_send`, `agent_wait`, `agent_status`, `agent_reply` and
+`agent_cancel`; their arguments are listed in [README.md](../README.md#internal-mcp-surface).
 
-`agent_send` accepts an optional `target` (`opencode` | `copilot` | `codex` | `antigravity`).
-With no explicit target, profile or strength, resolution starts at the default **profile**
-(`AGENT_COMPANION_DEFAULT_PROFILE`, else `profiles.json`'s `defaultProfile`) and
-routes to that profile's companion; a default profile that names no configured
-profile fails loudly with `PROFILE_UNKNOWN` rather than falling through to a
-target. Only when no default profile is configured does resolution fall back to
-`AGENT_COMPANION_DEFAULT_TARGET`, then the `default-target` state file. With no
-`profiles.json` the bridge synthesizes one profile from `default-target` /
-`default-model`. **There is no silent fallback** — if nothing is configured and
-no routing input is passed, `agent_send` returns `TARGET_UNCONFIGURED`, pointing
-at onboarding.
+`agent_catalog` takes no arguments. It reports enabled companions, the default,
+per-companion model configuration, reply/resume/cancel/model-selection
+capabilities, readiness and the installed version seen at the last check. An
+unset model default is labelled as inheriting the companion's configuration.
+The call is ownerless and observational: no hydration, ownership change, lease
+renewal, ledger/digest write or session creation. If model enumeration needs a
+session, it reports "not enumerable without a session". A missing catalog entry
+alone does not prove an explicitly requested model invalid.
+
+`agent_send` accepts `task` and an absolute existing `cwd`, with optional `target`,
+`model` and `max_wait_sec`. It passes the child's exact message to the companion.
+The bridge adds no task instructions or required answer format. Omitted `target`
+uses `AGENT_COMPANION_DEFAULT_TARGET`, then the `default-target` file. If neither
+exists, the send returns `TARGET_UNCONFIGURED`. An explicit `model` overrides
+per-companion configuration; with no override or configured default, the native
+configuration is inherited. Codex receives no model key in that case.
+
+Wait, status, reply and cancel retain their existing control semantics. Replies
+require that specific job's `reply_available: true`, based on its starting
+adapter and current live state. Catalog capabilities alone do not establish it.
 
 ## Companion Matrix
 
@@ -218,62 +228,28 @@ Codex metadata object's `session_id`; it scopes completion delivery, not
 companion continuity.
 
 On a thread with an in-flight job, only a matching retry reattaches: host session,
-target, profile, cwd, task, mode, template and template arguments must match.
-A different request with the same routing is refused as `thread_busy`, naming
-the job and the wait/cancel/reply options. Target, profile and cwd conflicts
-have their own mismatch responses.
+task, target, model and cwd must match. A different task or model is refused as
+`thread_busy`, naming the job and the wait/cancel/reply options. Target and cwd
+conflicts retain their own mismatch responses.
 
-`agent_send` is routed by the sole routing brain `resolveRouting({target,
-profile, strength})` (`bridge-server/server.mjs`). A harness picks **at most one
-of** `profile` or `strength`; an explicit `target` may co-exist as a refinement.
+The subagent honours an explicit companion and model. When the choice is open,
+it reads the catalog once, chooses a ready companion and leaves the model to
+that companion's configuration. It keeps the chosen conversation for follow-ups.
+The bridge resolves the requested or configured companion and applies the
+capability/model gate before spawning work.
 
-1. A harness asks the `agent-companion` subagent to send work, naming a
-   **strength** (preferred), a **profile** id, or a bare `target`.
-2. `resolveRouting` resolves exactly one profile from `profiles.json`, applies a
-   pre-spawn capability gate (model/adapter validity), and returns the backing
-   `{companion, model, adapter}`.
-3. The resolved adapter owns that job until terminal status.
-
-No silent fallback: a request that is unresolvable, ambiguous, or refused by the
-capability gate returns an explicit `ok:false` envelope that names the failure
-and, where candidates exist, echoes their ids (`TARGET_UNCONFIGURED`,
-`TARGET_UNSUPPORTED`, `STRENGTH_UNCONFIGURED`, `STRENGTH_AMBIGUOUS`,
-`PROFILE_UNKNOWN`, `PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`,
-`CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED`). The gate refusals
-(`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED`) have no
-candidate list to echo — they name the offending companion in `target` instead,
-and `MODEL_NOT_ALLOWED` adds `model` and a `hint`. Every one of them ships in the
-`TARGET_UNCONFIGURED` envelope shape, carrying the public `targets` and
-`profiles` lists so the harness can see what *is* configured.
-
-The companion subagent must return any routing refusal and stop. It may not
-substitute a `target`, `profile`, or `strength` the harness did not supply.
-Both template suites assert this; the measured failure is
+Refusals remain explicit: `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`,
+`CAPABILITY_UNAVAILABLE` and `MODEL_NOT_ALLOWED`. The subagent relays the refusal
+and stops. It does not change or drop the parent's preference to get around it.
+The delegated task stays with the companion on refusal, failure, timeout or
+unreachable execution; the child may check a specific finding, but does not
+finish the delegated work itself. Both role suites pin this rule. The measured
+substitution failure remains documented in
 [`RELIABILITY_REMEDIATION.md` F5](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
 
-## Strength Router
-
-Users configure multiple companion profiles — including multiple model profiles
-from the same runtime — in `$BASE_DIR/profiles.json`, and assign strengths to
-those profiles. Harnesses see only the strength names (via `agent_status`); they
-never need to know whether a strength is backed by Copilot, OpenCode, another
-companion, or a specific model behind one of them.
-
-A profile **inherits** its companion's capabilities (it never re-declares
-capability booleans). OpenCode server and Codex app-server profiles can select
-models while sharing the runtime. An ACP daemon replaces its agent child when
-cwd or model changes, and refuses the switch while a prompt is active.
-Multiple profiles may declare the
-same strength — the top-level `defaultProfile` breaks the tie **only if it itself
-declares that strength**, otherwise the send returns `STRENGTH_AMBIGUOUS`.
-
-Profile authoring and examples belong in [README.md](../README.md); the
-single reader is `lib/profile-registry.mjs`. Only ids, model names and strength
-labels are persisted — never secrets.
-
-The router is capability-driven: a strength label never implies a capability the
-backing profile lacks, and the design avoids assuming every companion supports
-reply, resume, parallelism, streaming, or model selection.
+OpenCode server and Codex app-server can select models while sharing the runtime.
+An ACP daemon replaces its agent child when cwd or model changes, and refuses
+the switch while a prompt is active.
 
 ## Companion Adapter Contract
 
@@ -287,13 +263,9 @@ The runtime boundary is expressed through job fields and handlers:
   `agent_status` and both digests read it from there; nothing reads
   `summary.usage` after the terminal. Absent, never zeroed, when the transport
   reported nothing.
-- A completed `review` job also carries `verdict` (`agree` | `disagree` | `null`)
-  and `verdictReason` (`missing` | `malformed` | `conflicting` when the verdict
-  is null), read once at `retainTerminalJob` from the message's `VERDICT:` line
-  (`classifyReviewVerdict`, beside the template in `bridge-server/validation.mjs`)
-  and rendered from the job into wait `meta`, the queue event, the body footer
-  and the digest. A null verdict never remaps the status: the turn completed;
-  the review did not conclude.
+- Each adapter receives the child's message verbatim. Answers remain the
+  companion's own text; the bridge adds no critic instructions, required closing
+  line or answer classification. Usage and terminal-state reporting are separate.
 - Every `unreachable` result derives one `failure_class` for job status, wait
   metadata and completion notifications. A live Codex `turn/completed` with
   zero observed tool calls is remapped only when its assistant message reports
@@ -310,16 +282,24 @@ State defaults to the host-routed companion home `~/.{claude,codex}/agent-compan
 
 - `default-model`: Copilot model config.
 - `default-target`: configured default target (written by onboarding).
-- `profiles.json`: companion profiles, strengths and the default profile.
+- `profiles.json`: legacy configuration only. A logged, one-shot migration at
+  first bridge start carries a named default profile's model to that companion's
+  default setting only when none is already set. The user's file is retained;
+  normal routing stops reading it after migration.
 - `threads/`: logical companion thread names, each holding the companion
   session the last job on that thread recorded — an ACP session id, or a
-  codex app-server thread id — namespaced by profile. It is what a follow-up
-  send resumes. The exec adapter never reads or writes it.
+  codex app-server thread id. It is what a follow-up send resumes. Legacy keys
+  were namespaced by profile: a mapping to exactly one companion session is
+  preserved; several possible sessions are marked ambiguous and follow-up is
+  refused with the conflict named. Migration never silently starts a fresh
+  conversation. The exec adapter never reads or writes it.
 - `jobs/`: persisted in-flight/recent jobs for restart recovery. OpenCode
   server jobs persist their `ses_` session id (under the target-neutral
   `companionSessionId` key) and the server `baseUrl` so a respawned bridge can
   resume them. A settled job carries `usage` (see the adapter contract) — the
   per-job ledger that routing and cost decisions can be judged against.
+  Active legacy jobs keep their old fields until terminal; migration does not
+  rewrite or adopt their in-flight work.
 - `runtime/`: logs, queue, prompt streams, and digests.
 - `runtime/opencode-servers.json`: registry of the shared detached
   `opencode serve` process so a respawned bridge reattaches instead of
@@ -344,6 +324,10 @@ Things that are **not** true, that a reader of this repo would reasonably assume
 The measured evidence is in [`RELIABILITY_REMEDIATION.md`](RELIABILITY_REMEDIATION.md)
 and the harnesses are in [`probes/`](../probes/README.md). They are listed as negatives
 because the cost of re-deriving them is a day each.
+
+The `plan_path` and profile-selection references below describe the historical
+interface retired on 2026-11-05. Their measurements remain evidence; current
+requests supply context and model preferences through the conversational contract.
 
 **Transport and process lifetime**
 

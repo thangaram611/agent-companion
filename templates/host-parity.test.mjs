@@ -2,7 +2,7 @@
 //
 // agent-companion is a host-neutral bridge, not a Claude plugin that happens to
 // run elsewhere. The matrix is {claude, codex} hosts x {opencode, copilot,
-// codex} companions, and a capability that exists on one host and not the other
+// codex, antigravity} companions, and a capability that exists on one host and not the other
 // is a bug in the product, not a detail of the port.
 //
 // The two templates configure the same bridge through different host
@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const md = readFileSync(join(HERE, 'agent-companion.md'), 'utf8');
+const toml = readFileSync(join(HERE, 'agent-companion.toml'), 'utf8');
 const codexManifest = JSON.parse(readFileSync(
   join(HERE, '..', '.codex-plugin', 'plugin.json'),
   'utf8',
@@ -70,6 +71,8 @@ test('both hosts ship the same capability knobs, with the same values', () => {
   const claude = claudeEnv();
   const codex = codexEnv();
 
+  assert.deepEqual(capabilityKeys(claude), ['CODEX_RUNTIME_ADAPTER'],
+    'Phase 1 adds no configuration knobs');
   assert.deepEqual(capabilityKeys(claude), capabilityKeys(codex),
     'a knob set for one host and not the other gives the two an unequal feature set — '
     + 'set it in both templates, or neither');
@@ -79,6 +82,26 @@ test('both hosts ship the same capability knobs, with the same values', () => {
       `${key} differs between hosts (claude=${claude[key]} codex=${codex[key]}): `
       + 'the same dispatch would behave differently depending on which host launched the bridge');
   }
+});
+
+test('both hosts set the same effective tool deadline above the wait cap', () => {
+  const frontmatter = md.match(/^---\n([\s\S]*?)\n---\n/)[1];
+  const timeout = Number(frontmatter.match(/^\s{6}timeout:\s*(\d+)$/m)[1]);
+  assert.equal(timeout, codexManifest.mcpServers['agent-bridge'].tool_timeout_sec * 1000);
+  assert.ok(timeout > 1200 * 1000);
+});
+
+test('both hosts offer the same six private tools and conversational send fields', () => {
+  const claude = md.slice(md.indexOf('\n---\n') + 5);
+  const codex = toml.match(/^developer_instructions\s*=\s*"""([\s\S]*?)"""/m)[1];
+  for (const body of [claude, codex]) {
+    const names = [...new Set([...body.matchAll(/mcp__agent[-_]bridge__agent_([a-z]+)/g)].map((m) => m[1]))].sort();
+    assert.deepEqual(names, ['cancel', 'catalog', 'reply', 'send', 'status', 'wait']);
+    assert.match(body.replace(/\s+/g, ' '), /`task` and `cwd`, plus optional `target`, `model` and `max_wait_sec`/);
+    assert.doesNotMatch(body, /\b(?:templates?|modes?|strengths?|profiles?|verdicts?|fleet|parallel)\b/i);
+  }
+  assert.deepEqual([...claude.matchAll(/^# (.+)$/gm)].map((m) => m[1]),
+    [...codex.matchAll(/^# (.+)$/gm)].map((m) => m[1]));
 });
 
 test('the codex transport is the app-server adapter on both hosts', () => {

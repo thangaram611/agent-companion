@@ -1,145 +1,136 @@
-// Schema/structural sanity tests for templates/agent-companion.toml.
-//
-// Current Codex deliberately rejects role-local MCP authority. This file must
-// therefore contain only role fields; the Codex-only plugin manifest owns the
-// operative bridge registration and its separate marketplace tests.
-//
-// If a future edit ever pulls @iarna/toml or a built-in TOML parser into
-// scope, replace these checks with a real parse + structural assertions.
-
-import '../test/sandbox-home.mjs';
+// Codex roles inherit MCP authority from the plugin manifest. Host parity
+// checks the operative configuration; this suite pins the role schema and text.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-
-import { VALID_TEMPLATES } from '../bridge-server/validation.mjs';
+import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const TOML_PATH = join(HERE, 'agent-companion.toml');
-const text = readFileSync(TOML_PATH, 'utf8');
+const text = readFileSync(join(HERE, 'agent-companion.toml'), 'utf8');
+const description = text.match(/^description\s*=\s*"""([\s\S]*?)"""/m)[1];
+const body = text.match(/^developer_instructions\s*=\s*"""([\s\S]*?)"""/m)[1];
+const prose = body.replace(/\s+/g, ' ');
 
-// Same pin as templates/agent-companion.md.test.mjs: the payload doc lists
-// exactly the templates the bridge accepts, in the bridge's own order.
-const TEMPLATE_ENUM = [...VALID_TEMPLATES].map((t) => JSON.stringify(t)).join(' | ');
-
-test('Codex template lists every prompt template the bridge accepts, and the review verdict the parent reads', () => {
-  assert.ok(VALID_TEMPLATES.has('review'), 'the bridge ships the review template');
-  assert.ok(text.includes(`"template":      ${TEMPLATE_ENUM},`), `payload doc lists ${TEMPLATE_ENUM}`);
-  assert.match(text, /meta\.verdict/);
+test('Codex role accepts plain language and keeps the seven instruction sections in order', () => {
+  assert.match(description, /plain language/);
+  assert.match(description, /absolute repo or worktree path/);
+  assert.match(description, /optionally which companion or model/);
+  assert.match(description, /followup_task.*same subagent/s);
+  assert.match(description, /new one for independent work/);
+  assert.match(description, /long work in the background/);
+  assert.deepEqual([...body.matchAll(/^# (.+)$/gm)].map((m) => m[1]), [
+    'Identity', 'Choosing', 'Sending', 'Waiting', 'Answering', 'When it fails', 'Diagnostics',
+  ]);
+  // Source/install comments may name templates/. Active instructions may not
+  // teach the retired protocol, including in the parent-facing description.
+  const active = `${description}\n${body}`;
+  assert.doesNotMatch(active, /JSON|payload|\b(?:templates?|modes?|strengths?|profiles?|verdicts?|fleet|parallel)\b|rubber.duck|router,? not a worker/i);
+  assert.doesNotMatch(active, /"(?:action|task|target|cwd)"\s*:/);
+  assert.match(prose, /The companion does the work/);
 });
 
-const topLevel = text;
-
-test('role fields stay top-level and the role inherits the session model', async () => {
-  assert.match(topLevel, /^name\s*=\s*"agent-companion"\s*$/m);
-  assert.match(topLevel, /^description\s*=\s*"""/m);
-  // Keep this as a role-level field; moving it into a table silently changes
-  // its meaning in TOML.
-  assert.match(topLevel, /^developer_instructions\s*=\s*"""/m);
-
-  // A pinned id goes stale with the catalog: `gpt-5.5` answered model_not_found
-  // on codex-cli 0.164.0. Without a pin the role runs on the user's own model.
-  assert.doesNotMatch(topLevel, /^model\s*=/m);
-
-  const di = topLevel.match(/^developer_instructions\s*=\s*"""([\s\S]*?)"""/m);
-  assert.ok(di, 'developer_instructions block extractable');
-  const body = di[1];
-  assert.match(body, /spawn_agent/);
-  assert.match(body, /followup_task/);
-  assert.match(body, /Status \/ acknowledgement envelope/);
-  assert.match(body, /`ok: true` with no `content` \+ `meta`/);
-  // Same per-job-status gap as the Claude template — see its suite for why.
-  assert.match(body, /\*\*per-job status\*\*/);
-  assert.match(body, /`response.ok !== true`/);
-  assert.match(body, /never emit `undefined`/);
-  assert.match(body, /meta\.digest_uri/);
-  assert.match(body, /resource_link/);
-  assert.match(body, /"diagnostics": true/);
-  assert.match(body, /MCP-native doctor report/);
-  assert.doesNotMatch(body, /\bAgent\(\)/, 'Claude-specific Agent() call should be replaced');
-  assert.doesNotMatch(body, /SendMessage\(\)/, 'Claude-specific SendMessage() should be replaced');
-  assert.doesNotMatch(body, /canonical place to look up structured per-job progress/);
+test('Codex role uses the catalog for an open choice and sends only the new fields', () => {
+  assert.match(prose, /Honour an explicit companion or model/);
+  assert.match(prose, /read .*agent_catalog` once and choose a companion that is ready/);
+  assert.match(prose, /leave the model to the companion's own configuration unless the parent asked for one/);
+  assert.match(prose, /ownerless and read-only/);
+  assert.match(prose, /enabled companions.*default companion.*model configuration.*capabilities.*readiness.*last check/);
+  assert.match(prose, /not enumerable without a session/);
+  assert.match(prose, /ask the parent.*do not guess/);
+  assert.match(prose, /`task` and `cwd`, plus optional `target`, `model` and `max_wait_sec`/);
+  assert.match(prose, /bridge delivers `task` verbatim/);
+  assert.match(prose, /Omit `model` to inherit/);
 });
 
-test('role does not attempt to add MCP authority', () => {
-  assert.doesNotMatch(text, /^\[mcp_servers(?:\.|\])/m);
-  assert.doesNotMatch(text, /\$\{CLAUDE_PLUGIN_ROOT\}/);
-  assert.doesNotMatch(text, /MCP_TOOL_TIMEOUT/);
-  // Codex's session id arrives in MCP _meta; Claude's variable has no business here.
-  assert.doesNotMatch(text, /CLAUDE_CODE_SESSION_ID/,
-    'Codex template should not mention CLAUDE_CODE_SESSION_ID');
-});
-
-test('role uses the Codex-normalized bridge tool namespace', () => {
-  assert.match(text, /mcp__agent_bridge__agent_send/);
-  assert.match(text, /mcp__agent_bridge__agent_wait/);
-  assert.match(text, /mcp__agent_bridge__agent_status/);
-  assert.match(text, /mcp__agent_bridge__agent_reply/);
-  assert.match(text, /mcp__agent_bridge__agent_cancel/);
-  assert.match(text, /tools\.mcp__agent_bridge__agent_status/);
-  assert.match(text, /ALL_TOOLS/);
-  assert.match(text, /Absence from the top-level schema is expected/);
-  assert.doesNotMatch(text, /mcp__agent-bridge__/,
-    'Codex replaces the raw server-name hyphen with an underscore in model-visible tool names');
-});
-
-test('template documents strength/profile routing without hardcoding ids', () => {
-  // Wire payload doc lives in `description`; the build-the-JSON block lives in
-  // `developer_instructions`. Assert across the whole materialized template.
-  assert.match(text, /"strength":\s+"reviewer"/);
-  assert.match(text, /"profile":\s+"\.\.\."/);
-  assert.match(text, /"strength":\s+"<from input, else omit>"/);
-  assert.match(text, /discover the configured set via `\{action:status\}`/);
-  assert.match(text, /never pass companion or model ids/);
-  assert.doesNotMatch(text, /agent_route|agent_strength|agent_profile/);
-});
-
-test('template forbids re-routing a dispatch the bridge refused to route', () => {
-  // Same prohibition as the Claude template, authored host-neutrally so both
-  // suites can assert it. Reported as "strength advertised but not wired";
-  // forensics showed the bridge answered STRENGTH_UNCONFIGURED in 23ms and the
-  // subagent re-sent the task 30s later with target:"codex" — a target the
-  // parent never named. It belongs in developer_instructions (the behavioral
-  // contract), not in description (the wire-payload doc).
-  const di = topLevel.match(/^developer_instructions\s*=\s*"""([\s\S]*?)"""/m);
-  assert.ok(di, 'developer_instructions block extractable');
-  const body = di[1];
-  assert.match(body, /A routing error ≠ permission to pick your own route/);
-  // Includes both ambiguity codes: STRENGTH_AMBIGUOUS and PROFILE_AMBIGUOUS are
-  // routing-resolution failures too, and a code missing from the enumeration is
-  // exactly the gap the subagent reroutes through.
-  for (const code of ['STRENGTH_UNCONFIGURED', 'STRENGTH_AMBIGUOUS', 'PROFILE_UNKNOWN',
-    'PROFILE_AMBIGUOUS', 'ROUTING_CONFLICT', 'CAPABILITY_UNAVAILABLE',
-    'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED', 'MODEL_NOT_ALLOWED']) {
-    assert.match(body, new RegExp(`\`${code}\``),
-      `${code} named in the no-re-route prohibition`);
+test('Codex role relays answers, status, metadata and orphan events without requiring an answer format', () => {
+  assert.match(prose, /Return the companion's answer as the companion gave it/);
+  assert.match(prose, /own observations under a separate.*Observations/);
+  assert.match(prose, /asked a question, relay it/);
+  assert.match(prose, /Report success only after the bridge reports `completed`/);
+  assert.match(prose, /per-job status has no `action`/);
+  assert.match(prose, /fields the response supplies; never emit `undefined`/);
+  for (const field of ['meta.digest_uri', 'resource_link', 'meta.usage', 'meta.debug_digest_path', 'meta.detail', 'failure_class', 'session_retired']) {
+    assert.ok(body.includes(field), `${field} must reach the parent`);
   }
-  assert.match(body,
-    /Do NOT re-send the task with a `target`, `profile`, or `strength` the parent did not supply/);
-  assert.match(body, /and do NOT drop the one it did supply/);
+  assert.match(prose, /Orphan events surfaced during this turn/);
+  assert.match(prose, /include them as-is above your answer/);
+  assert.match(prose, /agent_status` with `diagnostics: true` first/);
 });
 
-// Same contract as the Claude template; on Codex the bridge reads the caller's
-// own thread id from MCP _meta, never a mapping keyed by the root session.
-test('Codex template leaves thread and session id to the host: a spawn starts a conversation, followup_task continues it', () => {
-  assert.doesNotMatch(text, /by-host-session|MY_THREAD/);
-  // Nor a session id: Codex sends it in _meta.
-  assert.doesNotMatch(text, /host_session_id/);
-  assert.doesNotMatch(text, /"thread":/);
-  const prose = text.replace(/\s+/g, ' ');
-  assert.match(prose, /followup_task to the same agent-companion to continue it/);
-  assert.match(prose, /spawn a new one to start fresh/);
+test('Codex role relays the four refusals and leaves failed work with the companion', () => {
+  assert.deepEqual([...new Set(body.match(/\b[A-Z]+_[A-Z_]+\b/g))].filter((code) => code !== 'ALL_TOOLS').sort(), [
+    'CAPABILITY_UNAVAILABLE', 'MODEL_NOT_ALLOWED', 'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
+  ]);
+  assert.match(prose, /Relay a refusal verbatim and stop; never work around it/);
+  assert.match(prose, /The delegated task itself stays with the companion/);
+  assert.match(prose, /do not complete it yourself or switch to a companion or model the parent did not allow/);
+  assert.match(prose, /read files to check one specific suspect finding/);
+  assert.match(prose, /actual terminal state.*failed.*timeout.*cancelled.*stuck.*unreachable/);
+  assert.match(prose, /partial output and digest link/);
+  assert.match(prose, /If a bridge call throws, retry once/);
+  assert.match(prose, /two consecutive calls throw, take one log tail/);
+  assert.match(prose, /last 20 lines.*~\/.codex\/agent-companion\/runtime\/agent-bridge\.log/);
+  assert.match(prose, /\(log file not found\)/);
+  assert.match(prose, /`mcp_unreachable`.*stop/);
+  assert.match(prose, /missing.*skip the log tail.*stop/);
+  assert.match(prose, /response-level `timeout` or `unreachable`.*without a log tail/);
 });
 
-test('Codex 0.164.0 invocation uses the current collaboration tool schemas and mailbox wait', () => {
-  const description = text.match(/^description\s*=\s*"""([\s\S]*?)"""/m)[1].replace(/\s+/g, ' ');
-  assert.match(description, /spawn_agent.*`task_name`.*`agent_type`.*`message`/);
-  assert.match(description, /followup_task.*`target`.*`message`/);
-  assert.match(description, /JSON-encoded STRING/);
-  assert.match(description, /wait_agent.*`timeout_ms`/);
-  assert.match(description, /send_message.*does not (?:start|trigger) a (?:new )?turn/);
-  assert.match(description, /list_agents/);
-  assert.doesNotMatch(text, /send_input|resume_agent|0\.130\.0|under-development|trigger_turn|spawn_agent `prompt`/);
+test('Codex role preserves bounded waits, per-job reply checks and cancel acknowledgement handling', () => {
+  assert.match(prose, /numeric `max_wait_sec`.*480.*\[1,1200\]/);
+  assert.match(prose, /Remember it as `BUDGET`.*same `BUDGET` for every wait/);
+  assert.match(prose, /identical.*in-flight.*reattaches.*BUDGET/);
+  assert.match(prose, /different `task` or `model`.*thread_busy/);
+  assert.equal(body.match(/Loop iter N: job <job_id> still running, re-waiting\./g)?.length, 1);
+  assert.match(prose, /exactly one line/);
+  assert.match(prose, /Keep looping until terminal.*no iteration cap/i);
+  assert.match(prose, /followup_task.*send_message arrivals.*only between waits/);
+  assert.match(prose, /interrupt latency is one `BUDGET`/);
+  assert.match(prose, /agent_status.*job_id.*reply_available: true.*that job/);
+  assert.match(prose, /per-job fact/);
+  assert.match(prose, /do not cancel-and-resend to fake a reply/);
+  assert.match(prose, /ACP.*cancelled turn plus a new prompt/);
+  assert.match(prose, /no tracked job to cancel/);
+  assert.match(prose, /`cancelling`.*same `BUDGET` until terminal/);
+});
+
+test('Codex role uses only supported top-level fields and inherits the session model', () => {
+  const topLevel = text.replace(/"""[\s\S]*?"""/g, '""');
+  assert.deepEqual([...topLevel.matchAll(/^(\w+)\s*=/gm)].map((m) => m[1]), [
+    'name', 'description', 'developer_instructions',
+  ]);
+  assert.match(topLevel, /^name\s*=\s*"agent-companion"\s*$/m);
+  assert.doesNotMatch(topLevel, /^\s*\[/m, 'role-local tables cannot add MCP authority');
+  assert.doesNotMatch(text, /\$\{CLAUDE_PLUGIN_ROOT\}|MCP_TOOL_TIMEOUT|CLAUDE_CODE_SESSION_ID/);
+  assert.doesNotMatch(description + body, /\\/, 'plain text needs no TOML string escapes');
+});
+
+test('Codex role lists six normalized tools and checks deferred discovery before declaring one missing', () => {
+  const names = [...new Set(body.match(/mcp__agent_bridge__agent_[a-z]+/g))].sort();
+  assert.deepEqual(names, ['cancel', 'catalog', 'reply', 'send', 'status', 'wait']
+    .map((name) => `mcp__agent_bridge__agent_${name}`));
+  assert.match(prose, /tools\.mcp__agent_bridge__agent_catalog/);
+  assert.match(prose, /one awaited.*call per `functions.exec`/);
+  assert.match(prose, /ALL_TOOLS.*exact normalized name/);
+  assert.match(prose, /Absence from the top-level schema is expected/);
+  assert.doesNotMatch(text, /mcp__agent-bridge__/);
+});
+
+test('Codex host names the conversation and parent controls remain natural messages', () => {
+  assert.doesNotMatch(text, /by-host-session|MY_THREAD|host_session_id|"thread":/);
+  assert.match(prose, /Thread continuity — named by the host/);
+  assert.match(prose, /Codex sends your own thread id in MCP `_meta`/);
+  assert.match(prose, /followup_task.*send_message.*keeps that id/);
+  assert.match(prose, /new spawn.*new id/);
+  assert.match(prose, /single-shot adapters.*no in-process conversation/);
+  assert.match(prose, /resume_available/);
+  const parent = description.replace(/\s+/g, ' ');
+  assert.match(parent, /spawn_agent.*`task_name`.*`agent_type`.*`message`/);
+  assert.match(parent, /followup_task.*`target`.*`message`/);
+  assert.match(parent, /wait_agent.*`timeout_ms`/);
+  assert.match(parent, /send_message.*does not trigger a new turn/);
+  assert.match(parent, /list_agents/);
+  assert.match(parent, /interrupt_agent.*does not cancel the companion job/);
+  assert.doesNotMatch(text, /send_input|resume_agent|trigger_turn|\bAgent\(\)|SendMessage\(\)/);
 });
