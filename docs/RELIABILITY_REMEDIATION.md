@@ -10,6 +10,25 @@ models and are not unit tests.
 state layout. The section numbers and evidence IDs here are cited by source comments
 and tests.
 
+**Design boundary — 2026-11-05.** Section 2's broker survival evidence, and
+implementation descriptions throughout this document, describe the previous
+design. The measurements are preserved; the broker, daemons, shared runtime
+registries, exec adapter and adapter-selection knobs are retired. The shipped
+controller gives up in-flight survival across bridge replacement: bridge loss
+stops the owned provider tree through the cleanup watcher, preserves history,
+and a later message to the same native child resumes cold. Historical guard
+names and failure classifications here are not a current API inventory.
+
+The new host evidence base is the
+[Claude Code 2.1.318 report](../probes/host-qualification/claude/REPORT-2026-11-05.md)
+and [Codex CLI 0.166.0 report](../probes/host-qualification/codex/REPORT-2026-11-05.md).
+Both measured cancellation only during pending calls, SubagentStop at completion,
+no host cleanup of descendants and a 1320 s per-call wall unaffected by progress.
+Claude `/clear` preserved the bridge on 2.1.318. These passive fixtures do not
+qualify shipped cleanup; controller tests and current probes cover that separately.
+See [Architecture](ARCHITECTURE.md#host-budgets) for leases, stop markers and
+remaining operator/desktop gates.
+
 ## 0. Host and process constraints
 
 - **S1 — Control is transport-specific.** `codex exec` has no mid-flight control

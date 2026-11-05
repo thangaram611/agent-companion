@@ -162,7 +162,7 @@ export function note(method, params = {}) {
 }
 
 // The deliberate exception: a frame whose whole point is that this pin does not
-// know the method — a codex that grew a notification, or the broker's own
+// know the method — a codex that grew a notification, or the retired broker's own
 // `broker/*` frames, which are not app-server methods at all. Unchecked by
 // construction, and named so that a reader can tell it apart from a builder call
 // that happens to have been written wrong.

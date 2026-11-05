@@ -1,7 +1,7 @@
 // Pure-function helpers for the agent-bridge MCP server (v6.1).
 //
 // Internal action validator for the split MCP tools:
-// agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
+// agent_catalog | agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
 // The server injects the action before validation. Error
 // messages are prefixed with `agent:` so MCP clients can surface them as
 // synchronous tool-call rejections.
@@ -11,21 +11,15 @@
 // a line to the private runtime bridge log on the `log()` helper.
 
 import {
-  readdirSync,
   statSync,
-  realpathSync,
   appendFileSync,
   writeFileSync,
   existsSync,
   renameSync,
 } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute } from 'node:path';
 
-import { plansDir, detectHost } from '../lib/host.mjs';
 import { bridgeLogFile, PRIVATE_FILE_MODE, chmodPrivate } from '../lib/runtime-paths.mjs';
-// Single-sourced from the registry — the validator imports ONLY the closed
-// strength set (never loadProfiles), so it stays socket/process/file-free.
-import { VALID_STRENGTHS } from '../lib/profile-registry.mjs';
 
 // --- Logger -----------------------------------------------------------------
 
@@ -61,315 +55,18 @@ export function log(level, ...args) {
 
 // --- Constants --------------------------------------------------------------
 
-export const VALID_ACTIONS   = new Set(['send', 'wait', 'status', 'reply', 'cancel']);
-export const VALID_MODES     = new Set(['PLAN', 'ANALYZE', 'EXECUTE']);
-export const VALID_TEMPLATES = new Set(['general', 'research', 'plan_review', 'review']);
-export const VALID_PARALLEL_STRATEGIES = new Set(['auto', 'always', 'never']);
+export const VALID_ACTIONS = new Set(['catalog', 'send', 'wait', 'status', 'reply', 'cancel']);
 export const VALID_TARGETS = new Set(['opencode', 'copilot', 'codex', 'antigravity']);
-export const DEFAULT_MODE    = 'EXECUTE';
-export const DEFAULT_PARALLEL = 'auto';
 
-// Field surface per action. Anything outside these is an "unknown key" error.
-// There is no session-id field: the host supplies it (server.mjs getHostSessionId).
+// Thread is an internal field injected by the host, not a model-facing input.
 const ALLOWED_FIELDS = {
-  send:   new Set(['action', 'task', 'mode', 'template', 'template_args', 'cwd', 'thread', 'target', 'profile', 'strength', 'max_wait_sec', 'parallel']),
+  catalog: new Set(['action']),
+  send:   new Set(['action', 'task', 'cwd', 'thread', 'target', 'model', 'max_wait_sec']),
   wait:   new Set(['action', 'job_id', 'max_wait_sec']),
   status: new Set(['action', 'job_id', 'verbose', 'diagnostics']),
   reply:  new Set(['action', 'job_id', 'message']),
   cancel: new Set(['action', 'job_id']),
 };
-
-// Per-template allowed keys. Plan_review and general have disjoint key sets;
-// research and review have none. Validating per template (instead of one
-// global set) prevents `scope_hint` from being silently accepted on plan_review
-// and vice-versa.
-const VALID_TEMPLATE_ARGS_KEYS_BY_TEMPLATE = {
-  general:     new Set(['scope_hint']),
-  research:    new Set(),
-  plan_review: new Set(['plan_path', 'focus_directive']),
-  review:      new Set(),
-};
-
-// Templates whose prompt already carries its own critique instructions and a
-// verdict contract. The always-on rubber-duck wrapper is not layered on top of
-// these: it doubles the prompt without changing the output, and its
-// `RUBBER-DUCK:` footer would compete with the verdict line the parent reads.
-export const RUBBER_DUCK_EXEMPT_TEMPLATES = new Set(['plan_review', 'review']);
-const SCOPE_HINT_MAX_CHARS = 500;
-
-// --- Prompt templates -------------------------------------------------------
-
-export function shouldUseFleet({ parallel = DEFAULT_PARALLEL, template = 'general', mode = DEFAULT_MODE, task = '' } = {}) {
-  if (parallel === 'always') return true;
-  if (parallel === 'never') return false;
-  if (parallel !== 'auto') return false;
-  if (template === 'plan_review') return true;
-  // One reviewer, one verdict line. A fleet of sub-reviewers concatenates N
-  // verdicts into one message, and two that disagree parse to no verdict at
-  // all — so `auto` never fans a review out, whatever the task looks like.
-  if (template === 'review') return false;
-  const text = String(task || '');
-  if (template === 'research') {
-    return text.length > 80 || /\b(compare|survey|latest|recent|sources|research|across|multiple)\b/i.test(text);
-  }
-  if (mode === 'ANALYZE') {
-    return text.length > 120 || /\b(review|audit|investigate|across|multiple|multi[- ]?file|large|exhaustive)\b/i.test(text);
-  }
-  return text.length > 180 ||
-    /\b(refactor|migration|feature|implement|across|multiple|multi[- ]?file|review|audit|exhaustive|parallel)\b/i.test(text);
-}
-
-export function formatGeneralTemplate({ task, mode, scope_hint, parallel }) {
-  const analyzeLine =
-    'Do not modify any files — no `edit`, `write`, or file-mutating `shell` commands. Read-only tools (`view`, `grep`, `glob`, `web_search`, `web_fetch`, and the `task` tool for read-only sub-agents) are fine. ' +
-    'For files >200 LOC, scope your analysis: pick one section (imports/types, functions, error paths, etc.) per turn rather than reading the whole file at once. ' +
-    'If the task names a specific concern, focus there first; defer comprehensive review to a follow-up. ' +
-    'If `template_args.scope_hint` is provided, treat it as the binding scope for this turn.';
-  const modeLine =
-    mode === 'EXECUTE'
-      ? 'You may use `edit`, `write`, `shell`, and the `task` tool. Be precise about file paths and the exact changes you intend.'
-      : mode === 'PLAN'
-        ? 'Do not modify any files — produce a plan only. Read-only tools (`view`, `grep`, `glob`, `web_search`, `web_fetch`, and read-only sub-agents) are fine. End the answer with a concrete, numbered implementation plan.'
-        : analyzeLine;
-  const label = mode === 'EXECUTE' ? 'EXECUTE' : mode === 'PLAN' ? 'PLAN' : 'ANALYZE';
-  // /fleet is a prompt-body slash command and MUST sit at the very start of
-  // the prompt body to be recognised by Copilot's parser. When parallel is
-  // true we drop the literal `TASK:` prefix so the slash command is the
-  // first non-whitespace token — fleet expects the objective immediately
-  // after `/fleet `.
-  const useFleet = shouldUseFleet({ parallel, template: 'general', mode, task });
-  const taskLine = useFleet ? `/fleet ${task}` : `TASK: ${task}`;
-  const lines = [
-    taskLine,
-    '',
-    `Mode: ${label}`,
-    modeLine,
-  ];
-  if (scope_hint) lines.push(`Scope: ${scope_hint}`);
-  lines.push('', 'Return: a concise answer plus the list of files you inspected or changed.');
-  return lines.join('\n');
-}
-
-export function formatResearchTemplate({ task, parallel }) {
-  const body = [
-    'You are a research assistant. The user wants a focused, evidence-backed answer to:',
-    '',
-    `  ${task}`,
-    '',
-    'Use `web_search` and `web_fetch` as needed. Read at least 2-3 reputable sources before answering.',
-    'Use only `web_search` and `web_fetch` — no shell, no file edits.',
-    '',
-    'Anti-hallucination rules (strict):',
-    "- Only claim a fact, URL, file path, function, constant, or command exists if you JUST verified it in THIS turn via a tool call. Do not cross-reference prior conversation context or things you vaguely remember from training.",
-    "- If the question asks about the user's own repo/files and you have not directly read them in this turn with a tool call, say so explicitly instead of inferring. Never describe the user's files from search-result bleed-through.",
-    "- When quoting a source, prefer verbatim text inside backticks over paraphrase. If you can't quote, label the claim \"(inferred)\" so the reader knows.",
-    '- If search results disagree or are thin, surface that disagreement — do not collapse it into a single confident answer.',
-    '',
-    'Return a structured response:',
-    '1. Direct answer (1-3 sentences)',
-    '2. Key findings (bullet points with concrete details)',
-    '3. Caveats / dissenting views (if any)',
-    '4. Sources (URLs you actually fetched, with one-line descriptions)',
-    '',
-    'Be concise. Skip filler.',
-  ].join('\n');
-  return maybeFleetPrefix(body, shouldUseFleet({ parallel, template: 'research', task }));
-}
-
-export function formatPlanReviewTemplate({ template_args, parallel }) {
-  const planPath = template_args?.plan_path;
-  const focus = template_args?.focus_directive;
-  if (!planPath) throw new Error('internal: plan_review reached formatter without plan_path');
-  const body = [
-    'You are a senior software architect reviewing an implementation plan produced by another AI coding',
-    'assistant. The plan lives at:',
-    '',
-    `  ${planPath}`,
-    '',
-    'Read it with the `view` tool. Then use `view`, `grep`, and `glob` on the project codebase to verify',
-    "that files, functions, APIs, and patterns referenced in the plan actually exist and match the plan's",
-    'description.',
-    '',
-    'Review priorities (in order):',
-    '1. Correctness — Will the changes solve the stated problem? Wrong assumptions or misunderstood APIs?',
-    '2. Completeness — Missing steps, unhandled edge cases, files that need changes but are not listed?',
-    '3. Safety — Could the changes break existing functionality or cause regressions?',
-    '4. Consistency — Do the changes follow codebase patterns? Internal contradictions?',
-    '5. Verification — Are there adequate type-check, lint, and test steps?',
-    '',
-    focus ? `[FOCUS DIRECTIVE: ${focus}]` : '',
-    '',
-    'DO NOT flag: style preferences, equivalent alternatives, theoretical concerns without evidence,',
-    "or pre-existing issues outside the plan's scope.",
-    '',
-    'DO NOT modify any files. Report findings — do not attempt to fix the plan or the code yourself.',
-    '',
-    'Respond with:',
-    '- VERDICT: "approve" or "revise"',
-    '- A numbered list of concrete findings, each with file path and specific issue',
-    '- A brief overall assessment (2-3 sentences)',
-  ].filter(Boolean).join('\n');
-  return maybeFleetPrefix(body, shouldUseFleet({ parallel, template: 'plan_review' }));
-}
-
-// The review loop's prompt. The subject is the task itself — a change, a
-// claim, a plan, a diff — and the contract is the LAST line: `VERDICT: agree`
-// or `VERDICT: disagree`, which `classifyReviewVerdict` reads into the terminal
-// envelope's `meta.verdict` so the parent can branch without parsing prose.
-// Read-only by construction, whatever `mode` the caller passed: a review that
-// edits is not a review (that is `general` in EXECUTE). The closing line is the
-// continuity hook — on a daemon-backed adapter a follow-up send lands on the
-// same conversation, so round two can say "finding 1" and be understood.
-export function formatReviewTemplate({ task, parallel }) {
-  const body = [
-    'You are a senior engineer reviewing work produced by another AI coding assistant. The subject under',
-    'review — a change, a plan, a claim, or a diff — is:',
-    '',
-    `  ${task}`,
-    '',
-    'Read the code it touches with your read-only tools (`view`, `grep`, `glob`) and verify every claim',
-    "against the codebase before judging it. Do not trust the subject's own description of what it does.",
-    '',
-    'Review priorities (in order):',
-    '1. Correctness — Does it do what it claims? Wrong assumptions, misunderstood APIs, logic errors?',
-    '2. Completeness — Missing cases, unhandled errors, call sites that also needed the change?',
-    '3. Safety — Could it break existing behaviour or cause regressions?',
-    "4. Consistency — Does it follow the codebase's own patterns? Internal contradictions?",
-    '5. Verification — Is it covered by a check that would catch its own defect?',
-    '',
-    'DO NOT flag: style preferences, equivalent alternatives, theoretical concerns without evidence,',
-    "or pre-existing issues outside the subject's scope.",
-    '',
-    'DO NOT modify any files — no `edit`, `write`, or file-mutating `shell` commands. Report findings;',
-    'do not fix them.',
-    '',
-    'Respond with:',
-    '- A numbered list of concrete findings, each with a file path (and line where possible) and the',
-    '  specific issue. Write "No findings." if there are none.',
-    '- A brief overall assessment (2-3 sentences).',
-    '- Exactly one verdict line as the LAST line of your message, with nothing after it:',
-    '    VERDICT: agree — <one line: why the subject holds as stated>',
-    '    VERDICT: disagree — <one line: the finding that must be addressed first>',
-    '  "agree" means the subject is correct, complete and safe as stated; "disagree" means at least',
-    '  one finding must be addressed before it is. A message without that line counts as no verdict.',
-    '',
-    'On a follow-up turn in this conversation, re-read what changed since your last verdict and',
-    're-verdict; refer to your earlier findings by number.',
-  ].join('\n');
-  return maybeFleetPrefix(body, shouldUseFleet({ parallel, template: 'review', task }));
-}
-
-export function formatPrompt({ template, task, mode, template_args, parallel }) {
-  switch (template || 'general') {
-    case 'general':     return formatGeneralTemplate({ task, mode, scope_hint: template_args?.scope_hint, parallel });
-    case 'research':    return formatResearchTemplate({ task, parallel });
-    case 'plan_review': return formatPlanReviewTemplate({ template_args, parallel });
-    case 'review':      return formatReviewTemplate({ task, parallel });
-    default: throw new Error(`unknown template: ${template}`);
-  }
-}
-
-// The review template's terminal contract, read the way classifyRubberDuck
-// reads the rubber-duck line: every `VERDICT:` line in the message counts, and
-// the answer is pessimistic. A value the contract does not define (plan_review's
-// `approve`, a hedged `agreed`), or two lines that disagree with each other, is
-// no verdict at all. `null` is the honest answer there — the bridge never
-// guesses one — and the job stays `completed`, because the turn did finish; it
-// is the REVIEW that did not conclude, and `reason` says which way.
-//
-// Markdown-tolerant on purpose: models bold the label, quote the value, or
-// bullet the line. Position is not checked — the prompt asks for the last line
-// so the parse is unambiguous, but a well-formed line anywhere is still the
-// model's verdict, and a second one that agrees is a fleet of sub-reviewers
-// agreeing.
-const VERDICT_LINE_RE = /(?:^|\n)[ \t]*(?:[-*]\s+)?[*_`]*VERDICT[*_`]*:[*_`\s"']*([A-Za-z]+)/gi;
-export function classifyReviewVerdict(message) {
-  if (!message) return { verdict: null, reason: 'missing' };
-  const values = [...String(message).matchAll(VERDICT_LINE_RE)].map((m) => m[1].toLowerCase());
-  if (values.length === 0) return { verdict: null, reason: 'missing' };
-  if (values.some((v) => v !== 'agree' && v !== 'disagree')) return { verdict: null, reason: 'malformed' };
-  if (new Set(values).size > 1) return { verdict: null, reason: 'conflicting' };
-  return { verdict: values[0], reason: null };
-}
-
-// Helper: prepend `/fleet ` to a multi-line template body so the slash
-// command sits at the very first non-whitespace token of the prompt
-// (Copilot's parser requirement). The rest of the body — role
-// description, rules, return format — becomes the orchestrator's
-// objective verbatim and is propagated to dispatched sub-agents.
-function maybeFleetPrefix(body, useFleet) {
-  return useFleet ? `/fleet ${body}` : body;
-}
-
-// Native rubber-duck request, added to every Copilot general/research prompt.
-// Unavailable critics must be reported, never silently substituted. The wrapper
-// is not exposed as a public tool parameter.
-export function appendRubberDuckReview(formatted) {
-  return [
-    formatted,
-    '',
-    '---',
-    '',
-    'CROSS-EXAMINATION STEP (mandatory before returning):',
-    '',
-    'After you have produced your initial answer, invoke the `rubber-duck` sub-agent via your `task` tool to critique your own response. Pass your draft answer as the sub-agent input along with a short copy of the original task. Ask the sub-agent to look for:',
-    '  1. Claims not backed by a tool call you made in this turn (hallucinated files, functions, flags, URLs).',
-    '  2. Cross-context conflation (mixing web-search results with details about the user files you did not read).',
-    '  3. Overlooked edge cases or assumptions worth flagging.',
-    '  4. Internal inconsistencies in the draft.',
-    '',
-    'If the native `rubber-duck` agent is unavailable or its call fails, do not substitute another agent or claim the critique passed. Return your answer with `RUBBER-DUCK: unavailable — <reason>`.',
-    '',
-    "Incorporate the rubber-duck's findings into your final answer. If the critique surfaces a Confirmed hallucination, REMOVE the offending claim. Prefix your final message with one of:",
-    '  `RUBBER-DUCK: clean.`   (if the critique approved)',
-    '  `RUBBER-DUCK: revised — <1-line summary of what you changed>.`',
-    '',
-    'Always request the native critique and report its outcome honestly. The bridge checks the verdict marker against the recorded native critic call.',
-  ].join('\n');
-}
-
-// --- Plan path resolution ---------------------------------------------------
-
-// The plans dir is only the lookup scope for plan_path="latest"; an explicit
-// plan_path may live anywhere (see the plan_review branch of validateAgentArgs).
-// Overridable via AGENT_PLANS_DIR for testing; otherwise it routes through
-// lib/host.mjs (so Codex resolves to ~/.codex/plans/ instead of Claude's
-// directory). Resolved per call so tests can set the env var without
-// re-importing the module — which is why there is no import-time constant.
-export function getPlansDir() {
-  return process.env.AGENT_PLANS_DIR || plansDir(detectHost());
-}
-
-export function resolveLatestPlanPath() {
-  const plansDir = getPlansDir();
-  let entries;
-  try { entries = readdirSync(plansDir); }
-  catch (err) { throw new Error(`agent: plans directory not readable (${plansDir}): ${err.message}`); }
-  // statSync follows symlinks; a dangling link or a stray directory named
-  // *.md must not turn "latest" into a raw ENOENT — skip it and keep looking.
-  // Only "there is nothing there" is skippable, though: an EACCES on the
-  // newest plan silently resolving to an older one is exactly the fallback
-  // this bridge refuses everywhere else, so any other error is the answer.
-  const candidates = entries
-    .filter((f) => f.endsWith('.md'))
-    .flatMap((f) => {
-      const full = join(plansDir, f);
-      try {
-        const st = statSync(full);
-        return st.isFile() ? [{ full, mtimeMs: st.mtimeMs }] : [];
-      } catch (err) {
-        if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') return [];
-        throw new Error(`agent: plan_path="latest" could not stat candidate ${full}: ${err.message}`);
-      }
-    })
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
-  if (candidates.length === 0) {
-    throw new Error(`agent: plan_path="latest" but no .md files found in ${plansDir}`);
-  }
-  return candidates[0].full;
-}
-
-// --- Action boundary validation ---------------------------------------------
 
 function assertKnownFields(action, args) {
   const allowed = ALLOWED_FIELDS[action];
@@ -416,20 +113,16 @@ function assertCwd(cwd) {
   if (!st.isDirectory()) throw new Error(`agent: cwd is not a directory: ${cwd}`);
 }
 
-// The per-action validators mutate their input where it's useful (e.g.
-// plan_path "latest" → resolved absolute path) and return a normalised
-// argument object. The returned shape is what the server hands off to the
-// handlers; it always includes the resolved defaults.
-
 export function validateAgentArgs(rawArgs) {
   const args = (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) ? rawArgs : {};
   const action = args.action;
-  if (!action) throw new Error('agent: action is required (one of: send, wait, status, reply, cancel)');
+  if (!action) throw new Error('agent: action is required (one of: catalog, send, wait, status, reply, cancel)');
   if (!VALID_ACTIONS.has(action)) {
-    throw new Error(`agent: action must be one of send|wait|status|reply|cancel, got "${action}"`);
+    throw new Error(`agent: action must be one of catalog|send|wait|status|reply|cancel, got "${action}"`);
   }
   assertKnownFields(action, args);
   switch (action) {
+    case 'catalog': return { action: 'catalog' };
     case 'send':   return validateSend(args);
     case 'wait':   return validateWait(args);
     case 'status': return validateStatus(args);
@@ -476,154 +169,23 @@ function validateStatus(args) {
 }
 
 function validateSend(args) {
-  const template = args.template || 'general';
-  if (!VALID_TEMPLATES.has(template)) {
-    throw new Error(`agent: template must be one of ${[...VALID_TEMPLATES].join('|')}, got "${template}"`);
-  }
-
-  const mode = args.mode || DEFAULT_MODE;
-  if (!VALID_MODES.has(mode)) {
-    throw new Error(`agent: mode must be one of ${[...VALID_MODES].join('|')}, got "${mode}"`);
-  }
-
-  // `task` is required for every template but plan_review, which drives its
-  // prompt from plan_path and ignores task.
-  const needsTask = template !== 'plan_review';
-  if (needsTask) assertString('task', args.task);
-  if (!needsTask && args.task) {
-    log('WARN', 'agent: task ignored for template="plan_review"');
-  }
-
-  const ta = args.template_args ?? {};
-  if (typeof ta !== 'object' || Array.isArray(ta)) {
-    throw new Error('agent: template_args must be a plain object');
-  }
-  const allowedTaKeys = VALID_TEMPLATE_ARGS_KEYS_BY_TEMPLATE[template] ?? new Set();
-  for (const key of Object.keys(ta)) {
-    if (!allowedTaKeys.has(key)) {
-      const allowedDesc = allowedTaKeys.size > 0 ? [...allowedTaKeys].join(', ') : '(none)';
-      throw new Error(`agent: unknown template_args key "${key}" for template="${template}" (allowed: ${allowedDesc})`);
-    }
-  }
-  if (template === 'general' && ta.scope_hint !== undefined) {
-    if (typeof ta.scope_hint !== 'string') {
-      throw new Error('agent: template_args.scope_hint must be a string');
-    }
-    if (ta.scope_hint.length > SCOPE_HINT_MAX_CHARS) {
-      throw new Error(`agent: template_args.scope_hint too long (${ta.scope_hint.length} > ${SCOPE_HINT_MAX_CHARS} chars)`);
-    }
-  }
-
-  if (template === 'plan_review') {
-    if (!ta.plan_path || typeof ta.plan_path !== 'string') {
-      throw new Error(
-        'agent: template="plan_review" requires template_args.plan_path ' +
-        '(absolute path to the plan .md file, or "latest")',
-      );
-    }
-    if (ta.plan_path === 'latest') {
-      ta.plan_path = resolveLatestPlanPath();
-      log('INFO', 'agent:', `plan_path=latest resolved to ${ta.plan_path}`);
-    }
-    if (ta.plan_path.includes('<') || ta.plan_path.includes('>')) {
-      throw new Error(`agent: template_args.plan_path looks like an un-substituted placeholder: "${ta.plan_path}"`);
-    }
-    if (!isAbsolute(ta.plan_path)) {
-      throw new Error(`agent: template_args.plan_path must be absolute, got "${ta.plan_path}"`);
-    }
-    let st;
-    try { st = statSync(ta.plan_path); }
-    catch { throw new Error(`agent: template_args.plan_path does not exist: ${ta.plan_path}`); }
-    if (!st.isFile()) throw new Error(`agent: template_args.plan_path is not a file: ${ta.plan_path}`);
-    // Canonicalise (dereference symlinks) so the prompt names the file the
-    // companion will actually open and the log is honest about it. The path is
-    // deliberately NOT confined to the plans directory: an earlier audit
-    // finding had it rejected unless it resolved inside getPlansDir(), on the
-    // theory that a symlink there could point Copilot at /etc/passwd. That was
-    // never a boundary — every shipped companion reads the whole filesystem on
-    // its own (Copilot runs --allow-all-paths, codex workspace-write confines
-    // writes not reads, OpenCode is unsandboxed), so naming a path in a prompt
-    // grants nothing; and the caller is the subagent, which has Bash and can
-    // copy any file into the plans dir. In practice the rejection only cost a
-    // bounced dispatch plus a duplicate plan the harness then edited out of
-    // sync with the copy the companion reviewed. See ARCHITECTURE.md
-    // (Negative Results → Blast radius). `latest` still resolves inside the
-    // host's plans dir — that is a lookup scope, not a containment.
-    let realPath;
-    try { realPath = realpathSync(ta.plan_path); }
-    catch { throw new Error(`agent: template_args.plan_path could not be resolved: ${ta.plan_path}`); }
-    ta.plan_path = realPath;
-    if (ta.focus_directive !== undefined && typeof ta.focus_directive !== 'string') {
-      throw new Error('agent: template_args.focus_directive must be a string');
-    }
-  }
-  // Note: pre-§D this branch had an `else if (template_args nonempty) → WARN
-  // "template ignores template_args"`. After §D introduced per-template
-  // template_args validation (`VALID_TEMPLATE_ARGS_KEYS_BY_TEMPLATE`), any
-  // key present is either accepted by the formatter (general's scope_hint)
-  // or already rejected upstream as an unknown key. The "ignores" warning is
-  // false now and was misleading users about scope_hint being dropped.
-
-  assertCwd(args.cwd);
+  assertString('task', args.task);
+  try { assertCwd(args.cwd); }
+  catch (err) { err.code = 'INVALID_CWD'; throw err; }
   assertThreadName(args.thread);
-
+  assertString('target', args.target, { optional: true });
+  assertString('model', args.model, { optional: true });
   const target = String(args.target || '').trim().toLowerCase();
-  if (target && !VALID_TARGETS.has(target)) {
-    throw new Error(`agent: target must be one of ${[...VALID_TARGETS].join('|')}, got "${args.target}"`);
-  }
-
-  // Strength + profile are open-string siblings of target (not closed enums, so
-  // the per-install vocabulary never freezes into the public MCP contract).
-  // Structural checks only here: strength against the closed VALID_STRENGTHS
-  // vocabulary, profile against the id charset. Registry membership /
-  // existence / routing conflicts are resolved server-side (resolveRouting),
-  // which echoes candidates on failure. The cardinal rule enforced here is the
-  // strict mutual-exclusion of {profile, strength}; an explicit target MAY
-  // co-exist (resolved server-side → ROUTING_CONFLICT on disagreement).
-  let strength = null;
-  if (args.strength !== undefined && args.strength !== null && args.strength !== '') {
-    if (typeof args.strength !== 'string') throw new Error('agent: strength must be a string');
-    strength = args.strength.trim().toLowerCase();
-    if (!VALID_STRENGTHS.has(strength)) {
-      throw new Error(`agent: strength must be one of ${[...VALID_STRENGTHS].join('|')}, got "${args.strength}"`);
-    }
-  }
-  let profile = null;
-  if (args.profile !== undefined && args.profile !== null && args.profile !== '') {
-    if (typeof args.profile !== 'string') throw new Error('agent: profile must be a string');
-    profile = args.profile.trim();
-    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(profile)) {
-      throw new Error(`agent: profile must match [a-z0-9][a-z0-9._-]{0,63} (got "${args.profile}")`);
-    }
-  }
-  if (profile && strength) {
-    throw new Error('agent: pass only one of profile or strength');
-  }
-
   if (args.max_wait_sec !== undefined && typeof args.max_wait_sec !== 'number') {
     throw new Error('agent: max_wait_sec must be a number');
   }
-
-  // Fleet (parallel) handling. `auto` is the default: the bridge prepends
-  // /fleet only when the task looks broad enough to benefit. `always` and
-  // `never` are explicit overrides.
-  if (args.parallel !== undefined && !VALID_PARALLEL_STRATEGIES.has(args.parallel)) {
-    throw new Error('agent: parallel must be one of auto|always|never');
-  }
-  const parallel = args.parallel || DEFAULT_PARALLEL;
-
   return {
     action: 'send',
-    task: needsTask ? args.task : null,
-    mode,
-    template,
-    template_args: ta,
+    task: args.task,
     cwd: args.cwd,
     thread: args.thread || null,
     target: target || null,
-    profile: profile || null,
-    strength: strength || null,
+    model: args.model?.trim() || null,
     max_wait_sec: args.max_wait_sec,
-    parallel,
   };
 }

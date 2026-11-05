@@ -1,8 +1,6 @@
-// The fake ACP agent, shared by both halves of the generic ACP transport:
-// scripts/acp-daemon.test.mjs (the daemon side — spawn, handshake, prompt,
-// permission, load, cancel) and bridge-server/server.test.mjs (the bridge side,
-// through a real detached daemon). It is a fixture, not a test — `node --test`
-// only collects `*.test.mjs`.
+// Fake ACP provider shared by protocol, adapter and controller tests.
+// This fixture starts local processes only and never runs a model.
+// Historical daemon tests used this same wire fixture before Phase 3.
 //
 // It lives here for the reason test/fake-codex-app-server.mjs does: the two
 // suites must agree on what an ACP agent does, and a second copy is how they
@@ -11,7 +9,7 @@
 // Driven through a companion's `binaryEnv` (`FAKE_ACP_BIN` for its own
 // descriptor, `COPILOT_BIN` for Copilot's, `ANTIGRAVITY_ACP_BIN` for
 // Antigravity's), the
-// idiom bridge-server/codex-runtime.test.mjs uses for its fake codex. It never
+// idiom bridge-server/adapters/codex.test.mjs uses for its fake codex. It never
 // runs a model and never spends a token. Everything it does is scripted from
 // its environment, so a test orders it around before the spawn:
 //
@@ -22,7 +20,7 @@
 //                              `session/request_permission` and records the answer
 //   ACP_FAKE_PERMISSION_KIND   the tool kind it asks about (`execute`)
 //   ACP_FAKE_ASK_FS            '1' → each prompt first asks `fs/read_text_file`,
-//                              a capability the daemon does not declare
+//                              a capability the ACP client does not declare
 //   ACP_FAKE_UNKNOWN_UPDATE    '1' → also emits `usage_update` and `notice`, two
 //                              v1 kinds no descriptor here declares
 //   ACP_FAKE_USAGE             `quota` (Gemini's `_meta.quota`, the default),
@@ -43,7 +41,7 @@
 // that comes back on the default model).
 //
 // `fakeAcpDescriptor` below is the fake's own companion descriptor, the
-// neutral descriptor the suites drive the generic daemon with; Antigravity's
+// neutral descriptor the suites drive the ACP adapter with; Antigravity's
 // real descriptor is driven through the same fake via `ANTIGRAVITY_ACP_BIN`.
 // It carries an `acp` block exactly as a real descriptor in
 // lib/target-registry.mjs does, so a suite that passes against it is a suite
@@ -76,7 +74,7 @@ export function fakeAcpDescriptor({ id = 'fake-acp', loadSession = true, updates
     id,
     displayName: 'Fake ACP agent',
     implemented: true,
-    capabilities: { send: true, wait: true, status: true, cancel: true, reply: true, resume: true, jsonEvents: true, acp: true, serverMode: false, parallel: 'planned', modelSelection: true },
+    capabilities: { send: true, wait: true, status: true, cancel: true, reply: true, resume: true, jsonEvents: true, acp: true, serverMode: false, modelSelection: true },
     binaryEnv: 'FAKE_ACP_BIN',
     binaryNames: ['fake-acp-agent'],
     versionArgs: ['--version'],
@@ -92,7 +90,6 @@ export function fakeAcpDescriptor({ id = 'fake-acp', loadSession = true, updates
       permission: (env) => env.FAKE_ACP_POLICY || 'all',
       usage: fakeAcpUsage,
       updates,
-      rubberDuck: false,
     },
   };
 }

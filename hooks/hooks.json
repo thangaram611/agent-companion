@@ -2,11 +2,32 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__agent-bridge__agent_send",
+        "matcher": "^mcp__(plugin_agent-companion_)?agent-bridge__agent_(send|wait|reply|cancel)$",
         "hooks": [
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/name-thread.sh\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "TaskStop",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_COMPANION_HOST=claude bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-owner.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_COMPANION_HOST=claude bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-owner.sh\"",
             "timeout": 5
           }
         ]
@@ -30,11 +51,6 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/install-agent.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/prewarm-target.sh\"",
             "timeout": 5
           },
           {

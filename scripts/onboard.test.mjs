@@ -132,123 +132,12 @@ test('CLI --list-targets --json exits 0 with target readiness', () => {
   assert.equal(out.defaultTarget.target, null);
 });
 
-// The codex smoke branch is config-isolated (D11's one deliberate exception —
-// --ignore-user-config avoids the user's MCP servers booting on this turn and
-// racing the smoke budget) and non-persisting (--ephemeral). Drives the real
-// CLI end to end against a FAKE `codex` binary (CODEX_BIN override) that
-// answers --version/login status/exec itself — no real Codex turn ever runs,
-// per the safety contract.
-test('CLI --target codex --smoke runs `codex exec` with --ignore-user-config --ephemeral --sandbox read-only', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'agent-onboard-codex-fake-'));
-  const argvFile = join(dir, 'argv.json');
-  const bin = join(dir, 'codex-fake.mjs');
-  writeFileSync(bin, [
-    // Absolute shebang (not `#!/usr/bin/env node`) — this test deliberately
-    // restricts PATH to /usr/bin:/bin (see `run()`) so `env node` would not
-    // resolve; the kernel follows an absolute interpreter path without any
-    // PATH lookup at all.
-    `#!${process.execPath}`,
-    'import { writeFileSync } from "node:fs";',
-    'const args = process.argv.slice(2);',
-    'if (args[0] === "--version") { console.log("codex-cli 0.145.0"); process.exit(0); }',
-    'if (args[0] === "login" && args[1] === "status") { process.exit(0); }',
-    'if (args[0] === "exec") {',
-    `  writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(args));`,
-    '  process.stdin.on("data", () => {});',
-    '  process.stdin.on("end", () => { console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "ready" } })); console.log(JSON.stringify({ type: "turn.completed", usage: {} })); process.exit(0); });',
-    '} else {',
-    '  process.exit(1);',
-    '}',
-    '',
-  ].join('\n'), { mode: 0o700 });
-  chmodSync(bin, 0o700);
-  try {
-    const r = run(['--target', 'codex', '--set-default', '--yes', '--smoke', '--json'], { CODEX_BIN: bin });
-    assert.equal(r.code, 0, r.stderr);
-    const out = JSON.parse(r.stdout);
-    assert.equal(out.report.ready, true);
-    assert.equal(out.smoke.supported, true);
-    assert.equal(out.smoke.passed, true);
-    const capturedArgs = JSON.parse(readFileSync(argvFile, 'utf8'));
-    assert.ok(capturedArgs.includes('--ignore-user-config'), `--ignore-user-config missing: ${capturedArgs.join(' ')}`);
-    assert.ok(capturedArgs.includes('--ephemeral'), `--ephemeral missing: ${capturedArgs.join(' ')}`);
-    const sIdx = capturedArgs.indexOf('--sandbox');
-    assert.ok(sIdx >= 0 && capturedArgs[sIdx + 1] === 'read-only', `--sandbox read-only missing: ${capturedArgs.join(' ')}`);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('Codex smoke requires a completed assistant ready reply, not exit zero or tool output', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-smoke-replies-'));
-  const bin = join(dir, 'codex');
-  writeFileSync(bin, `#!${process.execPath}
-    if (process.argv[2] === '--version') { console.log('codex-cli fake'); process.exit(0); }
-    if (process.argv[2] === 'login') process.exit(0);
-    process.stdout.write(process.env.SMOKE_OUTPUT || '');
-    process.exit(Number(process.env.SMOKE_EXIT || 0));
-  `, { mode: 0o700 });
-  const reply = (text) => ({ type: 'item.completed', item: { type: 'agent_message', text } });
-  const done = { type: 'turn.completed', usage: {} };
-  const cases = [
-    ['empty', [], false],
-    ['completion only', [done], false],
-    ['wrong reply', [reply('not ready'), done], false],
-    ['tool only', [{ type: 'item.completed', item: { type: 'command_execution', aggregated_output: 'ready' } }, done], false],
-    ['unfinished', [reply('ready')], false],
-    ['failed turn', [reply('ready'), { type: 'turn.failed', error: { message: 'failed' } }], false],
-    ['fatal error', [reply('ready'), { type: 'error', message: 'failed' }, done], false],
-    ['nonzero exit', [reply('ready'), done], false, 1],
-    ['ready', [reply('ready'), done], true],
-    ['case and punctuation', [reply(' READY!\n'), done], true],
-  ];
-  try {
-    for (const [name, events, passed, exit = 0] of cases) {
-      const r = run(['--target', 'codex', '--yes', '--smoke', '--json'], {
-        CODEX_BIN: bin, SMOKE_OUTPUT: events.map(JSON.stringify).join('\n'), SMOKE_EXIT: String(exit),
-      });
-      assert.equal(JSON.parse(r.stdout).smoke.passed, passed, name);
-      assert.equal(r.code, passed ? 0 : 3, name);
-    }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
-
 test('CLI --target none --yes is host-only and exits 0', () => {
   const r = run(['--target', 'none', '--yes', '--json']);
   assert.equal(r.code, 0, r.stderr);
   assert.equal(JSON.parse(r.stdout).target, null);
 });
 
-test('OpenCode 2 onboarding smoke uses the same private CLI and verifies the assistant reply', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'opencode2-onboard-'));
-  const bin = join(dir, 'opencode-fake.mjs'), capture = join(dir, 'run.json');
-  writeFileSync(bin, `#!${process.execPath}
-    const args = process.argv.slice(2);
-    if (args[0] === '--version') { console.log('opencode v2.0.25'); process.exit(0); }
-    if (args[0] === 'models') { console.log('ollama-cloud/gpt-oss:120b'); process.exit(0); }
-    if (args[0] === 'auth') { console.log(JSON.stringify([{ id: 'ollama-cloud', connections: [{ type: 'credential', id: 'cred_fixture' }] }])); process.exit(0); }
-    if (args.includes('--dir') || !args.includes('--standalone')) { console.error('Unrecognized legacy flag or missing private server'); process.exit(2); }
-    (await import('node:fs')).writeFileSync(process.env.OC_CAPTURE, JSON.stringify({ args, cwd: process.cwd() }));
-    if (process.env.OC_FAKE_TOOL_ONLY) console.log(JSON.stringify({ type: 'tool_call', name: 'read', output: 'READY' }));
-    else console.log(JSON.stringify({ type: 'text', part: { type: 'text', text: 'READY' } }));
-  `, { mode: 0o700 });
-  try {
-    const r = run(['--target', 'opencode', '--set-default', '--yes', '--smoke', '--json'], {
-      OPENCODE_BIN: bin, OC_CAPTURE: capture, AGENT_COMPANION_OPENCODE_MODEL: 'ollama-cloud/gpt-oss:120b',
-    });
-    assert.equal(r.code, 0, r.stderr);
-    assert.equal(JSON.parse(r.stdout).smoke.passed, true);
-    const actual = JSON.parse(readFileSync(capture));
-    assert.ok(actual.args.includes('--standalone'));
-    assert.ok(actual.args.includes('ollama-cloud/gpt-oss:120b'));
-    assert.doesNotMatch(actual.args.join(' '), /--dir/);
-    assert.match(actual.cwd, /agent-onboard-smoke-/);
-    const toolOnly = run(['--target', 'opencode', '--yes', '--smoke', '--json'], { OPENCODE_BIN: bin, OC_CAPTURE: capture, OC_FAKE_TOOL_ONLY: '1' });
-    assert.equal(toolOnly.code, 3, toolOnly.stderr);
-    assert.equal(JSON.parse(toolOnly.stdout).ok, false);
-    assert.equal(JSON.parse(toolOnly.stdout).smoke.passed, false, 'tool output is not an assistant smoke reply');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
 
 test('CLI unknown target exits 2', () => {
   const r = run(['--target', 'goose', '--yes']);
@@ -282,7 +171,7 @@ test('CLI plan and ordinary reruns preserve existing defaults, models and profil
     const r = run([...args, '--set-default', '--yes', '--json'], {}, files);
     assert.equal(r.code, 0, r.stderr);
     assert.deepEqual(r.stored, files);
-    assert.match(JSON.parse(r.stdout).configuration.summary, /review.*copilot/);
+    assert.match(JSON.parse(r.stdout).configuration.summary, /copilot/);
   }
 });
 
@@ -302,36 +191,14 @@ test('failed smoke and read-only plans never commit a default', () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('plans explain conflicting defaults and preserve invalid or ambiguous profiles', () => {
-  const cases = [
-    [{ 'default-target': 'copilot\n' }, { AGENT_COMPANION_DEFAULT_TARGET: 'opencode' }, 'env_override'],
-    [{ 'profiles.json': '{bad json\n' }, {}, 'invalid_configuration'],
-    [{ 'profiles.json': JSON.stringify({ profiles: [{ id: 'review', companion: 'copilot' }], defaultProfile: 'review' }) }, {}, 'profile_override'],
-    [{ 'profiles.json': JSON.stringify({ profiles: [{ id: 'a', companion: 'codex' }, { id: 'b', companion: 'codex' }] }) }, {}, 'profile_selection'],
-  ];
-  for (const [files, env, code] of cases) {
-    const r = run(['--plan', '--target', 'codex', '--set-default', '--yes', '--json'], env, files);
-    assert.equal(r.code, 2, r.stderr);
-    assert.equal(JSON.parse(r.stdout).plan.code, code);
-    for (const [name, bytes] of Object.entries(files)) assert.equal(r.stored[name], bytes);
-  }
-  const preserved = run(['--plan', '--yes', '--json'], {}, { 'profiles.json': '{bad json\n' });
+test('plans explain an overriding environment default and never read legacy profiles', () => {
+  const files = { 'default-target': 'copilot\n', 'profiles.json': '{bad json\n' };
+  const r = run(['--plan', '--target', 'codex', '--set-default', '--yes', '--json'], { AGENT_COMPANION_DEFAULT_TARGET: 'opencode' }, files);
+  assert.equal(r.code, 2, r.stderr);
+  assert.equal(JSON.parse(r.stdout).plan.code, 'env_override');
+  for (const [name, bytes] of Object.entries(files)) assert.equal(r.stored[name], bytes);
+  const preserved = run(['--plan', '--yes', '--json'], {}, files);
   assert.equal(preserved.code, 0, preserved.stderr);
-  assert.equal(preserved.stored['profiles.json'], '{bad json\n');
-  assert.match(JSON.parse(preserved.stdout).configuration.summary, /needs attention/);
-});
-
-test('preflight includes readiness of the profile that will actually receive work', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onboard-profile-readiness-'));
-  const bin = join(dir, 'copilot');
-  writeFileSync(bin, '#!/bin/sh\necho copilot-fake\n', { mode: 0o700 });
-  try {
-    const profiles = JSON.stringify({ profiles: [{ id: 'review', companion: 'copilot', model: 'not-a-real-model' }], defaultProfile: 'review' });
-    const r = run(['--plan', '--target', 'copilot', '--set-default', '--yes', '--json'], { COPILOT_BIN: bin }, { 'profiles.json': profiles });
-    assert.equal(r.code, 3, r.stdout + r.stderr);
-    assert.equal(JSON.parse(r.stdout).plan.ready, false);
-    assert.match(JSON.stringify(JSON.parse(r.stdout).plan.report.blockers), /model_invalid/);
-    assert.equal(r.stored['profiles.json'], profiles);
-    assert.equal(r.stored['default-target'], null);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  assert.equal(preserved.stored['profiles.json'], files['profiles.json']);
+  assert.equal(Object.hasOwn(JSON.parse(preserved.stdout).configuration, 'profiles'), false);
 });

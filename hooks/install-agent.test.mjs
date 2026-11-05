@@ -1,11 +1,7 @@
 // install-agent.sh / install-agent-codex.sh integration tests via shell-out.
 //
-// The Claude installer resolves and bakes Node for its agent-local MCP entry.
-// The Codex installer deliberately does not: current Codex strips role-local
-// MCP config and inherits the bridge from the plugin manifest.
-//
-// These tests pin the override, the drift (there must be no second copy), and
-// the no-op behaviour the header comments now claim.
+// Both agents inherit the session bridge. Claude materialization translates
+// the logical server/tool names into the plugin namespace used by the host.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,8 +19,6 @@ const VARIANTS = [
     name: 'claude',
     script: join(__dirname, 'install-agent.sh'),
     dest: ['.claude', 'agents', 'agent-companion.md'],
-    // YAML frontmatter: `      command: <path>`
-    commandOf: (src) => src.match(/^[ \t]*command:[ \t]*(\S+)[ \t]*$/m)?.[1],
     sentinel: 'hooks/install-agent.sh',
   },
   {
@@ -61,37 +55,6 @@ function nodeWrapper(dir, name) {
 }
 
 for (const variant of VARIANTS) {
-  if (variant.commandOf) {
-    test(`${variant.name}: AGENT_COMPANION_NODE selects the node baked into the MCP config`, () => {
-      const home = makeHome();
-      try {
-        const override = nodeWrapper(home, 'node-override');
-        const pathNode = nodeWrapper(home, 'node');
-        run(variant, home, { AGENT_COMPANION_NODE: override, PATH: `${home}:${process.env.PATH}` });
-        const written = variant.commandOf(readFileSync(destPath(variant, home), 'utf8'));
-        assert.equal(written, realpathSync(process.execPath), 'the override must resolve to its usable Node binary');
-        assert.ok(existsSync(`${override}.used`), 'the explicit override must be invoked');
-        assert.equal(existsSync(`${pathNode}.used`), false, 'the usable PATH candidate must not be tried');
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
-    });
-
-    test(`${variant.name}: an unusable AGENT_COMPANION_NODE falls through to detection`, () => {
-      const home = makeHome();
-      try {
-        run(variant, home, { AGENT_COMPANION_NODE: '/nonexistent/node' });
-        const written = variant.commandOf(readFileSync(destPath(variant, home), 'utf8'));
-        // Must not be left as the bogus override, and must not be a hard failure:
-        // a bad override degrades to auto-detection, it does not break the install.
-        assert.notEqual(written, '/nonexistent/node');
-        assert.ok(written && written !== 'node', `expected a resolved node path, got ${written}`);
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
-    });
-  }
-
   test(`${variant.name}: a no-op rerun leaves the destination's mtime untouched`, () => {
     const home = makeHome();
     try {
@@ -156,28 +119,23 @@ for (const variant of VARIANTS) {
   });
 }
 
-test('only the Claude agent installer resolves Node for its agent-local MCP', () => {
-  for (const variant of VARIANTS.filter((entry) => entry.commandOf)) {
-    const src = readFileSync(variant.script, 'utf8');
-    assert.ok(
-      src.includes('node-tools.sh'),
-      `${variant.name} must source hooks/node-tools.sh rather than hand-copy the resolver`,
-    );
-    assert.equal(
-      /_validate_node\s*\(\)/.test(src),
-      false,
-      `${variant.name} defines its own _validate_node — that copy is exactly what drifted and lost AGENT_COMPANION_NODE`,
-    );
-    assert.equal(
-      src.includes('.nvm/alias'),
-      false,
-      `${variant.name} still carries a copy of the nvm resolution chain`,
-    );
+test('Claude materializes the plugin-scoped reference and tools without a second server', () => {
+  const home = makeHome();
+  try {
+    const variant = VARIANTS.find((entry) => entry.name === 'claude');
+    run(variant, home);
+    const agent = readFileSync(destPath(variant, home), 'utf8');
+    assert.match(agent, /^---\n# AUTO-INSTALLED/);
+    assert.match(agent, /^mcpServers: \[plugin:agent-companion:agent-bridge\]$/m);
+    for (const action of ['catalog', 'send', 'wait', 'status', 'reply', 'cancel']) {
+      assert.ok(agent.includes(`mcp__plugin_agent-companion_agent-bridge__agent_${action}`));
+    }
+    assert.doesNotMatch(agent, /mcp__agent-bridge__|^\s+(?:command|args|timeout|env):/m);
+    const script = readFileSync(variant.script, 'utf8');
+    assert.ok(!script.includes('node-tools.sh'), 'Node resolution belongs to the session launcher');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
-  const codex = VARIANTS.find((entry) => entry.name === 'codex');
-  const codexSrc = readFileSync(codex.script, 'utf8');
-  assert.equal(codexSrc.includes('node-tools.sh'), false);
-  assert.equal(codexSrc.includes('AGENT_COMPANION_NODE'), false);
 });
 
 test('codex: CODEX_HOME selects the materialized agent directory', () => {

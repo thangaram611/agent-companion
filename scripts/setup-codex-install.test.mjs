@@ -182,7 +182,7 @@ if (args.join(' ') === 'mcp list --json') {
       args: ['hooks/launch-agent-bridge.sh'],
       env: {
         AGENT_COMPANION_HOST: 'codex',
-        CODEX_RUNTIME_ADAPTER: 'appserver',
+        AGENT_COMPANION_OWNER_GRACE_MS: '120000',
       },
       env_vars: [],
       cwd,
@@ -318,7 +318,7 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
       cwd: '.',
       env: {
         AGENT_COMPANION_HOST: 'codex',
-        CODEX_RUNTIME_ADAPTER: 'appserver',
+        AGENT_COMPANION_OWNER_GRACE_MS: '120000',
       },
       default_tools_approval_mode: 'approve',
       startup_timeout_sec: 120,
@@ -538,7 +538,7 @@ test('dry-run previews a clean install and --no-target-check explicitly defers a
   assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'codex\n');
 });
 
-test('both harnesses preserve independent defaults/profiles and unrelated settings', (t) => {
+test('both harnesses preserve independent defaults, legacy files and unrelated settings', (t) => {
   const f = setupFixture(t);
   writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
   const profiles = '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n';
@@ -549,7 +549,7 @@ test('both harnesses preserve independent defaults/profiles and unrelated settin
   writeFileSync(settings, JSON.stringify({ theme: 'dark', permissions: { allow: ['Bash(custom)'], deny: ['Bash(blocked)'] } }));
   const result = f.run(['--host', 'both', '--skip-tests']);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /companion: profile review → copilot.*needs attention/);
+  assert.match(result.stdout, /companion: opencode \(config\); needs attention/);
   assert.match(result.stdout, /Claude: agent and permissions installed; companion: codex/);
   assert.equal(readFileSync(path.join(f.state(), 'profiles.json'), 'utf8'), profiles);
   assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'opencode\n');

@@ -1,285 +1,214 @@
-import '../test/sandbox-home.mjs';
-import test, { after } from 'node:test';
+import './sandbox-home.mjs';
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Controller } from '../bridge-server/controller/controller.mjs';
+import { Records } from '../bridge-server/controller/records.mjs';
+import { createBridgeController, recoverController } from '../bridge-server/server.mjs';
+import { codexDispatchFixture, diskSnapshot, terminalRows } from './controller/codex-dispatch-fixture.mjs';
+import { until } from './controller/helpers.mjs';
+import { note } from './codex-wire-frames.mjs';
 
-// All paths are pinned BEFORE importing any source module. The source tree and
-// dependency link are read-only inputs. No real provider or socket is used.
-const here = dirname(fileURLToPath(import.meta.url));
-const source = join(here, '..');
-const sandbox = mkdtempSync(join(tmpdir(), 'incident-'));
-const runtimeDir = join(sandbox, 'runtime');
-const workDir = join(sandbox, 'work');
-mkdirSync(runtimeDir, { recursive: true });
-mkdirSync(workDir, { recursive: true });
-const pins = {
-  AGENT_COMPANION_HOME: join(sandbox, 'state'), AGENT_RUNTIME_DIR: runtimeDir,
-  AGENT_QUEUE_PATH: join(runtimeDir, 'queue.jsonl'), AGENT_BRIDGE_LOG_FILE: join(runtimeDir, 'bridge.log'),
-  AGENT_CODEX_BROKER_REGISTRY: join(runtimeDir, 'broker.json'), CODEX_BROKER_SOCKET_PATH: join(runtimeDir, 'b.sock'),
-  CODEX_BROKER_LOG_FILE: join(runtimeDir, 'broker.log'), AGENT_ACP_DAEMON_REGISTRY: join(runtimeDir, 'acp.json'),
-  AGENT_OPENCODE_SERVER_REGISTRY: join(runtimeDir, 'opencode.json'),
-  AGENT_HEARTBEAT_DIR: join(runtimeDir, 'heartbeats'), AGENT_PROMPT_JSONL_DIR: join(runtimeDir, 'prompts'),
-  AGENT_DIGEST_DIR: join(runtimeDir, 'digests'), COPILOT_OTEL_TRACES_PATH: join(runtimeDir, 'otel.jsonl'),
-  COPILOT_SOCKET_PATH: join(runtimeDir, 'copilot.sock'), ANTIGRAVITY_SOCKET_PATH: join(runtimeDir, 'antigravity.sock'),
-  COPILOT_DAEMON_LOG_FILE: join(runtimeDir, 'copilot.log'), ANTIGRAVITY_DAEMON_LOG_FILE: join(runtimeDir, 'antigravity.log'),
-  CODEX_BIN: join(sandbox, 'forbidden-real-provider'), CODEX_BROKER_PATH: join(sandbox, 'forbidden-real-broker'),
-  CODEX_RUNTIME_ADAPTER: 'appserver', AGENT_COMPANION_DEFAULT_TARGET: 'codex',
-  CLAUDE_CODE_SESSION_ID: 'isolated-incident-regressions',
-};
-Object.assign(process.env, pins);
-for (const p of ['heartbeats', 'prompts', 'digests']) mkdirSync(join(runtimeDir, p), { recursive: true });
-const load = (p) => import(pathToFileURL(join(source, p)).href);
-const cx = await load('bridge-server/codex-app-server-runtime.mjs');
-const { fakeBrokerSocket } = await load('test/fake-codex-broker-socket.mjs');
-const { note } = await load('test/codex-wire-frames.mjs');
-const state = await load('lib/state.mjs');
-const mod = await load('bridge-server/server.mjs');
-const { digestPath } = await load('lib/prompt-digest.mjs');
-
-let attemptedSpawns = 0;
-const sockets = [];
-let statuses = {};
-let turns = {};
-let currentTurn = 'TURN1';
-let nativeStarts = 0;
-let handlers = {};
-cx._setForTest({
-  connect: async (path) => {
-    assert.equal(path, pins.CODEX_BROKER_SOCKET_PATH, 'every broker connection is sandbox-addressed');
-    const sock = fakeBrokerSocket({ statuses, turns, handlers });
-    sockets.push(sock);
-    return sock;
-  },
-  spawnBroker: () => { attemptedSpawns++; throw new Error('forbidden real broker spawn'); },
-  inspectCodexInstall: () => ({ ready: true, selected: {
-    version: '0.147.0', path: '/fake/codex', realPath: '/fake/codex',
-    helperPath: '/fake/codex-code-mode-host', source: 'installed',
-    identity: 'fake-codex-0.147.0', quarantined: false,
-  } }),
-  pathExists: () => true,
+// Phase 3 mapping: a wait budget is not an execution timeout. Only owner lease
+// expiry closes work, and a stopped result requires verified process absence.
+test('CONTRACT: timeout must stop work or avoid claiming process termination', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  const waiting = h.call({ action: 'wait', thread: 'child', job_id, max_wait_sec: 1 });
+  await until(() => h.active.requests.size === 1, 'attached wait');
+  await h.clock.advance(1000);
+  const response = await waiting;
+  assert.equal(response.status, 'still_running');
+  assert.equal(response.stop_evidence, undefined);
+  assert.doesNotMatch(JSON.stringify(response), /terminated|stopped/);
+  assert.equal(h.records.readResult(job_id), null);
+  assert.equal((await h.active.live.get(job_id).supervisor.verifyGone()).gone, false);
+  await h.clock.advance(3000);
+  await until(() => h.records.readResult(job_id), 'lease cleanup');
+  const result = h.records.readResult(job_id);
+  assert.equal(result.outcome, 'stopped');
+  assert.equal(result.cause, 'owner_lease_expired');
+  assert.equal(result.stopEvidence.gone, true);
+  assert.deepEqual(result.stopEvidence.survivors, []);
+  const terminal = await h.call({ action: 'wait', thread: 'child', job_id });
+  assert.equal(terminal.meta.stop_evidence.gone, true);
 });
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function until(predicate, label, budget = 3000) {
-  const end = Date.now() + budget;
-  while (Date.now() < end) { if (predicate()) return; await sleep(5); }
-  assert.ok(predicate(), `fixture did not reach ${label}`);
+
+// Phase 3 mapping: new work on a busy conversation is an explicit refusal;
+// it does not silently attach to, replace, or steer the original native turn.
+test('CONTRACT: new instructions must be delivered or explicitly rejected while native turn is active', async (t) => {
+  const h = codexDispatchFixture(t);
+  const first = await h.send();
+  const refused = await h.send('NEW_DECISION_MUST_REACH_PROVIDER');
+  assert.equal(refused.ok, false);
+  assert.equal(refused.status, 'thread_busy');
+  assert.equal(refused.job_id, first.job_id);
+  assert.deepEqual(h.frames().filter((f) => f.method === 'turn/start').map((f) => f.params.input[0].text), ['original']);
+  assert.equal(h.frames().some((f) => f.method === 'turn/steer'), false);
+});
+
+// Phase 3 mapping: refusal allocates no execution; the old answer remains
+// attributable only to the original execution id, including its queue event.
+test('CONTRACT: old native answer must not be labeled the successful result of an undelivered new task', async (t) => {
+  const h = codexDispatchFixture(t);
+  const first = await h.send();
+  assert.equal((await h.send('undelivered')).status, 'thread_busy');
+  await h.complete(first.job_id, 'OLD_ANSWER');
+  const result = await h.call({ action: 'wait', thread: 'child', job_id: first.job_id });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.job_id, first.job_id);
+  assert.equal(result.content, 'OLD_ANSWER');
+  assert.deepEqual(h.records.listExecutions().map((e) => [e.executionId, e.text]), [[first.job_id, 'original']]);
+  assert.equal(terminalRows(first.job_id).length, 1);
+  assert.equal(terminalRows(first.job_id)[0].meta.job_id, first.job_id);
+});
+
+async function retryFixture(t) {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  await h.emit(job_id, [note('error', { threadId: 'T1', turnId: 'TURN1', willRetry: true,
+    error: { message: 'Reconnecting... 2/5', codexErrorInfo: 'internalServerError', additionalDetails: null } })]);
+  return { ...h, job_id };
 }
-const parse = (response) => JSON.parse(response.content.find((c) => c.type === 'text').text);
-const frames = (list = sockets) => list.flatMap((s) => s.calls);
-const methodCount = (method, list = sockets) => frames(list).filter((m) => m.method === method).length;
-const queueRows = () => existsSync(pins.AGENT_QUEUE_PATH)
-  ? readFileSync(pins.AGENT_QUEUE_PATH, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
-const terminalRows = (id) => queueRows().filter((r) => r.kind === 'terminal' && r.jobId === id);
-const send = (bridge, task, thread) => bridge.dispatch({
-  action: 'send', target: 'codex', task, mode: 'EXECUTE', template: 'general',
-  cwd: workDir, thread, parallel: 'never', max_wait_sec: 1,
-}).then(parse);
-const wait = (bridge, id) => bridge.dispatch({ action: 'wait', job_id: id, max_wait_sec: 1 }).then(parse);
-const snapshot = (x) => JSON.parse(JSON.stringify(x));
-function complete(sock, text, turnId = currentTurn) {
-  sock.notify('item/completed', { item: { id: `m-${turnId}`, type: 'agentMessage', text, phase: 'final_answer' } });
-  sock.notify('turn/completed', { turn: { id: turnId, status: 'completed', items: [] } });
-}
-function beginFixture(turnId) {
-  mod.jobs.clear(); mod._resetForTest();
-  for (const job of state.listJobsForSession(pins.CLAUDE_CODE_SESSION_ID)) state.deleteJob(job.jobId);
-  statuses = {}; turns = {}; currentTurn = turnId; nativeStarts = 0;
-  handlers = {
-    'turn/start': ({ threadId }) => {
-      nativeStarts++;
-      statuses[threadId] = 'active';
-      turns[threadId] = [{ id: currentTurn, status: 'inProgress', items: [] }];
-      return { turn: { id: currentTurn } };
-    },
-    'turn/interrupt': ({ threadId }) => {
-      statuses[threadId] = 'idle';
-      turns[threadId] = [{ id: currentTurn, status: 'interrupted', items: [] }];
-      return {};
-    },
-  };
-}
-
-const observations = {};
-function check(name, kind, body) {
-  // Phase 0 retains the ten incident defects for later phases; controls still
-  // fail normally. TODO executes every contract assertion without hiding it.
-  test(`${kind}: ${name}`, { todo: kind === 'CONTRACT' }, body);
-}
-
-// Probe A is one continuous real bridge-worker path, not fabricated timeout
-// output: start -> watcher timeout -> retained ledger -> follow-up send.
-beginFixture('TURN-OLD');
-process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS = '120';
-const first = await send(mod, 'OLD_INSTRUCTION', 'incident-timeout-followup');
-await until(() => mod.jobs.get(first.job_id)?.turnId === 'TURN-OLD', 'first native turn');
-const firstSocket = sockets.findLast((s) => s.paramsFor('turn/start').length);
-firstSocket.notify('item/agentMessage/delta', { itemId: 'old-message', delta: 'OLD_PARTIAL' });
-await until(() => mod.jobs.get(first.job_id)?.terminalAt, 'actual watcher expiry');
-const firstTerminal = await wait(mod, first.job_id);
-const afterExpiry = snapshot({
-  job: mod.jobs.get(first.job_id), response: firstTerminal,
-  nativeStatus: statuses.T1, interruptCalls: methodCount('turn/interrupt'),
-  starts: nativeStarts, ledger: state.readJob(first.job_id),
+// Phase 3 mapping: schema-validated retry frames remain native progress.
+test('CONTRACT: willRetry:true must not settle the bridge job before native terminal', async (t) => {
+  const h = await retryFixture(t);
+  const status = await h.call({ action: 'status', job_id: h.job_id });
+  assert.equal(status.status, 'running');
+  assert.equal(status.retry.willRetry, true);
+  assert.equal(h.records.readResult(h.job_id), null);
+  assert.equal(h.records.readExecution(h.job_id).terminal, undefined);
+  assert.equal(terminalRows(h.job_id).length, 0);
 });
-process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS = '1000';
-const socketBoundary = sockets.length;
-const second = await send(mod, 'NEW_DECISION_MUST_REACH_PROVIDER', 'incident-timeout-followup');
-await until(() => mod.jobs.get(second.job_id)?.turnId === 'TURN-OLD', 'follow-up attaching to active old turn');
-const followupSockets = sockets.slice(socketBoundary);
-const followingSocket = followupSockets.findLast((s) => s.paramsFor('broker/subscribe').length);
-const beforeOldCompletion = snapshot({
-  send: second, job: mod.jobs.get(second.job_id),
-  transmittedTexts: frames().flatMap((m) => m.params?.input || []).map((i) => i.text).filter(Boolean),
-  followupMethods: followupSockets.flatMap((s) => s.methods()), starts: nativeStarts,
-});
-statuses.T1 = 'idle';
-complete(followingSocket, 'OLD_TURN_FINISHED_WITHOUT_NEW_DECISION', 'TURN-OLD');
-await until(() => mod.jobs.get(second.job_id)?.terminalAt, 'old completion returned under new job');
-const secondTerminal = await wait(mod, second.job_id);
-observations.timeoutThenSend = { afterExpiry, beforeOldCompletion, followupTerminal: secondTerminal };
-check('timeout fixture actually started one native turn and expired with preserved partial output', 'CONTROL', () => {
-  assert.equal(afterExpiry.starts, 1); assert.equal(afterExpiry.job.status, 'timeout');
-  assert.equal(afterExpiry.ledger.status, 'timeout'); assert.match(afterExpiry.job.summary.message, /OLD_PARTIAL/);
-});
-check('timeout fixture leaves native active and new send receives old completion', 'CONTROL', () => {
-  assert.equal(afterExpiry.nativeStatus, 'active'); assert.equal(afterExpiry.interruptCalls, 0);
-  assert.equal(beforeOldCompletion.starts, 1); assert.equal(secondTerminal.status, 'completed');
-  assert.match(secondTerminal.content, /OLD_TURN_FINISHED_WITHOUT_NEW_DECISION/);
-});
-check('timeout must stop work or avoid claiming process termination', 'CONTRACT', () => {
-  assert.ok(afterExpiry.nativeStatus !== 'active' || !/bridge terminated the target process/i.test(afterExpiry.response.content),
-    'native turn is active, no interrupt was sent, yet the terminal response claims process termination');
-});
-check('new instructions must be delivered or explicitly rejected while native turn is active', 'CONTRACT', () => {
-  const delivered = beforeOldCompletion.transmittedTexts.some((text) => text.includes('NEW_DECISION_MUST_REACH_PROVIDER'));
-  const rejected = beforeOldCompletion.send.ok === false;
-  assert.ok(delivered || rejected, 'new send returned ok:true and no turn/start or turn/steer carried its text');
-});
-check('old native answer must not be labeled the successful result of an undelivered new task', 'CONTRACT', () => {
-  assert.notEqual(secondTerminal.status, 'completed', 'old turn completion was reported as success for NEW_DECISION_MUST_REACH_PROVIDER');
+// Phase 3 mapping: the later native completion, rather than the retry error,
+// becomes the durable result and remains observable on repeated waits.
+test('CONTRACT: a recovered native answer must remain observable after a retryable error', async (t) => {
+  const h = await retryFixture(t);
+  await h.complete(h.job_id, 'RECOVERED_AND_FINISHED');
+  for (let i = 0; i < 2; i++) {
+    const result = await h.call({ action: 'wait', thread: 'child', job_id: h.job_id });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.content, 'RECOVERED_AND_FINISHED');
+  }
 });
 
-// Probe B injects a schema-validated retry error followed by genuine native
-// progress/completion. It does not infer retry status from arbitrary strings.
-beginFixture('TURN-RETRY');
-process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS = '1000';
-const retry = await send(mod, 'RETRY_STREAM_TASK', 'incident-retry');
-await until(() => mod.jobs.get(retry.job_id)?.turnId === 'TURN-RETRY', 'retry turn start');
-const retrySocket = sockets.findLast((s) => s.paramsFor('turn/start').length);
-const retryFrame = note('error', {
-  threadId: 'T1', turnId: 'TURN-RETRY', willRetry: true,
-  error: { message: 'Reconnecting... 2/5; proxy tunnel refused', codexErrorInfo: 'internalServerError', additionalDetails: null },
-});
-retrySocket.deliver(retryFrame);
-await sleep(25);
-const afterRetry = snapshot(mod.jobs.get(retry.job_id));
-const retryTerminal = await wait(mod, retry.job_id);
-statuses.T1 = 'idle';
-complete(retrySocket, 'RECOVERED_AND_FINISHED', 'TURN-RETRY');
-await sleep(15);
-observations.retry = { frame: retryFrame, afterRetry, response: retryTerminal, afterNativeCompletion: snapshot(mod.jobs.get(retry.job_id)), socketDestroyed: retrySocket.destroyed };
-check('retry fixture passes pinned wire-schema validation and real worker receives error', 'CONTROL', () => {
-  assert.equal(retryFrame.params.willRetry, true); assert.equal(afterRetry.status, 'failed');
-  assert.match(afterRetry.error, /Reconnecting/); assert.equal(afterRetry.detail, 'codex_server_failed');
-});
-check('willRetry:true must not settle the bridge job before native terminal', 'CONTRACT', () => {
-  assert.equal(afterRetry.terminalAt, undefined, 'retryable transport error prematurely terminalized the job');
-});
-check('a recovered native answer must remain observable after a retryable error', 'CONTRACT', () => {
-  assert.equal(observations.retry.afterNativeCompletion.status, 'completed');
-  assert.match(observations.retry.afterNativeCompletion.summary.message, /RECOVERED_AND_FINISHED/);
+// Phase 3 mapping: a second controller reads the shared records but neither
+// adopts the runtime nor renews the owner's lease nor writes a digest.
+test('CONTRACT: a status-only second bridge must not recover a live owner job', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  const second = new Controller({ records: new Records({ dir: h.records.dir }), clock: h.clock });
+  const before = diskSnapshot();
+  const lease = h.records.readLease(job_id);
+  const status = await h.call({ action: 'status', job_id }, {}, second);
+  assert.equal(status.status, 'unknown');
+  assert.deepEqual(diskSnapshot(), before);
+  assert.deepEqual(second.records.readLease(job_id), lease);
+  assert.equal(second.live.size, 0);
+  assert.equal(second.requests.size, 0);
+  assert.equal(h.active.live.size, 1);
+  assert.equal(h.frames().filter((f) => f.method === 'turn/start').length, 1);
 });
 
-// Probe C models two simultaneously alive bridge module instances sharing a
-// ledger and fake native runtime. Import query separates only the server's
-// module-local job map, exactly the state split between real bridge processes.
-// Fault injection: observer B misses A's completion frame, then its own watch
-// timer expires. This exposes stale writer fencing independently of host MCP
-// lifetime behavior, which this in-process fixture cannot prove.
-beginFixture('TURN-OBSERVERS');
-process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS = '350';
-const owned = await send(mod, 'OWNED_LIVE_TASK', 'incident-observers');
-await until(() => mod.jobs.get(owned.job_id)?.turnId === 'TURN-OBSERVERS', 'owner turn start');
-const ownerSocket = sockets.findLast((s) => s.paramsFor('turn/start').length);
-const observer = await import(pathToFileURL(join(source, 'bridge-server/server.mjs')).href + '?incident-observer=second');
-const observerBoundary = sockets.length;
-const stateBeforeHydration = snapshot(state.readJob(owned.job_id));
-observer.hydrateJobsFromLedger();
-await until(() => sockets.slice(observerBoundary).some((s) => s.paramsFor('thread/resume').length), 'observer hydration native resume');
-const observerSockets = sockets.slice(observerBoundary);
-const observerSocket = observerSockets.findLast((s) => s.paramsFor('broker/subscribe').length);
-assert.ok(observerSocket, 'observer must subscribe');
-const digestBeforeStatus = readFileSync(digestPath(owned.job_id), 'utf8');
-await sleep(10);
-const observerStatus = parse(await observer.dispatch({ action: 'status', job_id: owned.job_id }));
-const digestAfterStatus = readFileSync(digestPath(owned.job_id), 'utf8');
-const hydrateObserved = snapshot({
-  ownerStillNonterminal: !mod.jobs.get(owned.job_id).terminalAt,
-  observerLoaded: observer.jobs.has(owned.job_id),
-  mapsDistinct: mod.jobs !== observer.jobs,
-  observerMethods: observerSockets.flatMap((s) => s.methods()),
-  observerSubscriptions: methodCount('broker/subscribe', observerSockets),
-  observerNativeResumes: methodCount('thread/resume', observerSockets),
-  stateBeforeHydration, status: observerStatus,
-  digestChangedByStatus: digestAfterStatus !== digestBeforeStatus,
-});
-// Status activity is recent, but API reports total job age, not event age.
-const ownerJob = mod.jobs.get(owned.job_id);
-ownerJob.startedAt = Date.now() - 600_000;
-ownerSocket.notify('item/agentMessage/delta', { itemId: 'live-progress', delta: 'FRESH_EVENT_MARKER' });
-await until(() => mod.jobs.get(owned.job_id)?.adapterResult?.stdout?.includes('FRESH_EVENT_MARKER'), 'fresh progress event');
-const freshProgress = parse(await mod.dispatch({ action: 'status', job_id: owned.job_id }));
-statuses.T1 = 'idle';
-complete(ownerSocket, 'OWNER_COMPLETED', 'TURN-OBSERVERS');
-await until(() => mod.jobs.get(owned.job_id)?.terminalAt, 'owner completion');
-const ownerLedger = snapshot(state.readJob(owned.job_id));
-await until(() => observer.jobs.get(owned.job_id)?.terminalAt, 'stale observer timeout');
-const finalLedger = snapshot(state.readJob(owned.job_id));
-const rows = terminalRows(owned.job_id);
-observations.observers = {
-  hydration: hydrateObserved, freshProgress,
-  ownerLedger, finalLedger,
-  ownerMemoryStatus: mod.jobs.get(owned.job_id).status,
-  observerMemoryStatus: observer.jobs.get(owned.job_id).status,
-  terminalRows: rows.map((r) => ({ jobId: r.jobId, kind: r.kind, meta: r.meta })),
-  faultInjection: 'completion frame deliberately delivered only to owner A; observer B timer expires while runtime is idle',
-};
-check('second bridge fixture has independent job map and attaches while owner remains alive', 'CONTROL', () => {
-  assert.equal(hydrateObserved.mapsDistinct, true); assert.equal(hydrateObserved.ownerStillNonterminal, true);
-  assert.equal(hydrateObserved.observerLoaded, true); assert.equal(hydrateObserved.observerSubscriptions, 1);
-  assert.ok(hydrateObserved.observerNativeResumes >= 1);
-});
-check('fault injection reaches two different terminal observations for one job', 'CONTROL', () => {
-  assert.equal(ownerLedger.status, 'completed'); assert.equal(finalLedger.status, 'timeout');
-  assert.equal(observations.observers.ownerMemoryStatus, 'completed');
-  assert.equal(observations.observers.observerMemoryStatus, 'timeout'); assert.equal(rows.length, 2);
-});
-check('a status-only second bridge must not recover a live owner job', 'CONTRACT', () => {
-  assert.equal(hydrateObserved.observerSubscriptions, 0, 'startup hydration creates another live watcher before status is answered');
-});
-check('an older observer must not overwrite an already persisted terminal result', 'CONTRACT', () => {
-  assert.equal(finalLedger.status, ownerLedger.status, 'stale observer timeout replaced a persisted completed result');
-});
-check('one native job must publish at most one terminal event across observers', 'CONTRACT', () => {
-  assert.equal(rows.length, 1, 'two unfenced bridge writers published competing terminal events');
-});
-check('status inactivity must reflect the just-received provider event', 'CONTRACT', () => {
-  assert.ok(freshProgress.ms_since_last_event < 1000,
-    `fresh event was received, but ms_since_last_event reports ${freshProgress.ms_since_last_event}`);
-});
-check('the job-specific status handler must be read-only', 'CONTRACT', () => {
-  assert.equal(hydrateObserved.digestChangedByStatus, false, 'status rewrites digest contents');
-});
-check('all probes use fake broker transport and make no spawn attempt', 'CONTROL', () => {
-  assert.equal(attemptedSpawns, 0); assert.equal(state.BASE_DIR, pins.AGENT_COMPANION_HOME);
-  assert.ok(sockets.length > 0); assert.ok(sockets.every((s) => s.destroyed));
+// Phase 3 mapping: results are immutable even within the same generation;
+// after a follow-up, every stale-generation write is fenced by shared records.
+test('CONTRACT: an older observer must not overwrite an already persisted terminal result', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  const logs = [];
+  const second = new Controller({ records: new Records({ dir: h.records.dir, log: (row) => logs.push(row) }) });
+  const stale = second.records.readExecution(job_id);
+  await h.complete(job_id);
+  const result = h.records.readResult(job_id);
+  assert.equal(second.records.writeResult({ ...result, outcome: 'failed' }), false);
+  const next = await h.send('follow-up');
+  assert.notEqual(next.job_id, job_id);
+  assert.equal(second.records.writeExecution(stale), false);
+  assert.equal(second.records.writeResult({ ...result, outcome: 'failed' }), false);
+  assert.equal(logs.filter((r) => r.code === 'stale_generation').length, 2);
+  assert.deepEqual(h.records.readResult(job_id), result);
 });
 
-after(() => {
-  for (const sock of sockets) sock.destroy();
-  mod.jobs.clear(); observer.jobs.clear(); cx._resetForTest();
-  rmSync(sandbox, { recursive: true, force: true });
+// Phase 3 mapping: durable completion receipts deduplicate publications from
+// repeated waits and startup reconciliation, including after the queue drains.
+test('CONTRACT: one native job must publish at most one terminal event across observers', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  await h.complete(job_id);
+  await h.call({ action: 'wait', thread: 'child', job_id });
+  const second = createBridgeController({ records: new Records({ dir: h.records.dir }), env: h.env });
+  await recoverController(second);
+  await h.call({ action: 'wait', thread: 'child', job_id }, {}, second);
+  await recoverController(second);
+  assert.equal(terminalRows(job_id).length, 1);
+  assert.equal(terminalRows(job_id)[0].consumed, true);
+  assert.deepEqual(second.records.read('completions', job_id), { executionId: job_id });
+});
+
+// Phase 3 mapping: expose the native event timestamp, not total job age.
+test('CONTRACT: status inactivity must reflect the just-received provider event', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  await h.clock.advance(1000);
+  await h.emit(job_id, [note('item/agentMessage/delta', { threadId: 'T1', turnId: 'TURN1', itemId: 'part', delta: 'FRESH_EVENT' })]);
+  const status = await h.call({ action: 'status', job_id });
+  assert.equal(status.last_native_activity, h.clock.now());
+  assert.notEqual(status.last_native_activity, h.records.readExecution(job_id).startedAt);
+  assert.equal(status.partial_text, 'FRESH_EVENT');
+});
+
+// Phase 3 mapping: snapshot all sandbox state, including records, lease,
+// digest, completion queue and file mtimes, across the job-specific handler.
+test('CONTRACT: the job-specific status handler must be read-only', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  const before = diskSnapshot();
+  for (let i = 0; i < 3; i++) assert.equal((await h.call({ action: 'status', job_id })).status, 'running');
+  assert.deepEqual(diskSnapshot(), before);
+});
+
+// The six old controls described the legacy defects themselves. These instead
+// establish the new fixture's transport, delivery, ownership and cleanup facts.
+test('CONTROL: sandbox-addressed transport starts only the fake Codex binary', async (t) => {
+  const h = codexDispatchFixture(t);
+  await h.send();
+  assert.deepEqual(h.spawns, [[h.bin, 'app-server']]);
+  assert.ok(h.records.dir.startsWith(h.dir));
+  assert.ok(h.frames().some((f) => f.method === 'initialize'));
+});
+test('CONTROL: duplicate send reattaches without a second native start', async (t) => {
+  const h = codexDispatchFixture(t);
+  assert.equal((await h.send()).job_id, (await h.send()).job_id);
+  assert.equal(h.frames().filter((f) => f.method === 'turn/start').length, 1);
+});
+test('CONTROL: fake server rejects frames outside the pinned wire schema', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  await assert.rejects(h.emit(job_id, [{ method: 'error', params: {} }]), /refuses a frame/);
+});
+test('CONTROL: native completion preserves text and verified exit', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  await h.complete(job_id);
+  const result = h.records.readResult(job_id);
+  assert.equal(result.text, 'native answer');
+  assert.equal(result.stopEvidence.gone, true);
+  assert.equal(h.active.live.size, 0);
+});
+test('CONTROL: dispatch cancel interrupts the fake turn and verifies exit', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  const result = await h.call({ action: 'cancel', thread: 'child', job_id });
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.meta.cause, 'owner_stop');
+  assert.equal(result.meta.stop_evidence.gone, true);
+  assert.equal(h.frames().filter((f) => f.method === 'turn/interrupt').length, 1);
+});
+test('CONTROL: a second bridge has independent controller and records instances', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  const records = new Records({ dir: h.records.dir });
+  const second = new Controller({ records });
+  assert.notEqual(second.records, h.records);
+  assert.notEqual(second.live, h.active.live);
+  assert.deepEqual(second.records.readExecution(job_id), h.records.readExecution(job_id));
 });

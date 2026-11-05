@@ -80,7 +80,7 @@ writeFileSync(CONTRACT_PATH, serialized);
 const n = contract.serverNotifications;
 console.log(`Wrote ${CONTRACT_PATH} from codex-cli ${codexVersion}${current === serialized ? ' (unchanged)' : ''}`);
 
-// Read the diff FOR the operator, classified the way the broker and the drift
+// Read the diff FOR the operator, classified the way the adapter and the drift
 // test classify it: routing moves first, because at runtime those are one
 // job's events arriving at another job's bridge. A version-only bump says so
 // in one line instead of leaving a two-line git diff to be interpreted.

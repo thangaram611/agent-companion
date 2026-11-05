@@ -1,137 +1,103 @@
-import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { VALID_TEMPLATES } from '../bridge-server/validation.mjs';
-
 const HERE = dirname(fileURLToPath(import.meta.url));
 const text = readFileSync(join(HERE, 'agent-companion.md'), 'utf8');
 
-// The payload doc must list exactly the templates the bridge accepts, in the
-// bridge's own order — a template the subagent cannot see is one the parent
-// never dispatches, and one it lists that the bridge rejects is a bounced send.
-const TEMPLATE_ENUM = [...VALID_TEMPLATES].map((t) => JSON.stringify(t)).join(' | ');
+const frontmatter = text.match(/^---\n([\s\S]*?)\n---\n/)[1];
+const description = frontmatter.match(/^description: \|\n([\s\S]*?)^model:/m)[1];
+const body = text.slice(text.indexOf('\n---\n') + 5);
+const prose = body.replace(/\s+/g, ' ');
 
-test('Claude template lists every prompt template the bridge accepts, and the review verdict the parent reads', () => {
-  assert.ok(VALID_TEMPLATES.has('review'), 'the bridge ships the review template');
-  assert.ok(text.includes(`"template":      ${TEMPLATE_ENUM},`), `payload doc lists ${TEMPLATE_ENUM}`);
-  // The verdict is a meta field the parent branches on; the subagent relays
-  // the terminal envelope verbatim, so the doc names where it lands.
-  assert.match(text, /meta\.verdict/);
+test('Claude role accepts plain language and keeps the seven instruction sections in order', () => {
+  assert.match(description, /plain language/);
+  assert.match(description, /absolute repo or worktree path/);
+  assert.match(description, /optionally which companion or model/);
+  assert.match(description, /SendMessage.*same subagent/s);
+  assert.match(description, /new one for independent work/);
+  assert.match(description, /run_in_background: true/);
+  assert.deepEqual([...body.matchAll(/^# (.+)$/gm)].map((m) => m[1]), [
+    'Identity', 'Choosing', 'Sending', 'Waiting', 'Answering', 'When it fails', 'Diagnostics',
+  ]);
+  // Source/install comments may name templates/. Active instructions may not
+  // teach the retired protocol, including in the parent-facing description.
+  const active = `${description}\n${body}`;
+  assert.doesNotMatch(active, /JSON|payload|\b(?:templates?|modes?|strengths?|profiles?|verdicts?|fleet|parallel)\b|rubber.duck|router,? not a worker/i);
+  assert.doesNotMatch(active, /"(?:action|task|target|cwd)"\s*:/);
+  assert.match(prose, /The companion does the work/);
 });
 
-test('Claude template documents status response rendering explicitly', () => {
-  assert.match(text, /Status \/ acknowledgement envelope/);
-  assert.match(text, /`ok: true` with no `content` \+ `meta`/);
-  // The per-job status response carries no `action` key and no content/meta, so
-  // it must be named explicitly here; without it the subagent routes a healthy
-  // running job into the error envelope and prints a field that does not exist.
-  assert.match(text, /\*\*per-job status\*\*/);
-  assert.match(text, /`response.ok !== true`/);
-  assert.match(text, /never emit `undefined`/);
-  assert.match(text, /meta\.digest_uri/);
-  assert.match(text, /resource_link/);
-  assert.match(text, /"diagnostics": true/);
-  assert.match(text, /MCP-native doctor report/);
-  assert.doesNotMatch(text, /canonical place to look up structured per-job progress/);
+test('Claude role uses the catalog for an open choice and sends only the new fields', () => {
+  assert.match(prose, /Honour an explicit companion or model/);
+  assert.match(prose, /read .*agent_catalog` once and choose a companion that is ready/);
+  assert.match(prose, /leave the model to the companion's own configuration unless the parent asked for one/);
+  assert.match(prose, /ownerless and read-only/);
+  assert.match(prose, /enabled companions.*default companion.*model configuration.*capabilities.*readiness.*last check/);
+  assert.match(prose, /not enumerable without a session/);
+  assert.match(prose, /ask the parent.*do not guess/);
+  assert.match(prose, /`task` and `cwd`, plus optional `target`, `model` and `max_wait_sec`/);
+  assert.match(prose, /bridge delivers `task` verbatim/);
+  assert.match(prose, /Omit `model` to inherit/);
+  const tools = frontmatter.match(/^tools: (.+)$/m)[1].split(', ');
+  assert.deepEqual(tools, [
+    ...['catalog', 'send', 'wait', 'status', 'reply', 'cancel'].map((name) => `mcp__agent-bridge__agent_${name}`),
+    'Bash', 'Read', 'Write', 'Edit', 'Grep', 'Glob', 'WebFetch', 'TodoWrite',
+  ]);
+  assert.match(frontmatter, /^model: sonnet$/m);
 });
 
-test('Claude template documents strength/profile routing without hardcoding ids', () => {
-  // The new optional routing siblings are documented beside target in both the
-  // wire-payload doc and the build-the-JSON block.
-  assert.match(text, /"strength":\s+"reviewer"/);
-  assert.match(text, /"profile":\s+"\.\.\."/);
-  assert.match(text, /"strength":\s+"<from input, else omit>"/);
-  assert.match(text, /discover the configured set via `\{action:status\}`/);
-  assert.match(text, /never pass companion or model ids/);
-  // The tool allow-list must NOT grow — still the 5 agent_* tools plus host tools.
-  assert.doesNotMatch(text, /agent_route|agent_strength|agent_profile/);
+test('Claude role relays answers, status, metadata and orphan events without requiring an answer format', () => {
+  assert.match(prose, /Return the companion's answer as the companion gave it/);
+  assert.match(prose, /own observations under a separate.*Observations/);
+  assert.match(prose, /asked a question, relay it/);
+  assert.match(prose, /Report success only after the bridge reports `completed`/);
+  assert.match(prose, /per-job status has no `action`/);
+  assert.match(prose, /fields the response supplies; never emit `undefined`/);
+  for (const field of ['meta.digest_uri', 'resource_link', 'meta.usage', 'meta.debug_digest_path', 'meta.detail']) {
+    assert.ok(body.includes(field), `${field} must reach the parent`);
+  }
+  assert.match(prose, /Orphan events surfaced during this turn/);
+  assert.match(prose, /include them as-is above your answer/);
+  assert.match(prose, /agent_status` with `diagnostics: true` first/);
 });
 
-// Every routing-resolution code resolveRouting/resolveProfileRouting can return
-// before a job ever exists (bridge-server/server.mjs). Each one means "the
-// parent's routing key did not resolve" — never "try another key". The list is
-// closed on purpose, so the two ambiguity codes belong in it: a strength two
-// profiles declare with no defaultProfile tiebreak fails as STRENGTH_AMBIGUOUS
-// (server.mjs resolveRouting), and a bare target two profiles claim fails as
-// PROFILE_AMBIGUOUS (resolveBareTarget) — the same "key did not resolve" class
-// that the prohibition exists to close.
-const ROUTING_ERROR_CODES = [
-  'STRENGTH_UNCONFIGURED', 'STRENGTH_AMBIGUOUS', 'PROFILE_UNKNOWN',
-  'PROFILE_AMBIGUOUS', 'ROUTING_CONFLICT', 'CAPABILITY_UNAVAILABLE',
-  'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED', 'MODEL_NOT_ALLOWED',
-];
-
-test('Claude template sets the MCP deadline as a per-server field, not an env var', () => {
-  const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
-  assert.ok(fm, 'frontmatter block extractable');
-  const frontmatter = fm[1];
-
-  // Measured: an `env: MCP_TOOL_TIMEOUT` does reach the bridge child process
-  // and the Claude Code host ignores it outright. It is a no-op that reads like
-  // a configured deadline, so it must not come back as a live key. The
-  // template's own YAML comment names it on purpose (that is the warning), so
-  // strip comment lines before asserting rather than banning the string.
-  const active = frontmatter.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
-  assert.doesNotMatch(active, /MCP_TOOL_TIMEOUT/,
-    'the inert MCP_TOOL_TIMEOUT env var must not return as a live frontmatter key');
-
-  // The field the host honours is a SIBLING of command/args, so anchor the
-  // assertion to command's own indentation rather than to any leading space.
-  const command = frontmatter.match(/^(\s*)command:\s*node\s*$/m);
-  assert.ok(command, 'agent-bridge server entry declares `command: node`');
-  const timeout = frontmatter.match(new RegExp(`^${command[1]}timeout:\\s*(\\d+)\\s*$`, 'm'));
-  assert.ok(timeout, 'per-server `timeout` declared as a sibling of `command`');
-
-  // It must clear clampWaitSec's 1200s cap (bridge-server/server.mjs) so the
-  // bridge always answers before the host abandons the call. The field both
-  // raises the per-call wall clock and floors the MCP idle window.
-  assert.ok(Number(timeout[1]) > 1200 * 1000,
-    `timeout ${timeout[1]}ms must exceed clampWaitSec's 1200s cap`);
-});
-
-test('Claude template names itself as the source and SETS the adapter knob', () => {
-  // hooks/install-agent.sh regenerates ~/.claude/agents/agent-companion.md from
-  // this file on every session start, so the warning has to live where the edit
-  // that would be lost gets made.
+test('Claude references the plugin session server by name and preserves its budget and env', () => {
+  const manifest = JSON.parse(readFileSync(join(HERE, '..', '.claude-plugin/plugin.json'), 'utf8'));
+  const server = manifest.mcpServers?.['agent-bridge'];
+  assert.ok(server, 'Claude plugin must register the session server');
+  assert.match(frontmatter, /^mcpServers: \[agent-bridge\]$/m);
+  assert.doesNotMatch(frontmatter, /^\s+(command|args|timeout|env):/m);
+  assert.equal(server.type, 'stdio');
+  assert.equal(server.command, '/bin/bash');
+  assert.deepEqual(server.args, ['${CLAUDE_PLUGIN_ROOT}/hooks/launch-agent-bridge.sh']);
+  assert.equal(server.timeout, 1320000);
+  assert.ok(server.timeout > 1200 * 1000);
+  assert.equal(server.env.MCP_TOOL_TIMEOUT, undefined);
+  assert.equal(server.env.AGENT_COMPANION_OWNER_GRACE_MS, '120000');
   assert.match(text, /THIS FILE IS THE SOURCE/);
   assert.match(text, /re-materializes/);
-
-  const fm = text.match(/^---\n([\s\S]*?)\n---\n/);
-  assert.ok(fm, 'frontmatter block extractable');
-  const frontmatter = fm[1];
-  assert.match(frontmatter, /takes effect on the NEXT session/);
-  // SET, not merely documented — and set as a live `env:` key rather than a
-  // commented example. It was documentation-only while the app-server transport
-  // was new; it is now the shipped default, because on `exec` a codex job dies
-  // with the bridge that started it (measured: probes/smoke/orphan.mjs) and on
-  // the app-server it survives (probes/smoke/appserver.mjs).
-  //
-  // The value itself is asserted against the Codex template's twin in
-  // templates/host-parity.test.mjs — this file only checks the Claude host's
-  // mechanism, which is a YAML `env:` mapping under the agent-bridge server.
-  const active = frontmatter.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
-  assert.match(active, /^\s{6}env:\s*$/m,
-    'the bridge server needs a live `env:` block, not a commented example');
-  assert.match(active, /^\s{8}CODEX_RUNTIME_ADAPTER:\s*appserver\s*$/m,
-    'the adapter must be a live env key under that block');
 });
 
-test('Claude template forbids re-routing a dispatch the bridge refused to route', () => {
-  // Reported as "strength advertised but not wired"; forensics showed the
-  // bridge answered STRENGTH_UNCONFIGURED in 23ms and the subagent re-sent the
-  // task 30s later with target:"codex" — a target the parent never named.
-  assert.match(text, /A routing error ≠ permission to pick your own route/);
-  for (const code of ROUTING_ERROR_CODES) {
-    assert.match(text, new RegExp(`\`${code}\``),
-      `${code} named in the no-re-route prohibition`);
-  }
-  assert.match(text,
-    /Do NOT re-send the task with a `target`, `profile`, or `strength` the parent did not supply/);
-  assert.match(text, /and do NOT drop the one it did supply/);
+test('Claude role relays routing and unsupported-follow-up refusals and leaves failed work with the companion', () => {
+  assert.deepEqual([...new Set(body.match(/\b[A-Z]+_[A-Z_]+\b/g))].sort(), [
+    'CAPABILITY_UNAVAILABLE', 'FOLLOWUP_UNSUPPORTED', 'MODEL_NOT_ALLOWED', 'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
+  ]);
+  assert.match(prose, /Relay a refusal verbatim and stop; never work around it/);
+  assert.match(prose, /The delegated task itself stays with the companion/);
+  assert.match(prose, /do not complete it yourself or switch to a companion or model the parent did not allow/);
+  assert.match(prose, /read files to check one specific suspect finding/);
+  assert.match(prose, /actual terminal state.*failed.*timeout.*cancelled.*stuck.*unreachable/);
+  assert.match(prose, /partial output and digest link/);
+  assert.match(prose, /If a bridge call throws, retry once/);
+  assert.match(prose, /two consecutive calls throw, take one log tail/);
+  assert.match(prose, /last 20 lines.*~\/.claude\/agent-companion\/runtime\/agent-bridge\.log/);
+  assert.match(prose, /\(log file not found\)/);
+  assert.match(prose, /`mcp_unreachable`.*stop/);
+  assert.match(prose, /missing.*skip the log tail.*stop/);
+  assert.match(prose, /response-level `timeout` or `unreachable`.*without a log tail/);
 });
 
 // One agent-companion instance is one companion conversation, and the host
@@ -142,7 +108,31 @@ test('Claude template leaves thread and session id to the host: a spawn starts a
   // Nor a session id: the bridge inherits CLAUDE_CODE_SESSION_ID from Claude Code.
   assert.doesNotMatch(text, /host_session_id|CLAUDE_CODE_SESSION_ID/);
   assert.doesNotMatch(text, /"thread":/);
-  const prose = text.replace(/\s+/g, ' ');
-  assert.match(prose, /SendMessage the same agent-companion to continue it/);
-  assert.match(prose, /spawn a new one to start fresh/);
+  assert.match(prose, /Thread continuity — named by the host/);
+  assert.match(prose, /hooks\/name-thread.sh.*agent id/);
+  assert.match(prose, /SendMessage.*keeps that id/);
+  assert.match(prose, /new spawn.*new id/);
+  assert.match(prose, /resumes saved native history cold under a new provider process/);
+  assert.match(prose, /Copilot follow-ups are refused with `FOLLOWUP_UNSUPPORTED`/);
+  assert.match(prose, /Bridge loss stops the owned provider tree and keeps history/);
+  assert.match(prose, /`agent_reply` steers only where capabilities.*`reply_unavailable`/);
+  assert.doesNotMatch(prose, /single-shot adapters|daemon no longer holds/);
+});
+
+test('Claude role preserves bounded waits, per-job reply checks and cancel acknowledgement handling', () => {
+  assert.match(prose, /numeric `max_wait_sec`.*480.*\[1,1200\]/);
+  assert.match(prose, /Remember it as `BUDGET`.*same `BUDGET` for every wait/);
+  assert.match(prose, /identical.*in-flight.*reattaches.*BUDGET/);
+  assert.match(prose, /different `task` or `model`.*thread_busy/);
+  assert.equal(body.match(/Loop iter N: job <job_id> still running, re-waiting\./g)?.length, 1);
+  assert.match(prose, /exactly one line/);
+  assert.match(prose, /Keep looping until terminal.*no iteration cap/i);
+  assert.match(prose, /SendMessage arrivals.*only between waits/);
+  assert.match(prose, /interrupt latency is one `BUDGET`/);
+  assert.match(prose, /agent_status.*job_id.*reply_available: true.*that job/);
+  assert.match(prose, /per-job fact/);
+  assert.match(prose, /do not cancel-and-resend to fake a reply/);
+  assert.match(prose, /reply_unavailable/);
+  assert.match(prose, /no tracked job to cancel/);
+  assert.match(prose, /`cancelling`.*same `BUDGET` until terminal/);
 });

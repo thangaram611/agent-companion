@@ -1,37 +1,24 @@
 #!/usr/bin/env node
 // agent-bridge MCP server (subagent-oriented, target-generic architecture)
 //
-// MCP tools: agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
+// MCP tools: agent_catalog | agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
 // agent_send takes an optional `target` (opencode | copilot | codex | antigravity);
 // omitting it uses the configured default target, and there is no silent
 // fallback.
-// No start/stop/pause/session-gate. Claude owns this server through the
-// standalone subagent's frontmatter; Codex registers it at plugin/session scope
-// because agent roles cannot add MCP authority. The subagent is the only
-// supported caller on both hosts. Model selection and rubber-duck critique are
-// internal server concerns and never exposed through the public schema.
+// Both hosts register this server at plugin/session scope. Owner-bound calls
+// require the native subagent identity; catalog and status remain ownerless.
+// Task text is passed through verbatim.
 //
 // `send` enqueues the task and returns `status=still_running` with the job_id
-// immediately (no blocking — the worker keeps running in the background). The
-// one exception is the reattach guard in `handleSend`: when a non-terminal job
-// already exists for the same thread and host session — including one hydrated
-// from the ledger after a bridge respawn — the send awaits that job and answers
-// with a wait response, bounded by the same clampWaitSec budget. The subagent
-// then loops on `wait` until terminal, emitting a short line between
-// iterations so a human watching the transcript can see progress.
+// after delivery acknowledgement. An identical in-flight send reattaches to
+// the same execution. Bounded waits hold the owner's lease until they return.
 //
-// The host budget that actually bounds a wait is the MCP *tool idle* timeout,
-// not a stream watchdog. Measured from the Claude Code 2.1.226 binary: the
-// stdio-transport default is 1,800,000 ms (30 min), polled on a 30 s tick, and
-// it is satisfied by each `agent_wait` **returning** — an emission mid-call does
-// not reset it (only a `notifications/progress` would, and that is not what the
-// per-iteration line is). So the budget is: clampWaitSec's 1200 s ceiling
-// against an 1,800,000 ms stdio idle default = 600 s of headroom, which is why
-// clampWaitSec needs no change. Never raise it past 1500 s without also setting
-// a per-server `timeout` on the MCP server entry — the `env: MCP_TOOL_TIMEOUT`
-// form is a host no-op (it reaches only this child). Codex's own per-tool-call
-// budget is 120 s (`codex-rs/codex-mcp/src/rmcp_client.rs:79`); Codex callers
-// raise tool_timeout_sec in the Codex plugin manifest.
+// Each wait is below the host's per-call wall: both 2026-11-05 host reports
+// measured cancellation at 1320 s with or without progress. Claude configures
+// sibling timeout (ms), Codex tool_timeout_sec (s); child MCP_TOOL_TIMEOUT env
+// does not configure either host. clampWaitSec caps at 1200 s, default 480 s.
+// The owner lease covers gaps between bounded calls, not total answer duration.
+// See probes/host-qualification/{claude,codex}/REPORT-2026-11-05.md.
 //
 // Completion surfacing: each terminal/alert event is appended to a JSONL queue
 // file with `consumed:false`; the drain script (invoked from host lifecycle
@@ -41,6 +28,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { detectHost } from '../lib/host.mjs';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -54,156 +42,21 @@ import {
   readdirSync, statSync,
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { Controller } from './controller/controller.mjs';
+import { Records } from './controller/records.mjs';
+import { systemClock } from './controller/clock.mjs';
+import { codexProvider, getCodexContractStatus } from './adapters/codex.mjs';
+import { opencodeProvider } from './adapters/opencode.mjs';
+import { acpProvider } from './adapters/acp.mjs';
 
-import {
-  ensureRuntime,
-  promptBg,
-  watchPrompt,
-  inspectPrompt,
-  cancelPrompt,
-  replyPrompt,
-  selectedRuntimeAdapter,
-  runtimeSupportsDetachedPromptResume,
-} from './acp-runtime.mjs';
-import {
-  syncAcpDaemonLeases,
-  reapIdleAcpDaemon,
-  acpDaemonSnapshot,
-  acpDaemonIdleTtlMs,
-} from './daemon-client.mjs';
-import {
-  log,
-  formatPrompt,
-  appendRubberDuckReview,
-  RUBBER_DUCK_EXEMPT_TEMPLATES,
-  classifyReviewVerdict,
-  shouldUseFleet,
-  validateAgentArgs,
-} from './validation.mjs';
-import {
-  readDefaultModel,
-  isModelAllowedFor,
-  readDefaultTarget,
-  ALLOWED_MODELS,
-  DEFAULT_MODEL,
-  readThreadSid, writeThreadSid, clearThread, listThreads,
-  writeJob, readJob, listJobsForSession, deleteJob,
-} from '../lib/state.mjs';
-import {
-  loadProfiles,
-  getProfile,
-  resolveStrength,
-  buildSynthesizedProfile,
-  listProfilesPublic,
-  flatStrengths,
-  STRENGTH_CAPABILITY_REQUIREMENTS,
-} from '../lib/profile-registry.mjs';
-import { queuePath, promptEventsPath, runtimeDir, bridgeLogFile, daemonLogFile, digestDir, appendPrivateFile } from '../lib/runtime-paths.mjs';
-import { createReqId, withReq, logEvent } from '../lib/log.mjs';
-import { writeDigest, digestPath } from '../lib/prompt-digest.mjs';
-import { buildDoctorReport } from '../lib/doctor.mjs';
-import {
-  cancelOpenCodeRun,
-  openCodeRuntimeInfo,
-  startOpenCodeRun,
-  writeOpenCodeDigest,
-} from './opencode-runtime.mjs';
-import {
-  cancelCodexRun,
-  codexRuntimeInfo,
-  startCodexRun,
-} from './codex-runtime.mjs';
-import {
-  resolveOpenCodeAdapter,
-  openCodeServerActive,
-  openCodeServerRuntimeInfo,
-  openCodeServerPromptId,
-  resolveOpenCodeServerModel,
-  parseOpenCodeModel,
-  ensureOpenCodeServer,
-  createOpenCodeSession,
-  startOpenCodeServerPrompt,
-  abortOpenCodeSession,
-  getOpenCodeSessionStatus,
-  openOpenCodeTurnWatcher,
-  loadOpenCodeTranscript,
-  probeOpenCodeServerHealth,
-  openCodeServerPoolSnapshot,
-  reapIdleOpenCodeServer,
-  syncOpenCodeServerLeases,
-  openCodeServerIdleTtlMs,
-} from './opencode-server-runtime.mjs';
-import {
-  codexAppServerActive,
-  codexAppServerRuntimeInfo,
-  codexAppServerPromptId,
-  ensureCodexBroker,
-  connectCodexBroker,
-  probeCodexBrokerHealth,
-  openCodexThreadWithBrokerRecovery,
-  codexBrokerErrorNeedsRespawn,
-  resumeCodexThread,
-  readCodexThread,
-  startCodexTurn,
-  steerCodexTurn,
-  interruptCodexTurn,
-  openCodexTurnWatcher,
-  codexBrokerSnapshot,
-  syncCodexBrokerLeases,
-  reapIdleCodexBroker,
-  codexBrokerIdleTtlMs,
-} from './codex-app-server-runtime.mjs';
-import { pidAlive } from '../lib/shared-runtime-registry.mjs';
-import {
-  defaultTargetInfo,
-  defaultTargetId,
-  getTarget,
-  listTargets,
-  listTargetIds,
-  daemonAdapterFor,
-} from '../lib/target-registry.mjs';
+import { log, validateAgentArgs } from './validation.mjs';
+import { BASE_DIR, readDefaultModel, migrateLegacyState, isModelAllowedFor, readDefaultTarget, ALLOWED_MODELS } from '../lib/state.mjs';
+import { lastTargetChecks } from '../lib/target-diagnostics.mjs';
+import { queuePath, runtimeDir, digestDir, appendPrivateFile, writePrivateFileAtomic } from '../lib/runtime-paths.mjs';
+import { logEvent } from '../lib/log.mjs';
+import { digestPath, renderDigest } from '../lib/prompt-digest.mjs';
+import { defaultTargetInfo, defaultTargetId, getTarget, listTargets, listTargetIds } from '../lib/target-registry.mjs';
 
-// Per-target dispatch table for the non-copilot (single-shot CLI-shaped)
-// runtimes: worker start, cancel, and runtime-info. Consolidates the id-
-// literal branches that a third CLI target would otherwise force at every
-// send/cancel/status call site (worker-dispatch, handleCancel, agent_status).
-// Copilot stays outside this table — it is genuinely different runtime
-// semantics (daemon, supervisor, /fleet) — and digest routing is
-// deliberately NOT here: every non-copilot digest call site goes through the
-// one target-neutral writer, writeJobDigest, which is also where the W1.4′
-// no-destruction rule lives (see refreshDigestForJob below). Safe to reference the worker fns
-// here before their textual definition — they are hoisted `async function`
-// declarations, not const arrow functions.
-const CLI_RUNTIMES = {
-  opencode: { start: runOpenCodeWorker, cancel: cancelOpenCodeRun, info: openCodeRuntimeInfo },
-  codex:    { start: runCodexWorker,    cancel: cancelCodexRun,    info: codexRuntimeInfo },
-};
-
-// The ACP companions — everything the daemon path serves (Copilot, Antigravity).
-// Keyed on the descriptor's `capabilities.acp`, never on an id: a new ACP
-// companion is a descriptor plus a daemon socket, not a branch here. The two
-// Copilot-only extras key on their own descriptor fields the same way —
-// `/fleet` on `capabilities.parallel`, the rubber-duck wrapper on
-// `acp.rubberDuck` — so a job on a second ACP companion gets neither.
-// `getTarget('')` would resolve the DEFAULT target, so an empty id is refused
-// here rather than silently reading as whatever the default happens to be.
-function isAcpTarget(target) {
-  return Boolean(target) && getTarget(target)?.capabilities?.acp === true;
-}
-function fleetCapable(target) {
-  return Boolean(target) && getTarget(target)?.capabilities?.parallel === 'fleet';
-}
-function rubberDuckTarget(target) {
-  return Boolean(target) && getTarget(target)?.acp?.rubberDuck === true;
-}
-const ACP_TARGET_IDS = listTargetIds().filter(isAcpTarget);
-
-// --- Queue (replaces dev-channel notifications) -----------------------------
-
-// Resolved per-call so tests can flip AGENT_QUEUE_PATH before each
-// scenario. The const-at-module-load form locked the path for the lifetime
-// of the process and made queue-write tests unrunnable from node:test
-// without subprocesses.
 function getQueuePath() {
   return queuePath();
 }
@@ -277,38 +130,7 @@ function adoptHostSessionId(sid) {
   if (_bridgeHostSid) return;
   _bridgeHostSid = sid;
   log('INFO', 'sid adopted:', sid);
-  // Lazy hydrate-and-sweep, deferred until the bridge actually knows whose
-  // session it serves. Idempotent guards inside both functions handle the
-  // already-run case.
-  try { hydrateJobsFromLedger(); } catch (err) { log('WARN', 'lazy hydrate failed:', err.message); }
-  try { sweepOwnSessionStaleQueueRows(); } catch (err) { log('WARN', 'lazy sweep failed:', err.message); }
-}
 
-function enqueueEvent(event) {
-  // Synchronous append; writes are small (~1-5KB). `consumed:false` lets the
-  // drain script filter out events already surfaced by a wait-terminal MCP
-  // response — the subagent never sees the same event twice.
-  //
-  // Sid resolution: prefer the originating job's stored sid (so a recovered
-  // bridge holding session-B's job correctly tags session-B's events even
-  // when this bridge process serves session-A). Fall back to the bridge's
-  // own adopted sid; fall back finally to env. Untagged rows are dropped by
-  // the drain hook, so a missing sid means the event never surfaces.
-  const fromJob = event.jobId ? jobs.get(event.jobId)?.claudeSessionId : null;
-  const sid = fromJob || getHostSessionId();
-  try {
-    appendPrivateFile(
-      getQueuePath(),
-      JSON.stringify({
-        ts: Date.now(),
-        consumed: false,
-        claudeSessionId: sid,
-        ...event,
-      }) + '\n',
-    );
-  } catch (err) {
-    log('WARN', 'enqueue failed:', err.message);
-  }
 }
 
 function markQueueConsumed(jobId) {
@@ -329,538 +151,43 @@ function markQueueConsumed(jobId) {
   }
 }
 
-log('INFO', 'bridge start:', `pid=${process.pid} ppid=${process.ppid} claude_sid=${process.env.CLAUDE_CODE_SESSION_ID || 'unset'}`);
-
-// --- Job tracking -----------------------------------------------------------
-
-const jobs = new Map();
-const JOB_RETENTION_MS = 60 * 60 * 1000;
-const JOB_GC_INTERVAL_MS = 60 * 1000;
-
-// Dispose the shared `opencode serve` after it has been idle this long with no
-// live opencode-server job anywhere on the machine. The server is detached and
-// survives bridge restarts by design (that enables resume), so without a reaper
-// it would persist forever. The TTL is derived from the job timeout — see
-// openCodeServerIdleTtlMs. Leases are the primary guard; this is the backstop.
-const OPENCODE_SERVER_IDLE_TTL_MS = openCodeServerIdleTtlMs();
-
-// Same contract for the shared codex broker: it is detached and outlives every
-// bridge on purpose (that is what makes a subagent's return cost a socket
-// client instead of a job). This is the SECOND reaper on it, not the only one —
-// the broker runs its own idle reaper (no client, no beating host session, no
-// loaded thread) and exits on its own. This one is the bridge-side backstop:
-// it disposes a broker whose leases have all gone, which is the case the
-// broker's own three gates do not cover on their own.
-const CODEX_BROKER_IDLE_TTL_MS = codexBrokerIdleTtlMs();
-
-// And for each ACP daemon: the daemon runs its own inactivity reaper (no
-// prompt in flight, no beating host heartbeat), and this is the bridge-side
-// backstop that disposes one whose leases have all gone — the third shared
-// runtime, the same two-reaper shape as the broker.
-const ACP_DAEMON_IDLE_TTL_MS = acpDaemonIdleTtlMs();
-
-const jobsGcTimer = setInterval(() => {
-  gcExpiredJobs();
-  const liveOpenCodeServerJobs = [...jobs.entries()]
-    .filter(([, j]) => j.target === 'opencode' && j.opencodeAdapter === 'server' && !j.terminalAt)
-    .map(([jobId]) => jobId);
-  // The adapter a job STARTED under, never the live env: an operator flipping
-  // CODEX_RUNTIME_ADAPTER mid-flight must not make this tick stop renewing an
-  // in-flight job's lease on the broker that is running it.
-  const liveCodexAppServerJobs = [...jobs.entries()]
-    .filter(([, j]) => j.target === 'codex' && j.codexAdapter === 'appserver' && !j.terminalAt)
-    .map(([jobId]) => jobId);
-  // Renew our leases before reaping so this tick's view of cross-process
-  // liveness includes our own jobs, and so other bridges see them too.
-  try { syncOpenCodeServerLeases(liveOpenCodeServerJobs); }
-  catch (err) { log('WARN', 'opencode server lease sync failed:', err.message); }
-  try { syncCodexBrokerLeases(liveCodexAppServerJobs); }
-  catch (err) { log('WARN', 'codex broker lease sync failed:', err.message); }
-  // Fire-and-forget; never let a dispose HTTP call disrupt the GC tick.
-  Promise.resolve(reapIdleOpenCodeServer({
-    idleMs: OPENCODE_SERVER_IDLE_TTL_MS,
-    hasLiveJobs: liveOpenCodeServerJobs.length > 0,
-  })).catch(() => {});
-  Promise.resolve(reapIdleCodexBroker({
-    idleMs: CODEX_BROKER_IDLE_TTL_MS,
-    hasLiveJobs: liveCodexAppServerJobs.length > 0,
-  })).catch(() => {});
-  for (const companion of ACP_TARGET_IDS) {
-    // A job holds a lease once its prompt is registered on the daemon — a
-    // `starting` job has nothing on it yet — and until it settles.
-    const live = [...jobs.entries()]
-      .filter(([, j]) => j.target === companion && j.promptId && !j.terminalAt)
-      .map(([jobId]) => jobId);
-    try { syncAcpDaemonLeases(companion, live); }
-    catch (err) { log('WARN', `${companion} acp daemon lease sync failed:`, err.message); }
-    Promise.resolve(reapIdleAcpDaemon(companion, {
-      idleMs: ACP_DAEMON_IDLE_TTL_MS,
-      hasLiveJobs: live.length > 0,
-    })).catch(() => {});
-  }
-}, JOB_GC_INTERVAL_MS);
-if (jobsGcTimer.unref) jobsGcTimer.unref();
-
-function gcExpiredJobs(now = Date.now()) {
-  for (const [jobId, job] of jobs) {
-    if (!job.terminalAt || !job.retentionExpiresAt) continue;
-    if (job.retentionExpiresAt > now) continue;
-    jobs.delete(jobId);
-    deleteJob(jobId);
-    digestCarry.delete(jobId);
-    log('INFO', 'gc job:', jobId, `status=${job.status}`);
-  }
-}
-
-// In-memory jobs use `sessionId` for the companion runtime session (a Copilot
-// ACP session or an OpenCode `ses_` id). The persisted form renames it to the
-// target-neutral `companionSessionId` so it cannot be confused with the Claude
-// Code session id (`claudeSessionId`) that the drain hook keys on, and so an
-// OpenCode session id is not stored under a Copilot-specific key.
-// Best-effort: failures don't abort the action — the in-memory map is still
-// authoritative for the current bridge process.
-function persistJob(jobId) {
-  const job = jobs.get(jobId);
-  if (!job || !job.claudeSessionId) return;
-  try {
-    const { sessionId, ...rest } = job;
-    const data = { ...rest };
-    if (sessionId !== undefined) data.companionSessionId = sessionId;
-    writeJob(jobId, data);
-  } catch (err) {
-    log('WARN', 'persistJob failed:', jobId, err.message);
-  }
-}
-
-// Wait-budget clamp. All modes share a single 1200s (20 min) cap; the
-// previous mode-aware split (900 ANALYZE / 540 other) was lifted when the
-// daemon prompt timeout grew from 10→25 min to accommodate /fleet jobs.
-// There is no 600s stream-idle watchdog — that figure was measured wrong and
-// removed from this file's header; see docs/ARCHITECTURE.md "Negative Results".
-// The budget that actually bounds a wait is the MCP *tool idle* timeout
-// (stdio default 1,800,000 ms), satisfied by each agent_wait RETURNING, not by
-// any mid-call emission. That leaves this cap 600s of headroom. Codex's per-tool MCP timeout defaults to 120s
-// (`codex-rs/codex-mcp/src/rmcp_client.rs:79`) but is user-configurable
-// via `tool_timeout_sec` in the Codex plugin manifest — see README's Codex
-// install section. A NON-NUMERIC value never reaches here — validateSend
-// and validateWait reject it with `agent: max_wait_sec must be a number` before
-// dispatch. What reaches here is CLAMPED, not defaulted: 3000 -> 1200, -100 -> 1.
-// Only a missing value, 0, or NaN falls back to 480. Floor 1s avoids no-wait races.
 export function clampWaitSec(input) {
   const cap = 1200;
   return Math.max(1, Math.min(Number(input) || 480, cap));
 }
 
-function getJob(jobId) { gcExpiredJobs(); return jobs.get(jobId) || null; }
-function updateJob(jobId, patch) {
-  const j = jobs.get(jobId);
-  if (j) { Object.assign(j, patch); persistJob(jobId); }
-  return j || null;
-}
-function retainTerminalJob(jobId, patch) {
-  const job = jobs.get(jobId);
-  if (!job) return null;
-  const terminalAt = patch.terminalAt || Date.now();
-  Object.assign(job, patch, {
-    terminalAt,
-    retentionExpiresAt: terminalAt + JOB_RETENTION_MS,
-    inspectAvailable: isAcpTarget(patch.target || job.target) && Boolean(job.promptId || patch.promptId),
-  });
-  // Every adapter settles here, so this is where a review's verdict is read
-  // once and stored: the wait envelope, the digest and the ledger all render
-  // from the job. Re-derived on every retain so a later remap of the status
-  // (cancelled → stuck) cannot leave a verdict behind on a job that is no
-  // longer `completed`.
-  if (job.template === 'review') {
-    const fields = reviewVerdictFields(job);
-    if (fields) Object.assign(job, fields);
-    else { delete job.verdict; delete job.verdictReason; }
-  }
-  // Usage travels on the summary every adapter builds (lib/usage.mjs, one
-  // shape for all of them) and lives on the job from here — one home for the
-  // ledger, wait meta, status, the queue event and both digests, not a copy
-  // under `summary` as well. Nothing reads `summary.usage` after this point;
-  // the live digest read it off the streamed snapshot while the turn ran.
-  if (job.summary?.usage) {
-    job.usage = job.summary.usage;
-    delete job.summary.usage;
-  }
-  persistJob(jobId);
-  resolveAllWaiters(jobId, { terminal: true, job });
-  return job;
-}
-
-function retireThreadSid(thread, profileId, sessionId, reason) {
-  if (!thread || !sessionId) return false;
-  try {
-    if (readThreadSid(thread, profileId) !== sessionId) return false;
-    clearThread(thread, profileId);
-    log('WARN', 'thread sid retired:', `thread=${thread} profile=${profileId || '-'} session=${sessionId} reason=${reason}`);
-    return true;
-  } catch (err) {
-    log('WARN', 'retireThreadSid failed:', err.message);
-    return false;
-  }
-}
-
-function isBlankText(value) {
-  return typeof value !== 'string' || value.trim().length === 0;
-}
-
-function isEmptyCompletedSummary(summary) {
-  if (!summary || typeof summary !== 'object') return true;
-  return isBlankText(summary.message) &&
-    isBlankText(summary.thoughts) &&
-    (!Array.isArray(summary.toolCalls) || summary.toolCalls.length === 0) &&
-    !summary.plan;
-}
-
-// Codex can finish the conversational turn normally after its subordinate
-// command runner failed before executing anything. That is a protocol-level
-// completion, but it is not a task verdict. Keep this deliberately narrower
-// than a generic error-message detector: zero tool calls alone is valid for a
-// conversational turn and thread/read recovery has no tool history, while an
-// assistant may legitimately quote a missing-command error in a useful answer.
-export function isCodexCommandRunnerBlocker({ target, status, summary } = {}) {
-  if (target !== 'codex' || status !== 'completed') return false;
-  const stopReason = summary?.stopReason;
-  const liveZeroToolTurn = stopReason === 'turn/completed' &&
-    Array.isArray(summary?.toolCalls) && summary.toolCalls.length === 0;
-  // thread/read is a complete answer salvage but explicitly carries no tool
-  // history. It therefore cannot support the generic zero-tool inference below;
-  // only the assistant naming the unavailable runner itself is strong enough on
-  // that recovery path. This closes restart recovery without relabelling an
-  // ordinary salvaged answer whose original tool history is simply absent.
-  const recoveredTranscript = stopReason === 'thread/read';
-  if (!liveZeroToolTurn && !recoveredTranscript) return false;
-  const message = typeof summary?.message === 'string' ? summary.message.trim() : '';
-  if (!message) return false;
-
-  // Runtime evidence must be the assistant's assertion, not a quoted example
-  // embedded in an otherwise self-reported documentation or wording task.
-  const evidenceMessage = message
-    .replace(/"[^"\n]*"/g, ' ')
-    .replace(/“[^”\n]*”/g, ' ');
-  const selfReportedBlocker = /^(?:unable to (?:complete|run|execute)\b|i\s+(?:cannot|can't|am unable to)\s+(?:complete|run|execute)\b|cannot\s+(?:complete|run|execute)\b|(?:every|all)\b[^\n.]{0,120}\bcommands?\b[^\n.]{0,120}\bfailed before execution\b)/i;
-  const runnerEvidence = /\b(?:codex-code-mode-host|code[- ]mode host|command runner|tool access)\b/i;
-  const unavailableEvidence = /\b(?:missing|unavailable|not found|does not exist|failed before execution|failed to spawn)\b/i;
-  // A bare runtime diagnostic is also an explicit self-report. Require the
-  // runner/access subject at the start and an unavailable predicate ending its
-  // clause; this admits literal errors without matching explanatory prose such
-  // as "tool access is unavailable in the hypothetical environment".
-  const directRunnerUnavailable = /^(?:the\s+(?:configured\s+)?)?(?:(?:\S*\/)?codex-code-mode-host|code[- ]mode host|command runner|tool access)\b[^\n.!?]{0,120}\b(?:is unavailable|is missing|was not found|does not exist|failed before execution|failed to spawn)\b(?=\s*(?:[.!?]|$))/i;
-  if (directRunnerUnavailable.test(evidenceMessage)) return true;
-  if (!selfReportedBlocker.test(evidenceMessage)) return false;
-  if (runnerEvidence.test(evidenceMessage) && unavailableEvidence.test(evidenceMessage)) return true;
-
-  // On the live edge, the accumulator's empty tool list is real evidence. A
-  // universal pre-execution failure statement is then specific enough even if
-  // the assistant omitted the runner's binary name. Keep its clauses bounded
-  // and ignore quoted examples so unrelated prose does not become runtime
-  // failure evidence.
-  const universalPreExecutionFailure = /\b(?:every|all)\b[^\n.!?]{0,160}\bcommands?\b[^\n.!?]{0,120}\bfailed before execution\b/i;
-  return liveZeroToolTurn && universalPreExecutionFailure.test(evidenceMessage);
-}
-
 function iso(ts) { return ts ? new Date(ts).toISOString() : null; }
-function canonicalPathForCompare(path) {
-  if (!path) return null;
-  try { return realpathSync(path); }
-  catch { return String(path); }
-}
+// --- Target routing and capability gate ------------------------------------
 
-// The fields that make a send the same request; template_args is {} once validated.
-function sameRequest(job, args) {
-  return job.task === args.task && job.mode === args.mode && job.template === args.template &&
-    JSON.stringify(job.template_args ?? {}) === JSON.stringify(args.template_args ?? {});
-}
-
-function sameRequiredCwd(a, b) {
-  const ca = canonicalPathForCompare(a);
-  const cb = canonicalPathForCompare(b);
-  return !!ca && !!cb && ca === cb;
-}
-function normalizeInspectLimit(value) {
-  const n = Number.parseInt(String(value ?? ''), 10);
-  if (!Number.isFinite(n)) return 40;
-  return Math.max(1, Math.min(n, 200));
-}
-
-// --- Strength/profile routing — the sole SEND routing brain -----------------
-//
-// resolveRouting({target, profile, strength}, env) generalizes the old
-// one-to-one resolveTargetId. It reads ONLY loadProfiles(env) output, applies
-// constraint-consistency precedence, runs the pre-spawn capability gate
-// (STEP C), and returns {ok:true, resolved} or {ok:false, code, ...}. No silent
-// fallback: identical inputs + identical profiles.json → identical outcome.
-
-// Unchanged wording from the pre-#2 TARGET_UNCONFIGURED path.
 const UNCONFIGURED_SEND_ERROR =
   'no companion target configured and none passed. Pass target on agent_send, ' +
   'or set a default with `node scripts/onboard.mjs --target <id> --set-default`.';
 
-// STEP C — pre-spawn, statically-knowable capability gate. Only model + adapter
-// actually gate under v1 (STRENGTH_CAPABILITY_REQUIREMENTS is an empty no-op map).
-function capabilityGate(prof, env) {
-  if (!prof.companion) return { ok: false, code: 'TARGET_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR };
-  const descriptor = getTarget(prof.companion, env);
-  const caps = prof.capabilities || descriptor?.capabilities || null;
-  if (!descriptor || !descriptor.implemented || !caps?.send) {
-    return {
-      ok: false, code: 'TARGET_UNSUPPORTED', companion: prof.companion,
-      error: `target "${prof.companion}" is not a supported companion target (supported: ${listTargets().map((t) => t.id).join(', ')})`,
-    };
+export function resolveRouting({ target = null, model = null } = {}, env = process.env) {
+  const companion = target ? String(target).trim().toLowerCase() : readDefaultTarget(env).target;
+  if (!companion) return { ok: false, code: 'TARGET_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR };
+  const descriptor = getTarget(companion, env);
+  if (!descriptor?.implemented || !descriptor.capabilities?.send) {
+    return { ok: false, code: 'TARGET_UNSUPPORTED', companion,
+      error: `target "${companion}" is not a supported companion target (supported: ${listTargetIds().join(', ')})` };
   }
-  const model = prof.model || null;
-  if (model) {
-    if (caps.modelSelection === false) {
-      return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `companion "${prof.companion}" cannot select a model but profile pins "${model}"` };
-    }
-    if (!isModelAllowedFor(prof.companion, model)) {
-      if (prof.companion === 'copilot') {
-        return {
-          ok: false, code: 'MODEL_NOT_ALLOWED', companion: 'copilot', model,
-          error: `model "${model}" is not a documented Copilot model`,
-          hint: `set the Copilot model to a documented model id (one of: ${[...ALLOWED_MODELS].join(', ')}), or remove it to use the ${DEFAULT_MODEL} default`,
-        };
-      }
-      if (prof.companion === 'codex') {
-        return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: 'codex', model, error: `codex model "${model}" is invalid — model ids must contain no whitespace (bare ids like gpt-5.6-sol; no provider/ prefix)` };
-      }
-      return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `companion "${prof.companion}" model "${model}" is not a valid provider/model pin (expected provider/model)` };
-    }
+  const selectedModel = model || readDefaultModel(companion, env).model;
+  if (selectedModel && !descriptor.capabilities.modelSelection) {
+    return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion,
+      error: `companion "${companion}" cannot select a model` };
   }
-  // Coherence, not selection: a profile that named its companion's DAEMON adapter
-  // must actually have the daemon capabilities, whichever companion it is. Keyed
-  // off the target registry's own upgrade table rather than the literal 'server',
-  // so codex's `appserver` is covered by the rule that already covered opencode's
-  // `server` instead of by a second line beside it — the wording is unchanged for
-  // opencode, which is the point. A profile naming the single-shot adapter never
-  // trips this: it is asking for fewer capabilities, not more.
-  const daemonAdapter = daemonAdapterFor(prof.companion);
-  if (daemonAdapter && prof.adapter === daemonAdapter && !caps.serverMode) {
-    return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `${prof.companion} adapter:"${prof.adapter}" requested but server mode is unavailable in this environment` };
+  if (selectedModel && !isModelAllowedFor(companion, selectedModel)) {
+    return { ok: false, code: 'MODEL_NOT_ALLOWED', companion, model: selectedModel,
+      error: `model "${selectedModel}" is not valid for ${companion}`,
+      hint: companion === 'copilot'
+        ? `set the Copilot model to one of: ${[...ALLOWED_MODELS].join(', ')}, or omit it to inherit configuration`
+        : companion === 'opencode' ? 'Use a provider/model id.' : 'Model ids must contain no whitespace.' };
   }
-  // STRENGTH_CAPABILITY_REQUIREMENTS — no-op under the v1 empty map; populating
-  // it later enforces a requirement pre-spawn here with zero other changes.
-  for (const declared of prof.strengths) {
-    for (const reqCap of STRENGTH_CAPABILITY_REQUIREMENTS[declared] || []) {
-      if (!caps[reqCap]) {
-        return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion: prof.companion, error: `strength "${declared}" requires capability "${reqCap}" which companion "${prof.companion}" lacks` };
-      }
-    }
-  }
-  return { ok: true };
-}
-
-// Bare target-only path: lone profile whose companion===t; if multiple require a
-// defaultProfile tiebreak among them or PROFILE_AMBIGUOUS; if none, synthesize
-// for the explicit companion (legacy semantics — an explicit target always
-// resolves to that companion with the default model).
-function resolveBareTarget(load, t, env) {
-  const matches = load.profiles.filter((pr) => !pr.synthesized && pr.companion === t);
-  if (matches.length === 1) return { ok: true, prof: matches[0] };
-  if (matches.length > 1) {
-    const dp = load.defaultProfile?.value || null;
-    const winner = dp ? matches.find((m) => m.id === dp) : null;
-    if (winner) return { ok: true, prof: winner };
-    return { ok: false, code: 'PROFILE_AMBIGUOUS', error: `multiple profiles target companion "${t}" with no defaultProfile tiebreak`, candidates: matches.map((m) => m.id) };
-  }
-  return { ok: true, prof: buildSynthesizedProfile(t, env) };
-}
-
-// Zero explicit inputs: defaultProfile wins if it resolves; else the empty/
-// no-default edge falls back to the legacy bare-target against default-target
-// (so a hand-authored profiles.json that omits defaultProfile but keeps a
-// default-target does not newly fail); else TARGET_UNCONFIGURED.
-function resolveZeroInput(load, env) {
-  const dp = load.defaultProfile?.value || null;
-  if (dp) {
-    const prof = getProfile(load, dp);
-    if (prof) return { ok: true, prof };
-    // A configured defaultProfile must resolve; falling back would hide a configuration error.
-    return {
-      ok: false, code: 'PROFILE_UNKNOWN',
-      error: `defaultProfile "${dp}" names no configured profile`,
-      candidates: load.profiles.filter((pr) => !pr.synthesized).map((pr) => pr.id),
-    };
-  }
-  const dt = readDefaultTarget(env).target;
-  if (dt) return resolveBareTarget(load, dt, env);
-  return { ok: false, code: 'TARGET_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR };
-}
-
-export function resolveRouting({ target = null, profile = null, strength = null } = {}, env = process.env) {
-  const t = target ? String(target).trim().toLowerCase() : null;
-  const p = profile ? String(profile).trim() : null;
-  const s = strength ? String(strength).trim().toLowerCase() : null;
-  const load = loadProfiles({ env });
-  const publicIds = () => load.profiles.filter((pr) => !pr.synthesized).map((pr) => pr.id);
-
-  const succeed = (prof, requestedStrength) => {
-    const gate = capabilityGate(prof, env);
-    if (!gate.ok) return { ...gate, load };
-    return {
-      ok: true,
-      load,
-      resolved: {
-        profileId: prof.synthesized ? null : prof.id,
-        companion: prof.companion,
-        model: prof.model || null,
-        strengths: prof.strengths.slice(),
-        capabilities: prof.capabilities,
-        adapter: prof.adapter || null,
-        synthesized: !!prof.synthesized,
-        strength: requestedStrength || null,
-      },
-    };
-  };
-
-  // STEP A — constraint-consistency precedence.
-  if (p && s) return { ok: false, code: 'ROUTING_CONFLICT', error: 'pass only one of profile or strength', load };
-
-  let prof = null;
-  let requestedStrength = null;
-
-  if (p) {
-    prof = getProfile(load, p);
-    if (!prof) return { ok: false, code: 'PROFILE_UNKNOWN', error: `no configured profile "${p}"`, candidates: publicIds(), load };
-  } else if (s) {
-    const r = resolveStrength(load, s);
-    if (r.status === 'unconfigured') return { ok: false, code: 'STRENGTH_UNCONFIGURED', error: `no configured profile declares strength "${s}"`, candidates: publicIds(), load };
-    if (r.status === 'ambiguous') return { ok: false, code: 'STRENGTH_AMBIGUOUS', error: `strength "${s}" is declared by multiple profiles with no defaultProfile tiebreak`, candidates: r.candidates, load };
-    prof = getProfile(load, r.profileId);
-    requestedStrength = s;
-  } else if (t) {
-    const bt = resolveBareTarget(load, t, env);
-    if (!bt.ok) return { ...bt, load };
-    prof = bt.prof;
-  } else {
-    const zi = resolveZeroInput(load, env);
-    if (!zi.ok) return { ...zi, load };
-    prof = zi.prof;
-  }
-
-  // target refinement: an explicit target co-existing with profile/strength must
-  // agree with the resolved profile's companion.
-  if (t && (p || s) && prof.companion !== t) {
-    return { ok: false, code: 'ROUTING_CONFLICT', error: `resolved profile targets companion "${prof.companion}" but explicit target is "${t}"`, load };
-  }
-
-  return succeed(prof, requestedStrength);
+  return { ok: true, resolved: { companion, model: selectedModel, capabilities: descriptor.capabilities } };
 }
 
 function targetLabel(id) {
   return getTarget(id)?.displayName || id || 'unknown target';
-}
-
-async function fetchPromptInspect(job, { includeTimeline = false, limit = 40 } = {}) {
-  if (!job?.promptId) return null;
-  const resp = await inspectPrompt({
-    promptId: job.promptId,
-    includeTimeline,
-    limit: normalizeInspectLimit(limit),
-    companion: job.target || 'copilot',
-  });
-  if (!resp.ok) throw new Error(`inspect failed: ${resp.error}`);
-  return resp.data;
-}
-
-// ---------------------------------------------------------------------------
-// The guarded digest writer — W1.4′ lives HERE, not in any per-target wrapper
-// ---------------------------------------------------------------------------
-//
-// Every non-copilot digest write in this bridge goes through writeJobDigest,
-// because every render is a FULL replacement and the digest is the only record
-// of what a bridge streamed. A per-caller guard cannot hold that line: the
-// callers that most need it (resume, the resumed watcher's onEvent) are each
-// followed by emitNotification, whose own refreshDigestForJob tail would
-// re-render the body from an empty accumulator a millisecond later — measured
-// shrinking a live 11,754-byte digest to 228 bytes, the W1.4′ regression.
-//
-// The rule is ownership, not length: the first write by THIS process for a job
-// whose digest it did not create reads the existing body ONCE and carries it
-// into every render this process makes, until a render's own text already
-// contains it. Nothing is ever compared by size, so a genuinely shorter
-// follow-up turn still updates the file.
-//
-// What is memoized is the salvaged TEXT, not the decision about it. Latching the
-// decision instead was measured to lose the salvage outright: hydrate restores
-// `job.adapterResult` from the ledger, so a resumed job's FIRST render can be
-// the previous bridge's own completed answer — containment holds, the carry
-// latches empty, and the next render (the resumed watcher's first delta, whose
-// accumulator is empty) rebuilds the digest from nothing. Measured on a job
-// hydrated with its predecessor's result: 7,507 bytes to 351, the dead bridge's
-// text gone — the same W1.4′ regression, reached from the other side.
-const digestCarry = new Map(); // jobId -> {body, prior} read from a previous bridge's digest
-
-function priorDigestBody(jobId) {
-  const path = digestPath(jobId);
-  if (!path || !existsSync(path)) return { body: '', prior: '' };
-  let text;
-  try { text = readFileSync(path, 'utf8'); } catch { return { body: '', prior: '' }; }
-  const idx = text.indexOf('\n## ');
-  if (idx < 0) return { body: '', prior: '' };
-  // The Task section is re-rendered verbatim from the job record, so carrying
-  // it would just duplicate it.
-  const body = text.slice(idx + 1).replace(/^## Task\n[\s\S]*?(?=\n## |$)/, '').trim();
-  if (!body) return { body: '', prior: '' };
-  // The salvaged answer, kept beside the body so every render can ask whether it
-  // is about to duplicate it: tier-1 resume replays the whole item list on
-  // `turn/completed`, so a completed render often already contains everything
-  // the dead bridge wrote — while the delta renders on either side of it do not.
-  const prior = /^#{2,3} Final \/ partial assistant message\n+([\s\S]*?)(?=\n#{2,3} |$)/m.exec(body)?.[1]?.trim() || '';
-  return { body, prior };
-}
-
-function writeJobDigest(job, result = null) {
-  const jobId = job?.jobId;
-  if (!jobId) return null;
-  let salvaged = digestCarry.get(jobId);
-  if (salvaged === undefined) {
-    // One file read per job per process — the same as when this memoized the
-    // verdict. Only the containment test moved.
-    salvaged = priorDigestBody(jobId);
-    digestCarry.set(jobId, salvaged);
-  }
-  const incoming = result?.summary?.message || result?.stdout || '';
-  const duplicate = salvaged.prior && incoming.includes(salvaged.prior);
-  return writeOpenCodeDigest(job, result, { carriedForward: duplicate ? null : (salvaged.body || null) });
-}
-
-// Refresh the on-disk digest from the prompt jsonl. Called from
-// handleStatus, runWatchLoop interim alerts, and emitNotification. Returns
-// the path on success, null when there is nothing to write yet (no promptId
-// or no events). Best-effort: any failure is swallowed so the bridge never
-// blocks a response on a digest write.
-export function refreshDigestForJob(job, statusOverride = null) {
-  if (!job || !job.promptId || !job.jobId) return null;
-  if (job.target && !isAcpTarget(job.target)) {
-    return writeJobDigest({ ...job, status: statusOverride || job.status || 'running' }, job.adapterResult || null);
-  }
-  try {
-    return writeDigest(job.promptId, {
-      jobId:      job.jobId,
-      target:     job.target || 'copilot',
-      targetLabel: targetLabel(job.target || 'copilot'),
-      status:     statusOverride || job.status || 'running',
-      mode:       job.mode || null,
-      template:   job.template || null,
-      thread:     job.thread || null,
-      parallel:   !!job.fleet,
-      parallelStrategy: job.parallelStrategy || null,
-      task:       job.task || null,
-      sessionId:  job.sessionId || null,
-      startedAt:  job.startedAt || null,
-      terminalAt: job.terminalAt || null,
-      verdict:    job.verdict,
-      verdictReason: job.verdictReason ?? null,
-      usage:      job.usage ?? null,
-    });
-  } catch (err) {
-    log('WARN', 'refreshDigestForJob failed:', job.jobId, err.message);
-    return null;
-  }
 }
 
 const DIGEST_RESOURCE_SCHEME = 'agent-digest';
@@ -869,7 +196,7 @@ const DIGEST_RESOURCE_FILE_RE = /^agent-digest-([a-zA-Z0-9._-]+)\.md$/;
 const DIGEST_RESOURCE_URI_RE = /^agent-digest:\/\/([a-zA-Z0-9._-]+)$/;
 
 export function digestResourceUri(jobId) {
-  if (!digestPath(jobId)) return null;
+  if (typeof jobId !== 'string' || !/^[a-zA-Z0-9._-]+$/.test(jobId)) return null;
   return `${DIGEST_RESOURCE_SCHEME}://${jobId}`;
 }
 
@@ -886,7 +213,6 @@ function digestJobIdsFromDisk() {
       if (match) ids.add(match[1]);
     }
   } catch {}
-  for (const jobId of jobs.keys()) ids.add(jobId);
   return [...ids].sort();
 }
 
@@ -898,14 +224,12 @@ export function digestResourceForJobId(jobId) {
   try { stat = statSync(path); }
   catch { return null; }
   if (!stat.isFile()) return null;
-  const job = jobs.get(jobId);
-  const status = job?.status ? ` (${job.status})` : '';
   // Keep the descriptor minimal. Codex 0.139 accepts this shape for
   // list_mcp_resources; richer MCP metadata is still not portable across hosts.
   return {
     uri,
     name: `agent-digest-${jobId}`,
-    description: `Smart transcript digest for agent job ${jobId}${status}.`,
+    description: `Smart transcript digest for agent job ${jobId}.`,
     mimeType: DIGEST_RESOURCE_MIME_TYPE,
   };
 }
@@ -941,2096 +265,13 @@ export function readDigestResource(uri) {
   };
 }
 
-function digestUriForJobPrompt(jobId, promptId) {
-  return jobId && promptId ? digestResourceUri(jobId) : null;
-}
-
-function addDigestReference(obj, { jobId, promptId }) {
-  const digestUri = digestUriForJobPrompt(jobId, promptId);
-  if (!digestUri) return null;
-  obj.digest_uri = digestUri;
-  obj.debug = {
-    ...(obj.debug && typeof obj.debug === 'object' ? obj.debug : {}),
-    digest_path: digestPath(jobId),
-  };
-  return digestUri;
-}
-
-function addDigestMeta(meta, { jobId, promptId }) {
-  const digestUri = digestUriForJobPrompt(jobId, promptId);
-  if (!digestUri) return null;
-  meta.digest_uri = digestUri;
-  meta.debug_digest_path = digestPath(jobId);
-  return digestUri;
-}
-
 function digestResourceLinkForResult(obj) {
   const jobId = obj?.job_id || obj?.meta?.job_id;
   const advertisedUri = obj?.digest_uri || obj?.meta?.digest_uri;
   if (!jobId || !advertisedUri) return null;
   if (advertisedUri !== digestResourceUri(jobId)) return null;
-  const resource = digestResourceForJobId(jobId);
-  return resource ? { type: 'resource_link', ...resource } : null;
+  return { type: 'resource_link', uri: advertisedUri, name: `agent-digest-${jobId}`, mimeType: DIGEST_RESOURCE_MIME_TYPE };
 }
-
-// Per-job re-steer availability. Copilot can reply on any live (non-terminal)
-// prompt; OpenCode can reply only in server mode with a live session; codex can
-// reply only on the app-server transport, where `turn/steer` injects into the
-// RUNNING turn (the `codex exec` pipe has no control channel at all).
-//
-// Every branch keys on the adapter the JOB recorded, never on the live env, so
-// flipping CODEX_RUNTIME_ADAPTER/OPENCODE_RUNTIME_ADAPTER mid-flight cannot
-// make a running job advertise a capability its own transport does not have.
-function jobReplyAvailable(job) {
-  if (!job || job.terminalAt) return false;
-  const target = job.target;
-  if (isAcpTarget(target)) return Boolean(job.promptId);
-  if (target === 'opencode') return Boolean(job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId);
-  if (target === 'codex') return Boolean(job.codexAdapter === 'appserver' && job.sessionId);
-  return false;
-}
-
-// Per-job restart-resume availability — whether a respawned bridge could
-// reattach to this job. Copilot resumes via the detached daemon; OpenCode server
-// jobs resume via the surviving server + persisted session id; codex app-server
-// jobs resume via `thread/resume`, which rejoins a RUNNING thread on the shared
-// broker and still reads the transcript back from the rollout when the broker
-// itself died.
-function jobResumeAvailable(job) {
-  if (!job) return false;
-  const target = job.target;
-  if (isAcpTarget(target)) return Boolean(job.promptId && runtimeSupportsDetachedPromptResume(target));
-  if (target === 'opencode') return Boolean(job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId);
-  if (target === 'codex') return Boolean(job.codexAdapter === 'appserver' && job.sessionId);
-  return false;
-}
-
-export function buildJobResponse(job, inspect = null, { includeTimeline = false } = {}) {
-  const data = inspect || {};
-  // Status precedence: when the worker has emitted a bridge-level remap
-  // (timeout or unreachable), prefer the job's status over inspect data.
-  // Inspect is sourced from the daemon, which doesn't know about these
-  // bridge-only statuses and would otherwise surface the raw underlying
-  // value (e.g. failed for prompt timeout). For supervisor-detected and
-  // normal terminal states, inspect data wins as before.
-  const bridgeStatus = job.status;
-  const isBridgeRemap = bridgeStatus === 'timeout' || bridgeStatus === 'unreachable';
-  const status = isBridgeRemap ? bridgeStatus : (data.status || bridgeStatus || 'unknown');
-  const response = {
-    ok: true,
-    job_id: job.jobId,
-    target: job.target,
-    status,
-    prompt_id: data.promptId || job.promptId || null,
-    session_id: data.sessionId || job.sessionId || null,
-    mode: job.mode || null,
-    parallel: job.parallelStrategy || null,
-    fleet: Boolean(job.fleet),
-    thread: job.thread || null,
-    cwd: data.cwd || job.cwd || null,
-    started_at: data.startedAt || iso(job.startedAt),
-    terminal_at: data.terminalAt || iso(job.terminalAt),
-    ms_since_last_event:
-      data.msSinceLastEvent ??
-      (job.terminalAt ? 0 : Math.max(0, Date.now() - (job.startedAt || Date.now()))),
-    stuck_reason: data.stuckReason || job.stuckReason || null,
-    supervisor_detail: data.stuckDetail || job.stuckDetail || null,
-    // detail is bridge-owned (set only by the worker on `unreachable` remap
-    // or when retainTerminalJob persists the reconciled value). The daemon
-    // never emits a `detail` field on inspect responses, so we read only
-    // from job. Keeping a `data.detail` fallback here would let a future
-    // daemon change silently override the bridge's authoritative value.
-    detail: job.detail || null,
-    failed_tools: Array.isArray(data.failedTools) && data.failedTools.length > 0
-      ? data.failedTools : Array.isArray(job.failedTools) ? job.failedTools : [],
-    latest_plan: data.latestPlan || null,
-    inspect_available: Boolean(
-      data.inspectAvailable ?? job.inspectAvailable ??
-      (job.promptId && (!job.retentionExpiresAt || job.retentionExpiresAt > Date.now()))
-    ),
-    // Per-job capability: whether THIS job can be re-steered / resumed right now,
-    // computed from the real predicate rather than the target descriptor. A
-    // cli-mode OpenCode job or one without a live session reports false even
-    // when the target advertises the capability.
-    reply_available: jobReplyAvailable(job),
-    resume_available: jobResumeAvailable(job),
-    retention_expires_at: data.retentionExpiresAt || iso(job.retentionExpiresAt),
-    activity:           includeTimeline ? (Array.isArray(data.activity) ? data.activity : []) : undefined,
-    activity_count:     includeTimeline ? (data.activityCount ?? 0) : undefined,
-    activity_truncated: includeTimeline ? Boolean(data.activityTruncated) : undefined,
-    session_reborn:     Boolean(job.sessionReborn),
-    session_retired:    Boolean(job.sessionRetired),
-  };
-  const failureClass = terminalFailureClass({ ...job, status });
-  if (failureClass) response.failure_class = failureClass;
-  // Present only when the transport reported it; see lib/usage.mjs.
-  if (job.usage) response.usage = job.usage;
-  addDigestReference(response, { jobId: job.jobId, promptId: job.promptId });
-  return response;
-}
-
-// --- Waiters ----------------------------------------------------------------
-//
-// `wait` parks a resolver on the target jobId (`send` returns synchronously,
-// so it never parks). The worker calls resolveAllWaiters through
-// retainTerminalJob when the job reaches a terminal state. A per-call
-// timeout returns {timeout:true, job} so the subagent can loop with a fresh
-// wait.
-
-const waiters = new Map(); // jobId -> Set<resolver>
-
-function parkWaiter(jobId, resolver) {
-  if (!waiters.has(jobId)) waiters.set(jobId, new Set());
-  waiters.get(jobId).add(resolver);
-}
-function unparkWaiter(jobId, resolver) {
-  const set = waiters.get(jobId);
-  if (!set) return;
-  set.delete(resolver);
-  if (set.size === 0) waiters.delete(jobId);
-}
-function resolveAllWaiters(jobId, value) {
-  const set = waiters.get(jobId);
-  if (!set) return;
-  waiters.delete(jobId);
-  for (const r of set) { try { r(value); } catch {} }
-}
-
-function waitForJob(jobId, maxWaitSec) {
-  return new Promise((resolve) => {
-    const existing = getJob(jobId);
-    if (!existing) { resolve({ unknown: true }); return; }
-    if (existing.terminalAt) { resolve({ terminal: true, job: existing }); return; }
-    let settled = false;
-    const resolver = (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      unparkWaiter(jobId, resolver);
-      resolve(value);
-    };
-    parkWaiter(jobId, resolver);
-    const timer = setTimeout(
-      () => resolver({ timeout: true, job: getJob(jobId) }),
-      Math.max(1, maxWaitSec) * 1000,
-    );
-  });
-}
-
-function buildWaitResponse(outcome) {
-  if (outcome.unknown) {
-    return asJson({
-      ok: false, action: 'wait', status: 'unknown_job',
-      error: "unknown job_id (may have been GC'd after retention expired)",
-    });
-  }
-  const job = outcome.job;
-  if (outcome.timeout) {
-    const stillRunning = {
-      ok: true, action: 'wait', status: 'still_running',
-      job_id: job.jobId,
-      target: job.target,
-      // Surface thread even on still_running so a crash+resume can still
-      // recover it. (thread-continuity invariant.)
-      thread: job.thread || null,
-      current_status: job.status || 'running',
-      parallel: job.parallelStrategy || null,
-      fleet: Boolean(job.fleet),
-      started_at: iso(job.startedAt),
-      age_s: Math.round((Date.now() - (job.startedAt || Date.now())) / 1000),
-      // Mirror the terminal digest field so a poll that catches the job mid-run
-      // still sees the rebirth signal — without this, callers using {wait,
-      // max_wait_sec} would only learn about the lost context on the next
-      // poll iteration that resolves terminally.
-      session_reborn: Boolean(job.sessionReborn),
-      // Resource URI for the smart-transcript digest the parent can read for an
-      // up-to-date progress summary without making another status round-trip.
-      hint: 'call agent_wait({ job_id, max_wait_sec }) again to continue blocking.',
-    };
-    addDigestReference(stillRunning, { jobId: job.jobId, promptId: job.promptId });
-    if (job.reattached) stillRunning.reattached = true;
-    return asJson(stillRunning);
-  }
-  markQueueConsumed(job.jobId);
-  // Final digest refresh for terminal-via-wait. This is the path the
-  // companion's wait loop hits when a long job finishes; without this the
-  // digest can lag behind by one supervisor-alert window (~60s).
-  refreshDigestForJob(job, job.status);
-  const meta = {
-    job_id: job.jobId, status: job.status,
-    target: job.target,
-    mode: job.mode || 'EXECUTE',
-    parallel: job.parallelStrategy || '',
-    fleet: Boolean(job.fleet) ? 'true' : 'false',
-    thread: job.thread || null,
-    prompt_id: job.promptId || null,
-    session_id: job.sessionId || null,
-    failed_tools: Array.isArray(job.failedTools) ? job.failedTools.join(',') : '',
-    stuck_reason: job.stuckReason || null,
-  };
-  if (job.detail) meta.detail = String(job.detail).slice(0, 80);
-  if (job.summary?.stopReason) meta.stop_reason = String(job.summary.stopReason);
-  const failureClass = terminalFailureClass(job);
-  if (failureClass) meta.failure_class = failureClass;
-  if (job.sessionReborn) meta.session_reborn = 'true';
-  if (job.sessionRetired) meta.session_retired = 'true';
-  if (job.reattached) meta.reattached = 'true';
-  if (job.existingPromptId) meta.existing_prompt_id = String(job.existingPromptId);
-  if (job.protocolAnswered !== undefined && job.protocolAnswered !== null) meta.protocol_answered = String(job.protocolAnswered);
-  // A completed review's verdict, as stored by retainTerminalJob: `null` is a
-  // real value here (the line was missing/malformed/conflicting — see
-  // `verdict_reason`), so the key is present whenever the job carries one.
-  if (job.verdict !== undefined) {
-    meta.verdict = job.verdict;
-    if (job.verdictReason) meta.verdict_reason = job.verdictReason;
-  }
-  if (job.usage) meta.usage = job.usage;
-  const digestUri = addDigestMeta(meta, { jobId: job.jobId, promptId: job.promptId });
-  return asJson({
-    ok: true, action: 'wait', status: job.status,
-    job_id: job.jobId,
-    target: job.target,
-    duration_ms: job.durationMs || null,
-    content: formatTerminalContent({ ...job, digestUri, target: job.target }),
-    meta,
-  });
-}
-
-// --- Notification payload ---------------------------------------------------
-
-function emitAlertNotification({ jobId, task, promptId, alert, startedAt, reqId = null }) {
-  const ageSec = Math.round((Date.now() - startedAt) / 1000);
-  const content = [
-    `Task: ${truncate(task, 200)}`,
-    '',
-    `**promptId:** ${promptId}  |  **age:** ${ageSec}s  |  **tier:** ${alert.tier}  |  **reason:** ${alert.reason}`,
-  ].join('\n');
-  const meta = {
-    job_id: jobId, status: 'watchdog', prompt_id: promptId,
-    age_sec: String(ageSec), tier: String(alert.tier), reason: alert.reason,
-  };
-  if (reqId) meta.req_id = String(reqId);
-  enqueueEvent({ kind: 'alert', jobId, content, meta });
-}
-
-// One-shot rebirth alert, fired at prompt-bg time when the daemon reports
-// that the bridge-supplied sessionId was stale and a fresh Copilot session
-// had to be minted. Surfaces *immediately* (next drain tick), independent of
-// whether the eventual completion succeeds, so the parent can correct course
-// in long-running threads. emitNotification's session_reborn meta + the
-// formatTerminalContent banner are belt-and-suspenders for callers that
-// don't drain alerts.
-function emitRebirthAlert({ jobId, task, promptId, thread, previousSid, newSessionId, startedAt, reqId = null, target = 'copilot' }) {
-  const ageSec = Math.round((Date.now() - startedAt) / 1000);
-  const content = [
-    `Task: ${truncate(task, 200)}`,
-    '',
-    `**${targetLabel(target)} session respawned** — the prior subprocess died, in-process conversation context was lost.`,
-    '',
-    `**thread:** ${thread || '(none)'}  |  **prev sid:** ${previousSid || '(none)'}  |  **new sid:** ${newSessionId}`,
-    '',
-    'If subsequent prompts in this thread depend on earlier turns, restate the relevant context.',
-  ].join('\n');
-  const meta = {
-    job_id: jobId, status: 'watchdog', prompt_id: promptId,
-    age_sec: String(ageSec), tier: '1', reason: 'session_reborn',
-    session_reborn: 'true',
-  };
-  if (thread)       meta.thread = String(thread);
-  if (previousSid)  meta.previous_session_id = String(previousSid);
-  if (newSessionId) meta.session_id = String(newSessionId);
-  if (reqId)        meta.req_id = String(reqId);
-  enqueueEvent({ kind: 'alert', jobId, content, meta });
-  log('WARN', 'rebirth:', jobId, `thread=${thread || '-'} prev=${previousSid || '-'} new=${newSessionId}`);
-}
-
-// --- Failure classification -------------------------------------------------
-//
-// `unreachable` used to be rendered by splitting on **target**: copilot got the
-// daemon hint, everything else got `verify <binaryEnv> or the <cli> CLI is
-// available` from the target descriptor. That is how a pure bridge-lifecycle
-// event (this process restarted while a job was in flight) told the operator to
-// go check a binary that was never involved. Classify by FAILURE CLASS instead;
-// the target only selects wording *inside* a class.
-
-// Bridge-owned lifecycle details: the owning bridge process went away, or a
-// restarted bridge found a job it structurally cannot reattach to. Nothing in
-// this class implicates the target binary, its config, or PATH.
-const BRIDGE_LIFECYCLE_DETAILS = new Set([
-  'target_adapter_non_resumable_after_restart',
-  'sdk_adapter_non_resumable_after_restart',
-  'rehydrate_no_promptid',
-  'target_child_orphaned_by_bridge_restart',
-  // Emitted by the hydrate ownership guard when both the owning bridge pid and
-  // the companion child pid are gone (the transport-close path, which leaves no
-  // hydrate trace of its own).
-  'bridge_transport_closed',
-]);
-
-// Target-prefix-stripped details that mean "the socket/stream carrying this job
-// closed", e.g. `opencode_server_gone` → `server_gone`.
-const TRANSPORT_DETAILS = new Set(['server_gone', 'server_unreachable', 'server_watch_error']);
-
-// The app-server itself answered, but a required subordinate runtime could not
-// be started. This is definitive bridge-owned evidence, unlike assistant prose.
-const RUNTIME_UNAVAILABLE_DETAILS = new Set([
-  'bridge_daemon_unreachable',
-  'codex_code_mode_host_unavailable',
-  'codex_runtime_unavailable',
-  // The ACP agent answered `initialize` with a protocol version this daemon
-  // does not speak; definitive, bridge-owned, and about the runtime.
-  'acp_protocol_mismatch',
-]);
-
-// The runtime is not there to be run: spawn could not find/exec it, or the
-// shell reported the 127 "command not found" exit.
-const RUNTIME_MISSING_RE = /\b(?:ENOENT|EACCES|ENOTDIR)\b|\bexited with code 127\b|\bcommand not found\b/i;
-// Socket/stream flap. The runtime may be perfectly healthy; the pipe is not.
-const TRANSPORT_RE = /\b(?:EPIPE|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT)\b|socket hang up|stream (?:closed|ended)/i;
-// The thread itself is gone. Two codex transports, one class:
-//   `codex exec`       — measured on 0.147.0: JSON-RPC code -32600 with the human
-//                        reason `no rollout found for thread id`, delivered on
-//                        stderr with a completely empty stdout.
-//   `codex app-server` — the same `no rollout found for thread id` reason from
-//                        `thread/resume`, and `thread not loaded: <id>` from
-//                        `thread/read`. Both mean this app-server has no readable
-//                        rollout for that id.
-//
-// The bare `-32600` code is deliberately NOT a signature. On `codex exec` it was a
-// safe synonym for the resume rejection because that was the only -32600 the
-// transport could emit; on `codex app-server` EVERY error is -32600 and only the
-// message distinguishes them (docs/RELIABILITY_REMEDIATION.md, "Error taxonomy"),
-// so keying on the code would tell an operator whose steer failed that their
-// perfectly alive thread is unrecoverable — the exact misdiagnosis this function
-// exists to kill. Nothing is lost by dropping it: the exec rejection carries the
-// message text as well as the code.
-//
-// `thread not found` is deliberately NOT in this class, and that is the opposite of
-// what the plan's first taxonomy said. Settled by measurement
-// (probes/codex-app-server/unloaded.mjs): a thread with a COMPLETED turn, whose
-// app-server was then SIGKILLed, answers a fresh app-server like this —
-//
-//   thread/loaded/list  -> []                                (not loaded here)
-//   thread/read         -> OK, full transcript                (reads from disk!)
-//   turn/interrupt      -> -32600 `thread not found: <id>`
-//   turn/steer          -> -32600 `thread not found: <id>`
-//   thread/resume       -> OK, status {type:"idle"}           (fully recoverable)
-//
-// So `thread not found` means "not loaded into THIS process", not "gone" — the very
-// case the plan measures as fully recoverable. It is also what a genuinely
-// nonexistent id returns, so the message cannot tell the two apart and must not be
-// used to declare a death. The earlier reading came from
-// probes/codex-app-server/errs.mjs, which only ever asked about an all-zero id that
-// exists nowhere; with n=1 and that one case degenerate, the generalization did not
-// hold. The adapter's answer is structural, not textual: always `thread/resume`
-// before `turn/interrupt` / `turn/steer` on a thread this connection did not start.
-const THREAD_NOT_RESUMABLE_RE = /no rollout found for thread id|thread not loaded/i;
-
-// Left to the `unknown` fallback, because the thread is alive and only the bridge's
-// aim was off:
-//   `thread not found: <id>`      — see above: not loaded here, resume fixes it.
-//   `no active turn to steer`     — steering an idle thread, or a stale expectedTurnId.
-//   `no active turn to interrupt` — cancelling a turn that already ended.
-// In all three the thread is alive, so `thread_not_resumable` would be a lie. Neither is
-// a lifecycle event (nothing lost ownership of the job), nor a transport flap (the
-// RPC round-tripped fine and came back with an answer), and `runtime_unavailable`
-// is the only class allowed to name `binaryEnv` — the binary is plainly running.
-// `unknown` is what is left, and it is the honest landing: its rendering asserts
-// no cause beyond "could not reach", says outright that the bridge will not guess
-// one, and hands the operator the captured channels as the evidence.
-// One caveat for whoever lands the adapter, to be fixed there and not here: the
-// unreachable branches render stdout/stderr only, so a JSON-RPC reason that
-// arrives on the job's `error` alone — what codex-runtime.mjs does when the reason
-// comes off an event rather than stderr — is classified but never shown.
-
-// Classify an `unreachable` job into one of five failure classes. `evidence` is
-// the raw failure text (`error` + stderr) — required because the two
-// signature-keyed classes cannot be told apart from `detail` alone.
-//
-// ORDERING IS LOAD-BEARING. Every detail-keyed test runs BEFORE any text regex.
-// A `detail` is set deliberately by the bridge at the point of failure and is
-// definitive; the regexes are heuristics over free text that the companion also
-// writes to. Testing text first re-creates the exact misdiagnosis this function
-// exists to kill: `opencode_server_unreachable` (a transport flap) reclassified
-// as `runtime_unavailable` because the assistant's own output happened to quote
-// `bash: pnpm: command not found`.
-//
-// Correspondingly, the caller must NOT feed stdout into `evidence`: on the
-// opencode server adapter stdout *is* the assistant's prose. Both signatures the
-// text classes exist for (codex's resume rejection, spawn ENOENT / exit 127)
-// arrive on stderr, so stdout contributes only false positives here. It is still
-// rendered in the operator-facing excerpt — classification and display are
-// deliberately different corpora.
-//
-// `target` is used ONLY to strip the target prefix that the generic worker
-// paths bake into their detail strings, so the classifier keys on the condition
-// and never on which companion produced it.
-export function classifyUnreachable(detail, target, evidence = '') {
-  const raw = detail ? String(detail) : '';
-  const prefix = target ? `${target}_` : '';
-  const key = prefix && raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
-  const text = typeof evidence === 'string' ? evidence : String(evidence ?? '');
-
-  // --- definitive: keyed on a detail the bridge set itself ---
-  if (BRIDGE_LIFECYCLE_DETAILS.has(raw)) return 'bridge_lifecycle';
-  if (raw === 'thread_not_resumable') return 'thread_not_resumable';
-  // The only class permitted to name `descriptor.binaryEnv`.
-  if (RUNTIME_UNAVAILABLE_DETAILS.has(raw)) return 'runtime_unavailable';
-  if (raw === 'bridge_timeout' || TRANSPORT_DETAILS.has(key)) return 'runtime_transport';
-
-  // --- heuristic: signature over the failure text, only when no detail spoke ---
-  if (THREAD_NOT_RESUMABLE_RE.test(text)) return 'thread_not_resumable';
-  if (RUNTIME_MISSING_RE.test(text)) return 'runtime_unavailable';
-  if (TRANSPORT_RE.test(text)) return 'runtime_transport';
-  // Honest fallback: no signature matched, so do not guess a cause.
-  return 'unknown';
-}
-
-// One derivation for every machine-readable surface and the human formatter.
-// stdout is intentionally excluded: for server adapters it is assistant prose,
-// and a quoted missing-command example must not become infrastructure evidence.
-export function terminalFailureClass({
-  status, detail, target, error, stderr = null, adapterResult = null,
-} = {}) {
-  if (status !== 'unreachable') return null;
-  const errText = typeof stderr === 'string' ? stderr
-    : (typeof adapterResult?.stderr === 'string' ? adapterResult.stderr : '');
-  const evidence = [error, errText]
-    .filter((value) => typeof value === 'string' && value.trim())
-    .join('\n');
-  return classifyUnreachable(detail, target, evidence);
-}
-
-// Unwrap exactly one level of JSON from an error message. codex delivers
-// `error.message` and `turn.failed.error.message` as a JSON-ENCODED STRING
-// carrying an API error envelope, e.g.
-//   {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"…"}}
-// so the operator sees a wall of punctuation with the one useful sentence
-// buried inside it. Parse defensively — anything that is not JSON, or is JSON
-// without an inner message, is returned verbatim. Never throws: a mangled error
-// must still render as *something*.
-export function unwrapErrorMessage(raw) {
-  if (raw == null) return '';
-  if (typeof raw !== 'string') return String(raw);
-  const trimmed = raw.trim();
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('"')) return raw;
-  let parsed;
-  try { parsed = JSON.parse(trimmed); } catch { return raw; }
-  if (typeof parsed === 'string') return parsed;
-  if (!parsed || typeof parsed !== 'object') return raw;
-  const inner = (parsed.error && typeof parsed.error === 'object') ? parsed.error : parsed;
-  if (typeof inner.message === 'string' && inner.message) return inner.message;
-  if (typeof parsed.message === 'string' && parsed.message) return parsed.message;
-  return raw;
-}
-
-const MAX_CHANNEL_CHARS = 700;
-
-function tailChars(s, n) { return s.length > n ? `…${s.slice(s.length - (n - 1))}` : s; }
-
-// Inline a truncated tail of one captured channel. Measured on codex 0.147.0:
-// a bad `-m <model>` exits 1 with a COMPLETELY EMPTY stderr and the whole error
-// on stdout, while a bogus `resume <id>` gives a COMPLETELY EMPTY stdout with
-// the whole reason on stderr. Rendering stderr alone therefore loses half the
-// failure population outright — and these are precisely the failures where
-// nobody opens the digest file. So: both channels, always; empty ones cost
-// nothing because they render as nothing.
-function channelExcerpt(name, text) {
-  const body = typeof text === 'string' ? text.trim() : '';
-  if (!body) return '';
-  return `\n\n**${name} (tail):**\n\`\`\`\n${tailChars(body, MAX_CHANNEL_CHARS)}\n\`\`\``;
-}
-
-// Pure formatter: takes the fields a terminal job carries and returns the
-// human-readable body. Extracted from emitNotification so buildWaitResponse
-// can reuse the exact same formatting when the subagent blocks to completion.
-export function formatTerminalContent({
-  jobId, status, task, mode, durationMs,
-  summary, error, stuckReason, detail, failedTools, promptId,
-  sessionReborn = false, sessionRetired = false, digestUri = null,
-  target = 'copilot',
-  // Captured channels. buildWaitResponse spreads the whole job, so
-  // `adapterResult` arrives for free on that path; explicit stdout/stderr let a
-  // caller (or a test) supply them directly.
-  adapterResult = null, stdout = null, stderr = null,
-  // A completed review's parsed verdict (see reviewVerdictFields). Undefined
-  // on every other template; null when the line could not be read.
-  verdict = undefined, verdictReason = null,
-}) {
-  const label = targetLabel(target);
-  const rebirthBanner = sessionReborn
-    ? `> ⚠ ${label} session was respawned mid-thread; prior in-process conversation context was lost. ` +
-      'If your next prompt depends on earlier turns of this thread, restate the relevant context.\n\n'
-    : '';
-  const taskHeader = rebirthBanner + `Task: ${truncate(task, 200)}\n\n`;
-  const duration = durationMs || 0;
-  const rubberDuck = rubberDuckTarget(target)
-    ? classifyRubberDuck(summary?.message, summary?.toolCalls) : null;
-  const outText = typeof stdout === 'string' ? stdout
-    : (typeof adapterResult?.stdout === 'string' ? adapterResult.stdout : '');
-  const errText = typeof stderr === 'string' ? stderr
-    : (typeof adapterResult?.stderr === 'string' ? adapterResult.stderr : '');
-  const channels = channelExcerpt('stdout', outText) + channelExcerpt('stderr', errText);
-
-  if (status === 'completed' && summary?.message) {
-    const filesTouched = (summary.toolCalls || [])
-      .map((tc) => tc?.input?.path || tc?.input?.file_path)
-      .filter(Boolean);
-    const filesLine = filesTouched.length
-      ? `\n\n**Files touched:** ${[...new Set(filesTouched)].slice(0, 10).join(', ')}`
-      : '';
-    const failedLine = (Array.isArray(failedTools) && failedTools.length)
-      ? `\n\n**Failed tools:** ${failedTools.slice(0, 10).join(', ')}`
-      : '';
-    let rubberDuckFooter = '';
-    if (rubberDuck === 'clean') {
-      rubberDuckFooter = '\n\n_Rubber-duck: ✓ clean_';
-    } else if (rubberDuck === 'revised') {
-      rubberDuckFooter = '\n\n_Rubber-duck: ↻ revised — see `RUBBER-DUCK:` in the message above._';
-    } else if (rubberDuck === 'unavailable') {
-      rubberDuckFooter = '\n\n_Rubber-duck: unavailable — Copilot reported that the native critic could not complete._';
-    } else if (rubberDuck === 'unverified') {
-      rubberDuckFooter = '\n\n_Rubber-duck: unverified — no completed native critic call was recorded._';
-    }
-    let verdictFooter = '';
-    if (verdict !== undefined) {
-      verdictFooter = verdict
-        ? `\n\n_Verdict: ${verdict}_`
-        : `\n\n_Verdict: none — the \`VERDICT:\` line is ${verdictReason || 'unreadable'}; the review did not conclude, so treat the subject as unreviewed._`;
-    }
-    return taskHeader + summary.message +
-      `\n\n**Tool calls:** ${(summary.toolCalls || []).length}  •  **Duration:** ${Math.round(duration / 1000)}s` +
-      filesLine + failedLine + rubberDuckFooter + verdictFooter;
-  }
-  if (status === 'completed') {
-    return taskHeader +
-      `${label} reported completion but returned no assistant message. ` +
-      'Treat this as a failed turn and re-dispatch with explicit context.';
-  }
-  if (status === 'stuck') {
-    return taskHeader +
-      `${label} got stuck on: \`${stuckReason || 'unknown'}\`.\n\n` +
-      (promptId
-        ? `Inspect with \`agent_status({ job_id:"${jobId}", verbose:true })\` before deciding whether to recover directly.`
-        : 'Prompt inspection is unavailable for this job; decide whether to re-fire or recover directly.');
-  }
-  if (status === 'failed') {
-    // `error` is frequently a JSON-encoded API envelope (a bad `-m` produces
-    // exactly that, on stdout, with an empty stderr) — unwrap one level so the
-    // operator reads a sentence rather than an escaped blob, and inline both
-    // channels so the sentence has its context attached.
-    return taskHeader + `${label} job failed: ${unwrapErrorMessage(error) || 'unknown error'}` + channels;
-  }
-  if (status === 'cancelled') {
-    return taskHeader + `${label} job was cancelled.` +
-      (summary?.message ? `\n\nPartial output:\n${summary.message}` : '');
-  }
-  if (status === 'running') {
-    return taskHeader + `${label} job exceeded the bridge's wait budget. Runtime was asked to cancel.`;
-  }
-  if (status === 'timeout') {
-    const failedLine = (Array.isArray(failedTools) && failedTools.length)
-      ? `\n\n**Failed tools:** ${failedTools.slice(0, 10).join(', ')}` : '';
-    const digestHint = (detail) => digestUri
-      ? `\n\n**Partial transcript digest:** \`${digestUri}\` — read this MCP resource BEFORE re-dispatching. ${detail}`
-      : '';
-    const targetDigestLine = digestHint('It contains any captured assistant output, raw stdout/stderr, and job metadata.');
-    const digestLine = digestHint(
-      (fleetCapable(target)
-        ? 'It contains the partial assistant message, /fleet sub-agent reports (often near-complete), files touched, and todos. '
-        : 'It contains the partial assistant message, files touched, and todos. ') +
-      'You may be able to finalise from the digest alone, or use it to scope a much smaller follow-up send.');
-    if (!isAcpTarget(target)) {
-      const timeoutEnv = getTarget(target)?.timeoutEnv || 'AGENT_COMPANION_OPENCODE_TIMEOUT_MS';
-      return taskHeader +
-        `${label} did not finish within the target timeout (${Math.round(duration / 1000)}s).\n\n` +
-        'The bridge terminated the target process. Recommended next steps for the parent:\n' +
-        '- Read the digest resource URI below for any partial output and stderr.\n' +
-        '- Decompose the task into a smaller, explicitly-scoped send.\n' +
-        `- If the task is genuinely long, raise \`${timeoutEnv}\` and retry.` +
-        failedLine + targetDigestLine;
-    }
-    const retiredLine = sessionRetired
-      ? `\n\n**Session:** the timed-out ${label} session was retired; the next send on this thread starts a fresh session. Restate any needed context from the digest.`
-      : '';
-    return taskHeader +
-      `${label}'s model turn did not finish within the wait budget (${Math.round(duration / 1000)}s).\n\n` +
-      'The daemon is alive; the task was too large for one turn. Recommended next steps for the parent:\n' +
-      '- Read the partial-transcript digest resource URI below — sub-agent reports may already cover the work.\n' +
-      '- Decompose the task into smaller, explicitly-scoped sub-sends (target ≤ ~100 LOC of source per send).\n' +
-      '- For ANALYZE on large files, pass `template_args.scope_hint` (e.g. "imports/types only", "lines 1-120") to bind the analysis to a specific section.\n' +
-      '- Raise `max_wait_sec` (cap 1200s / 20 min for all modes) if the task is genuinely long.' +
-      (fleetCapable(target)
-        ? "\n- Try `parallel: \"never\"` once if you suspect /fleet's coordination overhead is the bottleneck for a strictly linear task."
-        : '') +
-      failedLine + digestLine + retiredLine;
-  }
-  if (status === 'unreachable') {
-    const detailLine = detail ? ` (detail: ${detail})` : '';
-    // Classification corpus is `error` + stderr ONLY. stdout is deliberately
-    // excluded: on the opencode server adapter it carries the assistant's own
-    // prose, so a model quoting `command not found` would otherwise be read as
-    // a missing binary. stdout is still rendered below in `channels`.
-    const failureClass = terminalFailureClass({ status, detail, target, error, stderr: errText });
-    const classLine = `\n\n**Failure class:** \`${failureClass}\``;
-    const digestPointer = digestUri
-      ? `the digest resource \`${digestUri}\``
-      : `the digest/logs under \`${runtimeDir()}\``;
-
-    if (failureClass === 'bridge_lifecycle') {
-      // Causally neutral by construction: the bridge genuinely cannot tell
-      // which of several outcomes applied, and saying so is more useful than
-      // an authoritative-sounding guess. Never names `binaryEnv` — no binary
-      // is implicated by a bridge losing ownership of its own job.
-      const cause = detail === 'sdk_adapter_non_resumable_after_restart'
-        ? 'The experimental Copilot SDK adapter cannot reattach an in-flight prompt after the bridge process restarts. ACP remains the default adapter for restart-resumable jobs.'
-        : detail === 'rehydrate_no_promptid'
-          ? 'A restarted bridge found this job in flight with no prompt id recorded, so there is nothing left to reattach to.'
-          : 'The bridge process that owned this job went away while the job was in flight, and the bridge that replaced it cannot reattach to the work.';
-      return taskHeader +
-        `The bridge lost ownership of this ${label} job${detailLine}.\n\n` +
-        `${cause}\n\n` +
-        `This is a bridge-lifecycle event, not a ${label} problem — nothing here implicates the ` +
-        'target binary, its configuration, or your PATH. The bridge also cannot tell which of ' +
-        'several outcomes actually applied: the companion turn may have completed, may have died ' +
-        'when its pipe closed, or may still be running detached. Treat the outcome as unknown ' +
-        'rather than failed.\n\n' +
-        `**Next:** read ${digestPointer} for whatever was captured before the handover, then ` +
-        're-send with the needed context restated.' + classLine + channels;
-    }
-
-    if (failureClass === 'thread_not_resumable') {
-      return taskHeader +
-        `The recorded ${label} thread could not be resumed${detailLine}.\n\n` +
-        'The runtime rejected the thread id itself — its rollout is missing, pruned, or was ' +
-        'written under a different home directory. This is not a missing-binary condition and ' +
-        'retrying the same resume will fail identically.\n\n' +
-        '**Next:** start a fresh send and restate the context you need from ' +
-        `${digestPointer}.\n\n` +
-        'Note: codex reports this on stderr with a completely empty stdout, so the excerpt below ' +
-        'may carry only one channel.' + classLine + channels;
-    }
-
-    if (failureClass === 'runtime_unavailable') {
-      if (detail === 'codex_code_mode_host_unavailable') {
-        const partialEvidence = channels || channelExcerpt('assistant output', summary?.message);
-        return taskHeader +
-          `The Codex app-server was reachable, but its command runner was unavailable${detailLine}.\n\n` +
-          'The assistant output below is partial runtime evidence only, not a task verdict. ' +
-          'Do not accept it as a review, build, or test conclusion; repair the command runner ' +
-          `and re-send after restarting the Codex runtime. Read ${digestPointer} for the captured turn.` +
-          classLine + partialEvidence;
-      }
-      if (detail === 'acp_protocol_mismatch') {
-        // The reason lives on `error`, not on a captured channel: say it.
-        return taskHeader +
-          `The ${label} ACP agent answered a protocol version this bridge does not speak${detailLine}.\n\n` +
-          `${unwrapErrorMessage(error) || 'The daemon refused the handshake.'}\n\n` +
-          'The daemon pins ACP v1 and does not adapt — the v2 draft renames methods, so guessing would send calls the ' +
-          `agent does not have. Install a ${label} release that speaks v1 (or wait for this bridge to adopt the new ` +
-          'version), run `node scripts/doctor.mjs`, and re-send.' + classLine + channels;
-      }
-      if (detail === 'codex_runtime_unavailable') {
-        return taskHeader +
-          `The Codex app-server runtime was unavailable before a task turn could start${detailLine}.\n\n` +
-          'The bridge made at most one guarded broker restart attempt. Run `node scripts/doctor.mjs` ' +
-          'to inspect the selected Codex/helper pair, quarantine state, and running-versus-installed broker identity; ' +
-          'then re-send after the runtime is healthy.' + classLine + channels;
-      }
-      // The one class where the binary really is the suspect, and therefore
-      // the only one allowed to name `descriptor.binaryEnv`. Wording unchanged.
-      let runtimeHint;
-      if (isAcpTarget(target)) {
-        runtimeHint = `check \`ps -ef | grep acp-daemon\` and tail \`${bridgeLogFile()}\` / \`${daemonLogFile(target)}\` to confirm the ${label} daemon is alive.`;
-      } else {
-        // Descriptor-driven, not a hardcoded "for OpenCode" lead-in — reachable
-        // for any non-copilot target whose binary is missing or not executable.
-        const descriptor = getTarget(target);
-        const binHint = descriptor
-          ? `verify \`${descriptor.binaryEnv}\` or the \`${descriptor.binaryNames[0]}\` CLI is available`
-          : 'verify the target binary is installed and on PATH';
-        runtimeHint = `check the target binary/configuration and read the digest/logs under \`${runtimeDir()}\`; ${binHint}.`;
-      }
-      return taskHeader +
-        `Bridge could not reach the ${label} runtime${detailLine}.\n\n` +
-        `This is infrastructure-level — ${runtimeHint}` + classLine + channels;
-    }
-
-    if (failureClass === 'runtime_transport') {
-      return taskHeader +
-        `The bridge's transport to the ${label} runtime failed mid-job${detailLine}.\n\n` +
-        'The runtime may well be installed and healthy: the socket or stream carrying this job ' +
-        'closed under it, so the turn can no longer be observed. Whatever the turn completed is ' +
-        'simply not visible to the bridge.\n\n' +
-        `**Next:** read ${digestPointer}, confirm the runtime process is still alive, and re-send. ` +
-        'A repeat means the transport, not the task.' + classLine + channels;
-    }
-
-    return taskHeader +
-      `Bridge could not reach the ${label} runtime${detailLine}.\n\n` +
-      'The bridge has no signature for this failure, so it will not guess a cause. The captured ' +
-      `output below and ${digestPointer} are the evidence; do not assume the target binary is at fault ` +
-      'without checking it.' + classLine + channels;
-  }
-  return taskHeader + `Unexpected terminal status: ${status}`;
-}
-
-export function emitNotification({
-  jobId, status, summary, error, stuckReason, detail = null, duration,
-  task, mode, cwd, thread = null, promptId = null, sessionId = null,
-  reconciled = false, bridgeReason = null, failedTools = [], reqId = null,
-  sessionReborn = false, sessionRetired = false, fleet = false, target = 'copilot', extraMeta = null,
-}) {
-  if (
-    target === 'copilot' &&
-    status === 'completed' &&
-    typeof summary?.message === 'string' &&
-    /(?:^|\n)\s*(?:Info:\s*)?Operation cancelled by user\.?\s*$/i.test(summary.message.trim())
-  ) {
-    status = 'stuck';
-    if (!stuckReason) stuckReason = 'cancelled_before_summary';
-  }
-
-  const label = targetLabel(target);
-
-  // Copilot CLI surfaces backend-model failures as stopReason="end_turn" with
-  // the error text as the assistant message, so without this remap they'd be
-  // classified as "completed" with the error masquerading as content. Cancel
-  // takes precedence above (a cancellation during a retry storm is "stuck").
-  if (
-    target === 'copilot' &&
-    status === 'completed' &&
-    typeof summary?.message === 'string' &&
-    /Error:\s*Execution failed:\s*Error:\s*Failed to get response from the AI model/i.test(summary.message)
-  ) {
-    status = 'failed';
-    if (!detail) detail = 'copilot_capi_failure';
-  }
-  // The worker normally persists this remap before notifying. Keep the same
-  // guard here as a defensive boundary for reconciled/direct notifications so
-  // no terminal queue row can promote a command-runner blocker to a verdict.
-  if (isCodexCommandRunnerBlocker({ target, status, summary })) {
-    status = 'unreachable';
-    error = error ||
-      'Codex app-server completed the turn only after reporting that its command runner was unavailable; no task verdict was produced.';
-    detail = 'codex_code_mode_host_unavailable';
-  }
-  if (status === 'completed' && isEmptyCompletedSummary(summary)) {
-    status = 'failed';
-    error = `${label} returned completed without any assistant message, tool calls, or plan updates.`;
-    detail = detail || 'empty_completed';
-    sessionRetired = true;
-  }
-
-  const meta = {
-    job_id: jobId, status,
-    target,
-    duration_ms: String(duration),
-    mode: mode || 'EXECUTE',
-  };
-  if (cwd)       meta.cwd = String(cwd);
-  if (thread)    meta.thread = String(thread);
-  if (promptId)  meta.prompt_id = String(promptId);
-  if (sessionId) meta.session_id = String(sessionId);
-  meta.inspect_available = promptId ? 'true' : 'false';
-  if (summary?.toolCalls)  meta.tool_calls  = String(summary.toolCalls.length || 0);
-  if (summary?.stopReason) meta.stop_reason = String(summary.stopReason);
-  if (stuckReason)         meta.stuck_reason = String(stuckReason).slice(0, 80);
-  if (detail)              meta.detail = String(detail).slice(0, 80);
-  const failureClass = terminalFailureClass({
-    status, detail, target, error,
-    adapterResult: jobs.get(jobId)?.adapterResult ?? null,
-  });
-  if (failureClass) meta.failure_class = failureClass;
-  if (Array.isArray(failedTools) && failedTools.length) meta.failed_tools = failedTools.join(',').slice(0, 80);
-  if (reconciled)   meta.reconciled = 'true';
-  if (bridgeReason) meta.bridge_reason = String(bridgeReason).slice(0, 40);
-  if (reqId)        meta.req_id = String(reqId);
-  if (sessionReborn) meta.session_reborn = 'true';
-  if (sessionRetired) meta.session_retired = 'true';
-  meta.fleet = fleet ? 'true' : 'false';
-  if (extraMeta && typeof extraMeta === 'object') {
-    for (const [k, v] of Object.entries(extraMeta)) {
-      if (v !== undefined && v !== null) meta[k] = String(v).slice(0, 80);
-    }
-  }
-
-  const rubberDuck = rubberDuckTarget(target)
-    ? classifyRubberDuck(summary?.message, summary?.toolCalls) : null;
-  if (status === 'completed' && rubberDuck !== null) meta.rubber_duck = rubberDuck;
-  // Read against THIS call's status, not the job's: the remaps above are the
-  // defensive boundary for reconciled/direct notifications, and a verdict must
-  // never ride a status that is no longer `completed`.
-  const verdictFields = reviewVerdictFields({ template: jobs.get(jobId)?.template, status, summary });
-  if (verdictFields) {
-    meta.verdict = verdictFields.verdict;
-    if (verdictFields.verdictReason) meta.verdict_reason = verdictFields.verdictReason;
-  }
-  // From the job once retained (its one home), or straight off the summary for
-  // a notification that never went through retainTerminalJob. Assigned whole,
-  // not through extraMeta, whose values are strings sliced to 80 chars.
-  const usage = jobs.get(jobId)?.usage ?? summary?.usage ?? null;
-  if (usage) meta.usage = usage;
-
-  // Final digest refresh on terminal. We pass the current `status` because
-  // the job's stored status may not yet reflect a late remap (e.g. cancelled
-  // → stuck) we did above. The resource URI is stable per jobId; surface it
-  // whether or not the write succeeded so the parent always knows where to look.
-  if (promptId && jobId) {
-    if (target && !isAcpTarget(target)) {
-      try { refreshDigestForJob(jobs.get(jobId), status); }
-      catch (err) { log('WARN', 'emit generic digest write failed:', jobId, err.message); }
-    } else {
-      try {
-        writeDigest(promptId, {
-          jobId, status, mode, template: null, thread, parallel: !!fleet,
-          target, targetLabel: label,
-          task, sessionId, startedAt: duration ? Date.now() - duration : null,
-          terminalAt: Date.now(),
-          verdict: verdictFields?.verdict, verdictReason: verdictFields?.verdictReason ?? null,
-          usage,
-        });
-      } catch (err) { log('WARN', 'emit digest write failed:', jobId, err.message); }
-    }
-  }
-  const digestUri = addDigestMeta(meta, { jobId, promptId });
-
-  const content = formatTerminalContent({
-    jobId, status, task, mode, durationMs: duration,
-    summary, error, stuckReason, detail, failedTools, promptId,
-    sessionReborn, sessionRetired, digestUri, target,
-    // buildWaitResponse spreads the whole job, so it gets this for free. This
-    // surface enumerates its fields, so without the explicit hand-off the same
-    // job renders with a different failure class and zero channel excerpts when
-    // it is delivered through the queue drain — which is the path the parent
-    // actually reads when it did not block on agent_wait.
-    adapterResult: jobs.get(jobId)?.adapterResult ?? null,
-    ...(verdictFields || {}),
-  });
-
-  enqueueEvent({ kind: 'terminal', jobId, content, meta });
-  if (rubberDuckTarget(target) && status === 'completed' && ['missing', 'unavailable', 'unverified'].includes(rubberDuck)) {
-    log('WARN', 'emit:', jobId, `rubber_duck=${rubberDuck} — completed task has no verified native critique`);
-  }
-  log('INFO', 'emit:', jobId, `status=${status} duration_ms=${duration}${status === 'completed' ? ` rubber_duck=${rubberDuck}` : ''}${stuckReason ? ` stuck=${stuckReason}` : ''}${detail ? ` detail=${detail}` : ''}${bridgeReason ? ` bridge=${bridgeReason}` : ''}`);
-}
-
-function truncate(s, n) { if (!s) return ''; return s.length > n ? s.slice(0, n - 1) + '…' : s; }
-
-// Classify the rubber-duck verdict surfaced by Copilot in the final message.
-// The rubber-duck wrapper is appended to general/research prompts, so every
-// completed job from those templates should yield at least one
-// `RUBBER-DUCK: clean.`, `revised …`, or `unavailable …` line. Success markers
-// also require a completed native critic call in the captured tool stream;
-// a differently named reviewer is not evidence that rubber-duck ran.
-//
-// Multi-verdict handling: when /fleet dispatches sub-agents, each sub-agent
-// receives the wrapper instructions and may emit its own verdict line; the
-// orchestrator concatenates sub-agent outputs into the final message, so the
-// message can contain N verdicts. We scan ALL matches and fail-pessimistic:
-// if ANY verdict is `unavailable`, it wins; otherwise `revised` wins over clean.
-// This avoids downgrading a sub-agent's unavailable or revised outcome just
-// because an earlier sub-agent reported clean.
-//
-// `missing` means no marker; `unverified` means success was claimed without a
-// completed native critic call. This verifies invocation, not critique quality
-// or which model the native agent selected.
-export function classifyRubberDuck(message, toolCalls = []) {
-  if (!message) return 'missing';
-  const matches = [...String(message).matchAll(/(?:^|\n)\s*RUBBER-DUCK:\s*(clean|revised|unavailable)\b/gi)];
-  if (matches.length === 0) return 'missing';
-  if (matches.some(m => m[1].toLowerCase() === 'unavailable')) return 'unavailable';
-  if (!(toolCalls || []).some(tc => tc?.input?.agent_type === 'rubber-duck' && tc.status === 'completed')) return 'unverified';
-  for (const m of matches) {
-    if (m[1].toLowerCase() === 'revised') return 'revised';
-  }
-  return 'clean';
-}
-
-// The review template's verdict as job fields — `{verdict, verdictReason}` for
-// a COMPLETED review, null for anything else. The parser lives beside the
-// template (bridge-server/validation.mjs, classifyReviewVerdict); this is only
-// the gate: no other template carries a verdict (plan_review's own
-// `VERDICT: approve|revise` line is not this contract), and a review that did
-// not complete has none to report.
-function reviewVerdictFields({ template, status, summary }) {
-  if (template !== 'review' || status !== 'completed') return null;
-  const { verdict, reason } = classifyReviewVerdict(summary?.message);
-  return { verdict, verdictReason: reason };
-}
-
-// --- Worker -----------------------------------------------------------------
-
-const MAX_JOB_MS = 40 * 60 * 1000;
-
-// The ACP worker: one prompt on the companion's daemon, driven to terminal by
-// runWatchLoop. Every companion-shaped decision is a descriptor read — the
-// daemon the prompt lands on (`target`), whether `/fleet` may be prepended
-// (`capabilities.parallel`), whether the rubber-duck wrapper applies
-// (`acp.rubberDuck`) — so Copilot keeps every behaviour it had and a second
-// ACP companion gets only what its descriptor claims.
-async function runAcpWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, profileId = null, model, previousSid, parallel, target = 'copilot' }) {
-  const startedAt = Date.now();
-  const fleet = fleetCapable(target) && shouldUseFleet({ parallel, template, mode, task });
-  const rlog = withReq(reqId, { job_id: jobId, target });
-  rlog.info('worker.start', { mode, template, thread: thread || null, model, cwd: cwd || null, parallel_strategy: parallel, fleet, target });
-  log('INFO', 'worker start:', jobId, `req=${reqId} target=${target} mode=${mode} template=${template} thread=${thread || '-'} model=${model} cwd=${cwd} parallel=${parallel} fleet=${fleet}`);
-  try {
-    await ensureRuntime({ reqId, companion: target });
-
-    // A companion with no `/fleet` never sees the strategy: formatPrompt would
-    // otherwise prepend `/fleet ` to a task no such agent understands.
-    let formatted = formatPrompt({ template, task, mode, template_args, parallel: fleetCapable(target) ? parallel : 'never' });
-    // plan_review and review prompts already embed their own critique
-    // instructions and end in a verdict line; layering the generic rubber-duck
-    // wrapper on top doubles the prompt size without changing the output.
-    // Every other template still gets the always-on wrapper — on the companion
-    // whose descriptor asks for it (Copilot); the others are relay-only.
-    if (rubberDuckTarget(target) && !RUBBER_DUCK_EXEMPT_TEMPLATES.has(template)) {
-      formatted = appendRubberDuckReview(formatted);
-    }
-
-    const startResp = await promptBg({
-      sessionId: previousSid || null,
-      text: formatted,
-      cwd,
-      model,
-      reqId,
-      companion: target,
-    });
-    if (!startResp.ok) {
-      // The agent behind the daemon speaks another ACP version. The daemon
-      // refused it (never adapted), so the job settles on the runtime, not on
-      // the task, and the envelope names the version that was answered.
-      if (startResp.code === 'ACP_PROTOCOL_MISMATCH') {
-        const answered = startResp.data?.protocol?.answered ?? null;
-        rlog.warn('worker.acp_protocol_mismatch', { answered });
-        log('WARN', 'worker acp protocol mismatch:', jobId, `target=${target} answered=${answered}`);
-        const duration = Date.now() - startedAt;
-        // On the job, not only in the queue event's extraMeta: the wait
-        // envelope renders from the job, the way `existingPromptId` does.
-        retainTerminalJob(jobId, {
-          status: 'unreachable',
-          detail: 'acp_protocol_mismatch',
-          error: startResp.error || 'the ACP agent answered an unsupported protocol version',
-          protocolAnswered: answered,
-          durationMs: duration,
-          terminalAt: Date.now(),
-        });
-        emitNotification({
-          jobId, status: 'unreachable', summary: null,
-          error: startResp.error || 'the ACP agent answered an unsupported protocol version',
-          stuckReason: null, detail: 'acp_protocol_mismatch',
-          duration, task, mode, cwd, thread,
-          promptId: null, sessionId: null, failedTools: [], reqId, fleet, target,
-          extraMeta: answered === null ? undefined : { protocol_answered: String(answered) },
-        });
-        return;
-      }
-      // Daemon-side mutex says another prompt already owns this Copilot
-      // sessionId. The bridge reattach guard should normally catch this
-      // first, but a race between two send dispatches can still slip
-      // through. Map to a clean terminal 'unreachable' envelope (with
-      // detail=session_busy + existing_prompt_id) instead of throwing a
-      // generic error that the caller would see as "unexpected terminal".
-      if (['SESSION_BUSY', 'CWD_BUSY', 'MODEL_BUSY'].includes(startResp.code)) {
-        const detail = String(startResp.code || 'SESSION_BUSY').toLowerCase();
-        const existingPromptId = startResp.data?.existingPromptId || null;
-        const conflictSessionId = startResp.data?.sessionId || null;
-        rlog.warn('worker.daemon_busy', { code: startResp.code, existing_prompt_id: existingPromptId, session_id: conflictSessionId });
-        log('WARN', 'worker daemon busy:', jobId, `code=${startResp.code} existingPromptId=${existingPromptId} sessionId=${conflictSessionId}`);
-        const duration = Date.now() - startedAt;
-        retainTerminalJob(jobId, {
-          status: 'unreachable',
-          detail,
-          error: startResp.error || 'daemon busy',
-          existingPromptId,
-          durationMs: duration,
-          terminalAt: Date.now(),
-        });
-        emitNotification({
-          jobId,
-          status: 'unreachable',
-          summary: null,
-          error: startResp.error || 'daemon busy',
-          stuckReason: null,
-          detail,
-          duration, task, mode, cwd, thread,
-          promptId: null,
-          sessionId: conflictSessionId,
-          failedTools: [],
-          reqId,
-          fleet,
-          target,
-          extraMeta: existingPromptId ? { existing_prompt_id: String(existingPromptId) } : undefined,
-        });
-        return;
-      }
-      throw new Error(`prompt-bg failed: ${startResp.error}`);
-    }
-    const { promptId, sessionId, sessionReborn, sessionLoaded } = startResp.data;
-    rlog.info('worker.prompt_started', { prompt_id: promptId, session_id: sessionId, session_reborn: !!sessionReborn, session_loaded: !!sessionLoaded });
-    log('INFO', 'worker prompt started:', jobId, `promptId=${promptId} sessionId=${sessionId}${sessionReborn ? ' (REBORN)' : ''}${sessionLoaded ? ' (LOADED)' : ''}`);
-
-    updateJob(jobId, { promptId, sessionId, status: 'running', inspectAvailable: true, sessionReborn: !!sessionReborn, sessionLoaded: !!sessionLoaded });
-
-    if (thread && sessionId) {
-      try { writeThreadSid(thread, profileId, sessionId); }
-      catch (err) { log('WARN', 'writeThreadSid failed:', err.message); }
-    }
-
-    // Surface the rebirth immediately, before the prompt completes. The
-    // parent (Claude/Codex) needs to know that the companion's in-process
-    // conversation context was lost so it can restate any thread context
-    // that matters. Copilot CLI's ACP session/load is process-local
-    // (github/copilot-cli#1767), so for it a stale session is always reborn;
-    // an agent whose descriptor honours `session/load` (Antigravity) is loaded
-    // instead, and then this never fires. The terminal emit also tags
-    // meta.session_reborn as belt-and-suspenders for callers that don't
-    // drain alerts.
-    if (sessionReborn) {
-      emitRebirthAlert({ jobId, task, promptId, thread, previousSid, newSessionId: sessionId, startedAt, reqId, target });
-    }
-
-    await runWatchLoop({ jobId, promptId, sessionId, thread, profileId, task, mode, cwd, startedAt, reqId, sessionReborn: !!sessionReborn, fleet, target });
-  } catch (err) {
-    // Failure before the prompt was registered (ensureDaemon, prompt-bg, etc).
-    // No promptId yet → not reconcilable, just record terminal failure.
-    await emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId: null, target });
-  } finally {
-    rlog.info('worker.end', { duration_ms: Date.now() - startedAt });
-    log('INFO', 'worker end:', jobId, `duration_ms=${Date.now() - startedAt}`);
-  }
-}
-
-async function runOpenCodeWorker(args) {
-  // CLI single-shot vs HTTP server mode. Server mode (OPENCODE_RUNTIME_ADAPTER=
-  // server) unlocks reply/resume/streaming; CLI mode stays the default.
-  if (openCodeServerActive()) return runOpenCodeServerWorker(args);
-  return runOpenCodeCliWorker(args);
-}
-
-// Server-mode worker: ensure a pooled `opencode serve`, create a persisted
-// session, subscribe to /event BEFORE prompting (so session.idle can't be
-// missed), then drive the turn through the reusable watch helper.
-async function runOpenCodeServerWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, model = null, parallel, target }) {
-  const startedAt = Date.now();
-  const rlog = withReq(reqId, { job_id: jobId, target });
-  rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target, adapter: 'server', model: model || null });
-  log('INFO', 'opencode-server worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} model=${model || '-'}`);
-  try {
-    const { baseUrl } = await ensureOpenCodeServer();
-    const sessionId = await createOpenCodeSession({ baseUrl, directory: cwd, title: thread || jobId });
-    const promptId = openCodeServerPromptId(jobId);
-    // The session is rooted at `cwd` via ?directory=; mark the adapter so reply/
-    // cancel/hydrate gate on what THIS job started with, not the live env.
-    updateJob(jobId, { promptId, sessionId, baseUrl, opencodeAdapter: 'server', pid: null, status: 'running', inspectAvailable: false });
-    writeJobDigest(jobs.get(jobId), null);
-    rlog.info('worker.session_created', { session_id: sessionId, base_url: baseUrl });
-    log('INFO', 'opencode-server session:', jobId, `session=${sessionId} base=${baseUrl} dir=${cwd}`);
-
-    const formatted = formatPrompt({ template, task, mode, template_args, parallel: 'never' });
-    await runOpenCodeServerWatch({
-      jobId, reqId, baseUrl, sessionId, promptId, directory: cwd,
-      prompt: formatted, model, task, mode, cwd, thread, startedAt, fresh: true,
-    });
-  } catch (err) {
-    const duration = Date.now() - startedAt;
-    retainTerminalJob(jobId, {
-      status: 'failed', summary: null, error: err.message,
-      stuckReason: null, detail: 'opencode_server_worker_error',
-      failedTools: [], durationMs: duration, terminalAt: Date.now(),
-    });
-    writeJobDigest(jobs.get(jobId), { stdout: '', stderr: err.message, summary: null });
-    emitNotification({
-      jobId, status: 'failed', summary: null, error: err.message,
-      stuckReason: null, detail: 'opencode_server_worker_error',
-      duration, task, mode, cwd, thread,
-      promptId: jobs.get(jobId)?.promptId || null, sessionId: jobs.get(jobId)?.sessionId || null,
-      failedTools: [], reqId, target, fleet: false,
-    });
-    rlog.warn('worker.catch', { error: err.message });
-    log('WARN', 'opencode-server worker catch:', jobId, `err="${err.message}"`);
-  } finally {
-    rlog.info('worker.end', { duration_ms: Date.now() - startedAt });
-  }
-}
-
-// Drive one OpenCode server turn to terminal. Reused by the fresh worker, by
-// reply (re-steer), and by restart resume. `fresh`/`reply` fire prompt_async
-// after the watcher subscribes; resume omits the prompt and reattaches.
-// A per-job watch generation guard (job.promptId === promptId) ensures a
-// superseded turn (after a reply aborts it) never writes a terminal/notification
-// over the live one — mirrors the Copilot superseding-prompt logic.
-async function runOpenCodeServerWatch({ jobId, reqId, baseUrl, sessionId, promptId, directory = null, prompt = null, model = null, task, mode, cwd, thread, startedAt, fresh = false, reply = false, abortFirst = false }) {
-  const rlog = withReq(reqId, { job_id: jobId });
-  const timeoutMs = resolveOpenCodeServerTimeoutMs();
-  let watcher;
-  try {
-    // Reply path: abort the in-flight turn and wait for the session to settle
-    // BEFORE subscribing/prompting, so the follow-up does not race the old turn
-    // or hit SessionBusyError. The handler already bumped job.promptId, so the
-    // old watcher discards its terminal when this abort's session.idle lands.
-    if (abortFirst) {
-      const ab = await abortOpenCodeSession({ baseUrl, sessionId, directory });
-      if (!ab.aborted) rlog.warn('reply.abort_unconfirmed', { error: ab.error || null });
-      const settled = await waitOpenCodeSessionIdle({ baseUrl, sessionId, directory });
-      if (!settled) rlog.warn('reply.session_still_busy', {});
-    }
-    // Subscribe to the directory-scoped event stream BEFORE prompting so the
-    // terminal session.idle can't be missed. Resume omits the prompt and asks
-    // the watcher to level-check whether the turn already finished.
-    watcher = await openOpenCodeTurnWatcher({
-      baseUrl, sessionId, directory, timeoutMs,
-      initialLevelCheck: !fresh && !reply,
-      onEvent: (snapshot) => {
-        const job = jobs.get(jobId);
-        if (!job || job.promptId !== promptId) return;
-        job.adapterResult = { stdout: snapshot.message || '', stderr: '', summary: snapshot };
-        refreshDigestForJob(job);
-      },
-    });
-    if (fresh || reply) {
-      // Per-job model (from the resolved profile) overrides the env default; an
-      // unset/synthesized job falls back to resolveOpenCodeServerModel()'s env
-      // default so the legacy/default path is byte-identical.
-      const promptModel = parseOpenCodeModel(model) || resolveOpenCodeServerModel();
-      await startOpenCodeServerPrompt({ baseUrl, sessionId, directory, prompt, model: promptModel });
-    }
-    const result = await watcher.done;
-
-    // Supersede guard: if a reply bumped job.promptId while we waited, this turn
-    // is obsolete — drop its terminal so the replacement watch owns the job.
-    const currentJob = jobs.get(jobId);
-    if (currentJob && currentJob.promptId !== promptId) {
-      rlog.info('worker.prompt_obsolete', { prompt_id: promptId, current_prompt_id: currentJob.promptId });
-      log('INFO', 'opencode-server obsolete turn ignored:', jobId, `old=${promptId} current=${currentJob.promptId}`);
-      return;
-    }
-
-    // Cancel verdict: if the bridge requested an abort for this job, the turn is
-    // cancelled regardless of how the stream reported it (OpenCode does not
-    // reliably emit MessageAbortedError when aborted mid-reasoning).
-    if (currentJob?.cancelRequested && result.status !== 'unreachable') {
-      result.status = 'cancelled';
-      result.error = null;
-      result.detail = 'cancelled';
-    }
-
-    // Empty-completed remap: a 'completed' turn with no assistant message, tools,
-    // or plan is a failure, matching emitNotification's own remap — keep the
-    // retained/persisted status in sync with the notification + digest.
-    if (result.status === 'completed' && isEmptyCompletedSummary(result.summary)) {
-      result.status = 'failed';
-      result.error = 'OpenCode returned completed without any assistant message or tool calls.';
-      result.detail = 'empty_completed';
-    }
-
-    const duration = Date.now() - startedAt;
-    const detail = result.detail
-      || (result.status === 'completed' ? null
-      : result.status === 'cancelled' ? 'cancelled'
-      : result.status === 'timeout' ? 'opencode_server_timeout'
-      : result.status === 'unreachable' ? 'opencode_server_unreachable'
-      : 'opencode_server_failed');
-    retainTerminalJob(jobId, {
-      status: result.status, summary: result.summary, error: result.error,
-      stuckReason: null, detail, failedTools: [],
-      durationMs: duration, terminalAt: Date.now(), adapterResult: result,
-    });
-    writeJobDigest(jobs.get(jobId), result);
-    emitNotification({
-      jobId, status: result.status, summary: result.summary, error: result.error,
-      stuckReason: null, detail, duration, task, mode, cwd, thread,
-      promptId, sessionId, failedTools: [], reqId, target: 'opencode', fleet: false,
-    });
-    rlog.info('worker.terminal', { status: result.status, duration_ms: duration });
-    log('INFO', 'opencode-server worker terminal:', jobId, `status=${result.status} duration_ms=${duration}`);
-  } catch (err) {
-    try { watcher?.close(); } catch {}
-    const currentJob = jobs.get(jobId);
-    if (currentJob && currentJob.promptId !== promptId) return;
-    const duration = Date.now() - startedAt;
-    // Same rule as the codex twin below: keep what streamed before the watch
-    // broke, and store the failure on `adapterResult` so it is what the next
-    // render reads. Writing a digest from a value the job does not hold left
-    // `job.adapterResult` on the last pre-error snapshot, and emitNotification's
-    // re-render then rebuilt the body from it — with the error text gone.
-    const partial = jobs.get(jobId)?.adapterResult || null;
-    const failure = { stdout: partial?.stdout || '', stderr: err.message, summary: partial?.summary || null };
-    retainTerminalJob(jobId, {
-      status: 'failed', summary: null, error: err.message,
-      stuckReason: null, detail: 'opencode_server_watch_error',
-      failedTools: [], durationMs: duration, terminalAt: Date.now(),
-      adapterResult: failure,
-    });
-    writeJobDigest(jobs.get(jobId), failure);
-    emitNotification({
-      jobId, status: 'failed', summary: null, error: err.message,
-      stuckReason: null, detail: 'opencode_server_watch_error',
-      duration, task, mode, cwd, thread, promptId, sessionId,
-      failedTools: [], reqId, target: 'opencode', fleet: false,
-    });
-    rlog.warn('worker.watch_catch', { error: err.message });
-    log('WARN', 'opencode-server watch catch:', jobId, `err="${err.message}"`);
-  }
-}
-
-function resolveOpenCodeServerTimeoutMs() {
-  // Reuse the same timeout knob as the CLI adapter for parity.
-  return openCodeServerRuntimeInfo().timeout_ms;
-}
-
-// Poll /session/status until the session leaves 'busy' (or a short budget
-// elapses). Used between a reply's abort and its re-prompt so OpenCode does not
-// reject the follow-up with SessionBusyError.
-async function waitOpenCodeSessionIdle({ baseUrl, sessionId, directory, attempts = 20, intervalMs = 150 }) {
-  for (let i = 0; i < attempts; i++) {
-    const status = await getOpenCodeSessionStatus({ baseUrl, sessionId, directory });
-    if (status !== 'busy') return true;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  return false;
-}
-
-// Restart resume for an OpenCode server job. An in-flight turn only keeps
-// running on the exact server process that started it, so probe the recorded
-// base URL first. If it survived, reattach (or harvest a turn that finished
-// while the bridge was down). If it is gone, replay the persisted transcript
-// from a fresh server; an unfinished turn is unrecoverable.
-async function resumeOpenCodeServerJob(job) {
-  const jobId = job.jobId;
-  const reqId = job.reqId || createReqId();
-  const startedAt = job.startedAt || Date.now();
-  const promptId = job.promptId || openCodeServerPromptId(jobId);
-  log('INFO', 'opencode-server resume:', jobId, `session=${job.sessionId} base=${job.baseUrl}`);
-
-  if (await probeOpenCodeServerHealth(job.baseUrl)) {
-    // Surviving server: the watcher's initial level-check harvests a turn that
-    // finished while the bridge was down, or reattaches a still-running one.
-    await runOpenCodeServerWatch({
-      jobId, reqId, baseUrl: job.baseUrl, sessionId: job.sessionId, promptId, directory: job.cwd || null,
-      task: job.task || '', mode: job.mode || 'EXECUTE', cwd: job.cwd || null,
-      thread: job.thread || null, startedAt,
-    });
-    return;
-  }
-
-  // Original server gone. Sessions persist on disk, so a fresh server can still
-  // serve the transcript; but an unfinished turn cannot be observed anymore.
-  let baseUrl = null;
-  try { ({ baseUrl } = await ensureOpenCodeServer()); }
-  catch (err) {
-    retainTerminalJob(jobId, {
-      status: 'unreachable',
-      error: `opencode server gone and respawn failed: ${err.message}`,
-      detail: 'opencode_server_gone', terminalAt: Date.now(),
-    });
-    writeJobDigest(jobs.get(jobId), jobs.get(jobId)?.adapterResult || null);
-    return;
-  }
-  updateJob(jobId, { baseUrl });
-  let transcript = null;
-  try { transcript = await loadOpenCodeTranscript({ baseUrl, sessionId: job.sessionId, directory: job.cwd || null }); }
-  catch (err) { log('WARN', 'opencode-server resume transcript failed:', jobId, err.message); }
-  if (transcript?.completed) {
-    finalizeResumedOpenCodeTranscript(job, transcript, reqId, startedAt);
-    return;
-  }
-  retainTerminalJob(jobId, {
-    status: 'unreachable',
-    error: 'the opencode server that ran this turn is gone; the in-flight turn was lost (session transcript preserved on disk)',
-    detail: 'opencode_server_gone', terminalAt: Date.now(),
-  });
-  writeJobDigest(jobs.get(jobId), jobs.get(jobId)?.adapterResult || null);
-}
-
-function finalizeResumedOpenCodeTranscript(job, transcript, reqId, startedAt) {
-  const jobId = job.jobId;
-  const status = transcript.aborted ? 'cancelled' : (transcript.error ? 'failed' : 'completed');
-  const result = {
-    status, summary: transcript.summary, error: transcript.error,
-    stdout: transcript.summary?.message || '', stderr: '',
-  };
-  const duration = Date.now() - startedAt;
-  const detail = status === 'completed' ? 'resumed_completed'
-    : status === 'cancelled' ? 'cancelled' : 'opencode_server_failed';
-  retainTerminalJob(jobId, {
-    status, summary: transcript.summary, error: transcript.error,
-    detail, durationMs: duration, terminalAt: Date.now(), adapterResult: result,
-  });
-  writeJobDigest(jobs.get(jobId), result);
-  emitNotification({
-    jobId, status, summary: transcript.summary, error: transcript.error, detail,
-    duration, task: job.task, mode: job.mode, cwd: job.cwd, thread: job.thread,
-    promptId: job.promptId, sessionId: job.sessionId, failedTools: [], reqId,
-    target: 'opencode', fleet: false,
-  });
-  log('INFO', 'opencode-server resume terminal:', jobId, `status=${status} (from transcript)`);
-}
-
-// Shared worker for the single-shot CLI adapters (OpenCode CLI, codex exec):
-// spawn via the adapter's startRun, patch the job on start, then retain the
-// terminal state, refresh the digest, and emit the completion event. The two
-// adapters have identical single-shot semantics — only the spawn function
-// differs — so the per-target detail codes derive from `target`. Reuses the
-// shared writeOpenCodeDigest writer (D7: it is already target-neutral). No
-// previousSid read (thread continuity stays on the daemon-backed adapters), no reply/resume.
-async function runSingleShotCliWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, model = null, parallel, target, startRun }) {
-  const startedAt = Date.now();
-  const rlog = withReq(reqId, { job_id: jobId, target });
-  rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target, model: model || null });
-  log('INFO', `${target} worker start:`, jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} parallel=${parallel} model=${model || '-'}`);
-  try {
-    const formatted = formatPrompt({ template, task, mode, template_args, parallel: 'never' });
-    const result = await startRun({
-      jobId,
-      cwd,
-      prompt: formatted,
-      model: model || null,
-      onStarted: ({ pid, promptId, command }) => {
-        updateJob(jobId, {
-          promptId,
-          sessionId: null,
-          pid,
-          runtimeCommand: command,
-          status: 'running',
-          inspectAvailable: false,
-        });
-        writeJobDigest(jobs.get(jobId), null);
-        rlog.info('worker.prompt_started', { prompt_id: promptId, pid, command });
-        log('INFO', `${target} worker started:`, jobId, `promptId=${promptId} pid=${pid || '-'}`);
-      },
-      // Codex reports its thread id on line 1 of the event stream (+0.20 s in
-      // 12/12 measured runs), so persist it the instant it arrives instead of
-      // waiting for the run to resolve — a bridge or child that dies mid-run
-      // then still leaves a resumable id in the ledger. Write-once: the id is
-      // stable across resumes, so the first arrival wins and a duplicate
-      // `thread.started` cannot churn the row. Adapters that report no session
-      // (OpenCode CLI) simply never call this.
-      onSession: (sessionId) => {
-        if (!sessionId || jobs.get(jobId)?.sessionId) return;
-        updateJob(jobId, { sessionId });
-        rlog.info('worker.session_captured', { session_id: sessionId });
-      },
-    });
-    const duration = Date.now() - startedAt;
-    const detail = result.status === 'failed'
-      ? (result.exitCode == null ? result.signal || `${target}_failed` : `exit_${result.exitCode}`)
-      : result.status === 'cancelled'
-        ? (result.signal || 'cancelled')
-        : result.status === 'timeout'
-          ? `${target}_timeout`
-          : null;
-    // Persist the adapter's session id (codex thread_id; null for OpenCode
-    // CLI, whose result carries none) BEFORE the terminal patch, so
-    // retainTerminalJob's persistJob write and the terminal emitNotification
-    // both see it. It lands on disk under the target-neutral
-    // `companionSessionId` key, which the app-server adapter's recovery reads
-    // back after a restart (`resumeCodexAppServerJob` resumes exactly this id).
-    // The exec transport still has no consumer for it — `codex exec resume` was
-    // deleted, not deferred — so on this path it is a record, not a lever.
-    // The already-captured id is the fallback, never the loser: the
-    // `child.on('error')` path resolves `sessionId: null` by construction, and
-    // a plain `result.sessionId ?? null` there would clobber a good id back to
-    // null after onSession had already banked it.
-    updateJob(jobId, { sessionId: result.sessionId ?? jobs.get(jobId)?.sessionId ?? null });
-    retainTerminalJob(jobId, {
-      status: result.status,
-      summary: result.summary,
-      error: result.error,
-      stuckReason: null,
-      detail,
-      failedTools: [],
-      durationMs: duration,
-      terminalAt: Date.now(),
-      adapterResult: result,
-    });
-    writeJobDigest(jobs.get(jobId), result);
-    emitNotification({
-      jobId,
-      status: result.status,
-      summary: result.summary,
-      error: result.error,
-      stuckReason: null,
-      detail,
-      duration,
-      task,
-      mode,
-      cwd,
-      thread,
-      promptId: jobs.get(jobId)?.promptId || null,
-      // Read back the job rather than the result, for the same reason as the
-      // patch above — the notification must carry the surviving id.
-      sessionId: jobs.get(jobId)?.sessionId ?? null,
-      failedTools: [],
-      reqId,
-      target,
-      fleet: false,
-    });
-    rlog.info('worker.terminal', { status: result.status, duration_ms: duration, exit_code: result.exitCode, signal: result.signal || null });
-  } catch (err) {
-    const duration = Date.now() - startedAt;
-    retainTerminalJob(jobId, {
-      status: 'failed',
-      summary: null,
-      error: err.message,
-      stuckReason: null,
-      detail: `${target}_worker_error`,
-      failedTools: [],
-      durationMs: duration,
-      terminalAt: Date.now(),
-    });
-    emitNotification({
-      jobId,
-      status: 'failed',
-      summary: null,
-      error: err.message,
-      stuckReason: null,
-      detail: `${target}_worker_error`,
-      duration,
-      task,
-      mode,
-      cwd,
-      thread,
-      promptId: jobs.get(jobId)?.promptId || null,
-      sessionId: null,
-      failedTools: [],
-      reqId,
-      target,
-    });
-    rlog.warn('worker.catch', { error: err.message });
-    log('WARN', `${target} worker catch:`, jobId, `err="${err.message}"`);
-  } finally {
-    rlog.info('worker.end', { duration_ms: Date.now() - startedAt });
-    log('INFO', `${target} worker end:`, jobId, `duration_ms=${Date.now() - startedAt}`);
-  }
-}
-
-function runOpenCodeCliWorker(args) {
-  return runSingleShotCliWorker({ ...args, startRun: startOpenCodeRun });
-}
-
-function runCodexWorker(args) {
-  // Broker-backed `codex app-server` vs single-shot `codex exec`, exactly as
-  // runOpenCodeWorker branches. The app-server adapter
-  // (CODEX_RUNTIME_ADAPTER=appserver) unlocks reply/resume/streaming; exec stays
-  // the default, so an unset variable leaves this path untouched.
-  if (codexAppServerActive()) return runCodexAppServerWorker(args);
-  return runSingleShotCliWorker({ ...args, startRun: startCodexRun });
-}
-
-// App-server worker: ensure the shared broker, open ONE connection for this
-// job, open the thread, persist its id before any model work begins, then
-// drive the turn through the reusable watch helper.
-//
-// "Open" is `thread/resume` when the thread this send names already recorded a
-// codex thread id (`previousSid`, read off the thread's `.sid` by handleSend
-// exactly as Copilot's is) and `thread/start` otherwise. That is what makes a
-// follow-up send a follow-up: round two of a review lands on the conversation
-// round one had, instead of a cold thread that has to be told everything again.
-// A thread with no recorded id is what opens fresh — and the host names the
-// thread after the calling agent (callArgs), so a new agent-companion spawn is
-// what opens fresh.
-//
-// The connection is per-job and lives from that open through the terminal:
-// `startCodexTurn` skips its status probe only for a thread THIS connection
-// created (a brand-new thread has no rollout, so asking would be both wasteful
-// and a `no rollout found` away from a false `thread_not_resumable`); a resumed
-// thread is probed, because `turn/start` on a busy thread does not reject.
-async function runCodexAppServerWorker({ jobId, reqId, task, mode, template, template_args, cwd, thread, profileId = null, previousSid = null, model = null, parallel, target }) {
-  const startedAt = Date.now();
-  const rlog = withReq(reqId, { job_id: jobId, target });
-  rlog.info('worker.start', { mode, template, thread: thread || null, cwd: cwd || null, parallel_strategy: parallel, target, adapter: 'appserver', model: model || null, previous_thread_id: previousSid });
-  log('INFO', 'codex-appserver worker start:', jobId, `req=${reqId} mode=${mode} template=${template} thread=${thread || '-'} cwd=${cwd} model=${model || '-'} prior=${previousSid || '-'}`);
-  let conn = null;
-  try {
-    let opened;
-    try {
-      opened = await openCodexThreadWithBrokerRecovery({ cwd, model, threadId: previousSid });
-    } catch (err) {
-      // The recorded thread could not be resumed on a broker that is otherwise
-      // answering — its rollout is gone from $CODEX_HOME/sessions, typically.
-      // No silent fallback to a fresh thread: the job fails naming what it was
-      // meant to continue, and the stale id is retired so the NEXT send on this
-      // thread opens fresh instead of failing the same way forever. A transport
-      // failure keeps the sid — the thread is fine, the broker is not.
-      if (previousSid && !codexBrokerErrorNeedsRespawn(err)) {
-        retireThreadSid(thread, profileId, previousSid, `resume_failed: ${err.message}`);
-        err.message = `thread ${thread} could not resume codex thread ${previousSid} (${err.message}); `
-          + 'its recorded id was retired, so the next send on this thread starts a fresh codex thread';
-      }
-      throw err;
-    }
-    const { broker, threadId, rolloutPath, brokerRestarted, resumed } = opened;
-    conn = opened.conn;
-    const promptId = codexAppServerPromptId(jobId);
-    // W1.1's guarantee, and the reason this write happens HERE rather than
-    // after the turn: the thread call answers with the thread id before the
-    // model does anything, so a bridge that dies mid-run still leaves a
-    // resumable id in the ledger. `sessionId` is the target-neutral slot the
-    // ledger already persists as `companionSessionId`.
-    //
-    // `codexAdapter` marks the transport this job STARTED under. Cancel, reply
-    // and hydrate all gate on it rather than on the live env, so an operator
-    // flipping CODEX_RUNTIME_ADAPTER mid-flight cannot re-route a running job.
-    updateJob(jobId, {
-      promptId,
-      sessionId: threadId,
-      codexAdapter: 'appserver',
-      brokerSocket: broker.socketPath,
-      rolloutPath: rolloutPath || null,
-      pid: null,
-      status: 'running',
-      inspectAvailable: false,
-    });
-    // The thread's `.sid`, written at the same moment as the ledger row and
-    // for the same reason: it is what the next send on this thread reads.
-    if (thread) {
-      try { writeThreadSid(thread, profileId, threadId); }
-      catch (err) { log('WARN', 'writeThreadSid failed:', err.message); }
-    }
-    writeJobDigest(jobs.get(jobId), null);
-    rlog.info(resumed ? 'worker.thread_resumed' : 'worker.thread_started', {
-      thread_id: threadId,
-      rollout_path: rolloutPath || null,
-      thread_status: opened.status,
-      broker_pid: broker.pid,
-      broker_reused: broker.reused,
-      broker_restarted: brokerRestarted,
-    });
-    log('INFO', 'codex-appserver thread:', jobId,
-      `thread=${threadId} resumed=${resumed} status=${opened.status} rollout=${rolloutPath || '-'} broker=${broker.pid} reused=${broker.reused} restarted=${brokerRestarted}`);
-
-    const formatted = formatPrompt({ template, task, mode, template_args, parallel: 'never' });
-    await runCodexAppServerWatch({
-      jobId, reqId, conn, threadId, promptId,
-      prompt: formatted, model, task, mode, cwd, thread, startedAt, fresh: true,
-    });
-  } catch (err) {
-    const duration = Date.now() - startedAt;
-    const runtimeUnavailable = err.code === 'CODEX_APP_SERVER_INSTALL_UNAVAILABLE'
-      || err.code === 'CODEX_BROKER_RESTART_DEFERRED'
-      || codexBrokerErrorNeedsRespawn(err);
-    const terminalStatus = runtimeUnavailable ? 'unreachable' : 'failed';
-    const terminalDetail = runtimeUnavailable ? 'codex_runtime_unavailable' : 'codex_server_worker_error';
-    // The failure text has to live on `adapterResult`, not just in the digest
-    // write below: emitNotification's own refresh re-renders the body from
-    // `adapterResult`, so a digest written straight from `err.message` would be
-    // replaced by a header-only one a line later — and the digest is exactly
-    // where the operator is sent to find out why the job failed.
-    const failure = { stdout: '', stderr: err.message, summary: null };
-    retainTerminalJob(jobId, {
-      status: terminalStatus, summary: null, error: err.message,
-      stuckReason: null, detail: terminalDetail,
-      failedTools: [], durationMs: duration, terminalAt: Date.now(),
-      adapterResult: failure,
-    });
-    writeJobDigest(jobs.get(jobId), failure);
-    emitNotification({
-      jobId, status: terminalStatus, summary: null, error: err.message,
-      stuckReason: null, detail: terminalDetail,
-      duration, task, mode, cwd, thread,
-      promptId: jobs.get(jobId)?.promptId || null, sessionId: jobs.get(jobId)?.sessionId || null,
-      failedTools: [], reqId, target, fleet: false,
-    });
-    rlog.warn('worker.catch', { error: err.message });
-    log('WARN', 'codex-appserver worker catch:', jobId, `err="${err.message}"`);
-  } finally {
-    // The connection is this function's to close: the watch only borrows it, so
-    // a reply that hands a connection to a background watch closes its own.
-    try { conn?.close(); } catch {}
-    rlog.info('worker.end', { duration_ms: Date.now() - startedAt });
-  }
-}
-
-// Drive one codex app-server turn to terminal. Reused by the fresh worker, by
-// reply's idle path, and by restart resume — the same three callers the
-// OpenCode server watch has. `fresh`/`reply` start a guarded turn after the
-// watcher subscribes; resume omits the prompt and level-checks instead.
-//
-// A per-job watch generation guard (job.promptId === promptId) ensures a
-// superseded turn never writes a terminal/notification over the live one.
-async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, prompt = null, model = null, task, mode, cwd, thread, startedAt, fresh = false, reply = false }) {
-  const rlog = withReq(reqId, { job_id: jobId });
-  const timeoutMs = resolveCodexAppServerTimeoutMs();
-  let watcher;
-  try {
-    // Subscribe BEFORE the turn starts so the first `item/*Delta` cannot be
-    // missed. Resume asks for the level check instead — that is what harvests a
-    // turn which finished while this bridge was down.
-    watcher = await openCodexTurnWatcher({
-      conn, threadId, timeoutMs, model,
-      initialLevelCheck: !fresh && !reply,
-      onEvent: (snapshot, { turnId } = {}) => {
-        const job = jobs.get(jobId);
-        if (!job || job.promptId !== promptId) return;
-        // `turn/started` is the live source of the id `turn/interrupt` and
-        // `turn/steer` require, and it is the one that keeps up when a SECOND
-        // turn starts on this thread. Persisted only when it CHANGES: this
-        // fires on every streamed delta, and a ledger write per token is a
-        // write storm, while a turn id per turn is two.
-        if (turnId && turnId !== job.turnId) updateJob(jobId, { turnId });
-        // Real sub-turn streaming — this is what closes F7 on this transport:
-        // `codex exec --json` emits no deltas at all, so a reasoning-only turn
-        // produced no progress signal whatsoever. Same shared digest writer as
-        // every other non-copilot job; there is no third one.
-        job.adapterResult = { stdout: snapshot.message || '', stderr: '', summary: snapshot };
-        refreshDigestForJob(job);
-      },
-    });
-    // A watch that did not see this turn from its start — a restart resume, or
-    // a turn found already running below — cannot have counted all of it.
-    if (!fresh && !reply) watcher.markUsagePartial();
-    if (fresh || reply) {
-      const started = await startCodexTurn({ conn, threadId, prompt, model });
-      // Assigned unconditionally, including to null. A turn id is only valid
-      // for THE turn it names, so carrying a previous turn's id forward is how
-      // a later `turn/steer` earns `no active turn to steer` — the conditional
-      // failure the resolver's transport lookup exists to avoid. `attached`
-      // supplies the running turn's own id when the status read could read it,
-      // and null otherwise, which the resolver answers with `thread/read`.
-      updateJob(jobId, { turnId: started.turnId ?? null });
-      // `turn/start` on a thread that already has a running turn SUCCEEDS and
-      // returns a SECOND turn id, so the adapter attaches to the live one
-      // instead. Say so out loud: a job silently riding another turn looks
-      // exactly like one that started its own.
-      if (started.attached) {
-        watcher.markUsagePartial();
-        rlog.warn('worker.turn_already_active', { thread_id: threadId });
-        log('WARN', 'codex-appserver turn already active:', jobId, `thread=${threadId} — attached instead of double-dispatching`);
-      }
-    }
-    const result = await watcher.done;
-
-    // Supersede guard: if a reply bumped job.promptId while we waited, this turn
-    // is obsolete — drop its terminal so the replacement watch owns the job.
-    const currentJob = jobs.get(jobId);
-    if (currentJob && currentJob.promptId !== promptId) {
-      rlog.info('worker.prompt_obsolete', { prompt_id: promptId, current_prompt_id: currentJob.promptId });
-      log('INFO', 'codex-appserver obsolete turn ignored:', jobId, `old=${promptId} current=${currentJob.promptId}`);
-      return;
-    }
-
-    // Cancel verdict: the bridge owns it. An interrupted turn settles
-    // `status:"interrupted"` with NO answer, and a turn that raced the
-    // interrupt to its own completion reports whatever it reached — so the
-    // stream cannot be trusted to report the cancellation, only the intent
-    // recorded before the interrupt was sent can.
-    if (currentJob?.cancelRequested && result.status !== 'unreachable') {
-      result.status = 'cancelled';
-      result.error = null;
-      result.detail = 'cancelled';
-    }
-
-    // A conversational turn can complete even though Codex never acquired its
-    // command runner. Normalize that protocol completion before retaining it:
-    // the assistant message and turn/completed stop reason remain evidence,
-    // while every persisted/status/wait/notification surface gets the honest
-    // runtime verdict. Cancellation above deliberately wins this race.
-    if (isCodexCommandRunnerBlocker({ target: 'codex', status: result.status, summary: result.summary })) {
-      result.status = 'unreachable';
-      result.error =
-        'Codex app-server completed the turn only after reporting that its command runner was unavailable; no task verdict was produced.';
-      result.detail = 'codex_code_mode_host_unavailable';
-    }
-
-    // Empty-completed remap, matching emitNotification's own remap so the
-    // retained/persisted status stays in sync with the notification + digest.
-    if (result.status === 'completed' && isEmptyCompletedSummary(result.summary)) {
-      result.status = 'failed';
-      result.error = 'Codex returned completed without any assistant message or tool calls.';
-      result.detail = 'empty_completed';
-    }
-
-    const duration = Date.now() - startedAt;
-    // `codex_server_*` reuses the classifier's transport vocabulary on purpose:
-    // classifyUnreachable strips the target prefix, so `server_gone` /
-    // `server_unreachable` land in `runtime_transport` — which is exactly what
-    // a dead broker or a dropped socket is — without a second detail dialect.
-    const detail = result.detail
-      || (result.status === 'completed' ? null
-      : result.status === 'cancelled' ? 'cancelled'
-      : result.status === 'timeout' ? 'codex_server_timeout'
-      : result.status === 'unreachable'
-        ? (result.summary?.stopReason === 'broker-gone' ? 'codex_server_gone' : 'codex_server_unreachable')
-        : 'codex_server_failed');
-    retainTerminalJob(jobId, {
-      status: result.status, summary: result.summary, error: result.error,
-      stuckReason: null, detail, failedTools: [],
-      durationMs: duration, terminalAt: Date.now(), adapterResult: result,
-    });
-    writeJobDigest(jobs.get(jobId), result);
-    emitNotification({
-      jobId, status: result.status, summary: result.summary, error: result.error,
-      stuckReason: null, detail, duration, task, mode, cwd, thread,
-      promptId, sessionId: threadId, failedTools: [], reqId, target: 'codex', fleet: false,
-    });
-    rlog.info('worker.terminal', { status: result.status, duration_ms: duration, turn_id: result.turnId || null });
-    log('INFO', 'codex-appserver worker terminal:', jobId, `status=${result.status} duration_ms=${duration}`);
-  } catch (err) {
-    try { watcher?.close(); } catch {}
-    const currentJob = jobs.get(jobId);
-    if (currentJob && currentJob.promptId !== promptId) return;
-    const duration = Date.now() - startedAt;
-    // Keep what streamed before the watch broke; the error joins it on stderr
-    // rather than replacing it. Stored on `adapterResult` so emitNotification's
-    // refresh renders the same thing instead of dropping the reason.
-    const partial = jobs.get(jobId)?.adapterResult || null;
-    const failure = { stdout: partial?.stdout || '', stderr: err.message, summary: partial?.summary || null };
-    retainTerminalJob(jobId, {
-      status: 'failed', summary: null, error: err.message,
-      stuckReason: null, detail: 'codex_server_watch_error',
-      failedTools: [], durationMs: duration, terminalAt: Date.now(),
-      adapterResult: failure,
-    });
-    writeJobDigest(jobs.get(jobId), failure);
-    emitNotification({
-      jobId, status: 'failed', summary: null, error: err.message,
-      stuckReason: null, detail: 'codex_server_watch_error',
-      duration, task, mode, cwd, thread, promptId, sessionId: threadId,
-      failedTools: [], reqId, target: 'codex', fleet: false,
-    });
-    rlog.warn('worker.watch_catch', { error: err.message });
-    log('WARN', 'codex-appserver watch catch:', jobId, `err="${err.message}"`);
-  }
-}
-
-function resolveCodexAppServerTimeoutMs() {
-  // Same knob as the exec adapter (AGENT_COMPANION_CODEX_TIMEOUT_MS): two
-  // independently chosen numbers drift, and a job that simply ran long then
-  // looks indistinguishable from a wedged one.
-  return codexAppServerRuntimeInfo().timeout_ms;
-}
-
-// Restart resume for a codex app-server job — THE incident fix. On this
-// transport a bridge that dies mid-run is not lost work: the broker owns the
-// turn, so there are two tiers and both were measured
-// (docs/RELIABILITY_REMEDIATION.md §2, "Two-tier durability").
-async function resumeCodexAppServerJob(job) {
-  const jobId = job.jobId;
-  const reqId = job.reqId || createReqId();
-  const startedAt = job.startedAt || Date.now();
-  const promptId = job.promptId || codexAppServerPromptId(jobId);
-  const threadId = job.sessionId;
-  const socketPath = job.brokerSocket || null;
-  log('INFO', 'codex-appserver resume:', jobId, `thread=${threadId} socket=${socketPath || '(default)'}`);
-
-  let conn = null;
-  try {
-    // Socket presence is not liveness, so this is a real connect + broker/status
-    // probe, never a stat of the path.
-    const health = await probeCodexBrokerHealth(socketPath);
-    if (health.alive) {
-      // Tier 1 — the broker outlived the bridge, so the turn is either still
-      // running or already finished. The watcher's level check harvests it
-      // either way: `active` rides the live stream to its terminal, anything
-      // else reads the transcript back over RPC.
-      conn = await connectCodexBroker({ socketPath });
-      await runCodexAppServerWatch({
-        jobId, reqId, conn, threadId, promptId, model: job.model ?? null,
-        task: job.task || '', mode: job.mode || 'EXECUTE', cwd: job.cwd || null,
-        thread: job.thread || null, startedAt,
-      });
-      return;
-    }
-    // Tier 2 — the broker is gone and took the in-flight turn with it. The
-    // rollout survives on disk, so a FRESH broker still resumes the thread and
-    // `thread/read` still returns the transcript. Only the turn is lost, and
-    // that is emphatically NOT `thread_not_resumable`: the thread resumes here
-    // to prove it.
-    const spawned = await ensureCodexBroker();
-    conn = await connectCodexBroker({ socketPath: spawned.socketPath });
-    const resumed = await resumeCodexThread({ conn, threadId, model: job.model ?? null });
-    const transcript = await readCodexThread({ conn, threadId });
-    finalizeResumedCodexThread(job, { transcript, threadStatus: resumed.status, reqId, startedAt, promptId });
-  } catch (err) {
-    // Leaving the job non-terminal would hang every agent_wait to its clamp —
-    // nothing else settles a resumed job.
-    log('WARN', 'codex-appserver resume failed:', jobId, err.message);
-    const error = `codex app-server resume failed for thread ${threadId}: ${err.message}`;
-    // Same reason as the worker catches: the reason has to be on
-    // `adapterResult` or emitNotification's refresh renders it away. Nothing the
-    // dead bridge wrote is lost — writeJobDigest carries that body forward.
-    const failure = { stdout: '', stderr: error, summary: null };
-    retainTerminalJob(jobId, {
-      status: 'unreachable', error, detail: 'codex_server_unreachable',
-      durationMs: Date.now() - startedAt, terminalAt: Date.now(),
-      adapterResult: failure,
-    });
-    writeJobDigest(jobs.get(jobId), failure);
-    emitNotification({
-      jobId, status: 'unreachable', summary: null, error, stuckReason: null,
-      detail: 'codex_server_unreachable', duration: Date.now() - startedAt,
-      task: job.task, mode: job.mode, cwd: job.cwd, thread: job.thread,
-      promptId, sessionId: threadId, failedTools: [], reqId, target: 'codex', fleet: false,
-    });
-  } finally {
-    try { conn?.close(); } catch {}
-  }
-}
-
-// The honest verdict for tier 2. The transcript is real salvage — `thread/read`
-// is a DISK reader, measured returning a full transcript from a fresh
-// app-server with no prior resume — but the turn that was in flight when the
-// broker died did not finish, and nothing in the protocol distinguishes "idle
-// because it finished" from "idle because it was killed". Calling that
-// `completed` is the silent-destruction failure this plan exists to kill, so
-// the job settles `unreachable` with the salvaged content attached and the
-// thread named as the live continuation point.
-function finalizeResumedCodexThread(job, { transcript, threadStatus, reqId, startedAt, promptId }) {
-  const jobId = job.jobId;
-  const summary = transcript.found ? transcript.summary : null;
-  const salvage = transcript.found
-    ? 'its transcript was read back from the rollout and is in the digest'
-    : 'its rollout held no assistant message yet';
-  const error = `the codex broker that ran this turn is gone; the in-flight turn was lost. `
-    + `Thread \`${job.sessionId}\` resumed cleanly on a fresh broker (status ${threadStatus}) and ${salvage}. `
-    + 'The thread itself is intact — this is a lost turn, not a lost thread.';
-  const result = { status: 'unreachable', summary, error, stdout: summary?.message || '', stderr: '' };
-  const duration = Date.now() - startedAt;
-
-  // Whatever the dead bridge streamed into this digest is the only record of
-  // that turn, so nothing here replaces it — writeJobDigest carries the prior
-  // body forward into every render this process makes for a job it did not
-  // start. When there is nothing to salvage the outcome also goes in the
-  // sibling note, exactly as the retire path does.
-  const retiredNote = transcript.found
-    ? null
-    : writeRetirementNote(job, { detail: 'codex_server_gone', error, childPid: null, childAlive: false });
-  retainTerminalJob(jobId, {
-    status: 'unreachable', summary, error, detail: 'codex_server_gone',
-    retiredNote, durationMs: duration, terminalAt: Date.now(), adapterResult: result,
-  });
-  writeJobDigest(jobs.get(jobId), result);
-  // Both branches notify. `retainTerminalJob` only resolves a waiter that is
-  // already parked; a parent that relies on the queue drain instead would never
-  // hear about a restart that happened to salvage nothing.
-  emitNotification({
-    jobId, status: 'unreachable', summary, error, stuckReason: null,
-    detail: 'codex_server_gone', duration,
-    task: job.task, mode: job.mode, cwd: job.cwd, thread: job.thread,
-    promptId, sessionId: job.sessionId, failedTools: [], reqId, target: 'codex', fleet: false,
-    // The note path is deliberately NOT in extraMeta: every meta value is
-    // sliced to 80 chars there, and a truncated absolute path is worse than
-    // none. It lives on the job record (`retiredNote`), which is where the
-    // retire path already publishes it.
-  });
-  log('INFO', 'codex-appserver resume terminal:', jobId, `status=unreachable salvaged=${transcript.found} thread_status=${threadStatus}`);
-}
-
-// Watch-loop and terminal handling, factored out so a rehydrated bridge can
-// re-attach to a daemon-owned promptId without re-running prompt-bg. Called
-// from runWorker (fresh prompt) and from rehydrate (recovery after restart).
-async function runWatchLoop({ jobId, promptId, sessionId, thread, profileId = null, task, mode, cwd, startedAt, reqId, sessionReborn = false, fleet = false, target = 'copilot' }) {
-  const rlog = withReq(reqId, { job_id: jobId });
-  try {
-    let result;
-    while (true) {
-      result = await awaitTerminal(promptId, 480, target);
-      if (result?.interim) {
-        emitAlertNotification({ jobId, task, promptId, alert: result.alert, startedAt, reqId });
-        // Real-time digest refresh: every supervisor alert (~60s during
-        // silence) regenerates the on-disk digest so a parent that reads
-        // the file mid-flight sees an up-to-date snapshot.
-        refreshDigestForJob(jobs.get(jobId));
-        if (Date.now() - startedAt > MAX_JOB_MS) throw new Error(`watch loop exceeded MAX_JOB_MS (${MAX_JOB_MS}ms)`);
-        continue;
-      }
-      break;
-    }
-
-    if (result.status === 'failed' && result.error === 'prompt timeout') {
-      // Promote prompt_timeout to a first-class terminal status. The model
-      // turn did not finish within the wait budget; the daemon is alive
-      // and the task was too large for one turn. Distinct from `stuck`
-      // (supervisor trip) and from `unreachable` (daemon/socket dead).
-      result.status = 'timeout';
-      result.stuckReason = null;
-      result.error = null;
-      result.detail = 'prompt_timeout';
-      retireThreadSid(thread, profileId, sessionId, 'prompt_timeout');
-      result.sessionRetired = true;
-      rlog.warn('worker.remap_prompt_timeout', { prompt_id: promptId });
-      log('INFO', 'remap prompt_timeout:', jobId, `promptId=${promptId} → status=timeout retired=${!!result.sessionRetired}`);
-    }
-
-    if (result.status === 'completed' && isEmptyCompletedSummary(result.summary)) {
-      result.status = 'failed';
-      result.error = `${targetLabel(target)} returned completed without any assistant message, tool calls, or plan updates.`;
-      result.detail = 'empty_completed';
-      retireThreadSid(thread, profileId, sessionId, 'empty_completed');
-      result.sessionRetired = true;
-      rlog.warn('worker.empty_completed', { prompt_id: promptId, session_retired: !!result.sessionRetired });
-      log('WARN', 'empty completed remapped:', jobId, `promptId=${promptId} retired=${!!result.sessionRetired}`);
-    }
-
-    if (result.status === 'failed' && result.error === 'empty completed response') {
-      result.error = `${targetLabel(target)} returned completed without any assistant message, tool calls, or plan updates.`;
-      result.detail = 'empty_completed';
-      retireThreadSid(thread, profileId, sessionId, 'empty_completed');
-      result.sessionRetired = true;
-    } else if (result.sessionRetired) {
-      retireThreadSid(thread, profileId, sessionId, result.detail || result.error || 'session_retired');
-      result.sessionRetired = true;
-    }
-
-    const currentJob = jobs.get(jobId);
-    if (currentJob?.supersedingPromptId === promptId && result.status === 'cancelled') {
-      currentJob.supersededPromptStatus = 'cancelled';
-      persistJob(jobId);
-      rlog.info('worker.prompt_superseded', { prompt_id: promptId, replacement_prompt_id: currentJob.promptId || null });
-      log('INFO', 'worker prompt superseded:', jobId, `promptId=${promptId}`);
-      return;
-    }
-    if (currentJob?.promptId && currentJob.promptId !== promptId) {
-      rlog.info('worker.prompt_obsolete', { prompt_id: promptId, current_prompt_id: currentJob.promptId });
-      log('INFO', 'worker obsolete prompt ignored:', jobId, `old=${promptId} current=${currentJob.promptId}`);
-      return;
-    }
-
-    const duration = Date.now() - startedAt;
-    const failedTools = failedToolsFromJsonl(promptId, target);
-    retainTerminalJob(jobId, {
-      promptId, sessionId,
-      status: result.status, summary: result.summary,
-      error: result.error, stuckReason: result.stuckReason,
-      detail: result.detail || null,
-      failedTools, durationMs: duration,
-      terminalAt: Date.now(),
-      sessionReborn,
-      sessionRetired: !!result.sessionRetired,
-    });
-    rlog.info('worker.terminal', { status: result.status, duration_ms: duration, failed_tools: failedTools?.length || 0, session_reborn: sessionReborn, session_retired: !!result.sessionRetired });
-    emitNotification({
-      jobId,
-      status: result.status, summary: result.summary,
-      error: result.error, stuckReason: result.stuckReason,
-      detail: result.detail || null,
-      duration, task, mode, cwd, thread,
-      promptId, sessionId, failedTools, reqId, sessionReborn,
-      sessionRetired: !!result.sessionRetired,
-      fleet,
-      target,
-    });
-  } catch (err) {
-    await emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId, target });
-  }
-}
-
-async function emitWorkerFailure({ jobId, err, startedAt, reqId, task, mode, cwd, thread, rlog, sessionId, target = 'copilot' }) {
-  const duration = Date.now() - startedAt;
-  const job = jobs.get(jobId);
-  const promptId = job?.promptId;
-  const profileId = job?.profileId ?? null;
-  const currentSessionId = job?.sessionId || sessionId;
-  const fleet = !!job?.fleet;
-  const isReconcilableErr = !!promptId && (
-    (err && typeof err.code === 'string' && ['ECONNREFUSED', 'ENOENT', 'EPIPE', 'ETIMEDOUT'].includes(err.code)) ||
-    /timeout/i.test(err?.message || '')
-  );
-  const reconciled = isReconcilableErr ? await reconcileAfterTimeout(promptId, target) : null;
-  let status = reconciled?.status ?? 'failed';
-  let summary = reconciled?.summary ?? null;
-  let error = reconciled?.error ?? err.message;
-  let detail = reconciled?.detail ?? null;
-  let sessionRetired = false;
-  if (status === 'completed' && isEmptyCompletedSummary(summary)) {
-    status = 'failed';
-    error = `${targetLabel(target)} returned completed without any assistant message, tool calls, or plan updates.`;
-    detail = 'empty_completed';
-    retireThreadSid(thread, profileId, currentSessionId, 'empty_completed');
-    sessionRetired = true;
-  }
-  rlog.warn('worker.catch', { error: err.message, reconciled: reconciled?.status || null });
-  log('WARN', 'worker catch:', jobId, `err="${err.message}" reconciled=${reconciled?.status || 'n/a'}`);
-  retainTerminalJob(jobId, {
-    promptId: promptId || null,
-    sessionId: currentSessionId || null,
-    status,
-    summary,
-    error,
-    stuckReason: reconciled?.stuckReason ?? null,
-    detail,
-    failedTools: promptId ? failedToolsFromJsonl(promptId, target) : [],
-    durationMs: duration, terminalAt: Date.now(),
-    sessionRetired,
-  });
-  emitNotification({
-    jobId,
-    status,
-    summary,
-    error,
-    stuckReason: reconciled?.stuckReason ?? null,
-    detail,
-    duration, task, mode, cwd, thread,
-    promptId: promptId || null,
-    sessionId: currentSessionId || null,
-    failedTools: promptId ? failedToolsFromJsonl(promptId, target) : [],
-    bridgeReason: reconciled?.bridgeReason || null,
-    reconciled: !!reconciled,
-    sessionRetired,
-    fleet,
-    reqId,
-    target,
-  });
-}
-
-async function awaitTerminal(promptId, maxWaitSec, target = 'copilot') {
-  // Cap aligned with the daemon's PROMPT_TIMEOUT_MS (25 min). The +120s
-  // padding gives the daemon room to return a terminal payload before we
-  // give up on the socket roundtrip.
-  const timeoutMs = Math.min((maxWaitSec + 120) * 1000, 25 * 60 * 1000);
-  const resp = await watchPrompt(
-    { promptId, since: 0, raw: false, wait: maxWaitSec, summaryOnly: true, companion: target },
-    timeoutMs,
-  );
-  if (!resp.ok) throw new Error(`await failed: ${resp.error}`);
-  return resp.data;
-}
-
-async function reconcileAfterTimeout(promptId, target = 'copilot') {
-  try {
-    const resp = await watchPrompt(
-      { promptId, since: 0, raw: false, wait: 0, summaryOnly: true, companion: target },
-      5_000,
-    );
-    const data = resp?.ok ? resp.data : null;
-    if (data?.status === 'completed') {
-      return { status: 'completed', summary: data.summary, error: null, stuckReason: null, detail: null, bridgeReason: 'reconciled_completed' };
-    }
-    if (data?.status === 'stuck' || data?.status === 'cancelled') {
-      return { status: 'stuck', summary: null, error: null, stuckReason: data.stuckReason || data.status, detail: null, bridgeReason: 'reconciled_stuck' };
-    }
-    // Socket reconciliation succeeded but the daemon reported no terminal
-    // state — treat as bridge-level unreachable (socket flapped). detail
-    // distinguishes this from a hard daemon-dead failure below.
-    return { status: 'unreachable', summary: null, error: null, stuckReason: null, detail: 'bridge_timeout', bridgeReason: 'bridge_timeout' };
-  } catch {
-    // Daemon process dead or socket gone — true infra failure.
-    return { status: 'unreachable', summary: null, error: null, stuckReason: null, detail: 'bridge_daemon_unreachable', bridgeReason: 'bridge_daemon_unreachable' };
-  }
-}
-
-function failedToolsFromJsonl(promptId, target = 'copilot') {
-  try {
-    const content = readFileSync(promptEventsPath(promptId, target), 'utf8');
-    const byId = new Map();
-    const names = new Set();
-    for (const line of content.split('\n')) {
-      if (!line.trim()) continue;
-      let ev; try { ev = JSON.parse(line); } catch { continue; }
-      if (ev.type === 'tool_call') byId.set(ev.toolCallId, ev.name);
-      else if (ev.type === 'tool_call_update' && ev.status === 'failed') {
-        const name = ev.name || byId.get(ev.toolCallId);
-        if (name) names.add(name);
-      }
-    }
-    return [...names];
-  } catch { return []; }
-}
-
-// --- Action handlers --------------------------------------------------------
 
 function asJson(obj) {
   const content = [{ type: 'text', text: JSON.stringify(obj) }];
@@ -3053,804 +294,180 @@ function invalidArgsResult(err) {
   });
 }
 
-async function handleSend(args) {
-  // The drain hook keys event delivery on claudeSessionId. Without it, every
-  // queue write the new job produces would land in a row that no session can
-  // claim — the model would never see its own watchdog alerts or terminal
-  // events. Refuse upfront with a clear error rather than silently dropping
-  // notifications later.
-  if (!getHostSessionId()) {
-    return asJson({
-      ok: false,
-      action: 'send',
-      error: 'no host session id: neither Codex _meta nor an inherited CLAUDE_CODE_SESSION_ID reached the bridge, so it cannot tag events for hook delivery.',
-    });
-  }
-
-  // Route by target/profile/strength through the sole routing brain. Every
-  // resolution error returns the TARGET_UNCONFIGURED envelope shape (echoing
-  // candidates + the public profile list); MODEL_NOT_ALLOWED keeps its legacy
-  // reason/model/hint fields as a superset.
-  const routing = resolveRouting(
-    { target: args.target || null, profile: args.profile || null, strength: args.strength || null },
-    process.env,
-  );
-  if (!routing.ok) {
-    const envelope = {
-      ok: false,
-      action: 'send',
-      code: routing.code,
-      target: routing.companion || null,
-      error: routing.error,
-      targets: listTargets(),
-      profiles: listProfilesPublic(routing.load),
-    };
-    // `?.length`, not truthiness: `publicIds()` returns `[]` when nothing is
-    // configured, and `[]` is truthy — so PROFILE_UNKNOWN and
-    // STRENGTH_UNCONFIGURED used to ship `candidates: []`, which reads exactly
-    // like a deliberately withheld list. Omit the key instead.
-    if (routing.candidates?.length) envelope.candidates = routing.candidates;
-    if (routing.code === 'MODEL_NOT_ALLOWED') {
-      envelope.reason = 'model-not-allowed';
-      envelope.model = routing.model;
-      envelope.hint = routing.hint;
-    }
-    return asJson(envelope);
-  }
-
-  const target = routing.resolved.companion;
-  const model = routing.resolved.model;
-  const profileId = routing.resolved.profileId;
-  const routedStrength = routing.resolved.strength;
-
-  // Over MCP the host has named the thread after the calling agent (callArgs);
-  // a direct dispatch caller that names none gets a conversation of its own.
-  const jobId = `${target}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  const thread = args.thread || `companion-${jobId}`;
-
-  // Reattach guard. When the MCP bridge dies mid-send and Claude Code respawns
-  // it, the same tool call lands again with the same thread + host session.
-  // The previous worker is still running inside the daemon. Starting a new
-  // prompt-bg on the same Copilot sessionId would overwrite the live
-  // collector entry (sessionCollectors[sessionId]) and silently amputate the
-  // first prompt's event stream. Instead, find the live job and just wait
-  // on it — its terminal payload is the one the caller wants anyway.
-  const hostSid = getHostSessionId();
-  for (const existing of jobs.values()) {
-    if (existing.thread !== thread) continue;
-    if (existing.claudeSessionId !== hostSid) continue;
-    if (existing.terminalAt) continue;
-    const existingTarget = existing.target;
-    if (existingTarget !== target) {
-      return asJson({
-        ok: false,
-        action: 'send',
-        status: 'target_mismatch',
-        job_id: existing.jobId,
-        current_status: existing.status || 'running',
-        thread,
-        target,
-        existing_target: existingTarget,
-        error:
-          `existing in-flight job ${existing.jobId} on thread ${thread} targets ${existingTarget}, ` +
-          `but this send requested ${target}. Wait/cancel the existing job or use a different thread.`,
-      });
-    }
-    const existingProfileId = existing.profileId ?? null;
-    if (existingProfileId !== profileId) {
-      return asJson({
-        ok: false,
-        action: 'send',
-        status: 'profile_mismatch',
-        job_id: existing.jobId,
-        current_status: existing.status || 'running',
-        thread,
-        target,
-        existing_profile: existingProfileId,
-        requested_profile: profileId,
-        error:
-          `existing in-flight job ${existing.jobId} on thread ${thread} runs profile ` +
-          `${existingProfileId || '(default)'}, but this send resolved to ${profileId || '(default)'}. ` +
-          'Wait/cancel the existing job or use a different thread.',
-      });
-    }
-    if (!sameRequiredCwd(existing.cwd, args.cwd)) {
-      return asJson({
-        ok: false,
-        action: 'send',
-        status: 'cwd_mismatch',
-        job_id: existing.jobId,
-        target,
-        current_status: existing.status || 'running',
-        thread,
-        existing_cwd: existing.cwd || null,
-        requested_cwd: args.cwd,
-        error:
-          `existing in-flight job ${existing.jobId} on thread ${thread} is rooted at ` +
-          `${existing.cwd || '(unknown)'}, but this send requested ${args.cwd}. ` +
-          'Refusing to reattach or start the target in the wrong workspace; wait/cancel the existing job or use a different thread.',
-      });
-    }
-    // Only a retry of the same call reattaches. A different request is new
-    // work, and folding it into the running job would drop it unseen — which is
-    // what happened to a follow-up sent to an agent-companion mid-job.
-    if (!sameRequest(existing, args)) {
-      return asJson({
-        ok: false,
-        action: 'send',
-        status: 'thread_busy',
-        job_id: existing.jobId,
-        target,
-        current_status: existing.status || 'running',
-        thread,
-        error:
-          `job ${existing.jobId} is still running on this conversation, and this send is a different request. ` +
-          'Wait for it, cancel it, or steer it with agent_reply where its reply_available is true.',
-      });
-    }
-    existing.reattached = true;
-    persistJob(existing.jobId);
-    const maxWait = clampWaitSec(args.max_wait_sec);
-    logEvent('info', 'agent.send.reattached', {
-      job_id: existing.jobId, target, thread, host_session: hostSid, status: existing.status || 'running',
-    });
-    log('INFO', 'agent:send reattached:', `job=${existing.jobId} target=${target} thread=${thread} status=${existing.status}`);
-    const outcome = await waitForJob(existing.jobId, maxWait);
-    return buildWaitResponse(outcome);
-  }
-
-  // Thread → the companion session the last job on this thread recorded,
-  // namespaced by profile (synthesized/legacy → profileId=null →
-  // byte-identical <thread>.sid). Copilot resumes its ACP session from it;
-  // codex on the app-server adapter resumes the thread (`thread/resume`), so a
-  // follow-up send continues the conversation instead of opening a cold one.
-  // The exec adapter never reads it — a single-shot pipe has nothing to resume
-  // — and a thread name with no sid yet (an explicit new name, or the
-  // auto-generated companion-<jobId>) reads null and opens fresh. The model was
-  // already validated by the capability gate in resolveRouting.
-  let previousSid = null;
-  if (isAcpTarget(target) || (target === 'codex' && codexAppServerActive())) {
-    try { previousSid = readThreadSid(thread, profileId); }
-    catch (err) { return asJson({ ok: false, error: err.message }); }
-  }
-
-  const reqId = createReqId();
-  const fleet = fleetCapable(target) && shouldUseFleet({
-    parallel: args.parallel,
-    template: args.template,
-    mode: args.mode,
-    task: args.task,
-  });
-  jobs.set(jobId, {
-    jobId, reqId,
-    target,
-    profileId,
-    model,
-    strength: routedStrength,
-    claudeSessionId: getHostSessionId(),
-    task: args.task, mode: args.mode,
-    template: args.template, template_args: args.template_args, cwd: args.cwd,
-    thread,
-    parallelStrategy: args.parallel,
-    fleet,
-    startedAt: Date.now(),
-    status: 'starting', inspectAvailable: false,
-  });
-  persistJob(jobId);
-  logEvent('info', `${target}.send`, {
-    req_id: reqId, job_id: jobId, target,
-    profile: profileId, strength: routedStrength,
-    template: args.template, mode: args.mode,
-    thread, model,
-    parallel_strategy: args.parallel,
-    fleet,
-  });
-  log('INFO', 'agent:send', `job=${jobId} req=${reqId} target=${target} profile=${profileId || '-'} strength=${routedStrength || '-'} template=${args.template} mode=${args.mode} thread=${thread} model=${model || '-'} parallel=${args.parallel} fleet=${fleet}`);
-
-  if (isAcpTarget(target)) {
-    runAcpWorker({
-      jobId, reqId,
-      task: args.task, mode: args.mode,
-      template: args.template, template_args: args.template_args,
-      cwd: args.cwd, thread, profileId, model, previousSid,
-      parallel: args.parallel,
-      target,
-    }).catch((err) => log('ERROR', 'worker error:', err.message));
-  } else if (CLI_RUNTIMES[target]) {
-    CLI_RUNTIMES[target].start({
-      jobId, reqId,
-      task: args.task, mode: args.mode,
-      template: args.template, template_args: args.template_args,
-      cwd: args.cwd, thread, profileId, model, previousSid,
-      parallel: args.parallel,
-      target,
-    }).catch((err) => log('ERROR', `${target} worker error:`, err.message));
-  }
-
-  // Return immediately with still_running. The worker continues in the
-  // background; the caller (subagent) loops on `wait` to block until terminal.
-  // Returning synchronously here avoids client-side MCP timeouts on hosts
-  // (Codex) with shorter per-tool budgets than the bridge's natural wait
-  // window. Shape mirrors buildWaitResponse's still_running envelope so the
-  // subagent doesn't need to special-case send vs wait responses.
-  const job = jobs.get(jobId);
-  return asJson({
-    ok: true, action: 'send', status: 'still_running',
-    job_id: jobId,
-    target,
-    profile: profileId,
-    strength: routedStrength,
-    thread,
-    current_status: job?.status || 'starting',
-    parallel: args.parallel,
-    fleet,
-    started_at: iso(job?.startedAt || Date.now()),
-    age_s: 0,
-    session_reborn: false,
-    hint: 'call agent_wait({ job_id, max_wait_sec }) to block until terminal.',
-  });
+// Controller-owned executions never enter the legacy worker/job cache. These
+// envelopes are projections of durable records, including on repeated waits.
+function executionStatus(result) {
+  return ({ completed: 'completed', failed: 'failed', interrupted: 'cancelled', stopped: 'cancelled', delivery_unknown: 'failed' })[result.outcome];
 }
 
-async function handleWait({ job_id, max_wait_sec }) {
-  if (!job_id) return asJson({ ok: false, action: 'wait', error: 'job_id required' });
-  const max = clampWaitSec(max_wait_sec);
-  const outcome = await waitForJob(job_id, max);
-  return buildWaitResponse(outcome);
-}
-
-async function buildCancelFollowup(job_id, target, cancelMeta = {}) {
-  const outcome = await waitForJob(job_id, 5);
-  if (outcome.terminal) return buildWaitResponse(outcome);
-  return asJson({
-    ok: true,
-    action: 'cancel',
-    status: 'cancelling',
-    job_id,
-    target,
-    cancelled: true,
-    ...cancelMeta,
-    hint: 'cancel signal accepted; call agent_wait({ job_id, max_wait_sec }) until terminal.',
-  });
-}
-
-async function handleCancel({ job_id }) {
-  if (!job_id) return asJson({ ok: false, action: 'cancel', error: 'job_id required' });
-  const job = getJob(job_id);
-  if (!job)                                       return asJson({ ok: false, error: 'unknown job_id' });
-  const target = job.target;
-  if (!job.promptId || job.status === 'starting') return asJson({ ok: false, error: 'job is not yet cancellable' });
-  if (job.status !== 'running')                   return asJson({ ok: false, error: `job is ${job.status}` });
-  if (!isAcpTarget(target)) {
-    // OpenCode server mode aborts the HTTP session turn; the watch loop then
-    // observes session.idle with MessageAbortedError and maps it to cancelled.
-    // CLI mode signals the spawned `opencode run` child.
-    if (target === 'opencode' && job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId) {
-      // Record the intent BEFORE aborting: OpenCode's abort does not always emit
-      // a MessageAbortedError (a turn aborted mid-reasoning just goes idle), so
-      // the watch can't infer cancellation from the stream alone. The bridge
-      // initiated it, so it owns the verdict.
-      updateJob(job_id, { cancelRequested: true });
-      const resp = await abortOpenCodeSession({ baseUrl: job.baseUrl, sessionId: job.sessionId, directory: job.cwd || null });
-      if (resp.aborted) {
-        return buildCancelFollowup(job_id, target, { reason: 'aborted opencode session turn' });
-      }
-      // The abort did not happen, so the intent must not survive it. A stale
-      // flag makes the watch relabel whatever the turn actually produced as
-      // `cancelled` with `error: null`, and the parent discards a finished
-      // turn on the strength of a cancel it was already told had failed.
-      updateJob(job_id, { cancelRequested: false });
-      return asJson({
-        ok: false, action: 'cancel', job_id, target,
-        status: 'cancel_failed', cancelled: false,
-        reason: resp.error || 'opencode session abort not confirmed',
-        error: resp.error || 'opencode session abort not confirmed',
-      });
-    }
-    // Codex app-server mode: `turn/interrupt` cancels the turn and LEAVES THE
-    // THREAD LIVE — unlike the exec adapter's SIGTERM, which takes the whole
-    // process with it. Record the intent BEFORE acting for the same reason
-    // OpenCode does: an interrupted turn settles `status:"interrupted"` with no
-    // answer, so the bridge's own record is what makes the verdict `cancelled`
-    // rather than a mystery terminal.
-    if (target === 'codex' && job.codexAdapter === 'appserver' && job.sessionId) {
-      updateJob(job_id, { cancelRequested: true });
-      let conn = null;
-      try {
-        conn = await connectCodexBroker({ socketPath: job.brokerSocket || null });
-        // The adapter resumes this thread first — a connection that did not
-        // start it would otherwise meet `thread not found`, which means "not
-        // loaded into this process", never "gone".
-        //
-        // `turnId` is REQUIRED by the protocol, so it is passed, not omitted:
-        // the live one when this bridge saw the turn start, and the adapter's
-        // `thread/read` lookup when it did not (a bridge that restarted mid-turn
-        // never saw `turn/started`). A cancel that cannot resolve one throws
-        // here and lands in the catch below as an honest `cancel_failed`.
-        const interrupted = await interruptCodexTurn({ conn, threadId: job.sessionId, turnId: job.turnId || null });
-        // Logged because the follow-up envelope may not carry it: an interrupt
-        // that settles the job inside the 5 s follow-up window returns the
-        // terminal wait response instead, and then the log is the only record
-        // of WHICH turn was cancelled — which is the whole field that used to
-        // be missing.
-        log('INFO', 'agent:cancel codex-appserver interrupt',
-          `job=${job_id} thread=${job.sessionId} turn=${interrupted.turnId}`);
-        return buildCancelFollowup(job_id, target, {
-          reason: 'interrupted the codex turn',
-          thread_id: job.sessionId,
-          turn_id: interrupted.turnId,
-          thread_alive: true,
-          note: `codex thread ${job.sessionId} stays live and resumable after an interrupt; only the turn was cancelled.`,
-        });
-      } catch (err) {
-        // The interrupt RPC was never acknowledged — connect timed out, socket
-        // backlog, broker busy — so the turn is untouched and still running.
-        // Clearing the intent is what keeps the watch from later relabelling a
-        // turn that completed normally as `cancelled` with its error nulled.
-        updateJob(job_id, { cancelRequested: false });
-        return asJson({
-          ok: false, action: 'cancel', job_id, target,
-          status: 'cancel_failed', cancelled: false,
-          thread_id: job.sessionId,
-          reason: err.message, error: err.message,
-        });
-      } finally {
-        try { conn?.close(); } catch {}
-      }
-    }
-    // CLI mode (opencode `run` or codex `exec`) signals the spawned child via
-    // that target's own cancel — routing every non-copilot cancel through
-    // cancelOpenCodeRun would cross-wire a codex job into OpenCode's
-    // `running`/`cancelRequested` bookkeeping.
-    const runtime = CLI_RUNTIMES[target];
-    const resp = runtime
-      ? runtime.cancel(job_id, job.pid || null)
-      : { ok: false, reason: `no cancel runtime registered for target "${target}"` };
-    if (resp.ok) {
-      return buildCancelFollowup(job_id, target, {
-        reason: resp.reason,
-        pid: resp.pid || null,
-      });
-    }
-    return asJson({
-      ok: false,
-      action: 'cancel',
-      job_id,
-      target,
-      status: 'cancel_failed',
-      cancelled: false,
-      reason: resp.reason,
-      pid: resp.pid || null,
-      error: resp.reason,
-    });
-  }
-  const resp = await cancelPrompt({ promptId: job.promptId, companion: target });
-  // Cancel also surfaces the job via the cancel MCP response, so mark the
-  // queue entry consumed to avoid a duplicate drain injection.
-  if (resp.data?.cancelled) {
-    markQueueConsumed(job_id);
-    return buildCancelFollowup(job_id, target, { reason: resp.data?.reason || null });
-  }
-  return asJson({
-    ok: true, action: 'cancel', status: 'cancel_not_confirmed', job_id, target,
-    cancelled: !!resp.data?.cancelled, reason: resp.data?.reason,
-  });
-}
-
-// OpenCode server re-steer: abort the in-flight turn, bump the per-job watch
-// generation so the old watcher drops its (cancelled) terminal, then prompt the
-// same session again under a fresh watch. Mirrors Copilot's cancel-then-reprompt
-// reply without the daemon socket.
-async function handleOpenCodeServerReply(job, message) {
-  const job_id = job.jobId;
-  if (!job.sessionId || !job.baseUrl) return asJson({ ok: false, action: 'reply', error: 'job has no live opencode session yet — wait for status: running' });
-  if (job.terminalAt) return asJson({ ok: false, action: 'reply', error: `job is already ${job.status} — start a new send` });
-  if (job.replyInFlight) return asJson({ ok: false, action: 'reply', error: 'reply already in flight for this job' });
-
-  const originalPromptId = job.promptId;
-  const replyTurn = (job.replyTurn || 0) + 1;
-  const replacementPromptId = openCodeServerPromptId(job_id, replyTurn);
-  // Bump the watch generation SYNCHRONOUSLY, before any await. The original
-  // turn's watcher is parked on `await watcher.done`; when the abort's
-  // session.idle lands it reaches its supersede guard, which must already see
-  // the new promptId so it discards the (cancelled) terminal instead of
-  // resolving waiters / emitting a spurious cancelled notification over the
-  // re-steer. Abort + settle then run inside the background watch so a failed
-  // abort or a still-busy session surfaces as the new turn's terminal rather
-  // than racing here. (Mirror of Copilot's atomic cancel-then-reprompt.)
-  job.replyInFlight = true;
-  updateJob(job_id, {
-    promptId: replacementPromptId,
-    replyTurn,
-    status: 'running',
-    inspectAvailable: false,
-    terminalAt: null,
-    retentionExpiresAt: null,
-    error: null,
-    stuckReason: null,
-    detail: null,
-  });
-
-  const reqId = job.reqId || createReqId();
-  runOpenCodeServerWatch({
-    jobId: job_id, reqId,
-    baseUrl: job.baseUrl, sessionId: job.sessionId, promptId: replacementPromptId, directory: job.cwd || null,
-    prompt: message, model: job.model ?? null, task: job.task || message, mode: job.mode || 'EXECUTE',
-    cwd: job.cwd || null, thread: job.thread || null,
-    startedAt: job.startedAt || Date.now(), reply: true, abortFirst: true,
-  })
-    .catch((err) => log('ERROR', 'opencode-server reply watch error:', job_id, err.message))
-    .finally(() => { const j = jobs.get(job_id); if (j) { j.replyInFlight = false; persistJob(job_id); } });
-
-  log('INFO', 'agent:reply opencode-server', `job=${job_id} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
-  return asJson({
-    ok: true, action: 'reply', job_id, target: 'opencode',
-    original_prompt_id: originalPromptId,
-    new_prompt_id: replacementPromptId,
-    session_id: job.sessionId,
-    hint: 'reply accepted. The original turn was aborted; the follow-up runs as a new prompt on the same OpenCode session.',
-  });
-}
-
-// Codex app-server re-steer. `turn/steer` is REAL mid-flight injection: the
-// running turn keeps its turn id and its work, and the message lands at the
-// next model boundary — measured fired against an in-flight `apply_patch`, the
-// patch completed atomically and the steer arrived 0.14 s later. So unlike
-// Copilot and OpenCode there is no cancel-then-reprompt here, and no watch
-// generation bump: the watcher already driving the turn is the one that
-// answers, and bumping the generation would make it discard its own terminal.
-//
-// An idle thread has no turn to steer, so THAT path takes a fresh guarded
-// `turn/start` under a bumped generation, exactly like the OpenCode reply.
-async function handleCodexAppServerReply(job, message) {
-  const job_id = job.jobId;
-  if (!job.sessionId) return asJson({ ok: false, action: 'reply', error: 'job has no codex thread yet — wait for status: running' });
-  if (job.terminalAt) return asJson({ ok: false, action: 'reply', error: `job is already ${job.status} — start a new send` });
-  if (job.replyInFlight) return asJson({ ok: false, action: 'reply', error: 'reply already in flight for this job' });
-
-  const threadId = job.sessionId;
-  let conn = null;
-  let handedOff = false;
-  // Take the lock SYNCHRONOUSLY, before the first await — the same discipline
-  // handleOpenCodeServerReply applies to its generation bump. Two replies in
-  // one tick would otherwise both clear the guard above, compute the same
-  // replyTurn and the same `-r1` promptId, and launch two turns whose watchers
-  // cannot supersede each other: two turn/starts, two terminals, two queue
-  // entries for one job.
-  job.replyInFlight = true;
-  persistJob(job_id);
-  try {
-    conn = await connectCodexBroker({ socketPath: job.brokerSocket || null });
-    // On this protocol `thread/resume` IS the status read, and it doubles as
-    // the resume-before-act attach `turn/steer` needs.
-    const resumed = await resumeCodexThread({ conn, threadId, model: job.model ?? null });
-    // Re-read across the two RPCs: the live watcher can settle this job while
-    // they are in flight. Proceeding would clear a real terminal (`terminalAt`
-    // back to null, status back to 'running') and bill a fresh turn for a job
-    // the parent has already been told is finished — the spec says reject.
-    const current = jobs.get(job_id) || job;
-    if (current.terminalAt) {
-      return asJson({ ok: false, action: 'reply', job_id, target: 'codex', error: `job is already ${current.status} — start a new send` });
-    }
-    if (resumed.status === 'active') {
-      // `expectedTurnId` is REQUIRED. The live id comes from `turn/started`;
-      // the resume that just read the status carries the running turn as a
-      // second source for a bridge that never saw it, and the adapter falls
-      // back to `thread/read` when neither has one. Recording what the steer
-      // actually hit keeps the job's id in step with the turn it steered.
-      //
-      // `lastTurn` is read under the SAME `inProgress` gate `resolveCodexTurnId`
-      // and `startCodexTurn` apply to it, so one rule governs every read: a
-      // thread reported `active` whose last recorded turn is `completed` is a
-      // finished turn that happens to be last, and passing its id would send the
-      // steer a dead one where null makes the adapter go and find the live one.
-      const resumedTurnId = resumed.lastTurn?.status === 'inProgress' ? resumed.lastTurn.id : null;
-      const steer = await steerCodexTurn({
-        conn, threadId, prompt: message,
-        expectedTurnId: job.turnId || resumedTurnId,
-      });
-      const replyTurn = (job.replyTurn || 0) + 1;
-      updateJob(job_id, { replyTurn, turnId: steer.turnId });
-      log('INFO', 'agent:reply codex-appserver steer',
-        `job=${job_id} thread=${threadId} turn=${steer.turnId} reply_turn=${replyTurn} confirmed=${steer.confirmed}`);
-      return asJson({
-        ok: true, action: 'reply', job_id, target: 'codex',
-        steered: true,
-        // Two facts, not one: the server ACCEPTED the steer, and the injected
-        // message was (or was not yet) seen landing in the turn. An unconfirmed
-        // steer is not a failed one — codex injects at the next model boundary —
-        // so the reason says so instead of the envelope claiming success it
-        // cannot see.
-        steer_confirmed: steer.confirmed,
-        steer_confirmation: steer.confirmation,
-        thread_id: threadId,
-        turn_id: steer.turnId,
-        session_id: threadId,
-        original_prompt_id: job.promptId || null,
-        new_prompt_id: job.promptId || null,
-        reply_turn: replyTurn,
-        hint: 'reply injected into the RUNNING turn — nothing was cancelled and no work was discarded. '
-          + 'It applies at the next model boundary; keep waiting on the same job_id.',
-      });
-    }
-
-    // Idle thread: nothing to steer, so the follow-up is a new guarded turn on
-    // the same thread, under a bumped watch generation.
-    const replyTurn = (job.replyTurn || 0) + 1;
-    const replacementPromptId = codexAppServerPromptId(job_id, replyTurn);
-    const originalPromptId = job.promptId;
-    updateJob(job_id, {
-      promptId: replacementPromptId,
-      replyTurn,
-      status: 'running',
-      inspectAvailable: false,
-      terminalAt: null,
-      retentionExpiresAt: null,
-      error: null,
-      stuckReason: null,
-      detail: null,
-      // CLEARED, not carried. The turn this id names is finished — that is why
-      // this branch was taken — and the replacement's id lands a round trip or
-      // three later, because `runCodexAppServerWatch` below is deliberately not
-      // awaited. An `agent_cancel` inside that window would otherwise send the
-      // dead one: measured against the real server, a completed turn's id on a
-      // thread whose next turn is running answers `-32600 expected active turn
-      // id A but found B`, so the cancel fails while the turn keeps billing.
-      // Null instead makes the resolver read the running turn off `thread/read`
-      // — the same source a restarted bridge uses.
-      turnId: null,
-    });
-
-    const reqId = job.reqId || createReqId();
-    const replyConn = conn;
-    handedOff = true;
-    runCodexAppServerWatch({
-      jobId: job_id, reqId, conn: replyConn, threadId, promptId: replacementPromptId,
-      prompt: message, model: job.model ?? null, task: job.task || message, mode: job.mode || 'EXECUTE',
-      cwd: job.cwd || null, thread: job.thread || null,
-      startedAt: job.startedAt || Date.now(), reply: true,
-    })
-      .catch((err) => log('ERROR', 'codex-appserver reply watch error:', job_id, err.message))
-      .finally(() => {
-        try { replyConn.close(); } catch {}
-        const j = jobs.get(job_id);
-        if (j) { j.replyInFlight = false; persistJob(job_id); }
-      });
-
-    log('INFO', 'agent:reply codex-appserver turn', `job=${job_id} thread=${threadId} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
-    return asJson({
-      ok: true, action: 'reply', job_id, target: 'codex',
-      steered: false,
-      thread_id: threadId,
-      session_id: threadId,
-      original_prompt_id: originalPromptId,
-      new_prompt_id: replacementPromptId,
-      reply_turn: replyTurn,
-      hint: 'the codex thread was idle, so the reply runs as a new turn on the same thread; its transcript carries over.',
-    });
-  } catch (err) {
-    return asJson({ ok: false, action: 'reply', job_id, target: 'codex', error: err.message });
-  } finally {
-    // Handed off means the background watch's own `finally` releases the lock
-    // when the replacement turn settles; every other exit releases it here.
-    if (!handedOff) {
-      try { conn?.close(); } catch {}
-      const j = jobs.get(job_id);
-      if (j) { j.replyInFlight = false; persistJob(job_id); }
-    }
-  }
-}
-
-async function handleReply({ job_id, message }) {
-  // Re-steer an in-flight job. Triple guard: validation rejects missing
-  // message; this handler rejects unknown/terminal jobs locally (cheap fast
-  // path); the daemon enforces its own per-prompt lock so two concurrent
-  // replies cannot race the cancel-and-restart sequence.
-  const job = getJob(job_id);
-  if (!job) return asJson({ ok: false, action: 'reply', error: 'unknown job_id' });
-  const target = job.target;
-  if (target === 'opencode') {
-    if (job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId) {
-      return handleOpenCodeServerReply(job, message);
-    }
-    return asJson({
-      ok: false, action: 'reply', job_id, target, code: 'TARGET_UNSUPPORTED',
-      error: 'OpenCode reply requires server mode (OPENCODE_RUNTIME_ADAPTER=server) and a live session; the CLI adapter cannot re-steer — cancel or start a new send.',
-    });
-  }
-  if (target === 'codex') {
-    // Gated on the adapter THIS job started under, not the live env: a job that
-    // began on the exec pipe has no control channel even if the variable has
-    // since been flipped.
-    if (job.codexAdapter === 'appserver' && job.sessionId) {
-      return handleCodexAppServerReply(job, message);
-    }
-    return asJson({
-      ok: false, action: 'reply', job_id, target, code: 'TARGET_UNSUPPORTED',
-      error: 'Codex reply requires the app-server adapter (CODEX_RUNTIME_ADAPTER=appserver) and a live thread; '
-        + '`codex exec` is a one-shot pipe with no control channel — cancel or start a new send with the revised prompt.',
-    });
-  }
-  if (!isAcpTarget(target)) {
-    return asJson({
-      ok: false,
-      action: 'reply',
-      job_id,
-      target,
-      code: 'TARGET_UNSUPPORTED',
-      error: `${targetLabel(target)} does not support in-flight replies; cancel or start a new send with the revised prompt.`,
-    });
-  }
-  if (!job.promptId) return asJson({ ok: false, action: 'reply', error: 'job has no prompt yet — wait for status: running' });
-  if (job.terminalAt) return asJson({ ok: false, action: 'reply', error: `job is already ${job.status} — start a new send` });
-  if (job.replyInFlight) return asJson({ ok: false, action: 'reply', error: 'reply already in flight for this job' });
-
-  const originalPromptId = job.promptId;
-  job.replyInFlight = true;
-  job.supersedingPromptId = originalPromptId;
-  job.supersededPromptStatus = null;
-  persistJob(job_id);
-  try {
-    const resp = await replyPrompt({ promptId: originalPromptId, message, companion: target });
-    if (!resp.ok || !resp.data?.ok) {
-      const reason = resp.data?.reason || resp.error || 'reply failed';
-      delete job.supersedingPromptId;
-      if (job.supersededPromptStatus === 'cancelled' && !job.terminalAt) {
-        retainTerminalJob(job_id, {
-          status: 'cancelled',
-          error: reason,
-          durationMs: Date.now() - (job.startedAt || Date.now()),
-          terminalAt: Date.now(),
-        });
-      } else {
-        persistJob(job_id);
-      }
-      return asJson({ ok: false, action: 'reply', job_id, error: reason });
-    }
-    const replacementPromptId = resp.data.new_prompt_id;
-    const replacementSessionId = resp.data.session_id || job.sessionId;
-    updateJob(job_id, {
-      promptId: replacementPromptId,
-      sessionId: replacementSessionId,
-      status: 'running',
-      inspectAvailable: true,
-      terminalAt: null,
-      retentionExpiresAt: null,
-      error: null,
-      stuckReason: null,
-      detail: null,
-      supersedingPromptId: null,
-      supersededPromptStatus: null,
-    });
-    delete job.supersedingPromptId;
-    delete job.supersededPromptStatus;
-
-    const reqId = job.reqId || createReqId();
-    runWatchLoop({
-      jobId: job_id,
-      promptId: replacementPromptId,
-      sessionId: replacementSessionId,
-      thread: job.thread || null,
-      profileId: job.profileId ?? null,
-      task: job.task || message,
-      mode: job.mode || 'EXECUTE',
-      cwd: job.cwd || null,
-      startedAt: job.startedAt || Date.now(),
-      reqId,
-      sessionReborn: !!job.sessionReborn,
-      fleet: !!job.fleet,
-      target,
-    }).catch((err) => log('ERROR', 'reply watch loop error:', job_id, err.message));
-
-    log('INFO', 'agent:reply', `job=${job_id} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
-    // Said plainly, because it is what happened: ACP has no mid-turn steer,
-    // so a reply on an ACP companion is a cancelled turn and a new prompt on
-    // the same session, told why. Nothing is injected into a running turn.
-    return asJson({
-      ok: true, action: 'reply', job_id, target,
-      original_prompt_id: resp.data.original_prompt_id,
-      new_prompt_id: replacementPromptId,
-      session_id: replacementSessionId,
-      hint: `reply accepted. The original turn was cancelled (ACP has no mid-turn steer); the follow-up runs as a new prompt on the same ${targetLabel(target)} session, told that the previous turn was interrupted on purpose.`,
-    });
-  } finally {
-    job.replyInFlight = false;
-    persistJob(job_id);
-  }
-}
-
-// `codex_runtime`, with the app-server block merged in the way `opencode_runtime`
-// merges its server block — but only when that adapter is actually selected: the
-// broker fields describe nothing that exists under `exec`, and the default
-// payload stays exactly what it was.
-function codexRuntimeStatus() {
-  const base = codexRuntimeInfo();
-  if (!codexAppServerActive()) return base;
-  const appserver = codexAppServerRuntimeInfo();
-  return {
-    ...base,
-    ...appserver,
-    // Protocol drift and cask-upgrade drift are different axes. The former is
-    // advisory until the live schema comparison finishes; the latter is the
-    // stale executable that must be safely restarted before a new send.
-    contract_version_skew: appserver.running_version
-      ? appserver.running_version !== appserver.pinned_version
-      : null,
-    upgrade_version_skew: appserver.running_version && appserver.selected_version
-      ? appserver.running_version !== appserver.selected_version
-      : null,
-    // The shared-runtime-registry entry for the one broker on this host home
-    // (`broker` above is the broker SCRIPT path, not its state).
-    broker_registry: codexBrokerSnapshot(),
+function terminalEnvelope(execution, result, action = 'wait') {
+  const status = executionStatus(result);
+  const evidence = result.stopEvidence;
+  const meta = {
+    status, job_id: result.executionId, thread: result.owner, target: execution.provider,
+    cause: result.cause, detail: result.outcome === 'delivery_unknown' ? 'delivery_unknown' : result.detail ?? null,
+    usage: result.usage, selected_model: result.selectedModel ?? null, effective_model: result.effectiveModel ?? null,
+    effective_effort: result.effectiveEffort ?? null, native_refs: result.nativeRefs ?? {},
+    stop_evidence: evidence ? { gone: evidence.gone, signals: evidence.signals?.length ?? 0,
+      survivors: evidence.survivors?.length ?? 0, cleanup_ms: evidence.cleanupMs ?? null,
+      detection_delay_ms: evidence.detectionDelayMs ?? null, protocol: evidence.protocol ?? [] } : null,
+    digest_uri: digestResourceUri(result.executionId),
   };
+  return { ok: true, action, status, job_id: result.executionId, target: execution.provider,
+    content: result.text ?? '', meta };
 }
 
-async function handleStatus({ job_id, verbose, diagnostics }) {
-  if (job_id) {
-    const job = getJob(job_id);
-    if (!job) return asJson({ ok: false, error: 'unknown job_id' });
-    let inspect = null;
-    if (job.promptId && isAcpTarget(job.target)) {
-      try { inspect = await fetchPromptInspect(job, { includeTimeline: verbose }); }
-      catch (err) { log('WARN', 'status inspect failed:', job_id, err.message); }
+function writeExecutionDigest(execution, result) {
+  const text = result?.text ?? execution.progress?.partialText ?? '';
+  writePrivateFileAtomic(digestPath(execution.executionId), renderDigest([{ type: 'message', text }], execution.nativeTurnId, {
+    jobId: execution.executionId, targetLabel: targetLabel(execution.provider), thread: execution.owner,
+    task: execution.text, sessionId: execution.historyId, startedAt: execution.startedAt,
+    terminalAt: result?.finishedAt, status: result ? executionStatus(result) : execution.state, usage: result?.usage,
+  }));
+}
+
+function publishResult(records, execution, result) {
+  // The immutable per-execution receipt survives queue draining and bridge
+  // restarts. Publication is serialized with the same conversation lock as
+  // controller writes; status never invokes this writer.
+  records._locked(execution.owner, () => {
+    if (records.read('completions', execution.executionId)) return;
+    writeExecutionDigest(execution, result);
+    const envelope = terminalEnvelope(execution, result);
+    appendPrivateFile(getQueuePath(), JSON.stringify({ ts: result.finishedAt, consumed: false,
+      claudeSessionId: execution.hostSessionId ?? null, kind: 'terminal', jobId: execution.executionId,
+      content: envelope.content, meta: envelope.meta }) + '\n');
+    records._write('completions', execution.executionId, { executionId: execution.executionId });
+  });
+}
+
+export function createBridgeController({ env = process.env, records = new Records({ dir: BASE_DIR }), ...options } = {}) {
+  const safely = (fn) => (...args) => { try { fn(...args); } catch (err) { log('WARN', 'execution publication failed:', err.message); } };
+  return new Controller({ env, records, clock: systemClock,
+    providers: { codex: codexProvider({ env }), opencode: opencodeProvider({ env }),
+      copilot: acpProvider('copilot', { env }), antigravity: acpProvider('antigravity', { env }) },
+    ...options, onProgress: safely(writeExecutionDigest), onResult: safely((execution, result) => publishResult(records, execution, result)),
+  });
+}
+export const controller = createBridgeController();
+
+export async function recoverController(active = controller) {
+  for (const execution of active.records.listExecutions()) {
+    const conversation = active.records.readConversation(execution.owner);
+    if (conversation?.executionId === execution.executionId && execution.state !== 'closed') {
+      await active.recover({ owner: execution.owner });
     }
-    // Refresh the on-disk digest so the caller can read up-to-date detail
-    // (sub-agent reports, files touched, todos, partial assistant message)
-    // without having to inspect the raw jsonl. This is the primary mechanism
-    // the parent agent uses to track progress on long-running /fleet jobs.
-    refreshDigestForJob(job);
-    const response = buildJobResponse(job, inspect, { includeTimeline: verbose });
-    if (diagnostics) response.diagnostics = buildDoctorReport();
-    return asJson(response);
+    const result = active.records.readResult(execution.executionId);
+    if (result) publishResult(active.records, execution, result);
   }
-  const modelInfo = readDefaultModel();
-  // Single producer read for the harness-facing strengths view + the
-  // operator-facing default_profile. The strengths array is deliberately
-  // id-free (the subagent enumerates it BEFORE sending and routes by label,
-  // never by companion/model/profile id).
-  const registry = loadProfiles({ env: process.env });
-  const response = {
-    ok: true, action: 'status',
+}
+
+async function handleSend(args, active, request) {
+  const provider = args.target || readDefaultTarget(active.env).target;
+  if (!provider) return asJson({ ok: false, action: 'send', code: 'TARGET_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR });
+  // A configured per-companion default model (the env knob or the default-model
+  // file) is an explicit selection for a NEW conversation. An existing conversation
+  // keeps its stored override, and an omitted model with nothing configured inherits
+  // the companion's own configuration (Codex then receives no model key at all).
+  const known = Object.hasOwn(active.providers ?? {}, provider);
+  const configured = known && args.model === undefined && args.thread && !active.records.readConversation(args.thread)
+    ? (readDefaultModel(provider, active.env).model ?? undefined) : undefined;
+  const sent = await active.send({ owner: args.thread, provider, cwd: args.cwd, text: args.task,
+    model: args.model ?? configured, hostSessionId: getHostSessionId(), ...request });
+  return asJson({ ok: true, status: 'still_running', job_id: sent.executionId, thread: args.thread });
+}
+
+function runningEnvelope(view, action) {
+  const execution = view.execution;
+  return { ok: true, action, status: 'still_running', job_id: execution.executionId, target: execution.provider,
+    thread: execution.owner, current_status: view.state, started_at: iso(execution.startedAt),
+    age_s: Math.round((Date.now() - execution.startedAt) / 1000), session_reborn: false,
+    digest_uri: digestResourceUri(execution.executionId),
+    hint: 'call agent_wait({ job_id, max_wait_sec }) again to continue blocking.' };
+}
+
+async function handleWait(args, active, request) {
+  await active.wait({ owner: args.thread, executionId: args.job_id, timeoutMs: clampWaitSec(args.max_wait_sec) * 1000, ...request });
+  const view = active.status({ executionId: args.job_id });
+  if (!view.result) return asJson(runningEnvelope(view, 'wait'));
+  publishResult(active.records, view.execution, view.result);
+  markQueueConsumed(args.job_id);
+  return asJson(terminalEnvelope(view.execution, view.result));
+}
+
+async function handleCancel(args, active, request) {
+  await active.cancel({ owner: args.thread, executionId: args.job_id, ...request });
+  const view = active.status({ executionId: args.job_id });
+  if (!view.result) return asJson(runningEnvelope(view, 'cancel'));
+  publishResult(active.records, view.execution, view.result);
+  markQueueConsumed(args.job_id);
+  return asJson(terminalEnvelope(view.execution, view.result, 'cancel'));
+}
+
+async function handleReply({ job_id, message, thread }, active, request) {
+  const response = await active.steer({ owner: thread, executionId: job_id, text: message, ...request });
+  return asJson({ action: 'reply', job_id, ...response });
+}
+
+function handleCatalog() {
+  const checks = lastTargetChecks();
+  return asJson({
+    ok: true, action: 'catalog',
     default_target: defaultTargetInfo(),
-    default_profile: registry.synthesized ? { value: null, source: 'synthesized' } : registry.defaultProfile,
-    targets: listTargets(),
-    strengths: flatStrengths(registry),
-    runtime_adapter: selectedRuntimeAdapter(),
-    // The shared-runtime-registry entry for each ACP daemon on this host home
-    // (null until a bridge has adopted one).
-    acp_daemons: Object.fromEntries(ACP_TARGET_IDS.map((id) => [id, acpDaemonSnapshot(id)])),
-    opencode_runtime: { ...openCodeRuntimeInfo(), ...openCodeServerRuntimeInfo(), server_pool: openCodeServerPoolSnapshot() },
-    codex_runtime: codexRuntimeStatus(),
-    default_model: modelInfo,
-    threads: listThreads(),
-    jobs_in_memory: jobs.size,
-    running_jobs: [...jobs.values()]
-      .filter((j) => !j.terminalAt)
-      .map((j) => ({
-        job_id: j.jobId,
-        target: j.target,
-        profile: j.profileId ?? null,
-        strength: j.strength ?? null,
-        status: j.status || 'starting',
-        mode: j.mode || null,
-        parallel: j.parallelStrategy || null,
-        fleet: Boolean(j.fleet),
-        thread: j.thread || null,
-        cwd: j.cwd || null,
-        prompt_id: j.promptId || null,
-        started_at: iso(j.startedAt),
-        age_s: Math.round((Date.now() - (j.startedAt || Date.now())) / 1000),
-        reply_in_flight: !!j.replyInFlight,
-      })),
+    targets: listTargets().filter((t) => t.implemented).map((target) => {
+      const model = readDefaultModel(target.id);
+      const checked = checks[target.id];
+      return {
+        id: target.id,
+        display_name: target.displayName,
+        default: target.default,
+        model: {
+          ...model,
+          description: model.model ? 'configured default' : "inherits the companion's own configuration",
+          enumeration: target.id === 'copilot' ? 'documented ids; account availability not checked'
+            : target.capabilities.acp || target.id === 'codex' ? 'not enumerable without a session' : 'not cached',
+          ...(target.id === 'copilot' ? { allowed: [...ALLOWED_MODELS] } : {}),
+        },
+        capabilities: Object.fromEntries(['reply', 'resume', 'cancel', 'modelSelection']
+          .map((key) => [key, target.capabilities[key]])),
+        readiness: {
+          ready: checked?.ready ?? null,
+          summary: checked ? (checked.ready ? 'ready at last check' : checked.blockers?.[0]?.message || 'not ready') : 'not checked; run agent_status with diagnostics',
+          checked_at: checked?.checkedAt || null,
+        },
+        installed_version: checked?.version || null,
+        ...(target.id === 'codex' ? { contractStatus: getCodexContractStatus() } : {}),
+      };
+    }),
+  });
+}
+
+function handleStatus({ job_id, diagnostics }, active) {
+  const project = (view) => {
+    const { execution: e, result: r, lease, state } = view;
+    return { ok: true, action: 'status', job_id: e.executionId, thread: e.owner, target: e.provider, cwd: e.cwd,
+      status: r ? executionStatus(r) : state, native_turn_state: e.terminal?.outcome ?? e.state,
+      started_at: iso(e.startedAt), terminal_at: iso(r?.finishedAt), lease,
+      last_native_activity: e.progress?.lastActivityAt ?? null, active_command: e.progress?.activeCommand ?? null,
+      retry: e.progress?.retry ?? null, partial_text: r?.text ?? e.progress?.partialText ?? '',
+      stop_evidence: r?.stopEvidence ?? e.cleanup ?? null, usage: r?.usage,
+      selected_model: r?.selectedModel ?? e.modelOverride ?? null,
+      effective_model: r?.effectiveModel ?? e.progress?.effectiveModel ?? e.effectiveModel ?? null,
+      effective_effort: r?.effectiveEffort ?? e.progress?.effectiveEffort ?? e.effectiveEffort ?? null,
+      cause: r?.cause ?? null, detail: r?.detail ?? null, native_refs: r?.nativeRefs ?? { historyId: e.historyId, nativeTurnId: e.nativeTurnId },
+      digest_uri: digestResourceUri(e.executionId), reply_available: view.replyAvailable };
   };
-  if (diagnostics) {
-    const report = buildDoctorReport();
-    response.diagnostics = report;
-    // Operator-facing, diagnostics-gated profile detail (ids + blockers).
-    response.profiles = (report.profiles || []).map((p) => ({
-      id: p.id, companion: p.companion, model: p.model, strengths: p.strengths,
-      ready: p.ready, blockers: p.blockers,
-    }));
+  let response;
+  if (job_id) {
+    const view = active.status({ executionId: job_id });
+    response = view ? project(view) : { ok: false, action: 'status', status: 'unknown_job', error: 'unknown job_id' };
+  } else {
+    const executions = active.records.listExecutions().map((e) => project(active.status({ executionId: e.executionId })));
+    response = { ok: true, action: 'status', default_target: defaultTargetInfo(), targets: listTargets(),
+      running_jobs: executions.filter((e) => !e.terminal_at), executions };
   }
+  response.contractStatus = getCodexContractStatus();
+  if (diagnostics) response.diagnostics = { targets: lastTargetChecks() };
   return asJson(response);
 }
 
@@ -3862,19 +479,15 @@ const mcp = new Server(
     capabilities: { tools: {}, resources: {} },
     instructions:
       'Internal transport for the agent-companion subagent; parent harnesses ' +
-      'must spawn that subagent rather than call these tools directly. Claude ' +
-      'scopes it to the agent; Codex registers it at plugin/session scope so ' +
-      'the role can inherit it. Tools: agent_send (returns ' +
+      'must spawn that subagent rather than call these tools directly. Both hosts ' +
+      'register it at plugin/session scope; execution calls require the native ' +
+      'child owner. Tools: agent_send (returns ' +
       'still_running synchronously), agent_wait (blocks until terminal), ' +
-      'agent_status, agent_reply, and agent_cancel. The companion uses ' +
+      'agent_catalog, agent_status, agent_reply, and agent_cancel. The companion uses ' +
       'agent_send for kickoff then loops on agent_wait until terminal. ' +
       `Default target is ${defaultTargetId() || 'unset (pass target or run onboarding)'}; ` +
-      `supported targets: ${listTargets().map((t) => t.id).join(', ')}; Copilot runtime adapter is ${selectedRuntimeAdapter()}. ` +
-      'Route a send by strength (preferred) or profile instead of a concrete ' +
-      'target; discover the configured strengths via {action:status} and never ' +
-      'pass companion or model ids. ' +
-      'Parallel orchestration (Copilot) is strategy-based: auto, always, ' +
-      'or never. Runtime IPC, logs, prompt streams, digests, and completion ' +
+      `supported targets: ${listTargets().map((t) => t.id).join(', ')}. ` +
+      'Read agent_catalog for companions and models. Runtime IPC, logs, prompt streams, digests, and completion ' +
       `queue live under the private directory ${runtimeDir()}.`,
   },
 );
@@ -3928,12 +541,11 @@ const AGENT_OUTPUT_SCHEMA = {
     debug: { type: 'object', additionalProperties: true },
     meta: { type: 'object', additionalProperties: true },
     content: { type: 'string' },
-    fleet: { type: 'boolean' },
-    parallel: { type: 'string' },
   },
 };
 
 const TOOL_ACTIONS = {
+  agent_catalog: 'catalog',
   agent_send: 'send',
   agent_wait: 'wait',
   agent_status: 'status',
@@ -3946,6 +558,13 @@ const INTERNAL_TOOL_NOTE =
 
 const AGENT_TOOLS = [
   {
+    name: 'agent_catalog',
+    description: INTERNAL_TOOL_NOTE + 'Read configured companions, models and last-checked readiness without starting a runtime or changing state.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+    outputSchema: AGENT_OUTPUT_SCHEMA,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
     name: 'agent_send',
     description:
       INTERNAL_TOOL_NOTE +
@@ -3956,62 +575,15 @@ const AGENT_TOOLS = [
       additionalProperties: false,
       properties: {
         target: TARGET_FIELD,
-        strength: {
-          type: 'string',
-          description:
-            'Route to the configured profile that declares this capability label (e.g. reviewer, ' +
-            'web_researcher, planner, fast_executor). Validated server-side against the live profile ' +
-            'registry. Discover available strengths via {action:status}; do not hardcode. Mutually ' +
-            'exclusive with profile.',
-        },
-        profile: {
-          type: 'string',
-          description:
-            'Route to a specific configured profile id. Discover ids via {action:status, ' +
-            'diagnostics:true}. Mutually exclusive with strength.',
-        },
-        task: { type: 'string', description: 'Plain-language task for the selected companion target.' },
-        mode: {
-          type: 'string',
-          enum: ['PLAN', 'ANALYZE', 'EXECUTE'],
-          description: 'PLAN produces a plan, ANALYZE is read-only, EXECUTE may edit/write/shell.',
-        },
-        template: {
-          type: 'string',
-          enum: ['general', 'research', 'plan_review', 'review'],
-          description:
-            'Prompt template. Defaults to general. plan_review requires template_args.plan_path. ' +
-            'review is a read-only review of the task as its subject, ending in a required ' +
-            'VERDICT: agree|disagree line that is parsed into terminal meta.verdict ' +
-            '(null with meta.verdict_reason when the line is missing, malformed or conflicting).',
-        },
-        template_args: {
-          type: 'object',
-          description: 'Template-specific arguments. Keys are validated per template.',
-          additionalProperties: false,
-          properties: {
-            plan_path:       { type: 'string', description: '[plan_review] Absolute path to the plan .md (any location the companion can read — no plans-dir requirement), or "latest" for the newest .md in the host plans dir.' },
-            focus_directive: { type: 'string', description: '[plan_review] Optional review focus.' },
-            scope_hint:      { type: 'string', description: '[general] Scope hint for large-file analysis.' },
-          },
-        },
+        task: { type: 'string', description: 'Exact text delivered to the companion, without framing or appended instructions.' },
+        model: { type: 'string', description: 'Explicit model override. Omit to inherit the companion configuration.' },
         cwd: {
           type: 'string',
           description: 'Required absolute target repo/worktree path. The bridge refuses to default cwd.',
         },
-        thread: {
-          type: 'string',
-          description: 'Set by the host, never by you: it names the companion conversation after the calling agent.',
-          pattern: '^[a-zA-Z0-9._-]+$',
-        },
         max_wait_sec: MAX_WAIT_FIELD,
-        parallel: {
-          type: 'string',
-          enum: ['auto', 'always', 'never'],
-          description: 'Parallel orchestration strategy. Defaults to auto.',
-        },
       },
-      required: ['cwd'],
+      required: ['task', 'cwd'],
     },
     outputSchema: AGENT_OUTPUT_SCHEMA,
   },
@@ -4056,9 +628,8 @@ const AGENT_TOOLS = [
         job_id: JOB_ID_FIELD,
         message: {
           type: 'string',
-          description: 'Follow-up text. On a transport with a live control channel (codex app-server) it is injected '
-            + 'into the running turn with nothing cancelled; otherwise the bridge cancels and restarts the current '
-            + 'turn with this continuation.',
+          description: 'Follow-up text for a running execution whose adapter supports steer. Returns accepted and '
+            + 'confirmed separately; unsupported capability or execution state returns reply_unavailable.',
         },
       },
       required: ['job_id', 'message'],
@@ -4089,45 +660,56 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 // Codex (PR openai/codex#15190) injects per-turn metadata on every MCP tool
 // call as `_meta["x-codex-turn-metadata"]`: `session_id` is the ROOT session
 // for every agent in it, `thread_id` the calling agent's own thread (measured
-// on codex-cli 0.164.0). The session id is adopted BEFORE validation: it is
-// the only host→bridge session-id channel on Codex. Claude's _meta carries
+// on codex-cli 0.164.0). Session adoption follows validation so an ownerless
+// control call cannot hydrate jobs. This is Codex's only host→bridge session-id
+// channel. Claude's _meta carries
 // claudecode/toolUseId and progressToken, but no session id; its bridge
 // inherits CLAUDE_CODE_SESSION_ID (getHostSessionId).
 //
-// One agent-companion instance is one companion conversation, so a send's
+// One agent-companion instance is one companion conversation, so every owner's
 // thread is named after the calling agent and never after the host session:
 // Codex's thread_id here, and on Claude the subagent's agent_id, which only
 // hooks can see — hooks/name-thread.sh writes it into `thread` before the call
-// leaves the host. The host's name wins over anything the model wrote. A send
-// that arrives with no name is refused rather than given a conversation
-// nobody could continue.
+// leaves the host (including clearing a root caller's fabricated thread).
+// Codex requires thread_source=subagent and never trusts an argument as owner.
+// Catalog and all status calls are observers, exempt from this owner gate.
+const OWNER_ACTIONS = new Set(['send', 'wait', 'reply', 'cancel']);
 export function callArgs(action, params) {
   const turn = params?._meta?.['x-codex-turn-metadata'];
-  if (turn?.session_id && typeof turn.session_id === 'string') adoptHostSessionId(turn.session_id);
   const toolArgs = params?.arguments || {};
   if (Object.prototype.hasOwnProperty.call(toolArgs, 'action')) {
     throw new Error('agent: split MCP tools do not accept an action field; choose the agent_* tool that matches the operation');
   }
   const args = { action, ...toolArgs };
-  if (action === 'send') {
-    if (turn?.thread_id && typeof turn.thread_id === 'string') args.thread = turn.thread_id;
-    if (!args.thread) {
-      throw new Error(
-        'agent: thread is required — the host names it after the calling agent ' +
-        "(Claude: hooks/name-thread.sh writes the subagent's agent_id; Codex: _meta thread_id), " +
-        'and neither reached the bridge',
-      );
+  if (OWNER_ACTIONS.has(action)) {
+    if (turn !== undefined || detectHost() === 'codex') {
+      args.thread = turn?.thread_source === 'subagent' ? turn.thread_id : null;
+    }
+    if (typeof args.thread !== 'string' || !args.thread.trim()) {
+      throw Object.assign(new Error(
+        'agent: native subagent owner required (Claude: hooks/name-thread.sh; Codex: subagent turn metadata)',
+      ), { code: 'NATIVE_OWNER_REQUIRED' });
     }
   }
-  return validateAgentArgs(args);
+  // Control-tool schemas carry no model-facing thread field. Validate their
+  // public arguments, then retain the attributed owner for the controller.
+  const { thread, ...publicArgs } = args;
+  const normalized = validateAgentArgs(OWNER_ACTIONS.has(action) && action !== 'send' ? publicArgs : args);
+  if (OWNER_ACTIONS.has(action)) normalized.thread = thread;
+  // An owner refusal must not adopt a session or trigger legacy hydration.
+  if (OWNER_ACTIONS.has(action) && turn?.session_id && typeof turn.session_id === 'string') adoptHostSessionId(turn.session_id);
+  return normalized;
 }
 
-mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+mcp.setRequestHandler(CallToolRequestSchema, async (req, extra = {}) => {
   const action = TOOL_ACTIONS[req.params.name];
   if (!action) throw new Error(`unknown tool: ${req.params.name}`);
   try {
-    return await dispatch(callArgs(action, req.params));
+    return await dispatch(callArgs(action, req.params), { requestId: extra.requestId, signal: extra.signal });
   } catch (err) {
+    if (['NATIVE_OWNER_REQUIRED', 'INVALID_CWD'].includes(err?.code)) {
+      return asJson({ ok: false, action, status: err.code, code: err.code, error: err.message });
+    }
     if (err && err.code === 'BRIDGE_SID_CONFLICT') {
       log('ERROR', 'sid conflict on MCP call:', err.message);
       return asJson({ ok: false, error: err.message, code: 'BRIDGE_SID_CONFLICT' });
@@ -4143,287 +725,57 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 // Exported dispatcher lets tests drive the action handlers directly without
 // going through MCP transport plumbing. Tests that want to exercise the
 // MCP `_meta` path go through callArgs, as the MCP handler does.
-export async function dispatch(normalized) {
-  switch (normalized.action) {
-    case 'send':   return handleSend(normalized);
-    case 'wait':   return handleWait(normalized);
-    case 'status': return handleStatus(normalized);
-    case 'reply':  return handleReply(normalized);
-    case 'cancel': return handleCancel(normalized);
-    default: throw new Error(`agent: unhandled action "${normalized.action}"`);
-  }
-}
-
-// Module-level idempotency flags. Hydrate and sweep are now triggered
-// lazily by adoptHostSessionId on the first sid-bearing MCP call, so we
-// must guard against re-running within the same bridge process.
-let _hydrated = false;
-let _swept = false;
-
-// Record a hydrate retirement NEXT TO the digest, never inside it.
-//
-// Hard constraint (W1.4′): hydrate must never call writeOpenCodeDigest for a
-// job it did not start. A fresh bridge has `adapterResult === null` by
-// construction, so the "refresh" it used to do rendered a header-only stub over
-// whatever the previous bridge had already written — measured shrinking a live
-// 11,754-byte digest to 228 bytes. Appending to a sibling file keeps the
-// retirement on disk without ever touching the digest body.
-function writeRetirementNote(job, { detail, error, childPid, childAlive }) {
-  const digest = digestPath(job.jobId);
-  if (!digest) return null;
-  // `agent-retired-<jobId>.md`, NOT `<digest>-retired.md`: the latter still
-  // matches DIGEST_RESOURCE_FILE_RE, so digestJobIdsFromDisk() would read the
-  // note back as a job id `<jobId>-retired` and listDigestResources() would
-  // publish a phantom `agent-digest://<jobId>-retired` resource for a job that
-  // never existed — one per retirement, and nothing GCs them. The `agent-`
-  // prefix change keeps the note beside the digest but out of that namespace.
-  const path = digest.replace(/agent-digest-([^/]+)\.md$/, 'agent-retired-$1.md');
-  // Defensive: if the digest filename ever stops matching, writing anyway would
-  // append the note INTO the digest, which is the exact thing this must not do.
-  if (path === digest) return null;
-  const lines = [
-    `# ${job.target || 'unknown target'} job ${job.jobId} - retired by bridge hydrate`,
-    '',
-    `**Retired:** ${new Date().toISOString()} by bridge pid ${process.pid}`,
-    `**Detail:** \`${detail}\``,
-    `**Reason:** ${error}`,
-    `**Child pid:** ${childPid || '(never recorded)'} (${childAlive ? 'still alive at retirement' : 'gone'})`,
-    `**Digest (not modified):** ${digest}`,
-  ];
-  if (job.sessionId) lines.push(`**Companion session/thread id:** \`${job.sessionId}\``);
-  lines.push('');
+export async function dispatch(normalized, { controller: active = controller, requestId, signal } = {}) {
+  const request = { requestId, signal };
   try {
-    appendPrivateFile(path, lines.join('\n') + '\n');
-    return path;
+    switch (normalized.action) {
+      case 'catalog': return handleCatalog();
+      case 'send':   return await handleSend(normalized, active, request);
+      case 'wait':   return await handleWait(normalized, active, request);
+      case 'status': return handleStatus(normalized, active);
+      case 'reply':  return await handleReply(normalized, active, request);
+      case 'cancel': return await handleCancel(normalized, active, request);
+      default: throw new Error(`agent: unhandled action "${normalized.action}"`);
+    }
   } catch (err) {
-    log('WARN', 'hydrate retirement note failed:', job.jobId, err.message);
-    return null;
+    if (!err.code) throw err;
+    const existing = ['thread_busy', 'provider_mismatch', 'cwd_mismatch'].includes(err.code)
+      ? active.status({ owner: normalized.thread }) : null;
+    return asJson({ ok: false, action: normalized.action, code: err.code,
+      status: ({ execution_unknown: 'unknown_job', AMBIGUOUS_HISTORY: 'thread_ambiguous' })[err.code] || err.code,
+      thread: normalized.thread, job_id: normalized.job_id ?? existing?.execution.executionId,
+      ...(existing ? { target: existing.execution.provider, current_status: existing.state } : {}), error: err.message });
   }
 }
 
-// Retire a non-terminal single-shot job left behind by a previous bridge.
-//
-// The pid probe is TELEMETRY, NOT A RESUMABILITY TEST. A piped, non-detached
-// companion child is doomed at its next stdout write once the bridge that owned
-// the pipe dies (measured: pipe + no-detach → `turn_aborted` in 2.2s, no signal
-// ever reaching the child), so "alive" describes a window of seconds, not a job
-// anything can rejoin. We still retire — leaving the job non-terminal would
-// hang every agent_wait to its clamp, because runWatchLoop is copilot-only and
-// wait blocks rather than polls. What the probe buys is an honest message: the
-// old code declared two jobs dead 56.1s and 4.1s BEFORE their children actually
-// died, and blamed the adapter for what a bridge restart did.
-//
-// Caveat worth knowing when reading the message: a zombie (exited but unreaped)
-// child still reports alive, because the pid remains in the table until waited on.
-function retireOrphanedCliJob(job, isPidAlive) {
-  const label = targetLabel(job.target);
-  // The recorded pid is the CHILD this job spawned (worker `onStarted`), and a
-  // fresh bridge never started it — so a pid equal to our own can only be a
-  // stale ledger row that pid reuse landed on this process. Never claim that.
-  const childPid = Number(job.pid);
-  const childAlive = childPid !== process.pid && isPidAlive(childPid);
-  const detail = childAlive
-    ? 'target_child_orphaned_by_bridge_restart'
-    : 'bridge_transport_closed';
-  const head = childAlive
-    ? `${label} child (pid ${childPid}) is still running but was orphaned when the bridge that owned its stdout pipe restarted; nothing can read its output, so it will die at its next write`
-    : childPid > 0
-      ? `${label} child (pid ${childPid}) died with the bridge process that owned it`
-      : `${label} job never recorded a child pid — the bridge died before the runtime started`;
-  // Pointers, because the answer to "where did the work go" is on disk, not in
-  // this envelope: codex emits its substance atomically at turn end, so the
-  // digest of an aborted job holds ~0.2% of the work product and the rollout
-  // (keyed by the companion session/thread id) holds the rest.
-  const pointers = [];
-  const digest = digestPath(job.jobId);
-  if (digest) pointers.push(`digest \`${digest}\``);
-  if (job.sessionId) pointers.push(`${job.target} session/thread \`${job.sessionId}\` (its rollout holds the full turn)`);
-  const error = pointers.length
-    ? `${head}. Salvage: ${pointers.join('; ')}.`
-    : `${head}.`;
-  const retiredNote = writeRetirementNote(job, { detail, error, childPid, childAlive });
-  retainTerminalJob(job.jobId, {
-    status: 'unreachable',
-    error,
-    detail,
-    childPidAlive: childAlive,
-    retiredNote,
-    terminalAt: Date.now(),
-  });
+export function _resetForTest() { _bridgeHostSid = null; }
+export { mcp, adoptHostSessionId };
+
+// Controller integration seam. Host loss never implements cleanup itself.
+let bridgeLossHandler = async () => { log('WARN', 'bridge loss: no controller cleanup handler registered'); };
+export function registerBridgeLossHandler(handler) {
+  bridgeLossHandler = handler;
+}
+export async function onBridgeLoss() {
+  await bridgeLossHandler();
 }
 
-// On bridge startup (or on first sid-bearing action in fallback mode), claim
-// any persisted jobs belonging to this Claude Code session. The previous
-// bridge for this session (killed by stdio reconnect, crash, etc.) may have
-// left in-flight jobs whose Copilot prompts are still running on the still-
-// detached daemon. Re-attach the watch loop so wait/status/reply/cancel
-// resolve correctly. Idempotent: subsequent calls within the same process
-// are no-ops.
-// `pidAlive` is a parameter so the ownership guard is testable without a real
-// pid: CI must never depend on a pid it does not own still being alive (or
-// still being dead) at probe time.
-export function hydrateJobsFromLedger({ pidAlive: isPidAlive = pidAlive } = {}) {
-  if (_hydrated) return;
-  const mySid = getHostSessionId();
-  if (!mySid) {
-    log('WARN', 'hydrate skipped: CLAUDE_CODE_SESSION_ID not set');
-    return;
-  }
-  let entries;
-  try { entries = listJobsForSession(mySid); }
-  catch (err) { log('WARN', 'hydrate listJobs failed:', err.message); return; }
+registerBridgeLossHandler(() => controller.bridgeLost());
 
-  let claimed = 0;
-  let resumed = 0;
-  for (const persisted of entries) {
-    const { companionSessionId, ...rest } = persisted;
-    const job = { ...rest };
-    if (companionSessionId !== undefined) job.sessionId = companionSessionId;
-    // Every persisted job carries the target it was created with; a ledger
-    // entry without one is corrupt or hand-edited. Skip it loudly rather than
-    // silently assuming a companion (no-silent-fallback).
-    if (!job.target) {
-      log('WARN', 'hydrate skipped: ledger entry has no target:', job.jobId);
-      continue;
-    }
-    jobs.set(job.jobId, job);
-    claimed++;
-
-    const isTerminal = !!job.terminalAt;
-    const target = job.target;
-    // Per target, not per bridge: every ACP daemon is detached except
-    // Copilot's experimental SDK adapter, which has no daemon to rejoin.
-    const canResumeDetachedPrompts = isAcpTarget(target) && runtimeSupportsDetachedPromptResume(target);
-
-    // If thread + sessionId are both known but the thread file may not
-    // exist (original bridge died before writeThreadSid ran), restore it.
-    // Do not restore timeout/empty-completed retirements: those sessions are
-    // intentionally poisoned and the next send must mint a clean ACP session.
-    // A codex app-server job's thread id is restored the same way — it is
-    // what the next send on that thread resumes; an exec job's is not, there
-    // being nothing to resume on that transport.
-    const sidRestorable = isAcpTarget(target)
-      ? (isTerminal || canResumeDetachedPrompts)
-      : (target === 'codex' && job.codexAdapter === 'appserver');
-    if (sidRestorable && job.thread && job.sessionId && !(isTerminal && job.sessionRetired)) {
-      try { writeThreadSid(job.thread, job.profileId ?? null, job.sessionId); }
-      catch (err) { log('WARN', 'hydrate writeThreadSid failed:', err.message); }
-    }
-
-    if (!isAcpTarget(target)) {
-      // Restart-resumability is a per-JOB property, not a per-target one, and
-      // `jobResumeAvailable` is already the predicate that answers it on the
-      // wire (`resume_available`) — so hydrate asks it rather than keeping a
-      // second copy of the same rule. Two non-copilot transports satisfy it
-      // today: an OpenCode server-mode job (the detached `opencode serve` is
-      // still listening and the session is persisted on disk), and a codex
-      // app-server job (the broker owns the turn, and the rollout survives even
-      // the broker). Both are dispatched here; a future restart-resumable
-      // target must add its branch to both the predicate and this call site.
-      if (!isTerminal && jobResumeAvailable(job)) {
-        if (target === 'codex') {
-          resumeCodexAppServerJob(job).catch((err) => log('ERROR', 'codex-appserver resume error:', job.jobId, err.message));
-        } else {
-          resumeOpenCodeServerJob(job).catch((err) => log('ERROR', 'opencode-server resume error:', job.jobId, err.message));
-        }
-        resumed++;
-        continue;
-      }
-      if (!isTerminal) retireOrphanedCliJob(job, isPidAlive);
-      continue;
-    }
-
-    // Resume the watch loop for non-terminal jobs that have a registered
-    // promptId. Jobs in 'starting' (no prompt-bg yet) cannot be resumed —
-    // mark them terminal:unreachable so wait/status return cleanly.
-    if (isTerminal) continue;
-    if (!job.promptId) {
-      retainTerminalJob(job.jobId, {
-        status: 'unreachable',
-        error: 'bridge restart before prompt-bg completed',
-        detail: 'rehydrate_no_promptid',
-        terminalAt: Date.now(),
-      });
-      continue;
-    }
-    if (!canResumeDetachedPrompts) {
-      retireThreadSid(job.thread, job.profileId ?? null, job.sessionId, 'sdk_adapter_non_resumable_after_restart');
-      retainTerminalJob(job.jobId, {
-        status: 'unreachable',
-        error: 'experimental SDK adapter cannot reattach in-flight prompts after bridge restart',
-        detail: 'sdk_adapter_non_resumable_after_restart',
-        sessionRetired: true,
-        terminalAt: Date.now(),
-      });
-      continue;
-    }
-    runWatchLoop({
-      jobId: job.jobId,
-      promptId: job.promptId,
-      sessionId: job.sessionId || null,
-      thread: job.thread || null,
-      profileId: job.profileId ?? null,
-      task: job.task || '',
-      mode: job.mode || 'EXECUTE',
-      cwd: job.cwd || null,
-      startedAt: job.startedAt || Date.now(),
-      reqId: job.reqId || createReqId(),
-      fleet: !!job.fleet,
-      target,
-    }).catch((err) => log('ERROR', 'rehydrate watch error:', job.jobId, err.message));
-    resumed++;
-  }
-  log('INFO', 'hydrate:', `claimed=${claimed} resumed=${resumed} sid=${mySid}`);
-  _hydrated = true;
-}
-
-// On startup, drop own-session entries from the queue that are older than
-// STARTUP_STALE_MS. Without this, the prior bridge's already-displayed alerts
-// would be redelivered on the first PostToolUse hook the new bridge's session
-// fires — same model would see them twice. We can be strict here because the
-// bridge's only durable user-facing state is the model's prior context, which
-// already has those alerts.
-const STARTUP_STALE_MS = 60_000;
-export function sweepOwnSessionStaleQueueRows(nowMs = Date.now()) {
-  if (_swept) return;
-  const mySid = getHostSessionId();
-  if (!mySid) return;
-  _swept = true;
-  try {
-    let dropped = 0;
-    const moved = rewriteQueueByMoveAside('sweep', (lines) => {
-      const kept = [];
-      for (const line of lines) {
-        let e; try { e = JSON.parse(line); } catch { kept.push(line); continue; }
-        const isOwn = e.claudeSessionId === mySid;
-        const isStale = typeof e.ts === 'number' && (nowMs - e.ts > STARTUP_STALE_MS);
-        if (isOwn && isStale) { dropped++; continue; }
-        kept.push(line);
-      }
-      return kept;
-    });
-    if (moved && dropped > 0) log('INFO', 'startup sweep:', `dropped=${dropped} sid=${mySid}`);
-  } catch (err) {
-    log('WARN', 'startup sweep failed:', err.message);
+let bridgeLossPending = false;
+async function exitOnBridgeLoss(code) {
+  if (bridgeLossPending) return;
+  bridgeLossPending = true;
+  // EOF may remove the final active handle. Keep the process alive until the
+  // async controller handoff finishes; subsequent signals share this exit.
+  const keepAlive = setInterval(() => {}, 1000);
+  try { await onBridgeLoss(); }
+  catch (err) { log('ERROR', 'bridge loss handler failed:', err.message); }
+  finally {
+    clearInterval(keepAlive);
+    process.exit(code);
   }
 }
-
-// Test-only: reset module-level state so each test scenario starts clean.
-// Production code never calls this — module state is permanent until the
-// bridge process exits. Exists because Node's ESM module cache means the
-// in-process test runner sees state mutations carry across test cases.
-export function _resetForTest() {
-  _bridgeHostSid = null;
-  _hydrated = false;
-  _swept = false;
-  // The salvaged digest text is per bridge PROCESS, and a test that resets the
-  // module is simulating a new one — keeping the map would let a test read a
-  // digest its simulated predecessor wrote as already salvaged, and silently
-  // skip the carry-forward.
-  digestCarry.clear();
-}
-
-export { mcp, jobs, gcExpiredJobs, persistJob, adoptHostSessionId, retainTerminalJob };
 
 // Only attach stdio transport when launched as a script. Allows
 // `import('./server.mjs')` from tests without spawning a real MCP loop.
@@ -4437,19 +789,16 @@ const isMain = (() => {
   } catch { return false; }
 })();
 if (isMain) {
+  process.on('SIGINT', () => { void exitOnBridgeLoss(130); });
+  process.on('SIGTERM', () => { void exitOnBridgeLoss(143); });
+  process.stdin.on('end', () => { void exitOnBridgeLoss(0); });
+  migrateLegacyState({ log });
+  await recoverController();
   // One-line startup log so a user troubleshooting host routing can grep
   // the private runtime bridge log for "host detected" and see what the
   // bridge resolved on this run. The README's Diagnostics section points
   // readers here.
-  const { detectHost } = await import('../lib/host.mjs');
   logEvent('info', 'bridge.startup', { host_detected: detectHost() });
 
-  // Eager hydrate/sweep when the sid is already known: on Claude Code it is
-  // inherited. Codex's arrives in _meta with the first call, which runs both
-  // lazily (adoptHostSessionId).
-  if (getHostSessionId()) {
-    hydrateJobsFromLedger();
-    sweepOwnSessionStaleQueueRows();
-  }
   await mcp.connect(new StdioServerTransport());
 }

@@ -1,6 +1,6 @@
 // Import this FIRST in any suite whose static imports reach lib/state.mjs or
-// lib/runtime-paths.mjs — directly or through validation.mjs, profile-registry,
-// target-registry, onboard.mjs, the daemons, or server.mjs.
+// lib/runtime-paths.mjs — directly or through validation.mjs,
+// target-registry, onboard.mjs, the adapters, or server.mjs.
 //
 //   import '../test/sandbox-home.mjs';
 //   import { validateAgentArgs } from './validation.mjs';
@@ -15,7 +15,7 @@
 // Why a sandbox is mandatory: under `node --test`, lib/host.mjs's
 // refuseRealHomeUnderTest throws on any path under the operator's real
 // account home (see test/runtime-sandbox-guard.test.mjs), because a suite
-// that read or wrote live state kept the shared codex broker alive for 30 min
+// that read or wrote live state kept the retired shared codex broker alive for 30 min
 // per run (measured 2026-08-28). Everything here lands under os.tmpdir().
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

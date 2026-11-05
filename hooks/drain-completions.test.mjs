@@ -17,7 +17,7 @@ const SCRIPT = join(__dirname, 'drain-completions.sh');
 // as the fallback — so before this, each test fired a heartbeat named after
 // its fixture session (`sid-A`, `café-1`, `sess_abc_def`, …) into the REAL
 // heartbeats dir. Measured 2026-08-28: those files kept the shared codex
-// broker's idle reaper extended for HOST_LIVENESS_TTL_MS (30 min) after every
+// retired broker's idle reaper extended for HOST_LIVENESS_TTL_MS (30 min) after every
 // `node --test`, which is why a superseded broker never retired on a machine
 // that ran the suite. The hook itself now refuses the real runtime dir under
 // NODE_TEST_CONTEXT (exit 78), so forgetting this assignment fails loudly
@@ -278,7 +278,7 @@ test('a nested session_id never displaces the top-level one', () => {
 test('session ids outside [A-Za-z0-9._-] still drain', () => {
   // A character-class capture yields an empty match rather than degrading, and
   // an empty session id exits 0 above the heartbeat — disabling both delivery
-  // and daemon liveness silently and permanently.
+  // and the historical compatibility heartbeat silently.
   for (const sid of ['agent:main:01HX', 'sess/abc+def', 'café-1']) {
     const { dir, path } = makeQueueFile([
       { ts: FRESH_TS, kind: 'terminal', jobId: 'j-x', claudeSessionId: sid,
@@ -312,8 +312,8 @@ test('session_id anywhere in the payload still resolves', () => {
 });
 
 test('an empty queue still records a heartbeat, and runtime state stays 0700/0600', () => {
-  // The heartbeat is the ONLY liveness signal keeping the Copilot ACP daemon
-  // alive through a Claude session with no Copilot traffic, and the queue is
+  // Historically the heartbeat kept the Copilot ACP daemon
+  // alive without traffic. This test retains the compatibility write; the queue is
   // empty on virtually every fire — so it must be written before the
   // queue-empty return, not after it.
   const dir = mkdtempSync(join(tmpdir(), 'drain-hb-'));

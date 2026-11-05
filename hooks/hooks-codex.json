@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/stop-owner.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": ".*",
@@ -18,11 +29,6 @@
           {
             "type": "command",
             "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/install-agent-codex.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/prewarm-target.sh\"",
             "timeout": 5
           },
           {
