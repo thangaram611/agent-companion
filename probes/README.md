@@ -16,18 +16,24 @@ workspace. These are not read-only checks.
 These scripts drive `bridge-server/server.mjs` over MCP stdio. The repo root is
 derived from the script location; override with `AGENT_COMPANION_REPO`.
 
+The smoke scripts still send dispatch fields retired by Phase 1. The legacy
+checks below describe their unchanged source, not acceptance of the new
+conversational contract. Update the requests and retired assertions before using
+these scripts as Phase 1 gates; this documentation change qualifies no live probe.
+
 | script | asserts |
 |---|---|
-| `smoke.mjs` | The five-tool MCP surface, unconfigured-strength refusal without empty candidates, real Codex exec work, early thread-id persistence, digest content, rollout correlation and terminal usage. Requires `reviewer` to be unconfigured. |
+| `smoke.mjs` | Legacy pre-Phase-1 contract: the five-tool MCP surface, unconfigured-strength refusal without empty candidates, real Codex exec work, early thread-id persistence, digest content, rollout correlation and terminal usage. Requires `reviewer` to be unconfigured. |
 | `orphan.mjs` | Cannot reach its orphan checks: its send lacks a thread and its tool wrapper supplies an unsupported session-id argument. The script's checks cover exec bridge death, digest preservation, lifecycle attribution and sibling retirement notes. |
 | `appserver.mjs` | An in-flight turn survives bridge SIGKILL with zero bridges alive; the replacement bridge resumes the same thread, preserves streamed output and completes the work. Reads the applied sandbox, model and effort from the rollout and checks reply/resume flags. |
-| `review-loop.mjs` | A review parses the planted defect's verdict; after a fix and bridge SIGKILL, a follow-up resumes the same conversation and recalls its subject. Checks parsed verdicts, truthful status and per-turn usage on the resumed thread. Round two's verdict value is the model's judgment, not an assertion. |
+| `review-loop.mjs` | Legacy pre-Phase-1 contract: a review parses the planted defect's verdict; after a fix and bridge SIGKILL, a follow-up resumes the same conversation and recalls its subject. Checks parsed verdicts, truthful status and per-turn usage on the resumed thread. Round two's verdict value is the model's judgment, not an assertion. |
 | `acp-antigravity.mjs` | Antigravity completion without usage, daemon/socket/stream identity, conversation memory, cancel-and-reprompt reply, cancellation, bridge-restart recovery on the same prompt and a model pin applied through `session/set_config_option`. Requires the ACP server to be signed in; spends about six turns. |
 | `appserver-control.mjs` | Live steering and cancellation with the required turn ids; distinguishes accepted steering from observed confirmation. Exercises both the banked turn id and `thread/read` fallback, and checks that an interrupted thread retains readable history. |
 
 The smoke scripts read `~/.claude/agent-companion/` directly. Their bridge must
-use that same state home. Codex smokes need routing to select Codex; a configured
-default profile takes precedence over `AGENT_COMPANION_DEFAULT_TARGET`.
+use that same state home. Codex smokes need routing to select Codex. Phase 1
+uses `AGENT_COMPANION_DEFAULT_TARGET` ahead of the `default-target` file; the
+legacy default-profile precedence has been retired.
 `smoke.mjs` also requires the exec adapter. The Antigravity probe selects its
 target explicitly.
 
@@ -67,7 +73,7 @@ cancellation can race the rollout write and leave no input for the history check
 ## `codex-app-server/` — transport and architecture validation
 
 These scripts isolate protocol behavior. The committed wire contract is generated
-from codex-cli 0.164.0 (`lib/codex-app-server-contract.json`); that provenance does
+from codex-cli 0.166.0 (`lib/codex-app-server-contract.json`); that provenance does
 not certify a live probe run. Use the shipped broker in
 `scripts/codex-app-server-broker.mjs` for production behavior.
 

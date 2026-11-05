@@ -1,6 +1,6 @@
 # Direction Assessment
 
-Last updated: 2026-10-26
+Last updated: 2026-11-05
 
 ## 1. Verdict
 
@@ -26,7 +26,13 @@ the bridge does not enforce independent judgment.
 
 ## 5. Review loop
 
-The acceptance contract is a read-only review with a parsed verdict and a
+**Superseded 2026-11-05 by Phase 1's conversational contract.** Reviews now carry
+ordinary task instructions and the parent's desired answer format. The bridge
+passes the child's message verbatim and does not parse verdicts or append review
+instructions. Same-conversation follow-up and the transport evidence below are
+retained; the former parser requirements are historical.
+
+The former acceptance contract was a read-only review with a parsed verdict and a
 follow-up that retains the conversation's context:
 
 - A completed `review` exposes `meta.verdict` as `agree`, `disagree`, or `null`
@@ -39,9 +45,9 @@ follow-up that retains the conversation's context:
   a caller needs to branch on them; prose is sufficient for the current loop.
 
 `bridge-server/validation.test.mjs`, `bridge-server/server.test.mjs` and
-`bridge-server/codex-app-server-runtime.test.mjs` cover the parser and
-continuity paths. `probes/smoke/review-loop.mjs` checks a planted defect,
-same-thread follow-up across a bridge SIGKILL, and per-turn usage against a
+`bridge-server/codex-app-server-runtime.test.mjs` covered the parser and
+continuity paths under that contract. The legacy `probes/smoke/review-loop.mjs`
+checks a planted defect, same-thread follow-up across a bridge SIGKILL, and per-turn usage against a
 real runtime. It spends model tokens and belongs to the manual release gates.
 
 ## 7. Re-verify on upgrade
