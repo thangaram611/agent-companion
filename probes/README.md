@@ -1,12 +1,12 @@
 # Probes
 
 Hand-run harnesses, outside `node --test` and the shipped plugin. They exercise
-real runtimes and can spend Codex or Antigravity tokens. They test process
+real runtimes and can spend host or companion tokens. They test process
 lifetimes, sandbox enforcement, restart recovery and control behavior that unit
 fakes cannot establish. Measurement evidence lives in
 [`docs/RELIABILITY_REMEDIATION.md`](../docs/RELIABILITY_REMEDIATION.md).
 
-Smoke jobs use temporary workspaces but write live job/runtime state and Codex
+Smoke jobs use temporary workspaces but write live execution records and runtime state and Codex
 rollouts. These are not read-only checks.
 
 ## `host-qualification/claude/` — Phase 2 host measurements
@@ -17,7 +17,9 @@ Preparation and `verify.mjs` are offline; live runs require explicit operator
 execution and credentials and spend Claude tokens. Each run keeps its own
 config, agents, logs and PID cleanup evidence. See the
 [runbook](host-qualification/claude/RUNBOOK.md) for the first smoke command,
-scenario matrix, TUI actions and limits. No production plugin is loaded.
+scenario matrix, TUI actions and limits. No production plugin is loaded. The [2026-11-05 report](host-qualification/claude/REPORT-2026-11-05.md)
+records the measured rows and remaining operator actions; it does not qualify
+provider cleanup.
 
 ## `host-qualification/codex/` — isolated Phase 2 host measurements
 
@@ -26,7 +28,9 @@ MCP/provider tree, hook logger, headless/PTY runners, scenario matrix and analyz
 The operator runs live Codex sessions in a per-run `CODEX_HOME`; this harness
 does not use the installed bridge. Start with `node probes/host-qualification/codex/runner.mjs smoke`.
 Offline checks are explicit: `node probes/host-qualification/codex/self-check.mjs`.
-Neither the harness nor its checks are discovered by `node --test`.
+Neither the harness nor its checks are discovered by `node --test`. The
+[2026-11-05 report](host-qualification/codex/REPORT-2026-11-05.md) records identity,
+stop/loss and long-call measurements; desktop remains separate.
 
 ## `smoke/` — end-to-end against the real bridge
 
@@ -44,10 +48,6 @@ a live provider run.
 | `orphan.mjs` | Bridge EOF hands work to the cleanup watcher; verified stopped result survives restart, and status preserves the digest and result. Spends one Codex turn. Does not test uncatchable SIGKILL. |
 | `acp-antigravity.mjs` | Completion without invented usage, cold history reuse in a new process, explicit unsupported-steer refusal, cancellation, acknowledged model selection and bridge-loss cleanup. Requires login and an available model id; spends five turns. |
 | `bridge-client.mjs` | Shared stdio MCP client, owner attribution, bounded waits and durable-record reader; no standalone probe. |
-
-The broker-survival probes `appserver.mjs` and `appserver-control.mjs` have
-been retired. Each execution now owns its provider process; a replacement
-bridge reads a terminal result and never adopts a live execution.
 
 The probes use the selected host's state home, or `AGENT_COMPANION_HOME` when
 set. Their temporary workspaces remain available for inspection. Run readiness

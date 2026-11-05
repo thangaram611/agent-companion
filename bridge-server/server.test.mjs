@@ -1,5 +1,5 @@
 // server.mjs must be importable from tests without attaching to stdio and
-// must expose enough seams to validate bridge behavior without a real daemon.
+// must expose enough seams to validate bridge behavior without a real provider.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

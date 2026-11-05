@@ -10,12 +10,12 @@ The companion does the work. The subagent supplies context, relays answers and
 questions, and can check a specific suspect finding. Failure leaves the task
 with the companion and is reported truthfully to the parent.
 
-Claude Code and Codex CLI are the current install surfaces. Claude keeps the
-bridge agent-local; Codex registers it at plugin/session scope so the child can
-inherit it. The six private `agent_*` tools connect that child to OpenCode,
+Claude Code and Codex CLI are the current install surfaces. Both register the
+bridge at plugin/session scope so the child can inherit it. The six private
+`agent_*` tools connect that child to OpenCode,
 Copilot, Codex or Antigravity. The ownerless catalog provides read-only discovery.
-Phase 1 changes this interface; runtime ownership, lifetime and recovery stay
-as described below until their later phases are qualified.
+Each execution owns a cold provider process. CLI host measurements inform the
+controller contract; Codex desktop and operator-only TUI rows remain unqualified.
 
 ## Product Vocabulary
 
@@ -33,30 +33,25 @@ The CLI and private tool schema keep `host` and `target`:
 ## Flow
 
 ```mermaid
-flowchart LR
-  User["User request"] --> Main["Main harness (Claude/Codex)"]
-  Main --> Subagent["agent-companion subagent"]
-  Subagent --> MCP["agent-bridge MCP server"]
-  MCP --> Registry["companion registry (target-registry.mjs)"]
-  Registry --> OpenCode["opencode-runtime.mjs"]
-  Registry --> Acp["acp-runtime.mjs (copilot, antigravity)"]
-  Registry --> CodexRuntime["codex-runtime.mjs (exec, default)"]
-  Registry --> CodexAppServer["codex-app-server-runtime.mjs (appserver)"]
-  Acp -.->|"UDS, JSON"| Daemon["acp-daemon.mjs (detached, one per companion)"]
-  Daemon -.->|"stdio, ACP v1"| Agent["copilot --acp / agy_acp_server.par"]
-  CodexAppServer -.->|"UDS, JSON-RPC"| Broker["codex-app-server-broker.mjs (detached, shared)"]
-  Broker -.->|"stdio"| AppServer["codex app-server"]
-  OpenCode --> Job["job ledger + queue + digest"]
-  Acp --> Job
-  CodexRuntime --> Job
-  CodexAppServer --> Job
-  Job --> Subagent
-  Subagent --> Main
+flowchart TD
+  Parent[Parent harness] --> Child[Native agent-companion subagent]
+  Child --> Bridge[agent-bridge MCP server]
+  Bridge --> Controller[Execution controller]
+  Controller --> Adapter[Provider protocol adapter]
+  Adapter --> Provider[Per-execution provider process group]
+  Controller --> Records[Conversation / execution / lease / result records]
+  Bridge -->|SIGINT / SIGTERM / EOF| Watcher[Cleanup watcher]
+  Watcher -->|terminate and verify recorded tree| Provider
+  Watcher -->|fenced terminal result| Records
+  Records --> Child
+  Child --> Parent
 ```
 
-The broker and ACP daemons survive bridge replacement; their clients reconnect.
-OpenCode server mode likewise uses a detached `opencode serve`. The job ledger,
-queue and digests persist on disk.
+One controller owns each execution. The provider exits after every answer.
+A later message to the same native child starts a new process and resumes its
+saved history. In-flight survival across bridge replacement is deliberately
+given up: bridge loss stops owned work and preserves history and results.
+No provider process or protocol connection is shared across children.
 
 ### MCP registration boundary
 
@@ -76,8 +71,8 @@ that reference to `[plugin:agent-companion:agent-bridge]` and its tool names to
 `mcp__plugin_agent-companion_agent-bridge__*`. The identity hook matches this
 namespace as well as the bare `mcp__agent-bridge__*` session name. See the
 [plugin MCP naming contract](https://code.claude.com/docs/en/mcp#plugin-provided-mcp-servers).
-The plugin server keeps sibling `timeout: 1320000` (milliseconds) and `env`
-with `CODEX_RUNTIME_ADAPTER: appserver`; Codex keeps `tool_timeout_sec: 1320`.
+The Claude plugin server keeps sibling `timeout: 1320000` (milliseconds);
+Codex keeps `tool_timeout_sec: 1320`. Both set the owner grace to 120000 ms.
 Both manifests select their host explicitly for the shared shell launcher,
 which resolves Node and waits for dependency readiness. Settings take effect
 on the next session. No root `.mcp.json` is needed.
@@ -104,9 +99,11 @@ produces no marker and a diagnostic, never a guessed owner. Markers are evidence
 for the controller, not cleanup or lease renewal.
 
 SIGINT, SIGTERM and stdin EOF share one awaited `onBridgeLoss()` hook, guarded
-against duplicate or racing loss events before exit. The controller plugs in
-with `registerBridgeLossHandler(async () => { ... })`. Until registered it only
-logs; this host integration adds no provider cleanup or lifetime policy.
+against duplicate or racing loss events before exit. The registered controller calls `bridgeLost()`, hands each recorded tree to
+the cleanup watcher and stops its own writers. The watcher terminates and verifies
+that tree, writes its immutable result, then exits; it owns no provider protocol.
+Uncatchable bridge SIGKILL cannot run this handoff. A new bridge never adopts
+a live execution and cannot claim cleanup until absence is verified.
 
 ## Private MCP Surface
 
@@ -132,223 +129,165 @@ per-companion configuration; with no override or configured default, the native
 configuration is inherited. Codex receives no model key in that case.
 
 Wait, status, reply and cancel retain their existing control semantics. Replies
-require that specific job's `reply_available: true`, based on its starting
-adapter and current live state. Catalog capabilities alone do not establish it.
+require that specific job's `reply_available: true`, based on its adapter capabilities
+and current live state. Catalog capabilities alone do not establish it: the catalog's
+`reply` mirrors the adapter's steer capability (Codex only), and the per-execution
+`reply_available` remains authoritative.
 
 ## Companion Matrix
 
-| Companion | Status | Send | Wait | Status | Cancel | Reply | Restart Resume |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| OpenCode (cli) | Implemented CLI adapter (default) | yes | yes | yes | yes | no | no |
-| OpenCode (server) | Implemented HTTP server adapter | yes | yes | yes | yes | yes | yes |
-| Copilot CLI | Implemented ACP adapter (generic daemon, Copilot descriptor) | yes | yes | yes | yes | yes (cancel + re-prompt) | yes with ACP |
-| Codex CLI (exec) | Implemented `codex exec` adapter (default, send-only) | yes | yes | yes | yes | no | no |
-| Codex CLI (app-server) | Implemented broker + JSON-RPC adapter | yes | yes | yes | yes | yes | yes |
-| Google Antigravity | Implemented ACP adapter (generic daemon, Antigravity descriptor; spawns the registry's `agy_acp_server.par`) | yes | yes | yes | yes | yes (cancel + re-prompt) | yes with ACP and `session/load` |
+All four companions support send, bounded wait, observational status and cancel.
+Each answer owns a new process, including the HTTP and ACP providers.
 
-The ACP transport is one daemon implementation, `scripts/acp-daemon.mjs`, run
-as **one detached process per ACP companion per host home**
-(`--companion copilot|antigravity`; `scripts/copilot-acp-daemon.mjs` is the
-Copilot binding of the same classes, and `test/fake-acp-agent.mjs` carries the
-neutral descriptor the suites drive it with). Each daemon owns one agent child
-over stdio — `copilot --acp`, or Google's `agy_acp_server.par` launched bare as
-the registry launches it; stdio is the only stable ACP transport — and one socket, log and prompt-stream
-namespace (`runtime/<companion>-acp.sock`, `<companion>-acp-daemon.log`,
-`prompts/<companion>-acp-<promptId>.jsonl`), and is recorded in
-`runtime/acp-daemons.json` through `lib/shared-runtime-registry.mjs` with
-leases, `lastUsedAt` and the two-phase disposal claim; the bridge's GC tick is
-the second reaper beside the daemon's own inactivity timer, as for the broker.
-Everything companion-shaped is the descriptor's `acp` block in
-`lib/target-registry.mjs` — spawn argv, extra env, files rotated at spawn,
-`clientInfo.name`, default model, whether `session/load` is honoured, the
-answer to `session/request_permission`, the usage reader, the
-`session/update` kinds the agent was measured to emit (an undeclared kind is
-logged once as drift and still parsed) and, for an agent that takes its model
-per session rather than as a spawn flag, the request that sets it
-(`acp.setModel`: Antigravity's `session/set_config_option`, sent after
-`session/new` and again after `session/load`, because a loaded session comes
-back on the default model — measured). The daemon pins ACP **v1** at
-`initialize`; an agent answering any other version is refused — child killed,
-prompt failed `ACP_PROTOCOL_MISMATCH`, job settled `unreachable` with
-`detail: acp_protocol_mismatch` — never adapted, because the v2 draft renames
-`session/load` to `session/resume`. Reply is cancel + re-prompt on the same
-session (ACP has no mid-turn steer, and the acknowledgement says so); restart
-resume is the daemon outliving the bridge, plus `session/load` for a session
-the daemon does not hold when the descriptor declares `acp.loadSession` AND
-the agent advertises it (Copilot's declares false: process-local sessions;
-Antigravity's declares true: its sessions are SQLite files under
-`~/.gemini/antigravity-acp/conversations/` and a loaded one remembers,
-measured). The daemon answers `session/request_permission` itself, from the descriptor's
-policy, because an unattended client that leaves a permission request pending
-has hung the agent.
+| Companion | Per-answer runtime | Follow-up by cold resume | Reply / steer | Model selection | Native history |
+| --- | --- | --- | --- | --- | --- |
+| Codex CLI | `codex app-server` over stdio | `thread/resume` | `turn/steer`; accepted and confirmed are separate | Explicit override, otherwise inherited; effective model/effort recorded | Saved thread id and vendor rollouts |
+| OpenCode 2.x only | Private `opencode serve` on loopback | Saved session id | Unsupported | `provider/model`, optional variant; resolved model verified | Vendor-persisted session |
+| GitHub Copilot CLI | `copilot --acp` | `FOLLOWUP_UNSUPPORTED` until cold load is qualified | Unsupported | Inherited configuration or supported explicit model | Session id retained; cross-process load unqualified |
+| Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Unsupported | Session config option after both new and load | SQLite conversations under `~/.gemini/antigravity-acp/conversations/` |
 
-The OpenCode adapter is selected by `OPENCODE_RUNTIME_ADAPTER` (`cli` default,
-`server` opt-in), mirroring how Copilot selects `acp`/`sdk`. The CLI adapter and
-onboarding share `lib/opencode-cli.mjs`'s version-specific command builder.
-OpenCode 1.x retains `--dir` and its opt-in permission flag; 2.x uses a private
-`--standalone` server and `--auto` only when explicitly configured. The child
-receives both the requested OS cwd and matching `PWD`: the 2.0.25 legacy-provider
-tool runtime otherwise reads from the inherited bridge directory. Readiness
-uses v2's native provider-connection metadata; a model omitted from its catalog
-stays unverified until a real run. One server adapter supports both HTTP contracts.
-It drives a single detached `opencode serve`: 1.x scopes sessions and SSE by
-`?directory=`, while 2.x creates sessions with a `location` and filters its global
-event stream by session id. The 2.x bootstrap password lives only in the private
-lease registry, survives bridge replacement and is omitted from public snapshots.
-Native step events feed partial output; the completed projected turn restores
-tool steps and usage missed during a bridge outage. Its paginated transcript is
-limited to the newest user turn and requires an idle outcome, rather than an
-intermediate tool step's completion timestamp. Active-session and transcript
-checks close subscription/stream-drop races. Since 2.x has no server-dispose API,
-the idle reaper authenticates the native process id and reconfirms its lease
-claim immediately before SIGTERM. A
-job records the adapter it started with (`opencodeAdapter`), and per-job
-`reply_available` / `resume_available` flags on the status response report what
-that specific job can do — independent of the current env.
+OpenCode validates the 2.x authenticated `/api` contract and runtime pid. Its
+bootstrap password stays only in adapter memory. The OS cwd and `PWD` both match
+the canonical requested directory; the historical 2.0.25 tool-runtime cwd issue
+is why both are set. Events are filtered by session id; terminal transcript
+projection is bounded by this execution's admitted user message and idle outcome.
+OpenCode 1.x is dropped. Permissions follow OpenCode's own server configuration.
 
-The Codex adapter is selected the same way, by `CODEX_RUNTIME_ADAPTER` (`exec`
-default, `appserver` opt-in), and records `codexAdapter` on the job for the same
-reason. `appserver` mode talks JSON-RPC over a unix socket to a **detached
-broker** — one per host home, shared by every bridge on the machine that
-resolves to it — that owns one `codex app-server` over stdio. The broker
-provides the survival boundary measured in
-[`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#2-app-server-and-broker-evidence).
-Reply is `turn/steer` (real mid-flight injection, no restart), cancel is `turn/interrupt` (the thread stays
-live), restart resume is `thread/resume` (which rejoins a *running* thread), and
-salvage is `thread/read` over RPC. A follow-up send on a thread whose last job
-recorded a thread id also goes through `thread/resume` — every app-server send
-on an existing thread, not only `review` — and `thread/start` opens only a
-thread with no recorded id; a recorded id that fails to resume on a healthy
-broker fails the job explicitly and retires the sid rather than opening fresh.
-`approvalPolicy` is pinned to `never`; §2 records the sandbox-escalation measurement.
-Two reapers stop the broker
-when nothing is using it: its own inactivity timer and the bridge-side lease
-reaper in `lib/shared-runtime-registry.mjs`. `thread/loaded/list` supplies the
-candidate ids, but is not itself an activity signal: each reaper reads those
-threads with turns included and proceeds only when every one is positively idle
-or terminal. Active and unrecognised/unreadable states fail safe and keep the
-broker alive.
+Codex selects an executable/helper pair before each runtime starts, using
+`lib/codex-install.mjs`. The configured `CODEX_BIN` or PATH anchors the version;
+the resolver retains invoked and canonical identity and may select a complete,
+same-version pair under `$CODEX_HOME/plugins/.plugin-appserver/`. It does not
+change Homebrew links or quarantine attributes. `approvalPolicy: never` is fixed;
+the default sandbox is `workspace-write` with network enabled. A busy native
+history is refused before `turn/start`. The advisory schema probe runs once per
+bridge; catalog's Codex entry and status expose `contractStatus` as
+`match|drift|unverified`. A version-only change is not schema drift.
 
-The app-server executable is selected as a pair before spawn. The configured
-`CODEX_BIN`/PATH binary anchors the desired version; `lib/codex-install.mjs`
-retains its invoked path, canonical path and stat identity, follows Codex's
-resource/canonical-bin/invoked-sibling helper order, and may select the
-same-version unquarantined pair extracted under
-`$CODEX_HOME/plugins/.plugin-appserver/`. It never alters `/opt/homebrew/bin` or
-xattrs; a failed xattr read remains an explicit indeterminate verdict rather
-than being collapsed to attribute absence. The broker publishes the selected launch identity on `initialize` and
-`broker/status`. Before each send the bridge compares that identity with a
-fresh selection; a mismatch or deleted running image is replaced only through
-the existing client/lease/active-turn disposal guards. A `thread/start`
-configuration `EPERM` or dead-broker signature gets the same guarded replacement
-and exactly one retry.
-
-Both Codex adapters share the sandbox resolver. The app-server sends mode
-and approval policy on start and resume, and network policy on `turn/start`.
-The measured default differences and extra-writable-root limitation are in
-[`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#sandbox-and-configuration).
+ACP pins protocol v1. The descriptor supplies argv, permissions, usage and model
+rules; the adapter handles `session/request_permission` itself. Antigravity
+reapplies an explicit model after each history load and verifies acknowledgement.
+Copilot's advertised load capability alone is insufficient: cold follow-up remains
+refused pending account resolution and qualification. ACP does not simulate steer
+by cancelling and re-prompting. Usage is absent when the provider reports none.
 
 ## Routing Contract
 
-**One agent-companion instance is one companion conversation.** The host names
-its thread: Claude's `PreToolUse` hook (`hooks/name-thread.sh`) supplies the
-subagent's `agent_id`; Codex's `callArgs` reads
-`_meta["x-codex-turn-metadata"].thread_id`. A resumed subagent keeps that identity;
-a fresh spawn gets a distinct conversation. An MCP send without a thread is
-refused. The host session id comes from Claude's inherited env or the same
-Codex metadata object's `session_id`; it scopes completion delivery, not
-companion continuity.
+**One native child is one companion conversation.** Claude's hook unconditionally
+writes the child's `agent_id` into `thread`, clearing it for a root caller.
+Codex requires `thread_source: subagent` and uses its `thread_id`. Send, wait,
+reply and cancel without that owner fail with `NATIVE_OWNER_REQUIRED`.
+Catalog and status are ownerless reads; neither renews a lease nor changes records.
+The parent session id scopes completion delivery, not companion continuity.
 
-On a thread with an in-flight job, only a matching retry reattaches: host session,
-task, target, model and cwd must match. A different task or model is refused as
-`thread_busy`, naming the job and the wait/cancel/reply options. Target and cwd
-conflicts retain their own mismatch responses.
+The first send requires an absolute existing directory and records its canonical
+path, provider, optional model override and native history id. Follow-ups retain
+provider and cwd; mismatches are explicit refusals. Omitted model retains an
+existing override, otherwise inherits the provider's configuration. A configured
+per-companion default is applied to a new conversation. An explicit model can
+change on a later, closed execution; the resolved model is recorded separately.
 
-The subagent honours an explicit companion and model. When the choice is open,
-it reads the catalog once, chooses a ready companion and leaves the model to
-that companion's configuration. It keeps the chosen conversation for follow-ups.
-The bridge resolves the requested or configured companion and applies the
-capability/model gate before spawning work.
+On a busy conversation, identical text and model reattach to the same execution
+after provider/cwd validation. Different text or model returns `thread_busy`.
+Reattachment returns the existing delivery acknowledgement, not a second prompt;
+use bounded `agent_wait` calls for completion. There is no hidden work queue.
 
-Refusals remain explicit: `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`,
-`CAPABILITY_UNAVAILABLE` and `MODEL_NOT_ALLOWED`. The subagent relays the refusal
-and stops. It does not change or drop the parent's preference to get around it.
-The delegated task stays with the companion on refusal, failure, timeout or
-unreachable execution; the child may check a specific finding, but does not
-finish the delegated work itself. Both role suites pin this rule. The measured
-substitution failure remains documented in
-[`RELIABILITY_REMEDIATION.md` F5](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
-
-OpenCode server and Codex app-server can select models while sharing the runtime.
-An ACP daemon replaces its agent child when cwd or model changes, and refuses
-the switch while a prompt is active.
+Target/model refusals include `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`,
+`CAPABILITY_UNAVAILABLE` and `MODEL_NOT_ALLOWED`. The child relays the failure
+without substituting a companion/model or completing the delegated work itself.
+See historical substitution failure [F5](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
+Missing history fails as `history_unavailable`; unsupported cold follow-up fails
+as `FOLLOWUP_UNSUPPORTED`. Ambiguous migrated history is never guessed.
+A missing delivery acknowledgement produces `delivery_unknown`, terminates the
+runtime and is never automatically resent.
 
 ## Companion Adapter Contract
 
-The runtime boundary is expressed through job fields and handlers:
+The controller owns processes, leases, records and results. Adapters implement
+only the provider protocol; they never write durable execution state or kill
+processes. The provider factories create an adapter with this interface:
 
-- Every adapter puts the turn's token usage, when its transport reports one,
-  on the summary it builds, in the one shape `lib/usage.mjs` defines (six
-  counters, `source`, optional `model`/`cost`/`cost_unit`, `partial` for a
-  watch that did not see the turn from its start). `retainTerminalJob` moves it
-  to `job.usage` — the ledger, wait `meta.usage`, the queue event,
-  `agent_status` and both digests read it from there; nothing reads
-  `summary.usage` after the terminal. Absent, never zeroed, when the transport
-  reported nothing.
-- Each adapter receives the child's message verbatim. Answers remain the
-  companion's own text; the bridge adds no critic instructions, required closing
-  line or answer classification. Usage and terminal-state reporting are separate.
-- Every `unreachable` result derives one `failure_class` for job status, wait
-  metadata and completion notifications. A live Codex `turn/completed` with
-  zero observed tool calls is remapped only when its assistant message reports
-  a universal pre-execution command blocker. A recovered `thread/read` history
-  has no tool record, so only an explicit named-runner-unavailable message is
-  remapped. Both become `codex_code_mode_host_unavailable` /
-  `runtime_unavailable`; ordinary zero-tool answers stay completed.
-- Adapters should write or refresh a digest before terminal notification when they have transcript/output material.
+| Method / property | Contract |
+| --- | --- |
+| `start({ cwd, env, model, supervisor })` | Spawn via `supervisor.spawn(argv, opts)`; return `{ runtime }`. Startup failure becomes `failed: runtime_unavailable`. |
+| `openHistory({ historyId, model })` | Null id creates history; a saved id must load unchanged or throw `HistoryUnavailable`. Apply model rules and return `{ historyId, effectiveModel }`, plus effective effort where reported. |
+| `deliver({ text })` | Send verbatim once; return `{ nativeTurnId }` on native acknowledgement. Ambiguous failure throws `DeliveryUnknown`; never retry delivery. |
+| `observe({ onProgress })` | Resolve one native outcome (`completed`, `failed`, `interrupted`) with text, usage, native refs and cause. Progress carries last activity, active command, retry state and partial text. Transport loss throws `ProviderLost`. |
+| `interrupt()` | Request native turn interruption; never signal a process. |
+| `close()` | Close protocol channels; process termination belongs to the supervisor. |
+| `capabilities` | `{ followUp, steer, modelSelection, loadsHistory }`; unsupported history load refuses follow-up. |
+| `steer({ text })` | Optional when `steer` is true; Codex reports acceptance separately from observed confirmation. |
+
+ACP's prompt response is terminal, so an earlier native session update or
+permission request supplies its delivery acknowledgement. Retryable provider
+errors remain progress. Usage uses `lib/usage.mjs`'s shared counters and optional
+model/cost fields; absent usage is never invented as zero.
+
+Each execution gets its own supervisor: `spawn`, `recordDescendant`, `census`,
+`terminate` and `verifyGone`. It records pid/pgid, samples descendants every 2 s,
+and includes protocol-reported command pids. Closure attempts native interrupt
+and protocol close with bounded waits, then SIGTERM to the group and recorded
+pids, SIGKILL to survivors after 2 s, and absence verification by pid plus birth
+identity. The cleanup target is at most 5 s on an awake machine after the close
+decision; lease detection delay is reported separately. A signal acknowledgement
+alone is never proof of exit.
 
 ## State
 
-State defaults to the host-routed companion home `~/.{claude,codex}/agent-companion/`
-(`CODEX_HOME` relocates the Codex home; `AGENT_COMPANION_HOME` overrides the state dir):
+`AGENT_COMPANION_HOME` overrides the state home; otherwise Claude uses
+`~/.claude/agent-companion/` and Codex uses `$CODEX_HOME/agent-companion/`
+(default `~/.codex/agent-companion/`).
 
-- `default-model`: Copilot model config.
-- `default-target`: configured default target (written by onboarding).
-- `profiles.json`: legacy configuration only. A logged, one-shot migration at
-  first bridge start carries a named default profile's model to that companion's
-  default setting only when none is already set. The user's file is retained;
-  normal routing stops reading it after migration.
-- `threads/`: logical companion thread names, each holding the companion
-  session the last job on that thread recorded — an ACP session id, or a
-  codex app-server thread id. It is what a follow-up send resumes. Legacy keys
-  were namespaced by profile: a mapping to exactly one companion session is
-  preserved; several possible sessions are marked ambiguous and follow-up is
-  refused with the conflict named. Migration never silently starts a fresh
-  conversation. The exec adapter never reads or writes it.
-- `jobs/`: persisted in-flight/recent jobs for restart recovery. OpenCode
-  server jobs persist their `ses_` session id (under the target-neutral
-  `companionSessionId` key) and the server `baseUrl` so a respawned bridge can
-  resume them. A settled job carries `usage` (see the adapter contract) — the
-  per-job ledger that routing and cost decisions can be judged against.
-  Active legacy jobs keep their old fields until terminal; migration does not
-  rewrite or adopt their in-flight work.
-- `runtime/`: logs, queue, prompt streams, and digests.
-- `runtime/opencode-servers.json`: registry of the shared detached
-  `opencode serve` process so a respawned bridge reattaches instead of
-  re-spawning.
-- `runtime/<companion>-acp.sock`: each ACP daemon's unix socket (copilot
-  and antigravity), a fixed short path like the broker's; `runtime/acp-daemons.json`
-  records the daemon's pid, leases, `lastUsedAt` and disposal claim per
-  companion — bookkeeping, not an address book, for the same reason as the
-  broker's file.
-- `runtime/codex-app-server.sock`: the codex broker's unix socket. Its path is
-  fixed and short on purpose — unix paths truncate silently at `SUN_LEN`
-  (~104 bytes on darwin). Startup uses the connect-probe verdict described below.
-- `runtime/codex-broker.json`: running launch metadata, leases, `lastUsedAt`
-  and the two-phase disposal claim for that broker. Unlike the OpenCode registry
-  — which holds the only record of an ephemeral `--port 0` address — this file
-  is bookkeeping, not an address book: the socket path above is a constant, so
-  a bridge that loses it simply re-adopts the broker by probing.
+| Path | Meaning |
+| --- | --- |
+| `default-target`, `default-model`, `default-model-<companion>` | Companion/model defaults; environment defaults take precedence. |
+| `target-checks.json` | Last explicit readiness evidence; catalog/status read it without probing. |
+| `conversations/<owner>.json` | Provider, canonical cwd, model override, native history, generation and current execution id. |
+| `executions/<id>.json` | Request, native references, process identities, progress, lifecycle and writer authority. |
+| `leases/<id>.json` | Attached owner requests and remaining grace. |
+| `results/<id>.json` | Immutable outcome, text/usage, native refs, selected/effective model, stop cause and cleanup evidence. |
+| `locks/<owner>.lock` | Exclusive record mutation lock; crash leftovers fail closed as `RECORD_BUSY`. |
+| `stops/<owner>.json` | Advisory TaskStop/SubagentStop marker. Its snapshot at dispatch prevents an old stop from cancelling new work. |
+| `completions/<id>.json` | Publication receipt keyed by execution id. |
+| `runtime/completions.jsonl` | Hook delivery queue; terminal wait consumes the execution's entries. |
+| `runtime/digests/agent-digest-<id>.md` | Controller-published task and final/partial output, status and reported usage. |
+| `runtime/agent-bridge.log`, `daemon.log` | Bridge and structured event logs; the latter is a retained filename, not a running service. |
+
+Record writes are atomic and private, with conversation-generation and writer
+fences. A native terminal outcome is persisted before cleanup; the final immutable
+result includes cleanup evidence. Startup reconciliation reads watcher results
+or verifies process absence. It never adopts old live work; until absence is
+proven, state stays `unknown` and a new execution is refused. Status does not
+reconcile, publish a completion or refresh a digest. The watcher writes only its
+fenced result; controller startup or an owner wait can publish it later.
+
+Legacy `profiles.json`, `threads/` and `jobs/` are migration inputs only. The
+logged one-shot `phase1-migrated` conversion preserves source configuration,
+carries a default model only when none is set, consolidates uniquely mapped
+history and writes ambiguity markers for conflicts. Records require the latest
+legacy job's provider to match before accepting a bare saved id. Migration must
+be performed with legacy work quiescent; it neither rewrites legacy jobs nor
+adopts their active processes. There are no shared runtime registries in the
+shipped execution path, and no one-hour GC of the new durable records.
+
+## Host budgets
+
+The [Claude 2.1.318 report](../probes/host-qualification/claude/REPORT-2026-11-05.md)
+and [Codex 0.166.0 report](../probes/host-qualification/codex/REPORT-2026-11-05.md)
+measure a **1320.0 s hard per-call wall on both hosts**, silent or with progress
+every 10 s (Claude 132 frames; Codex 131). Claude requested 1980 s and Codex
+1800 s. Progress does not extend that wall. The installed settings are Claude
+`timeout: 1320000` and Codex `tool_timeout_sec: 1320`; wait defaults to 480 s
+and caps at 1200 s, leaving 120 s below the configured wall. Parent messages
+reach a busy child between waits. Choose shorter waits when response latency matters.
+
+Owner send/wait/reply/cancel requests hold attachment while pending. When the
+last returns, `AGENT_COMPANION_OWNER_GRACE_MS` defaults to 120000 (120 s).
+Only a new owner request renews it. The controller uses monotonic awake ticks,
+pausing grace across long scheduling gaps rather than treating suspend as owner
+loss. A changed stop marker or attributed request cancellation closes the owner
+immediately; the lease handles missing signals. The old 40-minute execution
+cutoffs and their environment knobs are removed. Protocol startup/delivery
+bounds remain separate from total answer duration.
 
 ## Negative Results
 
@@ -357,25 +296,59 @@ The measured evidence is in [`RELIABILITY_REMEDIATION.md`](RELIABILITY_REMEDIATI
 and the harnesses are in [`probes/`](../probes/README.md). They are listed as negatives
 because the cost of re-deriving them is a day each.
 
-The `plan_path` and profile-selection references below describe the historical
-interface retired on 2026-11-05. Their measurements remain evidence; current
-requests supply context and model preferences through the conversational contract.
+The `plan_path`, profile-selection, exec, broker and daemon measurements below
+are historical evidence for designs retired on 2026-11-05. They are not current
+components or survival guarantees. Implementation-specific entries are labelled;
+full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION.md).
+
+**Phase 2 host findings (2026-11-05)**
+
+The [Claude report](../probes/host-qualification/claude/REPORT-2026-11-05.md) and
+[Codex report](../probes/host-qualification/codex/REPORT-2026-11-05.md) establish:
+
+- A stop during a pending request is attributable; a stop between dispatch and
+  wait or between waits gives no cancellation signal. Normal completion gives
+  SubagentStop only. Stop markers and the owner lease fill these gaps.
+- Neither host terminates provider descendants. Claude graceful exit gives
+  SIGINT (~235 ms before exit); Codex gives SIGTERM. Parent SIGKILL gives EOF
+  without SessionEnd. A surviving sibling connection remains usable.
+- Progress does not extend the 1320 s per-call wall; see [Host budgets](#host-budgets).
+- `/clear` on Claude 2.1.318 is not a bridge-loss trigger: session id changed
+  after 0.5 s, the servers and pending child continued, and inherited session
+  environment became stale. Addressability of the old child was not established.
+- A headless Claude parent has no TaskOutput. Background-only work was cut off
+  when the parent exited about ten minutes later; foreground children were used
+  for long-call measurements.
+- Same-child resume after stop works. Claude completed-child resume requires
+  session persistence. Busy-child messages are queued until wait returns
+  (Claude measured 39.6 s and 40.1 s delays for 40 s waits).
+- Healthy Claude attachment gaps were typically 1.5–7 s to first wait and 2–6 s
+  between waits, with maxima of 18.5 s and 20 s respectively; 119–126 s gaps
+  were deliberately held. Compaction/suspend and remaining TUI cases require
+  operator qualification; the unattended `/compact` command was not evidenced.
+
+These passive fixtures establish host signals, not the shipped cleanup implementation.
+
+- **Historical test timing is not current runtime qualification.** The former
+  fake-OpenCode-CLI test in `bridge-server/server.test.mjs` had a 5 s poll budget;
+  it failed under full-suite concurrency and passed in about 0.6 s alone. The
+  CLI runtime has been retired; preserve that observation as test history.
 
 **Transport and process lifetime**
 
-- **Exec's resume limit is not a Codex limit.** App-server `thread/resume` rejoins
+- **Historical (retired design): Exec's resume limit is not a Codex limit.** App-server `thread/resume` rejoins
   a running turn across bridge death. See
   [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#running-thread-recovery--measured-2026-08-10).
 - **`detached: true` is not what makes a child survive.** File-backed stdout is;
   the measured 2×2 matrix is
   [`RELIABILITY_REMEDIATION.md` S3](RELIABILITY_REMEDIATION.md#0-host-and-process-constraints).
-- **No signal reaches a codex child when its bridge dies.** It dies at its next
+- **Historical (retired design): No signal reaches a codex child when its bridge dies.** It dies at its next
   stdout write, so pid liveness does not prove recoverability. See
   [`RELIABILITY_REMEDIATION.md` F1](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
-- **`codex app-server` over stdio buys no survival by itself.** The detached broker
+- **Historical (retired design): `codex app-server` over stdio buys no survival by itself.** The detached broker
   owns that lifetime. Both durability tiers are measured in
   [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#broker-lifetime-and-routing).
-- **A present socket is not a live broker.** Only a definitive absent verdict
+- **Historical (retired design): A present socket is not a live broker.** Only a definitive absent verdict
   authorises unlink; an indeterminate probe must refuse. The measured stale-socket
   case and error classes are in
   [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#broker-lifetime-and-routing).
@@ -385,10 +358,10 @@ requests supply context and model preferences through the conversational contrac
 - **`turn/start` on a busy thread does not reject.** It can double-dispatch work;
   the adapter checks activity first. See
   [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#error-taxonomy).
-- **A thread being loaded does not mean it is active.** Both reapers need positive
+- **Historical (retired design): A thread being loaded does not mean it is active.** Both reapers need positive
   idle/terminal evidence, not list length. See
   [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#broker-lifetime-and-routing).
-- **An alive broker is not necessarily the installed broker.** A detached
+- **Historical (retired design): An alive broker is not necessarily the installed broker.** A detached
   app-server can keep a deleted Homebrew Caskroom image mapped across
   `brew upgrade codex`. Socket readiness therefore proves transport liveness,
   not executable freshness; version, canonical path and stat identity are
@@ -405,11 +378,10 @@ requests supply context and model preferences through the conversational contrac
 
 **Host budgets and observability**
 
-- **A wait is bounded by the host's MCP tool-idle budget.** `clampWaitSec`'s
-  1200 s ceiling has 600 s of headroom against the measured stdio default — never
-  raise it past 1500 s without a per-server `timeout`. The host measurement is in
-  [`RELIABILITY_REMEDIATION.md` §0](RELIABILITY_REMEDIATION.md#0-host-and-process-constraints).
-- **The two Claude Code budget variables, pinned** (docs read 2026-09-11; both names are
+- **An idle budget is not the only limit.** The older measured stdio default
+  was 1800 s; the configured per-call wall now controls the 1200 s wait cap.
+  See [Host budgets](#host-budgets) for the newer measurements.
+- **Historical documentation snapshot: two Claude Code budget variables** (docs read 2026-09-11; both names are
   present in the 2.1.268 binary; neither has been set or measured on this host).
   `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` (v2.1.187+, stdio servers included from v2.1.203) is
   the idle window above, in ms: default 1,800,000 for stdio, 300,000 for HTTP/SSE/WebSocket,
@@ -417,8 +389,8 @@ requests supply context and model preferences through the conversational contrac
   `env:` entry on the server reaches only the bridge child, like `MCP_TOOL_TIMEOUT`. The
   default is the measured value, so nothing sets it. The documented interaction that does
   matter: from v2.1.203 a per-server `timeout` of at least 1000 ms also floors the idle
-  window for that server, so the frontmatter's `timeout: 1320000` is the one knob the
-  templates carry (Codex: `tool_timeout_sec = 1320`). `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`
+  window for that server, so the per-server `timeout: 1320000` is now carried by the
+  Claude plugin manifest (Codex: `tool_timeout_sec = 1320`). `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`
   (v2.1.212+): an MCP call in the **main conversation** still running after 120,000 ms
   becomes a background task and the model receives a task id instead of the result; `0`
   turns it off. The docs exclude subagent calls outright, and every bridge call is made by
@@ -429,14 +401,14 @@ requests supply context and model preferences through the conversational contrac
 - **`env: { MCP_TOOL_TIMEOUT }` in agent frontmatter is inert.** The variable reaches the
   bridge child; the host ignores it. The fields that work are a sibling `timeout` (Claude,
   milliseconds) and `tool_timeout_sec` in the Codex plugin manifest (seconds).
-- **MCP progress notifications are not a model channel.** They reset the idle
-  watchdog and reach the spinner. The silent/progress control is in
+- **MCP progress notifications are not a model channel.** The older idle-watchdog measurement showed
+  them reaching the spinner; they do not extend the measured per-call wall. The silent/progress control is in
   [`RELIABILITY_REMEDIATION.md` §0](RELIABILITY_REMEDIATION.md#0-host-and-process-constraints).
-- **A digest is not a salvage artefact on the exec transport.** The answer arrives
+- **Historical (retired design): A digest is not a salvage artefact on the exec transport.** The answer arrives
   atomically at turn end. App-server `thread/read` salvages messages, not a measured
   tool-activity history. See
   [`RELIABILITY_REMEDIATION.md` F7 and evidence limits](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
-- **Protocol completion is not always a task verdict.** Codex can emit
+- **Historical (retired design): Protocol completion is not always a task verdict.** Codex can emit
   `turn/completed` after its subordinate command runner failed before any command
   executed. Conversely, many valid conversational turns use zero tools and
   restart recovery has no tool history. The bridge therefore requires a live
@@ -444,7 +416,7 @@ requests supply context and model preferences through the conversational contrac
   command blocker; for recovered `thread/read`, it requires an explicit
   named-runner-unavailable message instead. Prose merely quoting such an error
   is not enough.
-- **`--output-last-message` is not a salvage channel.** Neither it nor the exec
+- **Historical (retired design): `--output-last-message` is not a salvage channel.** Neither it nor the exec
   event stream reliably records an aborted turn; see
   [`RELIABILITY_REMEDIATION.md` F7](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
 - **`setTimeout` counts suspend on macOS, but not Linux.** The measured wake timing
@@ -470,13 +442,11 @@ requests supply context and model preferences through the conversational contrac
 - **The bridge runs no git and writes nothing inside a job's cwd.** An index hash
   alone does not identify its mutator; see the incident's git-command and stat-cache
   evidence in [`RELIABILITY_REMEDIATION.md` F4](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
-- **`handleStatus` performs no lifecycle mutation.** Hydrate and host-sid adoption
-  are latched; status on an adopted bridge re-runs neither. Claude's shared inline
-  teardown is measured in
-  [`RELIABILITY_REMEDIATION.md` S2 / F1](RELIABILITY_REMEDIATION.md#0-host-and-process-constraints).
-  Codex's plugin/session-scoped registration has a different lifetime. Detached
-  runtimes supply durability on both hosts.
-- **"No thread id" does not mean "broadcast".** Read against
+- **Status is not attachment or recovery.** It reads records without renewing
+  the lease, writing a result, publishing a completion or spawning a provider.
+  Cleanup signals only recorded process identities for one execution; siblings
+  of the same provider have independent process groups and connections.
+- **Historical (retired design): "No thread id" does not mean "broadcast".** Read against
   the codex source (rust-v0.150.1, 2026-08-28): codex has three delivery paths, not two — thread
   subscribers, **one connection** (`send_server_notification_to_connection`), and broadcast —
   and five pinned notifications take the middle one: `mcpServer/event/stream/notification`
@@ -491,7 +461,7 @@ requests supply context and model preferences through the conversational contrac
   owner-key rule is a table (`subscriptionId`, `processId`, `processHandle`, `watchId`), not a
   shape heuristic: `sessionId`, `loginId` and `importId` look identical and codex genuinely
   broadcasts those.
-- **A superseded broker that never retires is not a reaper bug.** The idle reaper held a
+- **Historical (retired design): A superseded broker that never retires is not a reaper bug.** The idle reaper held a
   pre-upgrade broker alive for hours on the machine that ran the test suite, and the cause was
   not in the reaper: `hooks/drain-completions.test.mjs` shelled the hook out with the real
   `$HOME`, so every run of its thirteen tests wrote five fixture-session heartbeats (`sid-A`,
@@ -502,12 +472,12 @@ requests supply context and model preferences through the conversational contrac
   and everything a test spawns inherits it, so `lib/host.mjs`'s `refuseRealHomeUnderTest` —
   called from `runtimeDir()`, from `state.mjs`'s `BASE_DIR` at import, and mirrored in
   `hooks/drain-completions.sh` — throws on any path under the real account home
-  (`os.userInfo()`, not `$HOME`; anything under `os.tmpdir()` passes). A textual guard over test sources missed four cases. If a daemon looks immortal, list the
-  heartbeats dir before suspecting the reaper.
+  (`os.userInfo()`, not `$HOME`; anything under `os.tmpdir()` passes). A textual guard over test sources missed four cases. That retired lifetime bug is why the real-home guard remains; heartbeats
+  are not owner-lease evidence in the current controller.
 - **Auto-accepting an approval defeats the sandbox.** The adapter pins `never`;
   the read-only write experiment is in
   [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#sandbox-and-configuration).
-- **Confining `plan_path` to the plans dir is not a boundary.** The path only reaches the
+- **Historical (retired design): Confining `plan_path` to the plans dir is not a boundary.** The path only reaches the
   companion *inside a prompt*, and every shipped companion reads the whole filesystem on its
   own (Copilot runs `--allow-all-paths`; codex `workspace-write` confines writes, not reads;
   OpenCode is unsandboxed) — and the caller is the subagent, which has `Bash` and copies the
@@ -525,13 +495,13 @@ requests supply context and model preferences through the conversational contrac
   drift policy are in
   [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#transport-and-contract).
 - **Config inheritance works — do not pin the model.** Omit the key unless a
-  profile selects an override; see
+  request or configuration selects an override; see
   [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#sandbox-and-configuration).
 - **An agent's yolo flag is not yolo.** Measured 2026-09-11 on Gemini CLI 0.59.0 under
   `--acp`: "Approval mode
   overridden to \"default\" because the current folder is not trusted", after which
   every edit and shell call arrives as a `session/request_permission` request. A
-  client that only passes a flag hangs its agent on the first tool; the generic daemon
+  client that only passes a flag hangs its agent on the first tool; the ACP adapter
   therefore answers the request itself, from the descriptor's policy, whatever any
   flag said.
 - **`notifications/initialized` is not ACP.** It is MCP's post-handshake notification.
@@ -570,7 +540,7 @@ requests supply context and model preferences through the conversational contrac
   answers too) and a `session/load`ed session comes back on the default model (measured
   2026-09-11: set to `gemini-3.8-flash-low`, killed, loaded, `currentValue` back to
   `gemini-3.7-flash-high`). So the descriptor names the request (`acp.setModel`) and the
-  daemon sends it after `session/new` and again after `session/load`; an unknown id is
+  adapter sends it after `session/new` and again after `session/load`; an unknown id is
   refused with -32602 naming the available ones and fails the prompt, never a silent
   fallback to the default. Copilot's descriptor has no such hook and its argv is
   unchanged.
@@ -584,12 +554,13 @@ requests supply context and model preferences through the conversational contrac
   registration would be a silent no-op, which is worse than the rejection it replaced. The
   plugin-manifest session-scope registration stays; `templates/agent-companion.toml.test.mjs`
   asserts the role carries no `[mcp_servers]`. Re-check `apply_role_to_config_inner` on every
-  codex upgrade — the day it honours the key, the Codex host can go agent-local like Claude.
+  codex upgrade — the day it honours the key, the Codex host could use role-local registration; both hosts currently use plugin scope.
 
 ## Codex Upgrade Incident Evidence (2026-09-02)
 
-Root-caused from process/file inspection, persisted jobs and upstream Codex
-source:
+Historical evidence for the retired broker design; remediation claims in this
+section describe that implementation, not the current controller. Root-caused
+from process/file inspection, persisted jobs and upstream Codex source:
 
 - The detached broker outlived its launching terminal with a deleted 0.151.0
   Caskroom image still mapped. Terminal loaded threads kept it alive. Socket

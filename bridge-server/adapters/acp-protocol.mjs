@@ -22,8 +22,8 @@ function extractOutputPreview(update) {
   return null;
 }
 
-// The option the daemon picks when the agent asks for permission. The
-// one-shot options, never the persistent ones: the daemon answers for THIS
+// The option the adapter picks when the agent asks for permission. The
+// one-shot options, never the persistent ones: the adapter answers for THIS
 // call and does not write policy into the agent's own store.
 function choosePermissionOption(options, allow) {
   const list = Array.isArray(options) ? options : [];
@@ -51,7 +51,7 @@ export class AcpConnection {
     this.initialized = false;
     this.dead = false;
     // What the handshake established: the version the agent answered, and
-    // whether it is the one this daemon pins.
+    // whether it is the one this ACP client pins.
     this.protocol = { pinned: ACP_PROTOCOL_VERSION, answered: null, status: 'pending' };
     this.agentInfo = null;
     this.agentCapabilities = null;
@@ -97,7 +97,7 @@ export class AcpConnection {
     }
 
     // A request FROM the agent (has id and method): a client method it wants
-    // this daemon to serve. Every one gets an answer — an unanswered request
+    // this ACP client to serve. Every one gets an answer — an unanswered request
     // is an agent that waits forever.
     if (msg.id !== undefined && msg.method) {
       this._onAgentRequest(msg);
@@ -111,7 +111,7 @@ export class AcpConnection {
   }
 
   // The client methods the agent may call. `session/request_permission` is
-  // the only one this daemon serves — it declared no fs and no terminal
+  // the only one this ACP client serves — it declared no fs and no terminal
   // capability, so a request for those is answered "Method not found" rather
   // than left hanging (an agent that asks anyway falls back to its own file
   // system, as Gemini CLI 0.59.0 was measured to do).
@@ -127,7 +127,7 @@ export class AcpConnection {
     });
   }
 
-  // The daemon is the user. Answer from the descriptor's policy — `all`
+  // The ACP client answers permission requests. Answer from the descriptor's policy — `all`
   // allows every kind, `edit` allows tool calls of kind `edit`, `none` allows
   // nothing that asks — and leave a `permission` event on the prompt stream
   // so the digest and the operator can see what was decided and why.
@@ -324,7 +324,7 @@ export class AcpConnection {
   // The v1 handshake. `clientCapabilities` is the spec's key (`capabilities`
   // was an MCP-ism); no fs and no terminal, so the agent uses its own file
   // system and shell. ACP has no `initialized` notification — the one the
-  // Copilot daemon used to send was MCP's, and Gemini CLI 0.59.0 answered it
+  // retired Copilot daemon used to send was MCP's, and Gemini CLI 0.59.0 answered it
   // with a -32601 on stderr (measured 2026-09-11).
   async initialize() {
     const result = await this._sendRequest(
@@ -343,7 +343,7 @@ export class AcpConnection {
       this.protocol = { pinned: ACP_PROTOCOL_VERSION, answered, status: 'mismatch' };
       const err = new Error(
         `${this.descriptor.displayName} answered protocolVersion ${answered === null ? '(none)' : answered}; `
-        + `this daemon pins ${ACP_PROTOCOL_VERSION} and does not adapt (agent: ${this.agentInfo?.name || '?'} ${this.agentInfo?.version || ''})`.trim(),
+        + `this ACP client pins ${ACP_PROTOCOL_VERSION} and does not adapt (agent: ${this.agentInfo?.name || '?'} ${this.agentInfo?.version || ''})`.trim(),
       );
       err.code = 'ACP_PROTOCOL_MISMATCH';
       err.answered = answered;

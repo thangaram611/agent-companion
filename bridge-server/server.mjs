@@ -13,18 +13,12 @@
 // after delivery acknowledgement. An identical in-flight send reattaches to
 // the same execution. Bounded waits hold the owner's lease until they return.
 //
-// The host budget that actually bounds a wait is the MCP *tool idle* timeout,
-// not a stream watchdog. Measured from the Claude Code 2.1.226 binary: the
-// stdio-transport default is 1,800,000 ms (30 min), polled on a 30 s tick, and
-// it is satisfied by each `agent_wait` **returning** — an emission mid-call does
-// not reset it (only a `notifications/progress` would, and that is not what the
-// per-iteration line is). So the budget is: clampWaitSec's 1200 s ceiling
-// against an 1,800,000 ms stdio idle default = 600 s of headroom, which is why
-// clampWaitSec needs no change. Never raise it past 1500 s without also setting
-// a per-server `timeout` on the MCP server entry — the `env: MCP_TOOL_TIMEOUT`
-// form is a host no-op (it reaches only this child). Codex's own per-tool-call
-// budget is 120 s (`codex-rs/codex-mcp/src/rmcp_client.rs:79`); Codex callers
-// raise tool_timeout_sec in the Codex plugin manifest.
+// Each wait is below the host's per-call wall: both 2026-11-05 host reports
+// measured cancellation at 1320 s with or without progress. Claude configures
+// sibling timeout (ms), Codex tool_timeout_sec (s); child MCP_TOOL_TIMEOUT env
+// does not configure either host. clampWaitSec caps at 1200 s, default 480 s.
+// The owner lease covers gaps between bounded calls, not total answer duration.
+// See probes/host-qualification/{claude,codex}/REPORT-2026-11-05.md.
 //
 // Completion surfacing: each terminal/alert event is appended to a JSONL queue
 // file with `consumed:false`; the drain script (invoked from host lifecycle
@@ -485,9 +479,9 @@ const mcp = new Server(
     capabilities: { tools: {}, resources: {} },
     instructions:
       'Internal transport for the agent-companion subagent; parent harnesses ' +
-      'must spawn that subagent rather than call these tools directly. Claude ' +
-      'scopes it to the agent; Codex registers it at plugin/session scope so ' +
-      'the role can inherit it. Tools: agent_send (returns ' +
+      'must spawn that subagent rather than call these tools directly. Both hosts ' +
+      'register it at plugin/session scope; execution calls require the native ' +
+      'child owner. Tools: agent_send (returns ' +
       'still_running synchronously), agent_wait (blocks until terminal), ' +
       'agent_catalog, agent_status, agent_reply, and agent_cancel. The companion uses ' +
       'agent_send for kickoff then loops on agent_wait until terminal. ' +

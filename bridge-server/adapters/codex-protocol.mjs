@@ -32,6 +32,8 @@ const APP_SERVER_SANDBOX_BY_EXEC_MODE = {
   bypass: 'danger-full-access',
 };
 
+// Historical exec comparisons below describe the transport retired in Phase 3;
+// the resolver and measured app-server policy remain in use.
 // Where the network decision actually lives on this transport — measured
 // 2026-08-11 against codex-cli 0.147.0's own schema, after shipping with it
 // unmeasured and `network_applied: false`.

@@ -40,7 +40,7 @@ HEARTBEAT_DIR="${AGENT_HEARTBEAT_DIR:-$RUNTIME_DIR/heartbeats}"
 # child and this hook inherits it when a suite shells it out. A suite that
 # forgot to sandbox AGENT_RUNTIME_DIR used to write a heartbeat per fixture
 # session into the operator's REAL runtime dir (measured 2026-08-28: kept the
-# shared codex broker alive 30 min per run). The real home is read from the
+# retired shared codex broker alive 30 min per run). The real home is read from the
 # account (`~user`), not $HOME, so a sandboxed $HOME passes; so does anything
 # under $TMPDIR. Never fires outside the suite.
 if [ -n "${NODE_TEST_CONTEXT:-}" ]; then
@@ -138,23 +138,11 @@ fi
 # session_id, so this only triggers on misconfigured callers.
 [ -n "$MY_SID" ] || exit 0
 
-# Heartbeat: BOTH long-lived daemons — the Copilot ACP daemon and the codex
-# app-server broker — run a heartbeat-aware inactivity tick that scans this dir
-# for fresh mtimes and reschedules its shutdown timer when any host is still
-# active. Touch BEFORE the queue-empty fast path so idle drains (the common
-# case between jobs) still count as liveness — without this the 15-min idle
-# timer would terminate the Copilot subprocess (and now the codex app-server
-# broker) mid-session whenever the user goes a stretch without triggering a
-# job, even if they're actively using Claude Code. Best-effort; failure here must not
-# block the drain.
-#
-# Cost note: this block must stay above the queue-empty fast path, so it has to
-# be free. The `[ -d ]` guard and the `: >` redirect are builtins, so a warm
-# runtime dir spawns nothing; the mkdir survives (rather than being deleted on
-# the assumption the bridge creates the dir) because on a machine where the
-# bridge has never run, heartbeats/ does not exist and the session would never
-# register as live. `: >` replaces `touch`: same result for the only consumer,
-# which reads mtime and expects a zero-byte file.
+# Historical compatibility heartbeat. The retired broker/daemon design used
+# these mtimes to postpone idle disposal. The shipped controller does not read
+# them: only pending owner requests and the attachment grace establish a lease.
+# Keep the existing best-effort file write here; removing it is behavior work.
+# The warm-directory path uses builtins and must not block completion delivery.
 [ -d "$HEARTBEAT_DIR" ] || mkdir -p "$HEARTBEAT_DIR" 2>/dev/null || true
 # Sanitized for use as a filename: every character outside [a-zA-Z0-9._-] becomes _.
 # The raw id is kept in MY_SID for jq's --arg; only the filename is folded.

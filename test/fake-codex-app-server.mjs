@@ -1,17 +1,8 @@
-// The fake `codex app-server`, shared by both halves of the codex app-server
-// work: scripts/codex-app-server-broker.test.mjs (the server side of the wire
-// protocol) and bridge-server/adapters/codex.test.mjs (the client
-// side). It is a fixture, not a test — `node --test` only collects `*.test.mjs`.
-//
-// It lives here rather than in either suite because the two suites must agree on
-// what the app-server does, and that is exactly the agreement a second copy
-// would quietly break: the end-to-end test whose whole purpose is "the adapter
-// and the broker really do talk to each other" would be running against an
-// app-server the broker's own tests never saw.
-//
-// Driven through `CODEX_BIN`, the idiom already in bridge-server/adapters/codex.test.mjs.
-// It never runs a model and never spends a token; a test orders it around with
-// three `fake/*` methods that the broker forwards like any other unknown method.
+// Fake codex app-server shared by protocol, adapter and controller tests.
+// It validates both sides of the pinned wire contract. Keeping one fake avoids
+// disagreement between adapter and integration fixtures. Historical broker
+// tests used this fixture before the per-execution redesign.
+// Driven through CODEX_BIN; fake/* methods control it without model calls.
 //
 // IT VALIDATES EVERY CLIENT REQUEST AGAINST THE PINNED CONTRACT first, exactly
 // as the real app-server does — deserialization refuses a call that omits a
@@ -25,7 +16,7 @@
 // says yes to everything cannot tell a working call from a misspelt one.
 //
 // IT CHECKS WHAT IT EMITS, TOO. `fake/emit` is the only end-to-end route —
-// app-server stdout → broker → threadId routing → the bridge's accumulator — so
+// app-server stdout → threadId routing → the adapter's accumulator — so
 // a frame written by hand here is a wrong wire shape with nothing between it and
 // a green assertion, which is precisely the hole the contract-built frame
 // builders close everywhere else. `serverFrameViolation` runs over every frame
@@ -54,9 +45,7 @@ import {
 } from ${JSON.stringify(CONTRACT_MODULE_URL)};
 
 const TRACE = process.env.CODEX_FAKE_TRACE || '';
-// Defaults to the PINNED version, not a literal: the broker skips the live
-// schema check when the version matches the pin, and a fake reporting a stale
-// literal would send every broker test down the (fake-unsupported) dump path.
+// The pinned version supplies fixture provenance; schema comparison is separate.
 const VERSION = process.env.CODEX_FAKE_VERSION || CODEX_PINNED_VERSION;
 const INIT_DELAY_MS = Number(process.env.CODEX_FAKE_INIT_DELAY_MS || 0);
 
@@ -71,13 +60,13 @@ if (process.argv[2] === '--version') {
   process.exit(0);
 }
 if (process.argv[2] === 'app-server' && process.argv[3] === 'generate-json-schema') {
-  // The broker's contract probe, on a version that differs from the pin. With
+  // The advisory adapter contract probe. With
   // CODEX_FAKE_SCHEMA_DIR set the fake replays that directory as its dump —
   // a test that has a real codex captures one and can then reach the probe's
   // \`match\` and \`drift\` verdicts, mutating the copy for the latter. Without
   // it the fake has no schema, and MUST say so and exit rather than fall
   // through to the stdio server below — that would sit on stdin until the
-  // probe's SIGKILL, stalling every test that boots a real broker.
+  // probe's SIGKILL, stalling every test that starts the adapter.
   const replay = process.env.CODEX_FAKE_SCHEMA_DIR || '';
   const outIdx = process.argv.indexOf('--out');
   const outDir = outIdx === -1 ? '' : process.argv[outIdx + 1];

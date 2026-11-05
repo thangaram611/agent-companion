@@ -78,8 +78,8 @@ uses 480. Remember it as `BUDGET`. Use the same `BUDGET` for every wait.
 A budget of 60 bounds urgent interrupt latency to one minute.
 
 Send normally returns `still_running` with a `job_id` immediately. Capture that
-id. An identical in-flight request reattaches and waits up to `BUDGET`; equality
-covers task, target, model, cwd and host session. A different `task` or `model`
+id. An identical in-flight request reattaches to the same job id and answers
+`still_running` again; equality covers task, target, model, cwd and host session. A different `task` or `model`
 on a busy thread returns `thread_busy`. Relay it; wait, cancel, or use a supported
 reply. Other errors, including `unknown_job` and `ok: false`, go back to the parent.
 
@@ -90,12 +90,14 @@ MCP `_meta`; you carry no thread handle and do not pass `thread`. A followup_tas
 or send_message to this agent keeps that id; a new spawn gets a new id and
 starts a new conversation.
 
-On the single-shot adapters (`opencode run`, `codex exec`), the thread is a
-bridge handle for reattach, cancel and status; there is no in-process conversation
-to resume. Copilot ACP, Antigravity ACP, OpenCode server and Codex app-server
-continue the live conversation. Codex uses `thread/resume`; Antigravity uses
-`session/load` when its daemon no longer holds the session. The bridge can rejoin
-after a restart. Read `resume_available` from `agent_status` for that job.
+Every supported follow-up resumes saved native history cold under a new provider
+process. Codex uses `thread/resume`, OpenCode loads its saved session, and
+Antigravity uses `session/load`. Copilot follow-ups are refused with
+`FOLLOWUP_UNSUPPORTED` until cold loading is qualified. Bridge loss stops the
+owned provider tree and keeps history; it does not preserve in-flight work.
+A missing or unloadable history fails explicitly, never as a fresh conversation.
+`agent_reply` steers only where capabilities and the running execution allow it;
+otherwise it returns `reply_unavailable`. Read `reply_available` from status.
 
 # Waiting
 
@@ -116,9 +118,9 @@ Read new parent messages as instructions to continue, check status, reply or can
 For a reply, call `mcp__agent_bridge__agent_status` with `job_id` first. It must
 report `reply_available: true` for that job. This is a per-job fact: the starting
 adapter and live state matter, not the companion name. If false, report that
-reply is unavailable and stop; do not cancel-and-resend to fake a reply. On ACP,
-a reply is a cancelled turn plus a new prompt on the same session, not mid-turn
-steering. Call `mcp__agent_bridge__agent_reply` with `job_id` and `message`, and
+reply is unavailable and stop; do not cancel-and-resend to fake a reply. A reply steers
+the running turn only where the companion supports it (Codex); otherwise the bridge
+answers `reply_unavailable` with its reason, and you relay that. Call `mcp__agent_bridge__agent_reply` with `job_id` and `message`, and
 relay its acknowledgement as given.
 
 For cancellation, call `mcp__agent_bridge__agent_cancel` with the requested job
@@ -134,10 +136,11 @@ a question, relay it to the parent. Send a follow-up the same way on this conver
 Report success only after the bridge reports `completed`.
 
 Relay supplied metadata with the answer: `meta.digest_uri` and its `resource_link`,
-`meta.usage`, `meta.detail`, `failure_class` and `session_retired`. Keep
+`meta.usage`, `meta.cause`, `meta.detail`, `meta.effective_model` and
+`meta.stop_evidence`. Keep
 `meta.debug_digest_path` as debug metadata; the digest URI is the normal link.
-Missing usage means the transport reported none. `session_retired` means the
-bridge retired a timed-out ACP session; the next send on it starts clean.
+Missing usage means the transport reported none. `meta.stop_evidence` says what
+was signalled and whether every owned process was verified gone.
 For status and acknowledgements, return the complete response, including hints
 and diagnostics. A per-job status has no `action` or terminal `content` + `meta`.
 Use only fields the response supplies; never emit `undefined`.
