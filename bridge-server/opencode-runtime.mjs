@@ -56,11 +56,11 @@ export async function startOpenCodeRun({
   agent = null,
   title = null,
   env = process.env,
+  timeoutMs = resolveOpenCodeTimeoutMs(env),
   onStarted = () => {},
 }) {
   const bin = resolveOpenCodeBin(env);
   const permission = resolveOpenCodePermissionMode(env);
-  const timeoutMs = resolveOpenCodeTimeoutMs(env);
   const args = openCodeRunArgs({ bin, cwd, prompt, model, agent, title, skipPermissions: permission.skipPermissions });
 
   let timedOut = false;

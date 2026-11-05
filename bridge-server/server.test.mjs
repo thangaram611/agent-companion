@@ -488,44 +488,6 @@ async function withOpenCodeServer(stubs, body) {
 }
 
 
-test('OpenCode server mode: reply re-steers and bumps the watch generation before aborting', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  let promptIdAtAbort = null;
-  try {
-    await withOpenCodeServer({
-      fetchJson: async (url) => {
-        if (url.includes('/abort')) { promptIdAtAbort = jobs.get('opencode-srv-reply')?.promptId; return { ok: true, data: true }; }
-        if (url.includes('/session/status')) return { ok: true, data: {} }; // idle after abort
-        if (url.includes('/prompt_async')) return { ok: true, data: {} };
-        return { ok: true, data: {} };
-      },
-      openEventStream: _ocSse([_ocFrame({ type: 'session.idle', properties: { sessionID: 'ses_reply' } })]),
-    }, async () => {
-      jobs.set('opencode-srv-reply', {
-        jobId: 'opencode-srv-reply', target: 'opencode', opencodeAdapter: 'server',
-        claudeSessionId: 'sid-oc-reply', status: 'running', promptId: 'opencode-srv-reply',
-        sessionId: 'ses_reply', baseUrl: 'http://127.0.0.1:4096', task: 't',
-        cwd: TEST_CWD, startedAt: Date.now(),
-      });
-      const reply = parse(await dispatch({ action: 'reply', job_id: 'opencode-srv-reply', message: 'revise' }));
-      assert.equal(reply.ok, true);
-      assert.equal(reply.target, 'opencode');
-      assert.match(reply.new_prompt_id, /-r1$/);
-      assert.equal(reply.session_id, 'ses_reply');
-      // The generation must be bumped BEFORE the abort fires, so the old watcher
-      // discards its (cancelled) terminal instead of resolving waiters.
-      for (let i = 0; i < 50 && promptIdAtAbort == null; i++) await new Promise((r) => setImmediate(r));
-      assert.match(promptIdAtAbort || '', /-r1$/);
-    });
-  } finally {
-    jobs.delete('opencode-srv-reply');
-    _resetForTest();
-  }
-});
-
-
 test('OpenCode server mode: per-job status flags reflect reply/resume availability', async () => {
   const mod = await bridge();
   const { jobs, buildJobResponse, _resetForTest } = mod;
@@ -733,235 +695,6 @@ test('usage: a turn resumed mid-flight by a fresh bridge reports only what it ob
   }
 });
 
-
-test('Codex app-server mode: reply on a running turn steers it — no cancel, no restart, no generation bump', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  try {
-    // `active` is what `thread/resume` reports for a thread with a turn in
-    // flight — and resume IS the status read on this protocol.
-    await withCodexAppServer({ statuses: { T1: 'active' } }, async ({ sockets }) => {
-      const job = _cxLiveJob(jobs, 'codex-steer', 'sid-cx-steer');
-      const reply = parse(await dispatch({ action: 'reply', job_id: 'codex-steer', message: 'actually, use ripgrep' }));
-      assert.equal(reply.ok, true);
-      assert.equal(reply.target, 'codex');
-      assert.equal(reply.steered, true);
-      assert.equal(reply.thread_id, 'T1');
-      // The watcher already driving the turn is the one that answers, so the
-      // generation must NOT move — bumping it would make that watcher discard
-      // its own terminal and the job would never settle.
-      assert.equal(reply.new_prompt_id, job.promptId);
-      assert.equal(jobs.get('codex-steer').promptId, 'codex-codex-steer');
-      assert.equal(jobs.get('codex-steer').replyTurn, 1);
-      assert.equal(jobs.get('codex-steer').terminalAt, undefined);
-
-      // The lock is held across the RPCs and released on the way out, so the
-      // next steer is not locked out by the previous one.
-      assert.equal(jobs.get('codex-steer').replyInFlight, false);
-
-      const sock = sockets[sockets.length - 1];
-      assert.deepEqual(sock.wire(), ['thread/resume', 'turn/steer'], 'steer only: no interrupt, no second turn/start');
-      // `expectedTurnId` is REQUIRED — omitting it was an unconditional -32600
-      // on the real server, i.e. every app-server reply failed. The fake
-      // enforces the contract, so the field being on the wire is what makes
-      // this test pass at all.
-      assert.deepEqual(sock.paramsFor('turn/steer')[0], {
-        threadId: 'T1', expectedTurnId: 'TURN1', input: [{ type: 'text', text: 'actually, use ripgrep' }],
-      });
-      assert.equal(reply.turn_id, 'TURN1');
-      // Two facts, kept apart: the server accepted it, and the injected message
-      // was seen landing in the turn.
-      assert.equal(reply.steer_confirmed, true);
-      assert.match(reply.steer_confirmation, /item\/completed userMessage/);
-    });
-  } finally {
-    jobs.delete('codex-steer');
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: a steer the model has not reached yet is reported unconfirmed, not delivered', async () => {
-  // Codex injects a steer at the NEXT MODEL BOUNDARY — measured 0.14 s against
-  // an in-flight apply_patch and 130 s against a model mid-reasoning. Claiming
-  // delivery because the RPC returned is the thing being fixed; the honest
-  // answer is `steered: true, steer_confirmed: false` with the reason.
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldWindow = process.env.AGENT_COMPANION_CODEX_STEER_CONFIRM_MS;
-  // The default window is 5 s of real waiting; this test only needs the timeout
-  // to expire, so it buys the same assertion for 20 ms.
-  process.env.AGENT_COMPANION_CODEX_STEER_CONFIRM_MS = '20';
-  try {
-    await withCodexAppServer({
-      statuses: { T1: 'active' },
-      // Accepted, never announced — the model is still mid-reasoning.
-      handlers: { 'turn/steer': (p) => ({ turn: { id: p.expectedTurnId } }) },
-    }, async () => {
-      _cxLiveJob(jobs, 'codex-steer-slow', 'sid-cx-steer-slow');
-      const reply = parse(await dispatch({
-        action: 'reply', job_id: 'codex-steer-slow', message: 'actually, use ripgrep',
-      }));
-      assert.equal(reply.ok, true);
-      assert.equal(reply.steered, true);
-      assert.equal(reply.steer_confirmed, false);
-      assert.match(reply.steer_confirmation, /next model boundary/);
-      // Not a failure: the job is still running and still the same turn.
-      assert.equal(jobs.get('codex-steer-slow').terminalAt, undefined);
-      assert.equal(jobs.get('codex-steer-slow').turnId, 'TURN1');
-    });
-  } finally {
-    jobs.delete('codex-steer-slow');
-    if (oldWindow === undefined) delete process.env.AGENT_COMPANION_CODEX_STEER_CONFIRM_MS;
-    else process.env.AGENT_COMPANION_CODEX_STEER_CONFIRM_MS = oldWindow;
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: a reply never steers with a turn resume reports as FINISHED', async () => {
-  // One rule for every read of `lastTurn`. `resolveCodexTurnId` and
-  // `startCodexTurn` both take it only when it says `inProgress`; the reply path
-  // used to pass `resumed.lastTurn?.id` ungated, so an `active` thread whose
-  // last RECORDED turn had completed (the window between one turn finishing and
-  // the next being recorded) would have steered a dead id — measured on the real
-  // server as `-32600 expected active turn id … but found …`. Gated, the adapter
-  // goes and reads the live turn instead.
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  try {
-    await withCodexAppServer({
-      turns: { T1: [{ id: 'TURN_LIVE', status: 'inProgress' }] },
-      handlers: {
-        'thread/resume': (p) => ({
-          thread: { id: p.threadId, status: { type: 'active' }, turns: [{ id: 'TURN_DEAD', status: 'completed' }] },
-        }),
-      },
-    }, async ({ sockets }) => {
-      // No live id: this bridge restarted and never saw `turn/started`.
-      _cxLiveJob(jobs, 'codex-stale-steer', 'sid-cx-stale', { turnId: null });
-      const reply = parse(await dispatch({
-        action: 'reply', job_id: 'codex-stale-steer', message: 'actually, use ripgrep',
-      }));
-      const sock = sockets[sockets.length - 1];
-      assert.equal(reply.ok, true);
-      assert.equal(reply.steered, true);
-      assert.equal(sock.paramsFor('turn/steer')[0].expectedTurnId, 'TURN_LIVE');
-      assert.ok(sock.wire().includes('thread/read'), 'the resolver asked the transport rather than trusting a finished turn');
-      assert.equal(jobs.get('codex-stale-steer').turnId, 'TURN_LIVE');
-    });
-  } finally {
-    jobs.delete('codex-stale-steer');
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: a job that goes terminal DURING the reply RPCs is rejected, not resurrected', async () => {
-  // The reply's two round trips (`thread/resume`, then steer or turn/start) are
-  // a window the live watcher can settle the job inside. Clearing `terminalAt`
-  // afterwards un-settles a result the parent has already been handed and bills
-  // a fresh turn for it.
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  try {
-    await withCodexAppServer({
-      handlers: {
-        'thread/resume': (p) => {
-          // Settle the job mid-call, exactly as the watcher's terminal would.
-          mod.retainTerminalJob('codex-race-reply', { status: 'completed', summary: { message: 'done' }, terminalAt: Date.now() });
-          return { thread: { id: p.threadId, status: { type: 'idle' } } };
-        },
-      },
-    }, async ({ sockets }) => {
-      _cxLiveJob(jobs, 'codex-race-reply', 'sid-cx-race');
-      const reply = parse(await dispatch({ action: 'reply', job_id: 'codex-race-reply', message: 'follow up' }));
-      assert.equal(reply.ok, false);
-      assert.match(reply.error, /already completed/);
-      const job = jobs.get('codex-race-reply');
-      assert.ok(job.terminalAt, 'the terminal survived the reply');
-      assert.equal(job.status, 'completed');
-      assert.equal(job.replyInFlight, false, 'the reply lock was released');
-      // No second billed turn was dispatched on the way out.
-      assert.equal(sockets.at(-1).wire().includes('turn/start'), false);
-      assert.equal(sockets.at(-1).wire().includes('turn/steer'), false);
-    });
-  } finally {
-    jobs.delete('codex-race-reply');
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: two replies in the same tick cannot both dispatch a turn', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  try {
-    await withCodexAppServer({ statuses: { T1: 'idle' } }, async ({ sockets }) => {
-      _cxLiveJob(jobs, 'codex-double-reply', 'sid-cx-double');
-      // Fired without awaiting the first: the lock has to be taken before the
-      // first await or both calls compute replyTurn 1 and the same `-r1`
-      // promptId, and neither watcher can supersede the other.
-      const [a, b] = (await Promise.all([
-        dispatch({ action: 'reply', job_id: 'codex-double-reply', message: 'first' }),
-        dispatch({ action: 'reply', job_id: 'codex-double-reply', message: 'second' }),
-      ])).map(parse);
-      const accepted = [a, b].filter((r) => r.ok);
-      const refused = [a, b].filter((r) => !r.ok);
-      assert.equal(accepted.length, 1, `exactly one reply may win: ${JSON.stringify([a, b])}`);
-      assert.match(refused[0].error, /reply already in flight/);
-      assert.equal(jobs.get('codex-double-reply').replyTurn, 1);
-      const starts = () => sockets.flatMap((s) => s.wire()).filter((m) => m === 'turn/start');
-      assert.ok(await _cxUntil(() => starts().length > 0), 'the accepted reply dispatched its turn');
-      assert.equal(starts().length, 1, 'one billed turn, not two');
-    });
-  } finally {
-    jobs.delete('codex-double-reply');
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: reply on an idle thread starts a fresh guarded turn under a bumped generation', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  try {
-    await withCodexAppServer({
-      statuses: { T1: 'idle' },
-      // A DIFFERENT id for the replacement turn, so "the job's turn id moved on"
-      // is observable rather than coincidental.
-      handlers: { 'turn/start': () => ({ turn: { id: 'TURN2' } }) },
-    }, async ({ sockets }) => {
-      _cxLiveJob(jobs, 'codex-idle-reply', 'sid-cx-idle');
-      const reply = parse(await dispatch({ action: 'reply', job_id: 'codex-idle-reply', message: 'follow up' }));
-      assert.equal(reply.ok, true);
-      assert.equal(reply.steered, false);
-      assert.match(reply.new_prompt_id, /-r1$/);
-      assert.equal(jobs.get('codex-idle-reply').promptId, reply.new_prompt_id);
-      // THE STALE-ID WINDOW. This branch was taken because TURN1 is over, and
-      // the replacement's id arrives a few round trips later — the watch below
-      // is deliberately not awaited. So the job must not still be advertising
-      // TURN1: an `agent_cancel` in here would send it, and the real server
-      // answers `-32600 expected active turn id … but found …` while the new
-      // turn keeps running. Null instead makes the resolver read the live turn
-      // off `thread/read`.
-      assert.notEqual(jobs.get('codex-idle-reply').turnId, 'TURN1', 'the finished turn\'s id is not carried forward');
-      const sock = sockets[sockets.length - 1];
-      assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'a new turn was started');
-      assert.ok(await _cxUntil(() => jobs.get('codex-idle-reply')?.turnId === 'TURN2'), 'the replacement turn\'s id lands on the job');
-      // An idle thread has no turn to steer, so this path re-prompts — but it
-      // still never interrupts, because there is nothing running to interrupt.
-      assert.equal(sock.wire().includes('turn/interrupt'), false);
-      sock.notify('turn/completed', { turn: { id: 'TURN2', status: 'completed', items: [{ id: 'm9', type: 'agentMessage', text: 'second turn done', phase: 'final_answer' }] } });
-      assert.ok(await _cxUntil(() => jobs.get('codex-idle-reply')?.terminalAt), 'the replacement watch settles the job');
-      assert.equal(jobs.get('codex-idle-reply').status, 'completed');
-    });
-  } finally {
-    jobs.delete('codex-idle-reply');
-    _resetForTest();
-  }
-});
 
 test('Codex reply/resume availability is per job, not per target', async () => {
   const mod = await bridge();
@@ -1276,81 +1009,6 @@ test('applyAdapterCapabilities flips codex only under the app-server adapter', a
 });
 
 
-test('handleReply rebinds a running job to the replacement prompt and watcher result', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-reply-rebind';
-  jobs.set('copilot-reply-1', {
-    jobId: 'copilot-reply-1',
-    target: 'copilot',
-    reqId: 'req-reply-1',
-    claudeSessionId: 'sid-reply-rebind',
-    thread: 'thread-reply-1',
-    task: 'original task',
-
-    status: 'running',
-    promptId: 'prompt-old',
-    sessionId: 'session-reply-1',
-    startedAt: Date.now() - 1000,
-    inspectAvailable: true,
-  });
-  try {
-    const body = await withDaemonStubs(
-      {
-        sendToSocket: async (msg) => {
-          if (msg.command === 'reply') {
-            assert.equal(msg.promptId, 'prompt-old');
-            return {
-              ok: true,
-              data: {
-                ok: true,
-                original_prompt_id: 'prompt-old',
-                new_prompt_id: 'prompt-new',
-                session_id: 'session-reply-1',
-              },
-            };
-          }
-          if (msg.command === 'watch') {
-            assert.equal(msg.promptId, 'prompt-new');
-            return {
-              ok: true,
-              data: {
-                promptId: 'prompt-new',
-                sessionId: 'session-reply-1',
-                status: 'completed',
-                summary: { message: 'replacement done\n\nRUBBER-DUCK: clean.' },
-              },
-            };
-          }
-          if (msg.command === 'inspect') return { ok: true, data: {} };
-          return { ok: true, data: {} };
-        },
-      },
-      async () => parse(await dispatch({
-        action: 'reply',
-        job_id: 'copilot-reply-1',
-        message: 'use this instead',
-      })),
-    );
-    assert.equal(body.ok, true);
-    assert.equal(body.new_prompt_id, 'prompt-new');
-
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    const job = jobs.get('copilot-reply-1');
-    assert.equal(job.promptId, 'prompt-new');
-    assert.equal(job.status, 'completed');
-    assert.equal(job.terminalAt > 0, true);
-  } finally {
-    jobs.delete('copilot-reply-1');
-    _resetForTest();
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-  }
-});
-
 // ---- TRACK: acp-generic ----
 //
 // The bridge's daemon path is keyed on the descriptor (`capabilities.acp`),
@@ -1373,31 +1031,6 @@ async function withAcpSession(sid, body) {
   }
 }
 
-
-test('acp: the reply acknowledgement says the turn was cancelled and re-prompted — ACP has no mid-turn steer', async () => {
-  await withAcpSession('sid-acp-reply', async (mod) => {
-    const { dispatch, jobs } = mod;
-    jobs.set('acp-reply-1', {
-      jobId: 'acp-reply-1', target: 'copilot', reqId: 'req-ar', claudeSessionId: 'sid-acp-reply',
-      thread: 'thread-acp-reply', task: 'original task',
-      status: 'running', promptId: 'ap-old', sessionId: 'acp-sess-r', startedAt: Date.now() - 1000, inspectAvailable: true,
-    });
-    const body = await withDaemonStubs({
-      sendToSocket: async (msg) => {
-        if (msg.command === 'reply') return { ok: true, data: { ok: true, original_prompt_id: 'ap-old', new_prompt_id: 'ap-new', session_id: 'acp-sess-r' } };
-        if (msg.command === 'watch') return { ok: true, data: { promptId: 'ap-new', sessionId: 'acp-sess-r', status: 'completed', summary: { message: 'continued\n\nRUBBER-DUCK: clean.', toolCalls: [] } } };
-        return { ok: true, data: {} };
-      },
-    }, async () => parse(await dispatch({ action: 'reply', job_id: 'acp-reply-1', message: 'use this instead' })));
-    assert.equal(body.ok, true);
-    assert.match(body.hint, /cancelled/);
-    assert.match(body.hint, /no mid-turn steer/);
-    assert.match(body.hint, /same GitHub Copilot CLI session/);
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    assert.equal(jobs.get('acp-reply-1').status, 'completed');
-  });
-});
 
 test('acp: the agent_send target enum is the registry, not a literal', async () => {
   const { mcp } = await bridge();
@@ -2102,6 +1735,7 @@ test('controller dispatch preserves the conversational tools and named refusals'
   const h = await wireFixture(t);
   const tools = (await h.mod.mcp._requestHandlers.get('tools/list')({ method: 'tools/list', params: {} })).tools;
   assert.deepEqual(tools.map((x) => x.name), ['agent_catalog', 'agent_send', 'agent_wait', 'agent_status', 'agent_reply', 'agent_cancel']);
+  assert.match(tools.find((x) => x.name === 'agent_reply').inputSchema.properties.message.description, /reply_unavailable/);
   assert.deepEqual(Object.keys(tools[1].inputSchema.properties).sort(), ['cwd', 'max_wait_sec', 'model', 'target', 'task']);
   assert.equal((await h.send({ thread: null })).code, 'NATIVE_OWNER_REQUIRED');
   assert.equal((await h.send({ cwd: 'relative' })).code, 'INVALID_CWD');
@@ -2355,4 +1989,114 @@ await cleanupExecution({ records, execution: records.readExecution(process.argv[
   assert.equal(trace.filter((x) => x.method === 'turn/start').length, 3);
   assert.equal(trace.some((x) => x.method === 'turn/interrupt'), true);
   assert.equal(Object.hasOwn(trace.find((x) => x.method === 'turn/start').params, 'model'), false);
+});
+
+import { codexDispatchFixture } from '../test/controller/codex-dispatch-fixture.mjs';
+
+test('controller reply steers the acknowledged native turn and confirms injection while holding the owner lease', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  assert.equal((await h.call({ action: 'status', job_id })).reply_available, true);
+  const reply = h.call({ action: 'reply', thread: 'child', job_id, message: 'use ripgrep' }, { requestId: 'steer-request' });
+  await until(() => h.frames().some((f) => f.method === 'turn/steer'), 'native steer');
+  assert.deepEqual(h.records.readLease(job_id).requestIds, ['steer-request']);
+  await h.clock.advance(4000); // Exceeds detached grace; reply still owns it.
+  assert.equal(h.records.readResult(job_id), null);
+  await h.emit(job_id, [note('item/completed', { threadId: 'T1', turnId: 'TURN1',
+    item: threadItem('userMessage', { id: 'steer', content: [{ type: 'text', text: 'use ripgrep' }] }) })]);
+  const response = await reply;
+  assert.equal(response.ok, true);
+  assert.equal(response.accepted, true);
+  assert.equal(response.confirmed, true);
+  assert.equal(response.nativeTurnId, 'TURN1');
+  assert.equal(response.job_id, job_id);
+  assert.equal(h.active.requests.size, 0);
+  assert.equal(h.records.readLease(job_id).attached, false);
+  assert.deepEqual(h.frames().filter((f) => f.method === 'turn/steer').map((f) => f.params), [
+    { threadId: 'T1', expectedTurnId: 'TURN1', input: [{ type: 'text', text: 'use ripgrep' }] },
+  ]);
+  assert.equal(h.frames().filter((f) => f.method === 'turn/start').length, 1);
+  assert.equal(h.frames().some((f) => f.method === 'turn/interrupt'), false);
+  await h.complete(job_id, 'steered answer');
+  assert.equal((await h.call({ action: 'wait', thread: 'child', job_id })).content, 'steered answer');
+});
+
+test('controller reply reports acknowledgement without claiming unobserved injection', async (t) => {
+  const h = codexDispatchFixture(t);
+  h.env.AGENT_COMPANION_CODEX_STEER_CONFIRM_MS = '1';
+  const { job_id } = await h.send();
+  const response = await h.call({ action: 'reply', thread: 'child', job_id, message: 'later boundary' });
+  assert.equal(response.ok, true);
+  assert.equal(response.accepted, true);
+  assert.equal(response.confirmed, false);
+  assert.equal((await h.call({ action: 'status', job_id })).reply_available, true);
+  assert.equal(h.records.readLease(job_id).attached, false);
+});
+
+test('controller reply refuses completed, foreign, missing and unowned executions without a new native turn', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  assert.equal((await h.call({ action: 'reply', thread: 'other', job_id, message: 'x' })).status, 'unknown_job');
+  assert.equal((await h.call({ action: 'reply', job_id, message: 'x' })).code, 'NATIVE_OWNER_REQUIRED');
+  assert.equal((await h.call({ action: 'reply', thread: 'child', job_id: 'missing', message: 'x' })).status, 'unknown_job');
+  await h.complete(job_id);
+  const before = wireDisk(h.records.dir);
+  const response = await h.call({ action: 'reply', thread: 'child', job_id, message: 'new work' });
+  assert.equal(response.ok, false);
+  assert.equal(response.status, 'reply_unavailable');
+  assert.equal(response.reason, 'state');
+  assert.equal((await h.call({ action: 'status', job_id })).reply_available, false);
+  assert.deepEqual(wireDisk(h.records.dir), before);
+  assert.equal(h.frames().filter((f) => f.method === 'turn/start').length, 1);
+});
+
+test('controller reply refuses providers without steer capability without invoking their protocol', async (t) => {
+  const h = await wireFixture(t);
+  for (const target of ['opencode', 'copilot', 'antigravity']) {
+    const { job_id } = await h.send({ target, thread: target });
+    const adapter = h.adapters.at(-1);
+    adapter.capabilities.steer = false;
+    adapter.steer = () => assert.fail('unsupported steer must not run');
+    const before = wireDisk(h.dir);
+    const response = await h.call({ action: 'reply', thread: target, job_id, message: 'revise' });
+    assert.equal(response.ok, false);
+    assert.equal(response.status, 'reply_unavailable');
+    assert.equal(response.reason, 'capability');
+    assert.equal((await h.call({ action: 'status', job_id })).reply_available, false);
+    assert.deepEqual(wireDisk(h.dir), before);
+  }
+});
+
+test('cancelled controller reply stops its execution and releases its owner request', async (t) => {
+  const h = codexDispatchFixture(t);
+  const { job_id } = await h.send();
+  const abort = new AbortController();
+  const reply = h.call({ action: 'reply', thread: 'child', job_id, message: 'pending' }, { requestId: 'cancel-reply', signal: abort.signal });
+  await until(() => h.frames().some((f) => f.method === 'turn/steer'), 'pending steer');
+  abort.abort();
+  const response = await reply;
+  assert.equal(response.accepted, true);
+  assert.equal(response.confirmed, false);
+  await until(() => h.records.readResult(job_id), 'reply cancellation cleanup');
+  assert.equal(h.records.readResult(job_id).cause, 'owner_stop');
+  assert.equal(h.records.readResult(job_id).stopEvidence.gone, true);
+  assert.equal(h.active.requests.size, 0);
+  assert.equal((await h.call({ action: 'status', job_id })).reply_available, false);
+});
+
+test('owner-attached execution survives forty minutes and retired timeout knobs; status advertises no cutoff', async (t) => {
+  const h = codexDispatchFixture(t);
+  h.env.AGENT_COMPANION_CODEX_TIMEOUT_MS = '1';
+  h.env.AGENT_COMPANION_OPENCODE_TIMEOUT_MS = '1';
+  const { job_id } = await h.send();
+  for (let i = 0; i < 3; i++) {
+    const waiting = h.call({ action: 'wait', thread: 'child', job_id, max_wait_sec: 1201 });
+    await until(() => h.active.requests.size === 1, 'bounded owner wait');
+    await h.clock.advance(1_200_000);
+    assert.equal((await waiting).status, 'still_running');
+  }
+  assert.equal(h.records.readResult(job_id), null);
+  assert.equal((await h.call({ action: 'status', job_id })).status, 'running');
+  const status = await h.call({ action: 'status' });
+  assert.doesNotMatch(JSON.stringify(status), /timeout_ms|timeoutEnv|40 minutes|AGENT_COMPANION_(CODEX|OPENCODE)_TIMEOUT_MS/);
 });

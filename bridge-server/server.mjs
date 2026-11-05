@@ -55,7 +55,7 @@ import { codexProvider } from './adapters/codex.mjs';
 import { opencodeProvider } from './adapters/opencode.mjs';
 import { acpProvider } from './adapters/acp.mjs';
 
-import { watchPrompt, replyPrompt, selectedRuntimeAdapter, runtimeSupportsDetachedPromptResume } from './acp-runtime.mjs';
+import { watchPrompt, selectedRuntimeAdapter, runtimeSupportsDetachedPromptResume } from './acp-runtime.mjs';
 
 import {
   log,
@@ -68,8 +68,8 @@ import { createReqId, withReq, logEvent } from '../lib/log.mjs';
 import { writeDigest, digestPath, renderDigest } from '../lib/prompt-digest.mjs';
 import { writeOpenCodeDigest } from './opencode-runtime.mjs';
 
-import { openCodeServerRuntimeInfo, openCodeServerPromptId, resolveOpenCodeServerModel, parseOpenCodeModel, ensureOpenCodeServer, startOpenCodeServerPrompt, abortOpenCodeSession, getOpenCodeSessionStatus, openOpenCodeTurnWatcher, loadOpenCodeTranscript, probeOpenCodeServerHealth } from './opencode-server-runtime.mjs';
-import { codexAppServerRuntimeInfo, codexAppServerPromptId, ensureCodexBroker, connectCodexBroker, probeCodexBrokerHealth, resumeCodexThread, readCodexThread, startCodexTurn, steerCodexTurn, openCodexTurnWatcher } from './codex-app-server-runtime.mjs';
+import { openCodeServerPromptId, ensureOpenCodeServer, openOpenCodeTurnWatcher, loadOpenCodeTranscript, probeOpenCodeServerHealth } from './opencode-server-runtime.mjs';
+import { codexAppServerPromptId, ensureCodexBroker, connectCodexBroker, probeCodexBrokerHealth, resumeCodexThread, readCodexThread, openCodexTurnWatcher } from './codex-app-server-runtime.mjs';
 import { pidAlive } from '../lib/shared-runtime-registry.mjs';
 import {
   defaultTargetInfo,
@@ -223,7 +223,7 @@ const jobs = new Map();
 const JOB_RETENTION_MS = 60 * 60 * 1000;
 const JOB_GC_INTERVAL_MS = 60 * 1000;
 
-// Only legacy reply jobs use this in-memory retention cache.
+// Only legacy recovery jobs use this in-memory retention cache.
 const jobsGcTimer = setInterval(gcExpiredJobs, JOB_GC_INTERVAL_MS);
 jobsGcTimer.unref();
 
@@ -965,13 +965,11 @@ export function formatTerminalContent({
       'It contains the partial assistant message, files touched, and todos. ' +
       'You may be able to finalise from the digest alone, or use it to scope a much smaller follow-up send.');
     if (!isAcpTarget(target)) {
-      const timeoutEnv = getTarget(target)?.timeoutEnv || 'AGENT_COMPANION_OPENCODE_TIMEOUT_MS';
       return taskHeader +
         `${label} did not finish within the target timeout (${Math.round(duration / 1000)}s).\n\n` +
-        'The bridge terminated the target process. Recommended next steps for the parent:\n' +
+        'This legacy timeout record does not verify process termination. Recommended next steps for the parent:\n' +
         '- Read the digest resource URI below for any partial output and stderr.\n' +
-        '- Decompose the task into a smaller, explicitly-scoped send.\n' +
-        `- If the task is genuinely long, raise \`${timeoutEnv}\` and retry.` +
+        '- Decompose the task into a smaller, explicitly-scoped send.' +
         failedLine + targetDigestLine;
     }
     const retiredLine = sessionRetired
@@ -1221,30 +1219,14 @@ function truncate(s, n) { if (!s) return ''; return s.length > n ? s.slice(0, n 
 
 // --- Worker -----------------------------------------------------------------
 
-const MAX_JOB_MS = 40 * 60 * 1000;
-
-// One prompt on the companion daemon, driven to terminal by runWatchLoop.
-async function runOpenCodeServerWatch({ jobId, reqId, baseUrl, sessionId, promptId, directory = null, prompt = null, model = null, task, cwd, thread, startedAt, fresh = false, reply = false, abortFirst = false }) {
+// Legacy recovery observer, retained until the runtime retirement job.
+async function runOpenCodeServerWatch({ jobId, reqId, baseUrl, sessionId, promptId, directory = null, task, cwd, thread, startedAt }) {
   const rlog = withReq(reqId, { job_id: jobId });
-  const timeoutMs = resolveOpenCodeServerTimeoutMs();
   let watcher;
   try {
-    // Reply path: abort the in-flight turn and wait for the session to settle
-    // BEFORE subscribing/prompting, so the follow-up does not race the old turn
-    // or hit SessionBusyError. The handler already bumped job.promptId, so the
-    // old watcher discards its terminal when this abort's session.idle lands.
-    if (abortFirst) {
-      const ab = await abortOpenCodeSession({ baseUrl, sessionId, directory });
-      if (!ab.aborted) rlog.warn('reply.abort_unconfirmed', { error: ab.error || null });
-      const settled = await waitOpenCodeSessionIdle({ baseUrl, sessionId, directory });
-      if (!settled) rlog.warn('reply.session_still_busy', {});
-    }
-    // Subscribe to the directory-scoped event stream BEFORE prompting so the
-    // terminal session.idle can't be missed. Resume omits the prompt and asks
-    // the watcher to level-check whether the turn already finished.
     watcher = await openOpenCodeTurnWatcher({
-      baseUrl, sessionId, directory, timeoutMs,
-      initialLevelCheck: !fresh && !reply,
+      baseUrl, sessionId, directory,
+      initialLevelCheck: true,
       onEvent: (snapshot) => {
         const job = jobs.get(jobId);
         if (!job || job.promptId !== promptId) return;
@@ -1252,23 +1234,9 @@ async function runOpenCodeServerWatch({ jobId, reqId, baseUrl, sessionId, prompt
         refreshDigestForJob(job);
       },
     });
-    if (fresh || reply) {
-      // Per-job model overrides the env default; an
-      // unset/synthesized job falls back to resolveOpenCodeServerModel()'s env
-      // default so the legacy/default path is byte-identical.
-      const promptModel = parseOpenCodeModel(model) || resolveOpenCodeServerModel();
-      await startOpenCodeServerPrompt({ baseUrl, sessionId, directory, prompt, model: promptModel });
-    }
     const result = await watcher.done;
 
-    // Supersede guard: if a reply bumped job.promptId while we waited, this turn
-    // is obsolete — drop its terminal so the replacement watch owns the job.
     const currentJob = jobs.get(jobId);
-    if (currentJob && currentJob.promptId !== promptId) {
-      rlog.info('worker.prompt_obsolete', { prompt_id: promptId, current_prompt_id: currentJob.promptId });
-      log('INFO', 'opencode-server obsolete turn ignored:', jobId, `old=${promptId} current=${currentJob.promptId}`);
-      return;
-    }
 
     // Cancel verdict: if the bridge requested an abort for this job, the turn is
     // cancelled regardless of how the stream reported it (OpenCode does not
@@ -1338,28 +1306,6 @@ async function runOpenCodeServerWatch({ jobId, reqId, baseUrl, sessionId, prompt
   }
 }
 
-function resolveOpenCodeServerTimeoutMs() {
-  // Reuse the same timeout knob as the CLI adapter for parity.
-  return openCodeServerRuntimeInfo().timeout_ms;
-}
-
-// Poll /session/status until the session leaves 'busy' (or a short budget
-// elapses). Used between a reply's abort and its re-prompt so OpenCode does not
-// reject the follow-up with SessionBusyError.
-async function waitOpenCodeSessionIdle({ baseUrl, sessionId, directory, attempts = 20, intervalMs = 150 }) {
-  for (let i = 0; i < attempts; i++) {
-    const status = await getOpenCodeSessionStatus({ baseUrl, sessionId, directory });
-    if (status !== 'busy') return true;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  return false;
-}
-
-// Restart resume for an OpenCode server job. An in-flight turn only keeps
-// running on the exact server process that started it, so probe the recorded
-// base URL first. If it survived, reattach (or harvest a turn that finished
-// while the bridge was down). If it is gone, replay the persisted transcript
-// from a fresh server; an unfinished turn is unrecoverable.
 async function resumeOpenCodeServerJob(job) {
   const jobId = job.jobId;
   const reqId = job.reqId || createReqId();
@@ -1431,24 +1377,17 @@ function finalizeResumedOpenCodeTranscript(job, transcript, reqId, startedAt) {
   log('INFO', 'opencode-server resume terminal:', jobId, `status=${status} (from transcript)`);
 }
 
-// Shared worker for the single-shot CLI adapters (OpenCode CLI, codex exec):
-// spawn via the adapter's startRun, patch the job on start, then retain the
-// terminal state, refresh the digest, and emit the completion event. The two
-// adapters have identical single-shot semantics — only the spawn function
-// differs — so the per-target detail codes derive from `target`. Reuses the
-// shared writeOpenCodeDigest writer (D7: it is already target-neutral). No
-// previousSid read (thread continuity stays on the daemon-backed adapters), no reply/resume.
-async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, prompt = null, model = null, task, cwd, thread, startedAt, fresh = false, reply = false }) {
+// Legacy recovery observer, retained until the runtime retirement job.
+async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, model = null, task, cwd, thread, startedAt }) {
   const rlog = withReq(reqId, { job_id: jobId });
-  const timeoutMs = resolveCodexAppServerTimeoutMs();
   let watcher;
   try {
     // Subscribe BEFORE the turn starts so the first `item/*Delta` cannot be
     // missed. Resume asks for the level check instead — that is what harvests a
     // turn which finished while this bridge was down.
     watcher = await openCodexTurnWatcher({
-      conn, threadId, timeoutMs, model,
-      initialLevelCheck: !fresh && !reply,
+      conn, threadId, model,
+      initialLevelCheck: true,
       onEvent: (snapshot, { turnId } = {}) => {
         const job = jobs.get(jobId);
         if (!job || job.promptId !== promptId) return;
@@ -1466,38 +1405,10 @@ async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, 
         refreshDigestForJob(job);
       },
     });
-    // A watch that did not see this turn from its start — a restart resume, or
-    // a turn found already running below — cannot have counted all of it.
-    if (!fresh && !reply) watcher.markUsagePartial();
-    if (fresh || reply) {
-      const started = await startCodexTurn({ conn, threadId, prompt, model });
-      // Assigned unconditionally, including to null. A turn id is only valid
-      // for THE turn it names, so carrying a previous turn's id forward is how
-      // a later `turn/steer` earns `no active turn to steer` — the conditional
-      // failure the resolver's transport lookup exists to avoid. `attached`
-      // supplies the running turn's own id when the status read could read it,
-      // and null otherwise, which the resolver answers with `thread/read`.
-      updateJob(jobId, { turnId: started.turnId ?? null });
-      // `turn/start` on a thread that already has a running turn SUCCEEDS and
-      // returns a SECOND turn id, so the adapter attaches to the live one
-      // instead. Say so out loud: a job silently riding another turn looks
-      // exactly like one that started its own.
-      if (started.attached) {
-        watcher.markUsagePartial();
-        rlog.warn('worker.turn_already_active', { thread_id: threadId });
-        log('WARN', 'codex-appserver turn already active:', jobId, `thread=${threadId} — attached instead of double-dispatching`);
-      }
-    }
+    watcher.markUsagePartial();
     const result = await watcher.done;
 
-    // Supersede guard: if a reply bumped job.promptId while we waited, this turn
-    // is obsolete — drop its terminal so the replacement watch owns the job.
     const currentJob = jobs.get(jobId);
-    if (currentJob && currentJob.promptId !== promptId) {
-      rlog.info('worker.prompt_obsolete', { prompt_id: promptId, current_prompt_id: currentJob.promptId });
-      log('INFO', 'codex-appserver obsolete turn ignored:', jobId, `old=${promptId} current=${currentJob.promptId}`);
-      return;
-    }
 
     // Cancel verdict: the bridge owns it. An interrupted turn settles
     // `status:"interrupted"` with NO answer, and a turn that raced the
@@ -1581,13 +1492,6 @@ async function runCodexAppServerWatch({ jobId, reqId, conn, threadId, promptId, 
     rlog.warn('worker.watch_catch', { error: err.message });
     log('WARN', 'codex-appserver watch catch:', jobId, `err="${err.message}"`);
   }
-}
-
-function resolveCodexAppServerTimeoutMs() {
-  // Same knob as the exec adapter (AGENT_COMPANION_CODEX_TIMEOUT_MS): two
-  // independently chosen numbers drift, and a job that simply ran long then
-  // looks indistinguishable from a wedged one.
-  return codexAppServerRuntimeInfo().timeout_ms;
 }
 
 // Restart resume for a codex app-server job — THE incident fix. On this
@@ -1721,7 +1625,6 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, task, cwd, sta
         // silence) regenerates the on-disk digest so a parent that reads
         // the file mid-flight sees an up-to-date snapshot.
         refreshDigestForJob(jobs.get(jobId));
-        if (Date.now() - startedAt > MAX_JOB_MS) throw new Error(`watch loop exceeded MAX_JOB_MS (${MAX_JOB_MS}ms)`);
         continue;
       }
       break;
@@ -1760,20 +1663,6 @@ async function runWatchLoop({ jobId, promptId, sessionId, thread, task, cwd, sta
     } else if (result.sessionRetired) {
       retireThreadSid(thread, sessionId, result.detail || result.error || 'session_retired');
       result.sessionRetired = true;
-    }
-
-    const currentJob = jobs.get(jobId);
-    if (currentJob?.supersedingPromptId === promptId && result.status === 'cancelled') {
-      currentJob.supersededPromptStatus = 'cancelled';
-      persistJob(jobId);
-      rlog.info('worker.prompt_superseded', { prompt_id: promptId, replacement_prompt_id: currentJob.promptId || null });
-      log('INFO', 'worker prompt superseded:', jobId, `promptId=${promptId}`);
-      return;
-    }
-    if (currentJob?.promptId && currentJob.promptId !== promptId) {
-      rlog.info('worker.prompt_obsolete', { prompt_id: promptId, current_prompt_id: currentJob.promptId });
-      log('INFO', 'worker obsolete prompt ignored:', jobId, `old=${promptId} current=${currentJob.promptId}`);
-      return;
     }
 
     const duration = Date.now() - startedAt;
@@ -2039,319 +1928,9 @@ async function handleCancel(args, active, request) {
   return asJson(terminalEnvelope(view.execution, view.result, 'cancel'));
 }
 
-async function handleOpenCodeServerReply(job, message) {
-  const job_id = job.jobId;
-  if (!job.sessionId || !job.baseUrl) return asJson({ ok: false, action: 'reply', error: 'job has no live opencode session yet — wait for status: running' });
-  if (job.terminalAt) return asJson({ ok: false, action: 'reply', error: `job is already ${job.status} — start a new send` });
-  if (job.replyInFlight) return asJson({ ok: false, action: 'reply', error: 'reply already in flight for this job' });
-
-  const originalPromptId = job.promptId;
-  const replyTurn = (job.replyTurn || 0) + 1;
-  const replacementPromptId = openCodeServerPromptId(job_id, replyTurn);
-  // Bump the watch generation SYNCHRONOUSLY, before any await. The original
-  // turn's watcher is parked on `await watcher.done`; when the abort's
-  // session.idle lands it reaches its supersede guard, which must already see
-  // the new promptId so it discards the (cancelled) terminal instead of
-  // resolving waiters / emitting a spurious cancelled notification over the
-  // re-steer. Abort + settle then run inside the background watch so a failed
-  // abort or a still-busy session surfaces as the new turn's terminal rather
-  // than racing here. (Mirror of Copilot's atomic cancel-then-reprompt.)
-  job.replyInFlight = true;
-  updateJob(job_id, {
-    promptId: replacementPromptId,
-    replyTurn,
-    status: 'running',
-    inspectAvailable: false,
-    terminalAt: null,
-    retentionExpiresAt: null,
-    error: null,
-    stuckReason: null,
-    detail: null,
-  });
-
-  const reqId = job.reqId || createReqId();
-  runOpenCodeServerWatch({
-    jobId: job_id, reqId,
-    baseUrl: job.baseUrl, sessionId: job.sessionId, promptId: replacementPromptId, directory: job.cwd || null,
-    prompt: message, model: job.model ?? null, task: job.task || message,
-    cwd: job.cwd || null, thread: job.thread || null,
-    startedAt: job.startedAt || Date.now(), reply: true, abortFirst: true,
-  })
-    .catch((err) => log('ERROR', 'opencode-server reply watch error:', job_id, err.message))
-    .finally(() => { const j = jobs.get(job_id); if (j) { j.replyInFlight = false; persistJob(job_id); } });
-
-  log('INFO', 'agent:reply opencode-server', `job=${job_id} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
-  return asJson({
-    ok: true, action: 'reply', job_id, target: 'opencode',
-    original_prompt_id: originalPromptId,
-    new_prompt_id: replacementPromptId,
-    session_id: job.sessionId,
-    hint: 'reply accepted. The original turn was aborted; the follow-up runs as a new prompt on the same OpenCode session.',
-  });
-}
-
-// Codex app-server re-steer. `turn/steer` is REAL mid-flight injection: the
-// running turn keeps its turn id and its work, and the message lands at the
-// next model boundary — measured fired against an in-flight `apply_patch`, the
-// patch completed atomically and the steer arrived 0.14 s later. So unlike
-// Copilot and OpenCode there is no cancel-then-reprompt here, and no watch
-// generation bump: the watcher already driving the turn is the one that
-// answers, and bumping the generation would make it discard its own terminal.
-//
-// An idle thread has no turn to steer, so THAT path takes a fresh guarded
-// `turn/start` under a bumped generation, exactly like the OpenCode reply.
-async function handleCodexAppServerReply(job, message) {
-  const job_id = job.jobId;
-  if (!job.sessionId) return asJson({ ok: false, action: 'reply', error: 'job has no codex thread yet — wait for status: running' });
-  if (job.terminalAt) return asJson({ ok: false, action: 'reply', error: `job is already ${job.status} — start a new send` });
-  if (job.replyInFlight) return asJson({ ok: false, action: 'reply', error: 'reply already in flight for this job' });
-
-  const threadId = job.sessionId;
-  let conn = null;
-  let handedOff = false;
-  // Take the lock SYNCHRONOUSLY, before the first await — the same discipline
-  // handleOpenCodeServerReply applies to its generation bump. Two replies in
-  // one tick would otherwise both clear the guard above, compute the same
-  // replyTurn and the same `-r1` promptId, and launch two turns whose watchers
-  // cannot supersede each other: two turn/starts, two terminals, two queue
-  // entries for one job.
-  job.replyInFlight = true;
-  persistJob(job_id);
-  try {
-    conn = await connectCodexBroker({ socketPath: job.brokerSocket || null });
-    // On this protocol `thread/resume` IS the status read, and it doubles as
-    // the resume-before-act attach `turn/steer` needs.
-    const resumed = await resumeCodexThread({ conn, threadId, model: job.model ?? null });
-    // Re-read across the two RPCs: the live watcher can settle this job while
-    // they are in flight. Proceeding would clear a real terminal (`terminalAt`
-    // back to null, status back to 'running') and bill a fresh turn for a job
-    // the parent has already been told is finished — the spec says reject.
-    const current = jobs.get(job_id) || job;
-    if (current.terminalAt) {
-      return asJson({ ok: false, action: 'reply', job_id, target: 'codex', error: `job is already ${current.status} — start a new send` });
-    }
-    if (resumed.status === 'active') {
-      // `expectedTurnId` is REQUIRED. The live id comes from `turn/started`;
-      // the resume that just read the status carries the running turn as a
-      // second source for a bridge that never saw it, and the adapter falls
-      // back to `thread/read` when neither has one. Recording what the steer
-      // actually hit keeps the job's id in step with the turn it steered.
-      //
-      // `lastTurn` is read under the SAME `inProgress` gate `resolveCodexTurnId`
-      // and `startCodexTurn` apply to it, so one rule governs every read: a
-      // thread reported `active` whose last recorded turn is `completed` is a
-      // finished turn that happens to be last, and passing its id would send the
-      // steer a dead one where null makes the adapter go and find the live one.
-      const resumedTurnId = resumed.lastTurn?.status === 'inProgress' ? resumed.lastTurn.id : null;
-      const steer = await steerCodexTurn({
-        conn, threadId, prompt: message,
-        expectedTurnId: job.turnId || resumedTurnId,
-      });
-      const replyTurn = (job.replyTurn || 0) + 1;
-      updateJob(job_id, { replyTurn, turnId: steer.turnId });
-      log('INFO', 'agent:reply codex-appserver steer',
-        `job=${job_id} thread=${threadId} turn=${steer.turnId} reply_turn=${replyTurn} confirmed=${steer.confirmed}`);
-      return asJson({
-        ok: true, action: 'reply', job_id, target: 'codex',
-        steered: true,
-        // Two facts, not one: the server ACCEPTED the steer, and the injected
-        // message was (or was not yet) seen landing in the turn. An unconfirmed
-        // steer is not a failed one — codex injects at the next model boundary —
-        // so the reason says so instead of the envelope claiming success it
-        // cannot see.
-        steer_confirmed: steer.confirmed,
-        steer_confirmation: steer.confirmation,
-        thread_id: threadId,
-        turn_id: steer.turnId,
-        session_id: threadId,
-        original_prompt_id: job.promptId || null,
-        new_prompt_id: job.promptId || null,
-        reply_turn: replyTurn,
-        hint: 'reply injected into the RUNNING turn — nothing was cancelled and no work was discarded. '
-          + 'It applies at the next model boundary; keep waiting on the same job_id.',
-      });
-    }
-
-    // Idle thread: nothing to steer, so the follow-up is a new guarded turn on
-    // the same thread, under a bumped watch generation.
-    const replyTurn = (job.replyTurn || 0) + 1;
-    const replacementPromptId = codexAppServerPromptId(job_id, replyTurn);
-    const originalPromptId = job.promptId;
-    updateJob(job_id, {
-      promptId: replacementPromptId,
-      replyTurn,
-      status: 'running',
-      inspectAvailable: false,
-      terminalAt: null,
-      retentionExpiresAt: null,
-      error: null,
-      stuckReason: null,
-      detail: null,
-      // CLEARED, not carried. The turn this id names is finished — that is why
-      // this branch was taken — and the replacement's id lands a round trip or
-      // three later, because `runCodexAppServerWatch` below is deliberately not
-      // awaited. An `agent_cancel` inside that window would otherwise send the
-      // dead one: measured against the real server, a completed turn's id on a
-      // thread whose next turn is running answers `-32600 expected active turn
-      // id A but found B`, so the cancel fails while the turn keeps billing.
-      // Null instead makes the resolver read the running turn off `thread/read`
-      // — the same source a restarted bridge uses.
-      turnId: null,
-    });
-
-    const reqId = job.reqId || createReqId();
-    const replyConn = conn;
-    handedOff = true;
-    runCodexAppServerWatch({
-      jobId: job_id, reqId, conn: replyConn, threadId, promptId: replacementPromptId,
-      prompt: message, model: job.model ?? null, task: job.task || message,
-      cwd: job.cwd || null, thread: job.thread || null,
-      startedAt: job.startedAt || Date.now(), reply: true,
-    })
-      .catch((err) => log('ERROR', 'codex-appserver reply watch error:', job_id, err.message))
-      .finally(() => {
-        try { replyConn.close(); } catch {}
-        const j = jobs.get(job_id);
-        if (j) { j.replyInFlight = false; persistJob(job_id); }
-      });
-
-    log('INFO', 'agent:reply codex-appserver turn', `job=${job_id} thread=${threadId} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
-    return asJson({
-      ok: true, action: 'reply', job_id, target: 'codex',
-      steered: false,
-      thread_id: threadId,
-      session_id: threadId,
-      original_prompt_id: originalPromptId,
-      new_prompt_id: replacementPromptId,
-      reply_turn: replyTurn,
-      hint: 'the codex thread was idle, so the reply runs as a new turn on the same thread; its transcript carries over.',
-    });
-  } catch (err) {
-    return asJson({ ok: false, action: 'reply', job_id, target: 'codex', error: err.message });
-  } finally {
-    // Handed off means the background watch's own `finally` releases the lock
-    // when the replacement turn settles; every other exit releases it here.
-    if (!handedOff) {
-      try { conn?.close(); } catch {}
-      const j = jobs.get(job_id);
-      if (j) { j.replyInFlight = false; persistJob(job_id); }
-    }
-  }
-}
-
-async function handleReply({ job_id, message }) {
-  // Re-steer an in-flight job. Triple guard: validation rejects missing
-  // message; this handler rejects unknown/terminal jobs locally (cheap fast
-  // path); the daemon enforces its own per-prompt lock so two concurrent
-  // replies cannot race the cancel-and-restart sequence.
-  const job = getJob(job_id);
-  if (!job) return asJson({ ok: false, action: 'reply', error: 'unknown job_id' });
-  const target = job.target;
-  if (target === 'opencode') {
-    if (job.opencodeAdapter === 'server' && job.baseUrl && job.sessionId) {
-      return handleOpenCodeServerReply(job, message);
-    }
-    return asJson({
-      ok: false, action: 'reply', job_id, target, code: 'TARGET_UNSUPPORTED',
-      error: 'OpenCode reply requires server mode (OPENCODE_RUNTIME_ADAPTER=server) and a live session; the CLI adapter cannot re-steer — cancel or start a new send.',
-    });
-  }
-  if (target === 'codex') {
-    // Gated on the adapter THIS job started under, not the live env: a job that
-    // began on the exec pipe has no control channel even if the variable has
-    // since been flipped.
-    if (job.codexAdapter === 'appserver' && job.sessionId) {
-      return handleCodexAppServerReply(job, message);
-    }
-    return asJson({
-      ok: false, action: 'reply', job_id, target, code: 'TARGET_UNSUPPORTED',
-      error: 'Codex reply requires the app-server adapter (CODEX_RUNTIME_ADAPTER=appserver) and a live thread; '
-        + '`codex exec` is a one-shot pipe with no control channel — cancel or start a new send with the revised prompt.',
-    });
-  }
-  if (!isAcpTarget(target)) {
-    return asJson({
-      ok: false,
-      action: 'reply',
-      job_id,
-      target,
-      code: 'TARGET_UNSUPPORTED',
-      error: `${targetLabel(target)} does not support in-flight replies; cancel or start a new send with the revised prompt.`,
-    });
-  }
-  if (!job.promptId) return asJson({ ok: false, action: 'reply', error: 'job has no prompt yet — wait for status: running' });
-  if (job.terminalAt) return asJson({ ok: false, action: 'reply', error: `job is already ${job.status} — start a new send` });
-  if (job.replyInFlight) return asJson({ ok: false, action: 'reply', error: 'reply already in flight for this job' });
-
-  const originalPromptId = job.promptId;
-  job.replyInFlight = true;
-  job.supersedingPromptId = originalPromptId;
-  job.supersededPromptStatus = null;
-  persistJob(job_id);
-  try {
-    const resp = await replyPrompt({ promptId: originalPromptId, message, companion: target });
-    if (!resp.ok || !resp.data?.ok) {
-      const reason = resp.data?.reason || resp.error || 'reply failed';
-      delete job.supersedingPromptId;
-      if (job.supersededPromptStatus === 'cancelled' && !job.terminalAt) {
-        retainTerminalJob(job_id, {
-          status: 'cancelled',
-          error: reason,
-          durationMs: Date.now() - (job.startedAt || Date.now()),
-          terminalAt: Date.now(),
-        });
-      } else {
-        persistJob(job_id);
-      }
-      return asJson({ ok: false, action: 'reply', job_id, error: reason });
-    }
-    const replacementPromptId = resp.data.new_prompt_id;
-    const replacementSessionId = resp.data.session_id || job.sessionId;
-    updateJob(job_id, {
-      promptId: replacementPromptId,
-      sessionId: replacementSessionId,
-      status: 'running',
-      inspectAvailable: true,
-      terminalAt: null,
-      retentionExpiresAt: null,
-      error: null,
-      stuckReason: null,
-      detail: null,
-      supersedingPromptId: null,
-      supersededPromptStatus: null,
-    });
-    delete job.supersedingPromptId;
-    delete job.supersededPromptStatus;
-
-    const reqId = job.reqId || createReqId();
-    runWatchLoop({
-      jobId: job_id,
-      promptId: replacementPromptId,
-      sessionId: replacementSessionId,
-      thread: job.thread || null,
-      task: job.task || message,
-      cwd: job.cwd || null,
-      startedAt: job.startedAt || Date.now(),
-      reqId,
-      sessionReborn: !!job.sessionReborn,
-      target,
-    }).catch((err) => log('ERROR', 'reply watch loop error:', job_id, err.message));
-
-    log('INFO', 'agent:reply', `job=${job_id} old_prompt=${originalPromptId} new_prompt=${replacementPromptId}`);
-    // Said plainly, because it is what happened: ACP has no mid-turn steer,
-    // so a reply on an ACP companion is a cancelled turn and a new prompt on
-    // the same session, told why. Nothing is injected into a running turn.
-    return asJson({
-      ok: true, action: 'reply', job_id, target,
-      original_prompt_id: resp.data.original_prompt_id,
-      new_prompt_id: replacementPromptId,
-      session_id: replacementSessionId,
-      hint: `reply accepted. The original turn was cancelled (ACP has no mid-turn steer); the follow-up runs as a new prompt on the same ${targetLabel(target)} session, told that the previous turn was interrupted on purpose.`,
-    });
-  } finally {
-    job.replyInFlight = false;
-    persistJob(job_id);
-  }
+async function handleReply({ job_id, message, thread }, active, request) {
+  const response = await active.steer({ owner: thread, executionId: job_id, text: message, ...request });
+  return asJson({ action: 'reply', job_id, ...response });
 }
 
 function handleCatalog() {
@@ -2399,7 +1978,7 @@ function handleStatus({ job_id, diagnostics }, active) {
       effective_model: r?.effectiveModel ?? e.progress?.effectiveModel ?? e.effectiveModel ?? null,
       effective_effort: r?.effectiveEffort ?? e.progress?.effectiveEffort ?? e.effectiveEffort ?? null,
       cause: r?.cause ?? null, detail: r?.detail ?? null, native_refs: r?.nativeRefs ?? { historyId: e.historyId, nativeTurnId: e.nativeTurnId },
-      digest_uri: digestResourceUri(e.executionId), reply_available: false };
+      digest_uri: digestResourceUri(e.executionId), reply_available: view.replyAvailable };
   };
   let response;
   if (job_id) {
@@ -2571,9 +2150,8 @@ const AGENT_TOOLS = [
         job_id: JOB_ID_FIELD,
         message: {
           type: 'string',
-          description: 'Follow-up text. On a transport with a live control channel (codex app-server) it is injected '
-            + 'into the running turn with nothing cancelled; otherwise the bridge cancels and restarts the current '
-            + 'turn with this continuation.',
+          description: 'Follow-up text for a running execution whose adapter supports steer. Returns accepted and '
+            + 'confirmed separately; unsupported capability or execution state returns reply_unavailable.',
         },
       },
       required: ['job_id', 'message'],
@@ -2677,7 +2255,7 @@ export async function dispatch(normalized, { controller: active = controller, re
       case 'send':   return await handleSend(normalized, active, request);
       case 'wait':   return await handleWait(normalized, active, request);
       case 'status': return handleStatus(normalized, active);
-      case 'reply':  return await handleReply(normalized);
+      case 'reply':  return await handleReply(normalized, active, request);
       case 'cancel': return await handleCancel(normalized, active, request);
       default: throw new Error(`agent: unhandled action "${normalized.action}"`);
     }
@@ -2692,7 +2270,7 @@ export async function dispatch(normalized, { controller: active = controller, re
   }
 }
 
-// Retained for legacy reply recovery tests; production startup uses recoverController.
+// Retained for legacy recovery tests; production startup uses recoverController.
 let _hydrated = false;
 let _swept = false;
 

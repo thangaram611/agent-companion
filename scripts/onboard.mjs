@@ -155,7 +155,7 @@ async function runOpenCodeSmoke(env) {
       jobId: `onboard-opencode-${process.pid}`, cwd: dir,
       prompt: 'Reply with the single word: ready',
       model: String(env.AGENT_COMPANION_OPENCODE_MODEL || '').trim() || null,
-      env: { ...env, AGENT_COMPANION_OPENCODE_TIMEOUT_MS: '120000' },
+      env, timeoutMs: 120_000,
     });
     const message = result.summary?.message?.trim() || '';
     return { supported: true, passed: result.status === 'completed' && /^ready[.!]?$/i.test(message), detail: message || result.error || result.status };

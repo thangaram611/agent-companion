@@ -9,6 +9,8 @@ import { cleanupExecution, spawnCleanupWatcher } from '../../scripts/cleanup-wat
 const TICK_MS = 1000;
 const PROTOCOL_MS = 10_000;
 const error = (code) => Object.assign(new Error(code), { code });
+const replyUnavailable = (a) => !a || a.record.state !== 'running' || a.record.terminal || a.stopping || a.closed || a.handedOff
+  ? 'state' : a.adapter.capabilities.steer ? null : 'capability';
 const deferred = () => {
   let resolve;
   const promise = new Promise((yes) => { resolve = yes; });
@@ -18,7 +20,7 @@ const deferred = () => {
 // providers[id] = { enabled, ready, modelAllowed(model), create() }.
 // create() returns exactly the protocol-only adapter in PHASE3-SPEC.md.
 // The host supplies trusted owner/request identities; this module does no
-// metadata attribution. send/wait/cancel hold attachment until they return.
+// metadata attribution. send/wait/reply/cancel hold attachment until they return.
 export class Controller {
   constructor({ providers, records = new Records(), clock = systemClock, env = process.env, createSupervisor = (opts) => new ProcessSupervisor(opts), launchWatcher = spawnCleanupWatcher, onProgress = () => {}, onResult = () => {} } = {}) {
     this.providers = providers;
@@ -256,6 +258,21 @@ export class Controller {
     catch (err) { if (err.code === 'wait_timeout') return this.status({ executionId }); throw err; }
     finally { this.endRequest(id); }
   }
+  async steer({ owner, executionId, text, requestId, signal }) {
+    this._owner(owner);
+    const execution = this.records.readExecution(executionId);
+    if (!execution || execution.owner !== owner) throw error('execution_unknown');
+    if (typeof text !== 'string' || !text.length) throw error('INVALID_TEXT');
+    const a = this.live.get(executionId);
+    const reason = replyUnavailable(a);
+    if (reason) return { ok: false, status: 'reply_unavailable', reason };
+    const id = this.beginRequest({ owner, executionId, requestId, signal, kind: 'reply' });
+    try {
+      // An already-aborted owner request starts cleanup synchronously.
+      if (a.stopping) return { ok: false, status: 'reply_unavailable', reason: 'state' };
+      return { ok: true, ...await a.adapter.steer({ text }) };
+    } finally { this.endRequest(id); }
+  }
   async cancel({ owner, executionId, requestId, signal }) {
     this._owner(owner);
     const execution = this.records.readExecution(executionId);
@@ -277,7 +294,7 @@ export class Controller {
     const lease = savedLease && (result
       ? { ...savedLease, attached: false, requestIds: [], deadline: null, remainingMs: null }
       : { ...savedLease, remainingMs: live ? live.remainingMs : savedLease.deadline == null ? null : Math.max(0, savedLease.deadline - this.clock.now()) });
-    return { execution, result, lease,
+    return { execution, result, lease, replyAvailable: !result && replyUnavailable(live) === null,
       state: result?.stopEvidence?.gone || execution.cleanup?.gone ? 'closed' : live ? execution.state : 'unknown' };
   }
   // Explicit startup reconciliation, never invoked by an observer. It never
