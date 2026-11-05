@@ -11,6 +11,15 @@ rollouts. `codex-app-server/probe.mjs` and `wsclient.mjs` write logs in the shel
 working directory; run them from a scratch directory and give them a scratch
 workspace. These are not read-only checks.
 
+## `host-qualification/codex/` — isolated Phase 2 host measurements
+
+The [Codex runbook](host-qualification/codex/RUNBOOK.md) provides a passive fake
+MCP/provider tree, hook logger, headless/PTY runners, scenario matrix and analyzer.
+The operator runs live Codex sessions in a per-run `CODEX_HOME`; this harness
+does not use the installed bridge. Start with `node probes/host-qualification/codex/runner.mjs smoke`.
+Offline checks are explicit: `node probes/host-qualification/codex/self-check.mjs`.
+Neither the harness nor its checks are discovered by `node --test`.
+
 ## `smoke/` — end-to-end against the real bridge
 
 These scripts drive `bridge-server/server.mjs` over MCP stdio. The repo root is
