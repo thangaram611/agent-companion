@@ -2,7 +2,7 @@ import { Agent, request } from 'node:http';
 import { createTurnAccumulator, parseOpenCodeModel } from './opencode-protocol.mjs';
 import { openCodeCliMajor } from '../../lib/opencode-cli.mjs';
 import { getTargetById } from '../../lib/target-registry.mjs';
-import { lastTargetChecks } from '../../lib/target-diagnostics.mjs';
+import { companionReady } from '../../lib/target-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 import { usageFromOpenCodeInfo, sumUsage } from '../../lib/usage.mjs';
 
@@ -16,7 +16,7 @@ export function opencodeProvider({ env = process.env } = {}) {
   const target = getTargetById('opencode', env);
   return {
     enabled: target.implemented,
-    get ready() { return lastTargetChecks().opencode?.ready === true; },
+    get ready() { return companionReady('opencode', env); },
     modelAllowed: model => isModelAllowedFor('opencode', model),
     create: () => new OpenCodeAdapter(env, target),
   };

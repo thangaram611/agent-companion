@@ -4,7 +4,7 @@ import { inspectCodexAppServerInstallation } from '../../lib/codex-install.mjs';
 import { connectionScopedNotificationMethods, routeNotification } from '../../lib/codex-app-server-contract.mjs';
 import { codexTurnBaseline, usageFromCodexTokenUsage } from '../../lib/usage.mjs';
 import { getTargetById } from '../../lib/target-registry.mjs';
-import { lastTargetChecks } from '../../lib/target-diagnostics.mjs';
+import { companionReady } from '../../lib/target-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 import { bounded, systemClock } from '../controller/clock.mjs';
 import { execFile } from 'node:child_process';
@@ -330,7 +330,7 @@ export function codexProvider({ env = process.env } = {}) {
     enabled: getTargetById('codex', env)?.implemented === true,
     // Registry-driven diagnostics already own readiness. Reading their cached
     // evidence is observational; installation selection happens only at start.
-    get ready() { return lastTargetChecks().codex?.ready === true; },
+    get ready() { return companionReady('codex', env); },
     modelAllowed: (model) => isModelAllowedFor('codex', model),
     create: () => new CodexAdapter({ env }),
   };

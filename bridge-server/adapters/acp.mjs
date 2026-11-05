@@ -3,7 +3,7 @@ import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AcpConnection } from './acp-protocol.mjs';
 import { getTargetById } from '../../lib/target-registry.mjs';
-import { lastTargetChecks } from '../../lib/target-diagnostics.mjs';
+import { companionReady } from '../../lib/target-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 
 const failure = (code, cause) => Object.assign(new Error(code, { cause }), { code });
@@ -202,7 +202,7 @@ export function acpProvider(companion, { env = process.env } = {}) {
     enabled: descriptor.implemented === true,
     // As with the catalog, readiness reads existing diagnostic evidence.
     // Probing/version commands or runtime startup belong to explicit actions.
-    get ready() { return lastTargetChecks()[descriptor.id]?.ready === true; },
+    get ready() { return companionReady(descriptor.id, env); },
     modelAllowed: (model) => isModelAllowedFor(descriptor.id, model),
     create: () => new AcpAdapter(descriptor, { env }),
   };
