@@ -60,21 +60,53 @@ queue and digests persist on disk.
 
 ### MCP registration boundary
 
-Claude's materialized Markdown agent owns an inline MCP server, so main Claude
-does not receive the bridge tools. Codex applies a bounded role overlay and
-intentionally rejects `mcp_servers` from a custom agent role: a child may
-inherit its parent's authority but may not expand it. The Codex-only plugin
-manifest therefore registers `agent-bridge` at session scope, and the
-`agent-companion` child inherits it. This makes the schemas visible to main
-Codex; the role remains the supported caller for delegated work. The catalog
-is ownerless and available for discovery. A root `.mcp.json` is not
-used because this repository is also a Claude plugin root. Codex sanitizes the
-raw hyphenated server id into the model-visible namespace
-`mcp__agent_bridge__*`, exposed as a deferred tool through `functions.exec`;
-Claude's agent-local registration retains
-`mcp__agent-bridge__*`. The Codex manifest declares the internal tools
-pre-approved so an inherited call works under headless approval policy
-`never`; user and managed plugin policy may still restrict it.
+Both hosts register `agent-bridge` at plugin/session scope: Claude through
+`.claude-plugin/plugin.json`'s inline `mcpServers` map, Codex through
+`.codex-plugin/plugin.json`. The parent now sees all six tools. Owner-bound
+`agent_send`, `agent_wait`, `agent_reply` and `agent_cancel` fail closed with
+`ok: false, status: NATIVE_OWNER_REQUIRED` without a native child owner.
+`agent_catalog` is the ownerless read for discovery; `agent_status`, with or
+without a job id, is also exempt from the owner gate.
+
+Claude's source template uses `mcpServers: [agent-bridge]`, a name reference,
+not an inline transport. `hooks/install-agent.sh` still materializes the agent:
+plugin-shipped agent frontmatter is ignored. Claude Code 2.1.318 registers
+plugin servers as `plugin:<plugin-name>:<server-key>`, so the installer qualifies
+that reference to `[plugin:agent-companion:agent-bridge]` and its tool names to
+`mcp__plugin_agent-companion_agent-bridge__*`. The identity hook matches this
+namespace as well as the bare `mcp__agent-bridge__*` session name. See the
+[plugin MCP naming contract](https://code.claude.com/docs/en/mcp#plugin-provided-mcp-servers).
+The plugin server keeps sibling `timeout: 1320000` (milliseconds) and `env`
+with `CODEX_RUNTIME_ADAPTER: appserver`; Codex keeps `tool_timeout_sec: 1320`.
+Both manifests select their host explicitly for the shared shell launcher,
+which resolves Node and waits for dependency readiness. Settings take effect
+on the next session. No root `.mcp.json` is needed.
+
+Claude's PreToolUse hook overwrites `thread` on every owner-bound call with
+`agent_id`, or clears it when absent, removing any model-supplied identity.
+A failed rewrite denies the call. Codex's owner comes only from
+`_meta['x-codex-turn-metadata'].thread_id` when `thread_source === 'subagent'`;
+root (`user`) and missing metadata are refused. Codex still inherits MCP
+authority from its parent and exposes `mcp__agent_bridge__*` through deferred
+tools. Its manifest retains pre-approved tools for headless policy `never`;
+user and managed plugin policy may still restrict them.
+
+Stop hooks write advisory `stops/<owner>.json` under the bridge state directory:
+`AGENT_COMPANION_HOME` wins, otherwise `lib/host.mjs` supplies
+`~/.claude/agent-companion` or `$CODEX_HOME/agent-companion` (default
+`~/.codex/agent-companion`). The atomic, private marker shape is
+`{owner, source: 'TaskStop'|'SubagentStop', t, session_id}`; `t` is Unix epoch
+milliseconds and an unavailable session id is `null`. Claude's parent-side
+TaskStop PreToolUse supplies `tool_input.task_id`; SubagentStop supplies
+`agent_id`. The 2026-11-05 Codex identity payloads also identify the child
+thread as `agent_id` (their `session_id` is the parent). Missing child identity
+produces no marker and a diagnostic, never a guessed owner. Markers are evidence
+for the controller, not cleanup or lease renewal.
+
+SIGINT, SIGTERM and stdin EOF share one awaited `onBridgeLoss()` hook, guarded
+against duplicate or racing loss events before exit. The controller plugs in
+with `registerBridgeLossHandler(async () => { ... })`. Until registered it only
+logs; this host integration adds no provider cleanup or lifetime policy.
 
 ## Private MCP Surface
 

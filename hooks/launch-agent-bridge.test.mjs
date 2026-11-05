@@ -1,4 +1,4 @@
-// Codex MCP launcher integration tests. The SessionStart dependency hook is
+// Session MCP launcher integration tests. The SessionStart dependency hook is
 // allowed to exit 0 after a bounded lock wait, so launcher success must depend
 // on observable dependency readiness rather than that exit code alone.
 
@@ -12,6 +12,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -47,8 +48,10 @@ count=$((count + 1))
 printf '%s\\n' "$count" > "$TEST_CALLS"
 printf 'dependency attempt %s\\n' "$count"
 if [ "\${READY_ON_ATTEMPT:-0}" -gt 0 ]; then
-  mkdir -p "$PLUGIN_DATA/bridge-server/node_modules/@modelcontextprotocol/sdk"
-  printf '{}\\n' > "$PLUGIN_DATA/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
+  deps="$PLUGIN_DATA/bridge-server"
+  if [ "$AGENT_COMPANION_HOST" = claude ]; then deps="$CLAUDE_PLUGIN_ROOT/bridge-server"; fi
+  mkdir -p "$deps/node_modules/@modelcontextprotocol/sdk"
+  printf '{}\\n' > "$deps/node_modules/@modelcontextprotocol/sdk/package.json"
 fi
 if [ "\${READY_ON_ATTEMPT:-0}" -le 0 ] || [ "$count" -lt "$READY_ON_ATTEMPT" ]; then
   exit 75
@@ -63,11 +66,12 @@ printf 'node exec: %s\\n' "$@"
   return { dir, root, calls, fakeNode, launcher: path.join(hooks, 'launch-agent-bridge.sh') };
 }
 
-function run(fixture, readyOnAttempt) {
+function run(fixture, readyOnAttempt, host = 'codex') {
   return spawnSync('/bin/bash', [fixture.launcher], {
     env: {
       ...process.env,
       CODEX_HOME: path.join(fixture.dir, 'codex home'),
+      AGENT_COMPANION_HOST: host,
       FAKE_NODE: fixture.fakeNode,
       TEST_CALLS: fixture.calls,
       READY_ON_ATTEMPT: String(readyOnAttempt),
@@ -87,6 +91,21 @@ test('ignores an early SDK file until the contended install reports complete', (
       'dependency chatter must never corrupt MCP stdout');
     assert.match(result.stderr, /dependency attempt 1/);
     assert.match(result.stderr, /dependency attempt 2/);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude session startup waits for dependencies and launches with the shared Node resolver', () => {
+  const fixture = makeFixture();
+  try {
+    const result = run(fixture, 2, 'claude');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(fixture.calls, 'utf8').trim(), '2');
+    assert.equal(result.stdout, `node exec: ${realpathSync(fixture.root)}/bridge-server/server.mjs\n`);
+    assert.doesNotMatch(result.stdout, /dependency attempt/);
+    assert.ok(existsSync(path.join(fixture.root, 'bridge-server/node_modules/@modelcontextprotocol/sdk/package.json')));
+    assert.ok(!existsSync(path.join(fixture.dir, 'codex home/plugins')));
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });
   }

@@ -8,7 +8,7 @@
 // The two templates configure the same bridge through different host
 // mechanisms, so they cannot be compared line by line:
 //
-//   Claude  templates/agent-companion.md    YAML frontmatter, `env:` mapping,
+//   Claude  .claude-plugin/plugin.json      native plugin MCP declaration,
 //                                           per-server `timeout:` in MILLISECONDS
 //   Codex   .codex-plugin/plugin.json       native plugin MCP declaration,
 //                                           `tool_timeout_sec` in SECONDS
@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const md = readFileSync(join(HERE, 'agent-companion.md'), 'utf8');
 const toml = readFileSync(join(HERE, 'agent-companion.toml'), 'utf8');
+const claudeManifest = JSON.parse(readFileSync(join(HERE, '..', '.claude-plugin', 'plugin.json'), 'utf8'));
 const codexManifest = JSON.parse(readFileSync(
   join(HERE, '..', '.codex-plugin', 'plugin.json'),
   'utf8',
@@ -41,22 +42,9 @@ const codexManifest = JSON.parse(readFileSync(
 // construction. Everything else in an env block is a capability knob.
 const HOST_IDENTITY_KEYS = new Set(['AGENT_COMPANION_HOST']);
 
-// The Claude host's `env:` mapping, from the frontmatter's agent-bridge server.
-// Comment lines are stripped first: a knob documented in a comment is NOT set,
-// and the whole point here is what the bridge actually receives.
+// Both hosts now configure the session-scoped server in their plugin manifest.
 function claudeEnv() {
-  const fm = md.match(/^---\n([\s\S]*?)\n---\n/);
-  assert.ok(fm, 'the Claude template must have extractable frontmatter');
-  const lines = fm[1].split('\n').filter((line) => !/^\s*#/.test(line));
-  const start = lines.findIndex((line) => /^\s{6}env:\s*$/.test(line));
-  if (start === -1) return {};
-  const env = {};
-  for (const line of lines.slice(start + 1)) {
-    const kv = line.match(/^\s{8}([A-Z0-9_]+):\s*(.+?)\s*$/);
-    if (!kv) break; // dedent ends the block
-    env[kv[1]] = kv[2].replace(/^["']|["']$/g, '');
-  }
-  return env;
+  return claudeManifest.mcpServers?.['agent-bridge']?.env || {};
 }
 
 // Current Codex roles cannot add MCP authority. The operative Codex env is
@@ -85,8 +73,7 @@ test('both hosts ship the same capability knobs, with the same values', () => {
 });
 
 test('both hosts set the same effective tool deadline above the wait cap', () => {
-  const frontmatter = md.match(/^---\n([\s\S]*?)\n---\n/)[1];
-  const timeout = Number(frontmatter.match(/^\s{6}timeout:\s*(\d+)$/m)[1]);
+  const timeout = claudeManifest.mcpServers['agent-bridge'].timeout;
   assert.equal(timeout, codexManifest.mcpServers['agent-bridge'].tool_timeout_sec * 1000);
   assert.ok(timeout > 1200 * 1000);
 });
@@ -115,10 +102,7 @@ test('the codex transport is the app-server adapter on both hosts', () => {
   }
 });
 
-test('each host still identifies itself, and only the Codex one needs to', () => {
-  // lib/host.mjs defaults to 'claude', so the Claude template setting it would
-  // be redundant; the Codex template MUST, or its state lands in ~/.claude/.
+test('each plugin identifies its host for the shared launcher', () => {
   assert.equal(codexEnv().AGENT_COMPANION_HOST, 'codex');
-  assert.equal(claudeEnv().AGENT_COMPANION_HOST, undefined,
-    'the Claude host is lib/host.mjs\'s default — setting it here would be noise that can drift');
+  assert.equal(claudeEnv().AGENT_COMPANION_HOST, 'claude');
 });

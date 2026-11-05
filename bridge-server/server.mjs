@@ -5,10 +5,9 @@
 // agent_send takes an optional `target` (opencode | copilot | codex | antigravity);
 // omitting it uses the configured default target, and there is no silent
 // fallback.
-// No start/stop/pause/session-gate. Claude owns this server through the
-// standalone subagent's frontmatter; Codex registers it at plugin/session scope
-// because agent roles cannot add MCP authority. The subagent is the only
-// supported caller on both hosts. Task text is passed through verbatim.
+// Both hosts register this server at plugin/session scope. Owner-bound calls
+// require the native subagent identity; catalog and status remain ownerless.
+// Task text is passed through verbatim.
 //
 // `send` enqueues the task and returns `status=still_running` with the job_id
 // immediately (no blocking — the worker keeps running in the background). The
@@ -40,6 +39,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { detectHost } from '../lib/host.mjs';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -3685,37 +3685,45 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 // Codex (PR openai/codex#15190) injects per-turn metadata on every MCP tool
 // call as `_meta["x-codex-turn-metadata"]`: `session_id` is the ROOT session
 // for every agent in it, `thread_id` the calling agent's own thread (measured
-// on codex-cli 0.164.0). The session id is adopted BEFORE validation: it is
-// the only host→bridge session-id channel on Codex. Claude's _meta carries
+// on codex-cli 0.164.0). Session adoption follows validation so an ownerless
+// control call cannot hydrate jobs. This is Codex's only host→bridge session-id
+// channel. Claude's _meta carries
 // claudecode/toolUseId and progressToken, but no session id; its bridge
 // inherits CLAUDE_CODE_SESSION_ID (getHostSessionId).
 //
-// One agent-companion instance is one companion conversation, so a send's
+// One agent-companion instance is one companion conversation, so every owner's
 // thread is named after the calling agent and never after the host session:
 // Codex's thread_id here, and on Claude the subagent's agent_id, which only
 // hooks can see — hooks/name-thread.sh writes it into `thread` before the call
-// leaves the host. The host's name wins over anything the model wrote. A send
-// that arrives with no name is refused rather than given a conversation
-// nobody could continue.
+// leaves the host (including clearing a root caller's fabricated thread).
+// Codex requires thread_source=subagent and never trusts an argument as owner.
+// Catalog and all status calls are observers, exempt from this owner gate.
+const OWNER_ACTIONS = new Set(['send', 'wait', 'reply', 'cancel']);
 export function callArgs(action, params) {
   const turn = params?._meta?.['x-codex-turn-metadata'];
-  if (action !== 'catalog' && turn?.session_id && typeof turn.session_id === 'string') adoptHostSessionId(turn.session_id);
   const toolArgs = params?.arguments || {};
   if (Object.prototype.hasOwnProperty.call(toolArgs, 'action')) {
     throw new Error('agent: split MCP tools do not accept an action field; choose the agent_* tool that matches the operation');
   }
   const args = { action, ...toolArgs };
-  if (action === 'send') {
-    if (turn?.thread_id && typeof turn.thread_id === 'string') args.thread = turn.thread_id;
-    if (!args.thread) {
-      throw new Error(
-        'agent: thread is required — the host names it after the calling agent ' +
-        "(Claude: hooks/name-thread.sh writes the subagent's agent_id; Codex: _meta thread_id), " +
-        'and neither reached the bridge',
-      );
+  if (OWNER_ACTIONS.has(action)) {
+    if (turn !== undefined || detectHost() === 'codex') {
+      args.thread = turn?.thread_source === 'subagent' ? turn.thread_id : null;
+    }
+    if (typeof args.thread !== 'string' || !args.thread.trim()) {
+      throw Object.assign(new Error(
+        'agent: native subagent owner required (Claude: hooks/name-thread.sh; Codex: subagent turn metadata)',
+      ), { code: 'NATIVE_OWNER_REQUIRED' });
     }
   }
-  return validateAgentArgs(args);
+  // Control-tool schemas carry no model-facing thread field. Validate their
+  // public arguments, then retain the attributed owner for the controller.
+  const { thread, ...publicArgs } = args;
+  const normalized = validateAgentArgs(OWNER_ACTIONS.has(action) && action !== 'send' ? publicArgs : args);
+  if (OWNER_ACTIONS.has(action)) normalized.thread = thread;
+  // An owner refusal must not adopt a session or trigger legacy hydration.
+  if (action !== 'catalog' && turn?.session_id && typeof turn.session_id === 'string') adoptHostSessionId(turn.session_id);
+  return normalized;
 }
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -3724,6 +3732,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     return await dispatch(callArgs(action, req.params));
   } catch (err) {
+    if (err?.code === 'NATIVE_OWNER_REQUIRED') {
+      return asJson({ ok: false, action, status: err.code, error: err.message });
+    }
     if (err && err.code === 'BRIDGE_SID_CONFLICT') {
       log('ERROR', 'sid conflict on MCP call:', err.message);
       return asJson({ ok: false, error: err.message, code: 'BRIDGE_SID_CONFLICT' });
@@ -4019,6 +4030,30 @@ export function _resetForTest() {
 
 export { mcp, jobs, gcExpiredJobs, persistJob, adoptHostSessionId, retainTerminalJob };
 
+// Controller integration seam. Host loss never implements cleanup itself.
+let bridgeLossHandler = async () => { log('WARN', 'bridge loss: no controller cleanup handler registered'); };
+export function registerBridgeLossHandler(handler) {
+  bridgeLossHandler = handler;
+}
+export async function onBridgeLoss() {
+  await bridgeLossHandler();
+}
+
+let bridgeLossPending = false;
+async function exitOnBridgeLoss(code) {
+  if (bridgeLossPending) return;
+  bridgeLossPending = true;
+  // EOF may remove the final active handle. Keep the process alive until the
+  // async controller handoff finishes; subsequent signals share this exit.
+  const keepAlive = setInterval(() => {}, 1000);
+  try { await onBridgeLoss(); }
+  catch (err) { log('ERROR', 'bridge loss handler failed:', err.message); }
+  finally {
+    clearInterval(keepAlive);
+    process.exit(code);
+  }
+}
+
 // Only attach stdio transport when launched as a script. Allows
 // `import('./server.mjs')` from tests without spawning a real MCP loop.
 // Resolve both sides through realpath so a symlinked argv[1] still matches
@@ -4031,12 +4066,14 @@ const isMain = (() => {
   } catch { return false; }
 })();
 if (isMain) {
+  process.on('SIGINT', () => { void exitOnBridgeLoss(130); });
+  process.on('SIGTERM', () => { void exitOnBridgeLoss(143); });
+  process.stdin.on('end', () => { void exitOnBridgeLoss(0); });
   migrateLegacyState({ log });
   // One-line startup log so a user troubleshooting host routing can grep
   // the private runtime bridge log for "host detected" and see what the
   // bridge resolved on this run. The README's Diagnostics section points
   // readers here.
-  const { detectHost } = await import('../lib/host.mjs');
   logEvent('info', 'bridge.startup', { host_detected: detectHost() });
 
   // Eager hydrate/sweep when the sid is already known: on Claude Code it is
