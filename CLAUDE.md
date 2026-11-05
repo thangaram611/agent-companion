@@ -4,7 +4,10 @@
 
 A delegation plugin: a **harness** (Claude Code or Codex CLI) spawns an isolated
 `agent-companion` subagent, which uses `agent-bridge` to run work on a **companion** runtime
-(OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity). Claude scopes the MCP server to the subagent.
+(OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity). The parent talks to the
+subagent in plain language (what to do, the absolute repo path, optionally which companion or
+model); the subagent sends that text verbatim through the private `agent_*` tools and brings the
+companion's answer back. Claude scopes the MCP server to the subagent.
 Current Codex forbids role-local MCP authority, so its plugin registers the internal bridge at
 session scope and the child inherits it; main can see the schemas, but direct use is unsupported.
 The matrix is 2 harnesses × 4 companions, and two companions ship two transports each — parity
@@ -46,28 +49,32 @@ machine that resolves to the same host home, so the two hosts get one each — n
 memory. This is the single most load-bearing fact in the repo.
 
 **No silent fallback, anywhere.** An unresolvable send returns an explicit `ok:false` envelope
-(`TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`, `STRENGTH_UNCONFIGURED`, `STRENGTH_AMBIGUOUS`,
-`PROFILE_UNKNOWN`, `PROFILE_AMBIGUOUS`, `ROUTING_CONFLICT`, `CAPABILITY_UNAVAILABLE`,
-`MODEL_NOT_ALLOWED`). Treat that list as closed — both agent templates enumerate all nine, and
-both forbid the subagent from re-sending with a target the harness never supplied. Both template
-suites pin the list, so update `resolveRouting`, both templates and both template suites
-when adding a routing refusal. The envelope echoes candidate ids only where candidates exist; the
-capability-gate refusals (`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED`)
-carry none.
+(`TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED`).
+Treat that list as closed — both agent templates enumerate all four and both tell the subagent to
+relay a refusal and stop rather than change or drop the parent's choice. Both template suites pin
+the list, so update `resolveRouting`, both templates and both template suites when adding a
+refusal. `target` omitted means the configured default companion; `model` omitted means the
+companion's own configuration is inherited (Codex receives no model key at all). The bridge adds
+no template, mode line, required answer format, `/fleet` prefix or critic wrapper to `task`:
+every adapter's prompt builder receives it verbatim, and tests assert that per adapter.
 
 **Conversation identity comes from the host.** Claude's `hooks/name-thread.sh`
 writes the subagent's `agent_id` into the send's `thread`; Codex's
 `_meta["x-codex-turn-metadata"].thread_id` wins in `callArgs`. MCP sends without a
 thread are refused. A new spawn starts a conversation; a message to the same
-agent continues it. On a busy thread, only the same task, mode, template and
-`template_args` can reattach, after target/profile/cwd checks. Different work
-returns `thread_busy`; it must wait, cancel or use a supported reply.
+agent continues it. On a busy thread, only the same task and model can reattach,
+after target/cwd checks. Different work returns `thread_busy`; it must wait, cancel
+or use a supported reply. `agent_catalog` is the one ownerless tool: read-only, no
+job hydration, no state write, no session creation; its tests assert that.
 
 **Capabilities and runtime selection are distinct.** Read capabilities from
-`lib/target-registry.mjs`. A profile's `adapter` declares capabilities but does
-not choose the spawned transport; the runtime environment does. OpenCode and
-Codex record the starting adapter per job for reply/resume. ACP jobs do not;
-Copilot re-reads `COPILOT_RUNTIME_ADAPTER` on each call.
+`lib/target-registry.mjs`. The runtime environment chooses the spawned transport
+(`CODEX_RUNTIME_ADAPTER`, `OPENCODE_RUNTIME_ADAPTER`). OpenCode and Codex record
+the starting adapter per job for reply/resume. ACP jobs do not; Copilot re-reads
+`COPILOT_RUNTIME_ADAPTER` on each call. Per-companion default models come from
+`AGENT_COMPANION_CODEX_MODEL`, `AGENT_COMPANION_OPENCODE_MODEL`, the `default-model`
+state file (Copilot) and the Antigravity descriptor; `profiles.json` is read once
+by the one-shot legacy migration in `lib/state.mjs` and never again.
 
 ## Single-source-of-truth modules
 
@@ -78,7 +85,6 @@ second reader/definition is how these break.
 | --- | --- |
 | `lib/host.mjs` | The only place that chooses claude-vs-codex conventions. `AGENT_COMPANION_HOST` is authoritative; `.host` marker files are diagnostic only, never a fallback. |
 | `lib/target-registry.mjs` | What a companion can do (capabilities) **and** what it takes to be ready (onboarding). Two concerns, one descriptor, deliberately. For the ACP companions the `acp` block is also everything the daemon needs to run them. |
-| `lib/profile-registry.mjs` | The **only** reader of `profiles.json`. `test/profile-registry-guard.test.mjs` fails on any other reference to `readProfilesRaw` / `PROFILES_FILE`. |
 | `lib/command-probe.mjs` | `probeCommand` is the **only** sanctioned synchronous shell-out from bridge code. It stays dependency-free so broker preflight does not initialize durable state. `test/exec-timeout-guard.test.mjs` fails on any duplicate or unbounded one. |
 | `lib/shared-runtime-registry.mjs` | Leases + two-phase disposal for the detached shared runtimes (one per host home). A `dispose` that does anything before the destructive act must call `confirmDisposal()` as late as possible and abort when it returns false. |
 
