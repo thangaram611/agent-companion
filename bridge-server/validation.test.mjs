@@ -73,3 +73,9 @@ test('no action takes a session id argument', () => {
     }
   }
 });
+
+test('execution timeout is not a tool argument; the bounded wait remains supported', () => {
+  assert.throws(() => validateAgentArgs(sendArgs({ timeout_ms: 1 })), /unknown field/);
+  assert.equal(validateAgentArgs({ action: 'wait', job_id: 'j', max_wait_sec: 1200 }).max_wait_sec, 1200);
+  assert.equal(Object.hasOwn(validateAgentArgs(sendArgs()), 'timeout_ms'), false);
+});

@@ -295,3 +295,13 @@ test('startOpenCodeRun reads usage off a step_finish part when the JSON stream c
     rmSync(dir2, { recursive: true, force: true });
   }
 });
+
+test('onboarding can bound its smoke independently of legacy execution timeout knobs', async () => {
+  const { dir, bin } = fakeBin('setInterval(() => {}, 1000);');
+  try {
+    const result = await startOpenCodeRun({ jobId: 'smoke-budget', cwd: dir, prompt: 'ready', timeoutMs: 50,
+      env: { ...process.env, OPENCODE_BIN: bin, AGENT_COMPANION_OPENCODE_TIMEOUT_MS: '1' } });
+    assert.equal(result.status, 'timeout');
+    assert.equal(result.timeoutMs, 50);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
