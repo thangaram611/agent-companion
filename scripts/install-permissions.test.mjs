@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'install-permissions.mjs');
 const REQUIRED_PERMISSIONS = [
+  'mcp__agent-bridge__agent_catalog',
   'mcp__agent-bridge__agent_send',
   'mcp__agent-bridge__agent_wait',
   'mcp__agent-bridge__agent_status',

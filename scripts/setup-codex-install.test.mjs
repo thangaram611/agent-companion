@@ -538,7 +538,7 @@ test('dry-run previews a clean install and --no-target-check explicitly defers a
   assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'codex\n');
 });
 
-test('both harnesses preserve independent defaults/profiles and unrelated settings', (t) => {
+test('both harnesses preserve independent defaults, legacy files and unrelated settings', (t) => {
   const f = setupFixture(t);
   writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
   const profiles = '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n';
@@ -549,7 +549,7 @@ test('both harnesses preserve independent defaults/profiles and unrelated settin
   writeFileSync(settings, JSON.stringify({ theme: 'dark', permissions: { allow: ['Bash(custom)'], deny: ['Bash(blocked)'] } }));
   const result = f.run(['--host', 'both', '--skip-tests']);
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /companion: profile review → copilot.*needs attention/);
+  assert.match(result.stdout, /companion: opencode \(config\); needs attention/);
   assert.match(result.stdout, /Claude: agent and permissions installed; companion: codex/);
   assert.equal(readFileSync(path.join(f.state(), 'profiles.json'), 'utf8'), profiles);
   assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'opencode\n');

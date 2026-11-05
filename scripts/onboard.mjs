@@ -20,7 +20,7 @@
 // unless --no-target-check is passed.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -31,24 +31,14 @@ import {
   inspectTarget,
   inspectTargets,
   targetReadinessSummary,
-  inspectProfiles,
-  profileReadinessSummary,
   memoizeProbe,
   probeCommand,
 } from '../lib/target-diagnostics.mjs';
-import { BASE_DIR, writeDefaultTarget, readDefaultTarget, writeProfiles, isModelAllowedFor } from '../lib/state.mjs';
+import { writeDefaultTarget, readDefaultTarget, writeTargetChecks } from '../lib/state.mjs';
 import { startOpenCodeRun } from '../bridge-server/opencode-runtime.mjs';
 import { createCodexCollector } from '../bridge-server/codex-runtime.mjs';
-import {
-  loadProfiles,
-  VALID_STRENGTHS,
-  COMPANION_ADAPTERS,
-  adapterValuesFor,
-} from '../lib/profile-registry.mjs';
-
 const VALID_HOSTS = new Set(['claude', 'codex', 'both']);
 const VALID_TARGET_OPTS = new Set([...TARGET_IDS, 'auto', 'none']);
-const PROFILE_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 export function parseArgs(argv) {
   const opts = {
@@ -61,15 +51,6 @@ export function parseArgs(argv) {
     listTargets: false,
     doctor: false,
     noTargetCheck: false,
-    // Strength-routed profile authoring.
-    listProfiles: false,
-    defineProfile: undefined,
-    companion: undefined,
-    model: undefined,
-    adapter: undefined,
-    strength: undefined, // CSV → array
-    assignStrength: undefined,
-    setDefaultProfile: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -86,14 +67,6 @@ export function parseArgs(argv) {
       case '--list-targets': opts.listTargets = true; break;
       case '--doctor': opts.doctor = true; break;
       case '--no-target-check': opts.noTargetCheck = true; break;
-      case '--list-profiles': opts.listProfiles = true; break;
-      case '--define-profile': opts.defineProfile = String(valueOf(inline) || '').trim(); break;
-      case '--companion': opts.companion = String(valueOf(inline) || '').trim().toLowerCase(); break;
-      case '--model': opts.model = String(valueOf(inline) || '').trim(); break;
-      case '--adapter': opts.adapter = String(valueOf(inline) || '').trim().toLowerCase(); break;
-      case '--strength': opts.strength = String(valueOf(inline) || '').split(',').map((s) => s.trim()).filter(Boolean); break;
-      case '--assign-strength': opts.assignStrength = String(valueOf(inline) || '').trim(); break;
-      case '--set-default-profile': opts.setDefaultProfile = String(valueOf(inline) || '').trim(); break;
       case '-h': case '--help': opts.help = true; break;
       default: opts.unknown = a; break;
     }
@@ -115,26 +88,11 @@ export function planOnboard({ options, targets, configuration }) {
 
   if (t && TARGET_IDS.has(t)) {
     if (options.setDefault && configuration) {
-      const profile = configuration.defaultProfile;
-      if (profile?.value && configuration.profiles.find((p) => p.id === profile.value)?.companion !== t) {
-        return { kind: 'error', code: 'profile_override', message: `default profile "${profile.value}" controls routing. Use --set-default-profile <id> to change it; profiles are preserved.` };
-      }
       if (configuration.defaultTarget.source === 'env' && configuration.defaultTarget.target !== t) {
         return { kind: 'error', code: 'env_override', message: 'AGENT_COMPANION_DEFAULT_TARGET overrides this choice. Change or unset it first.' };
       }
-      if (configuration.errors.length) {
-        return { kind: 'error', code: 'invalid_configuration', message: 'Repair the existing profile configuration before changing its default. ' + configuration.errors.join(' ') };
-      }
-      if (configuration.hasProfiles && !profile?.value && configuration.profiles.filter((p) => p.companion === t).length !== 1) {
-        return { kind: 'error', code: 'profile_selection', message: `Existing profiles do not resolve ${t} uniquely. Choose a profile with --set-default-profile <id>; profiles are preserved.` };
-      }
     }
-    let report = targets[t];
-    if (options.setDefault && configuration?.hasProfiles) {
-      const profile = configuration.profiles.find((p) => configuration.defaultProfile?.value
-        ? p.id === configuration.defaultProfile.value : p.companion === t);
-      if (profile) report = { ...report, ready: profile.ready, blockers: profile.blockers, warnings: profile.warnings };
-    }
+    const report = targets[t];
     return { kind: 'chosen', id: t, ready: !!report?.ready, report, writeDefault: options.setDefault };
   }
 
@@ -161,125 +119,13 @@ export function planOnboard({ options, targets, configuration }) {
   return { kind: 'ask', candidates: readyIds };
 }
 
-// Project from the registry; never parse profiles independently. File presence
-// also protects an empty or malformed authoring file from automatic selection.
 function inspectConfiguration(env, run) {
-  const registry = loadProfiles({ env });
   const defaultTarget = readDefaultTarget(env);
-  const profiles = inspectProfiles({ env, run, load: registry });
-  const defaultProfile = registry.synthesized ? null : registry.defaultProfile;
-  const hasFile = existsSync(join(BASE_DIR, 'profiles.json'));
-  const errors = registry.loadErrors.map((e) => e.message);
-  if (hasFile && registry.synthesized) errors.push('profiles.json could not be loaded; preserved for manual repair.');
-  const profile = profiles.find((p) => p.id === defaultProfile?.value);
-  let summary = defaultProfile?.value
-    ? `profile ${defaultProfile.value} → ${profile?.companion || 'unknown'} (${defaultProfile.source})`
-    : defaultTarget.target
-      ? `${defaultTarget.target} (${defaultTarget.source})`
-      : `no default${profiles.length ? `; ${profiles.length} profiles available for explicit routing` : '; select a companion before delegating'}`;
-  const ready = defaultProfile?.value ? profile?.ready
-    : defaultTarget.target ? inspectTarget(defaultTarget.target, { env, run }).ready : null;
-  if (ready === false || errors.length) summary += '; needs attention';
-  return { exists: hasFile || !!defaultTarget.target || !!env.AGENT_COMPANION_DEFAULT_PROFILE, hasProfiles: !registry.synthesized,
-    defaultTarget, defaultProfile, profiles, errors, summary };
-}
-
-// Pure profile planner: validate a profile definition against the existing set
-// without IO. Returns { kind:'ok', profile } or { kind:'error', code, message }.
-// Persistence (writeProfiles) is the caller's job. OpenCode per-profile models
-// are accepted — the worker model plumbing is committed-regression-verified for
-// both the cli and server adapters.
-export function planProfile({ id, companion, model = null, strengths = [], adapter = null, existing = [] }) {
-  const cleanId = String(id || '').trim();
-  if (!PROFILE_ID_RE.test(cleanId)) {
-    return { kind: 'error', code: 'bad_id', message: `profile id "${id}" must match ${PROFILE_ID_RE}` };
-  }
-  if (existing.some((p) => p.id === cleanId)) {
-    return { kind: 'error', code: 'duplicate_id', message: `profile "${cleanId}" already exists` };
-  }
-  const comp = String(companion || '').trim().toLowerCase();
-  if (!TARGET_IDS.has(comp)) {
-    return { kind: 'error', code: 'bad_companion', message: `--companion must be one of ${[...TARGET_IDS].join(', ')} (got "${companion}")` };
-  }
-  // Same rule, one table: the valid adapter set is per companion and lives in
-  // lib/profile-registry.mjs, so the CLI cannot drift from what loadProfiles
-  // will accept back off disk. Companion first — the set depends on it.
-  let adp = adapter ? String(adapter).trim().toLowerCase() : null;
-  if (adp) {
-    const values = adapterValuesFor(comp);
-    if (!values) return { kind: 'error', code: 'bad_adapter', message: `--adapter is not selectable for companion "${comp}" (accepted on: ${Object.keys(COMPANION_ADAPTERS).join(', ')})` };
-    if (!values.includes(adp)) return { kind: 'error', code: 'bad_adapter', message: `--adapter must be ${values.join(' or ')} for companion "${comp}"` };
-  }
-  const mdl = model ? String(model).trim() : null;
-  if (mdl && !isModelAllowedFor(comp, mdl)) {
-    return {
-      kind: 'error', code: 'bad_model',
-      message: comp === 'copilot'
-        ? `model "${mdl}" is not a documented Copilot model`
-        : `model "${mdl}" must be provider/model form (e.g. anthropic/claude-sonnet-4.6)`,
-    };
-  }
-  const strs = [];
-  for (const s of strengths) {
-    const label = String(s || '').trim().toLowerCase();
-    if (!label) continue;
-    if (!VALID_STRENGTHS.has(label)) {
-      return { kind: 'error', code: 'bad_strength', message: `strength "${s}" must be one of ${[...VALID_STRENGTHS].join(', ')}` };
-    }
-    if (!strs.includes(label)) strs.push(label);
-  }
-  const profile = { id: cleanId, companion: comp, ...(mdl ? { model: mdl } : {}), ...(adp ? { adapter: adp } : {}), strengths: strs };
-  return { kind: 'ok', profile };
-}
-
-// Pure strength-assignment planner — the deterministic mirror of the server's
-// resolveStrength ambiguity rule. A strength already claimed by another profile
-// is ambiguous UNLESS a defaultProfile tiebreak is one of the claimants (and so
-// actually claims the strength).
-export function planStrengthAssignment({ profileId, strength, existing = [], defaultProfile = null }) {
-  const label = String(strength || '').trim().toLowerCase();
-  if (!VALID_STRENGTHS.has(label)) {
-    return { kind: 'error', code: 'bad_strength', message: `strength "${strength}" must be one of ${[...VALID_STRENGTHS].join(', ')}` };
-  }
-  if (!existing.some((p) => p.id === profileId)) {
-    return { kind: 'error', code: 'unknown_profile', message: `profile "${profileId}" does not exist` };
-  }
-  const otherClaimants = existing.filter((p) => p.id !== profileId && (p.strengths || []).includes(label));
-  if (otherClaimants.length === 0) return { kind: 'ok', resolved: true };
-  const claimSet = new Set([profileId, ...otherClaimants.map((p) => p.id)]);
-  if (defaultProfile && claimSet.has(defaultProfile)) {
-    return { kind: 'ok', resolved: true, tiebreak: defaultProfile };
-  }
-  return {
-    kind: 'conflict', code: 'strength_ambiguous',
-    candidates: [...claimSet],
-    message: `strength "${label}" is already claimed by ${otherClaimants.map((p) => p.id).join(', ')}; set a defaultProfile tiebreak among the claimants (--set-default-profile <id>)`,
-  };
-}
-
-// Reconstruct the raw authoring doc (profiles[] + defaultProfile) from the
-// single-producer registry. The synthesized legacy profile is excluded; a
-// file-level defaultProfile that still points to a live profile is carried
-// forward.
-function loadAuthoringState(env) {
-  const reg = loadProfiles({ env });
-  const profiles = reg.synthesized
-    ? []
-    : reg.profiles.filter((p) => !p.synthesized).map((p) => ({
-        id: p.id, companion: p.companion,
-        ...(p.model ? { model: p.model } : {}),
-        ...(p.adapter ? { adapter: p.adapter } : {}),
-        strengths: p.strengths.slice(),
-      }));
-  const dp = (!reg.synthesized && reg.defaultProfile?.value && reg.byId.has(reg.defaultProfile.value))
-    ? reg.defaultProfile.value : null;
-  return { profiles, defaultProfile: dp };
-}
-
-function persistProfiles(profiles, defaultProfile) {
-  const doc = { profiles };
-  if (defaultProfile) doc.defaultProfile = defaultProfile;
-  writeProfiles(doc);
+  const ready = defaultTarget.target ? inspectTarget(defaultTarget.target, { env, run }).ready : null;
+  const summary = defaultTarget.target
+    ? `${defaultTarget.target} (${defaultTarget.source})${ready === false ? '; needs attention' : ''}`
+    : 'no default; select a companion before delegating';
+  return { exists: !!defaultTarget.target, defaultTarget, summary };
 }
 
 function printTargetReport(report, { json } = {}) {
@@ -358,91 +204,12 @@ function runCodexSmoke(env) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
-
-// Profile authoring CLI. Returns an exit code; never exits the process itself
-// (so it stays unit-testable). Pure planners do the validation; this wires them
-// to writeProfiles. Only ids / model names / strength labels are persisted —
-// never secrets.
-export function runProfileCommand(options, env = process.env, io = console) {
-  if (options.listProfiles) {
-    const profiles = inspectProfiles({ env });
-    if (options.json) { io.log(JSON.stringify({ profiles, defaultProfile: loadAuthoringState(env).defaultProfile }, null, 2)); return 0; }
-    if (profiles.length === 0) { io.log('no profiles configured (profiles.json absent or empty).'); return 0; }
-    const { defaultProfile } = loadAuthoringState(env);
-    io.log(`default profile: ${defaultProfile || 'unset'}`);
-    for (const p of profiles) io.log(`  - ${profileReadinessSummary(p)}${p.strengths.length ? ` [${p.strengths.join(', ')}]` : ''}`);
-    return 0;
-  }
-
-  if (options.defineProfile !== undefined) {
-    const { profiles, defaultProfile } = loadAuthoringState(env);
-    const plan = planProfile({
-      id: options.defineProfile, companion: options.companion, model: options.model,
-      adapter: options.adapter, strengths: options.strength || [], existing: profiles,
-    });
-    if (plan.kind === 'error') { io.error(`[FAIL] ${plan.message}`); return 2; }
-    // Mirror the server's ambiguity rule for each declared strength.
-    for (const s of plan.profile.strengths) {
-      const sa = planStrengthAssignment({ profileId: plan.profile.id, strength: s, existing: [...profiles, plan.profile], defaultProfile });
-      if (sa.kind === 'conflict') {
-        if (options.yes) { io.error(`[FAIL] ${sa.message}`); return 2; }
-        io.error(`[WARN] ${sa.message}`);
-      }
-    }
-    persistProfiles([...profiles, plan.profile], defaultProfile);
-    io.log(`[OK] defined profile "${plan.profile.id}" → ${plan.profile.companion}${plan.profile.model ? ` (${plan.profile.model})` : ''}${plan.profile.strengths.length ? ` [${plan.profile.strengths.join(', ')}]` : ''}`);
-    return 0;
-  }
-
-  if (options.assignStrength !== undefined) {
-    const { profiles, defaultProfile } = loadAuthoringState(env);
-    const target = profiles.find((p) => p.id === options.assignStrength);
-    if (!target) { io.error(`[FAIL] profile "${options.assignStrength}" does not exist`); return 2; }
-    const labels = options.strength || [];
-    if (labels.length === 0) { io.error('[FAIL] --assign-strength requires --strength <labels>'); return 2; }
-    for (const s of labels) {
-      const sa = planStrengthAssignment({ profileId: target.id, strength: s, existing: profiles, defaultProfile });
-      if (sa.kind === 'error') { io.error(`[FAIL] ${sa.message}`); return 2; }
-      if (sa.kind === 'conflict') {
-        if (options.yes) { io.error(`[FAIL] ${sa.message}`); return 2; }
-        io.error(`[WARN] ${sa.message}`);
-      }
-      const label = String(s).trim().toLowerCase();
-      if (!target.strengths.includes(label)) target.strengths.push(label);
-    }
-    persistProfiles(profiles, defaultProfile);
-    io.log(`[OK] assigned [${labels.join(', ')}] to "${target.id}"`);
-    return 0;
-  }
-
-  if (options.setDefaultProfile !== undefined) {
-    const { profiles } = loadAuthoringState(env);
-    if (!profiles.some((p) => p.id === options.setDefaultProfile)) {
-      io.error(`[FAIL] profile "${options.setDefaultProfile}" does not exist — define it first`);
-      return 2;
-    }
-    persistProfiles(profiles, options.setDefaultProfile);
-    io.log(`[OK] default profile set to "${options.setDefaultProfile}"`);
-    return 0;
-  }
-
-  return null; // not a profile command
-}
-
 const HELP = `agent-companion onboarding
 
   node scripts/onboard.mjs --target opencode|copilot|codex|antigravity|auto|none [--host claude|codex|both]
                            [--set-default] [--yes] [--json] [--plan] [--smoke] [--no-target-check]
   node scripts/onboard.mjs --list-targets [--json]
   node scripts/onboard.mjs --doctor [--json]
-
-  # Strength-routed companion profiles (authoring; ids/models/labels only, no secrets):
-  node scripts/onboard.mjs --list-profiles [--json]
-  node scripts/onboard.mjs --define-profile <id> --companion opencode|copilot|codex|antigravity \\
-                           [--model <m>] [--adapter cli|server (opencode) | exec|appserver (codex)] \\
-                           [--strength reviewer,planner] [--yes]
-  node scripts/onboard.mjs --assign-strength <id> --strength <labels> [--yes]
-  node scripts/onboard.mjs --set-default-profile <id>
 
 Attach your companion. Supported now: opencode, copilot, codex, and antigravity. Onboarding never
 asks for or stores provider secrets — authenticate with the vendor tools.
@@ -458,8 +225,8 @@ async function main() {
   if (options.help) { console.log(HELP); process.exit(0); }
   if (options.unknown) { console.error(`[FAIL] unknown argument: ${options.unknown}`); process.exit(2); }
   if (!VALID_HOSTS.has(options.host)) { console.error(`[FAIL] --host must be claude|codex|both (got ${options.host})`); process.exit(2); }
-  if (options.plan && (options.smoke || options.defineProfile !== undefined || options.assignStrength !== undefined || options.setDefaultProfile !== undefined)) {
-    console.error('[FAIL] --plan cannot be combined with --smoke or profile writes.'); process.exit(2);
+  if (options.plan && options.smoke) {
+    console.error('[FAIL] --plan cannot be combined with --smoke.'); process.exit(2);
   }
 
   // --doctor: full environment report.
@@ -469,11 +236,6 @@ async function main() {
     console.log(options.json ? JSON.stringify(report, null, 2) : renderDoctorReport(report));
     process.exit(report.ok ? 0 : 1);
   }
-
-  // Strength-routed profile authoring subcommands. runProfileCommand returns an
-  // exit code, or null when no profile flag was passed.
-  const profileExit = runProfileCommand(options, env);
-  if (profileExit !== null) process.exit(profileExit);
 
   const run = memoizeProbe(probeCommand);
   const targets = inspectTargets({ env, run });
@@ -536,7 +298,7 @@ async function main() {
   const { id, report } = plan;
   let wrote = false;
   if (!options.json && plan.writeDefault) {
-    console.log(`Plan: default companion ${configuration.summary} → ${id}; profiles unchanged.`);
+    console.log(`Plan: default companion ${configuration.summary} → ${id}; model settings preserved.`);
   }
 
   let smoke = null;
@@ -559,6 +321,10 @@ async function main() {
       writeDefaultTarget(id);
       wrote = true;
     }
+  }
+  if (plan.writeDefault && (report.ready || options.noTargetCheck) && smoke?.passed !== false) {
+    writeTargetChecks(Object.fromEntries(Object.entries(targets).map(([id, check]) =>
+      [id, { ...check, checkedAt: new Date().toISOString() }])));
   }
   const current = inspectConfiguration(env, run);
   if (options.json) {

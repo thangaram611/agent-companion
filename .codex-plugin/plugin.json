@@ -40,7 +40,7 @@
   "interface": {
     "displayName": "Agent Companion",
     "shortDescription": "Attach OpenCode, Copilot, Codex, or Antigravity companions.",
-    "longDescription": "Adds a Codex subagent that delegates implementation, review, and research work to a chosen companion runtime, currently OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity, through an internal MCP bridge, per-host runtime state, and completion drain hooks. Codex registers the bridge at plugin scope so the subagent can inherit it; the subagent remains the supported caller. The public direction is harness plus companion, with strength-routed companion profiles that map labels such as reviewer, web_researcher, planner, and fast_executor onto the configured companions.",
+    "longDescription": "Adds a Codex subagent that delegates implementation, review, and research work to a chosen companion runtime, currently OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity, through an internal MCP bridge, per-host runtime state, and completion drain hooks. Codex registers the bridge at plugin scope so the subagent can inherit it; the subagent remains the supported caller. Tell the subagent what to do, the absolute repository path, and optionally which companion or model to use. Follow-ups continue the same companion conversation.",
     "developerName": "thangaram611",
     "category": "Engineering",
     "capabilities": [

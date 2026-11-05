@@ -1,3 +1,4 @@
+import '../test/sandbox-home.mjs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -123,6 +124,37 @@ function withRuntimeDir() {
 
 afterEach(async () => {
   await _resetSdkRuntimeForTest();
+});
+
+test('bridge sends the exact task through the Copilot SDK prompt builder', async () => {
+  const cleanup = withRuntimeDir();
+  installFakeSdk();
+  const { dispatch, jobs, _resetForTest } = await import('./server.mjs');
+  _resetForTest();
+  const prior = { sid: process.env.CLAUDE_CODE_SESSION_ID, adapter: process.env.COPILOT_RUNTIME_ADAPTER };
+  process.env.CLAUDE_CODE_SESSION_ID = 'sdk-verbatim';
+  process.env.COPILOT_RUNTIME_ADAPTER = 'sdk';
+  const task = '  First line.\n\nSecond line: `quoted` — keep whitespace.  \n';
+  try {
+    const send = (await dispatch({ action: 'send', target: 'copilot', task, cwd: tmpdir() })).structuredContent;
+    for (let i = 0; i < 100 && !FakeClient.instances[0]?.sessions[0]?.sent.length; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const session = FakeClient.instances[0].sessions[0];
+    assert.equal(session.sent[0].prompt, task);
+    assert.equal(Object.hasOwn(FakeClient.instances[0].createConfigs[0], 'model'), false);
+    session.emit('assistant.message', { messageId: 'done', content: 'ready' });
+    session.emit('session.idle', {});
+    const terminal = (await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 1 })).structuredContent;
+    assert.equal(terminal.status, 'completed');
+  } finally {
+    await _resetSdkRuntimeForTest();
+    for (const [id, job] of jobs) if (job.claudeSessionId === 'sdk-verbatim') jobs.delete(id);
+    if (prior.sid === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = prior.sid;
+    if (prior.adapter === undefined) delete process.env.COPILOT_RUNTIME_ADAPTER; else process.env.COPILOT_RUNTIME_ADAPTER = prior.adapter;
+    _resetForTest();
+    cleanup();
+  }
 });
 
 test('SDK runtime sends a background prompt and maps session events to bridge watch/inspect shapes', async () => {

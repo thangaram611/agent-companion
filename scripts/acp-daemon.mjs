@@ -19,7 +19,7 @@
 // Yolo posture is the companion's, declared on its descriptor (Copilot's
 // `--allow-all-*` flags; an agent that asks anyway gets the descriptor's
 // answer to `session/request_permission`). Behavioural safety is enforced per
-// prompt by the templates, not by flags.
+// prompt by the caller, not by flags.
 //
 // Protocol v1 is PINNED: `initialize` sends `protocolVersion: 1`, and an agent
 // answering any other version is refused — the child is killed and the session
@@ -75,7 +75,7 @@ const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 // codex broker sweeps the same directory under the same predicate, and a local
 // copy tuned in one daemon would unlink heartbeats the other still reads as
 // live. See the note beside their definitions.
-const PROMPT_TIMEOUT_MS = 25 * 60 * 1000; // 25 min per prompt — must be >= MAX_LONG_POLL_WAIT_MS or legitimate long prompts are killed and surface as "prompt timeout" failures instead of real answers. Raised from 10 min to accommodate /fleet jobs that legitimately decompose into multiple long-running sub-agents (e.g. multi-file code reviews).
+const PROMPT_TIMEOUT_MS = 25 * 60 * 1000; // 25 min per prompt — must be >= MAX_LONG_POLL_WAIT_MS or legitimate long prompts are killed and surface as "prompt timeout" failures instead of real answers. Long tasks can include multiple sub-agents (e.g. multi-file code reviews).
 const PROMPT_RETENTION_MS = 60 * 60 * 1000; // retain terminal prompts for inspection
 const SPAWN_INIT_TIMEOUT_MS = 30 * 1000; // 30s for handshake
 const SILENCE_CHECK_INTERVAL_MS = 10 * 1000; // 10s — silence heuristic

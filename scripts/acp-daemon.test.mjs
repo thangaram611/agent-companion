@@ -88,7 +88,7 @@ async function runPrompt(manager, sessionId, text) {
   return state;
 }
 
-test('the descriptors drive the argv: Copilot byte-identical to the flags it always had, the fake as a bare `--acp`', () => {
+test('the descriptors drive the argv: Copilot permission flags and optional model, the fake as a bare `--acp`', () => {
   assert.deepEqual(COPILOT.acp.args({ model: 'claude-sonnet-4.6', env: {} }), [
     '--acp',
     '--model', 'claude-sonnet-4.6',
@@ -97,8 +97,8 @@ test('the descriptors drive the argv: Copilot byte-identical to the flags it alw
     '--allow-all-tools',
     '--allow-all-paths',
     '--allow-all-urls',
-    '--experimental',
   ]);
+  assert.equal(COPILOT.acp.args({}).includes('--model'), false);
   assert.equal(COPILOT.acp.clientName, 'copilot-acp-daemon');
   assert.deepEqual(COPILOT.acp.env({ env: {}, paths: { otelTraces: '/x/traces.jsonl' } }), {
     COPILOT_OTEL_ENABLED: 'true',
@@ -107,7 +107,6 @@ test('the descriptors drive the argv: Copilot byte-identical to the flags it alw
   assert.deepEqual(COPILOT.acp.rotate, ['otelTraces']);
   assert.equal(COPILOT.acp.loadSession, false, 'Copilot sessions are process-local (github/copilot-cli#1767)');
   assert.equal(COPILOT.acp.permission({}), 'all');
-  assert.equal(COPILOT.acp.rubberDuck, true);
 
   assert.deepEqual(FAKE.acp.args({ model: null, env: {} }), ['--acp']);
   assert.deepEqual(FAKE.acp.args({ model: 'm1', env: {} }), ['--acp', '--model', 'm1']);
@@ -384,7 +383,6 @@ test('antigravity: the descriptor — bare spawn, no usage reader, load honoured
   assert.equal(ANTIGRAVITY.acp.clientName, 'agent-companion');
   assert.equal(ANTIGRAVITY.acp.loadSession, true, 'a session survives the server process and session/load remembers (measured)');
   assert.equal(ANTIGRAVITY.acp.defaultModel({}), null, 'unset leaves the account\'s default model');
-  assert.equal(ANTIGRAVITY.acp.rubberDuck, false);
   assert.equal(ANTIGRAVITY.acp.permission({}), 'all');
   assert.equal(ANTIGRAVITY.acp.permission({ AGENT_COMPANION_ANTIGRAVITY_PERMISSION: 'edit' }), 'edit');
   assert.equal(ANTIGRAVITY.acp.permission({ AGENT_COMPANION_ANTIGRAVITY_PERMISSION: 'NONE' }), 'none');
@@ -399,7 +397,6 @@ test('antigravity: the descriptor — bare spawn, no usage reader, load honoured
   assert.equal(ANTIGRAVITY.binaryEnv, 'ANTIGRAVITY_ACP_BIN');
   assert.match(ANTIGRAVITY.binaryNames[0], /agent-companion\/antigravity-acp\/current\/agy_acp_server\.par$/, 'the registry binary, never agy');
   assert.equal(ANTIGRAVITY.capabilities.modelSelection, true);
-  assert.equal(ANTIGRAVITY.capabilities.parallel, 'planned');
 });
 
 test('antigravity: a pinned model is set on the session after session/new, set again after session/load, and no usage is invented', async (t) => {

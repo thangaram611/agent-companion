@@ -3,7 +3,7 @@
 // The Copilot binding of the generic ACP daemon (scripts/acp-daemon.mjs): the
 // same classes, bound to the Copilot descriptor in lib/target-registry.mjs,
 // whose `acp` block carries everything Copilot-shaped — the yolo flags, the
-// OTEL usage exporter, the process-local sessions, the rubber-duck footer.
+// OTEL usage exporter and the process-local sessions.
 //
 // The bridge spawns `scripts/acp-daemon.mjs --companion copilot`; running this
 // file directly starts the identical daemon by hand. Its exports exist so the

@@ -1,5 +1,5 @@
 // Import this FIRST in any suite whose static imports reach lib/state.mjs or
-// lib/runtime-paths.mjs — directly or through validation.mjs, profile-registry,
+// lib/runtime-paths.mjs — directly or through validation.mjs,
 // target-registry, onboard.mjs, the daemons, or server.mjs.
 //
 //   import '../test/sandbox-home.mjs';

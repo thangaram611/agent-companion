@@ -249,8 +249,6 @@ for h in "${HOSTS[@]}"; do
   CURRENT="$(jq -r '.configuration.summary' "$PLAN_DIR/$h.json")"
   case "$h" in claude) CLAUDE_COMPANION="$CURRENT" ;; codex) CODEX_COMPANION="$CURRENT" ;; esac
   echo "Companion ($h): $CURRENT"
-  jq -r '.configuration.profiles[] | "  Profile: \(.id) → \(.companion); ready=\(.ready)", (.blockers[], .warnings[] | "    " + .message)' "$PLAN_DIR/$h.json"
-  jq -r '.configuration.errors[] | "  Attention: " + .' "$PLAN_DIR/$h.json"
   jq -r '.targets[] | "  \(.displayName): " + (if .ready then "ready" else "not ready" end), (.blockers[], .warnings[] | "    " + .message), (.nextSteps[] | "    Next: " + .)' "$PLAN_DIR/$h.json"
   if [ "$PLAN_CODE" != 0 ] && [ -t 0 ] && [ "$YES" = 0 ] \
       && jq -e '.plan.code == "ambiguous_target" or .plan.code == "no_ready_target"' "$PLAN_DIR/$h.json" >/dev/null; then
@@ -267,7 +265,7 @@ for h in "${HOSTS[@]}"; do
   if [ "$CHOICE" = none ]; then
     echo "Plan ($h): preserve companion configuration."
   else
-    echo "Plan ($h): set default companion to $CHOICE; preserve profiles and model settings."
+    echo "Plan ($h): set default companion to $CHOICE; preserve model settings."
     jq -r 'if .plan.ready then empty else "  Readiness deferred by --no-target-check; companion is not ready." end' "$PLAN_DIR/$h.json"
   fi
   if [ "$h" = codex ]; then

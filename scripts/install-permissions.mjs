@@ -31,6 +31,7 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 
 const PERMISSIONS = [
+  'mcp__agent-bridge__agent_catalog',
   'mcp__agent-bridge__agent_send',
   'mcp__agent-bridge__agent_wait',
   'mcp__agent-bridge__agent_status',

@@ -282,7 +282,7 @@ test('CLI plan and ordinary reruns preserve existing defaults, models and profil
     const r = run([...args, '--set-default', '--yes', '--json'], {}, files);
     assert.equal(r.code, 0, r.stderr);
     assert.deepEqual(r.stored, files);
-    assert.match(JSON.parse(r.stdout).configuration.summary, /review.*copilot/);
+    assert.match(JSON.parse(r.stdout).configuration.summary, /copilot/);
   }
 });
 
@@ -302,36 +302,14 @@ test('failed smoke and read-only plans never commit a default', () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('plans explain conflicting defaults and preserve invalid or ambiguous profiles', () => {
-  const cases = [
-    [{ 'default-target': 'copilot\n' }, { AGENT_COMPANION_DEFAULT_TARGET: 'opencode' }, 'env_override'],
-    [{ 'profiles.json': '{bad json\n' }, {}, 'invalid_configuration'],
-    [{ 'profiles.json': JSON.stringify({ profiles: [{ id: 'review', companion: 'copilot' }], defaultProfile: 'review' }) }, {}, 'profile_override'],
-    [{ 'profiles.json': JSON.stringify({ profiles: [{ id: 'a', companion: 'codex' }, { id: 'b', companion: 'codex' }] }) }, {}, 'profile_selection'],
-  ];
-  for (const [files, env, code] of cases) {
-    const r = run(['--plan', '--target', 'codex', '--set-default', '--yes', '--json'], env, files);
-    assert.equal(r.code, 2, r.stderr);
-    assert.equal(JSON.parse(r.stdout).plan.code, code);
-    for (const [name, bytes] of Object.entries(files)) assert.equal(r.stored[name], bytes);
-  }
-  const preserved = run(['--plan', '--yes', '--json'], {}, { 'profiles.json': '{bad json\n' });
+test('plans explain an overriding environment default and never read legacy profiles', () => {
+  const files = { 'default-target': 'copilot\n', 'profiles.json': '{bad json\n' };
+  const r = run(['--plan', '--target', 'codex', '--set-default', '--yes', '--json'], { AGENT_COMPANION_DEFAULT_TARGET: 'opencode' }, files);
+  assert.equal(r.code, 2, r.stderr);
+  assert.equal(JSON.parse(r.stdout).plan.code, 'env_override');
+  for (const [name, bytes] of Object.entries(files)) assert.equal(r.stored[name], bytes);
+  const preserved = run(['--plan', '--yes', '--json'], {}, files);
   assert.equal(preserved.code, 0, preserved.stderr);
-  assert.equal(preserved.stored['profiles.json'], '{bad json\n');
-  assert.match(JSON.parse(preserved.stdout).configuration.summary, /needs attention/);
-});
-
-test('preflight includes readiness of the profile that will actually receive work', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onboard-profile-readiness-'));
-  const bin = join(dir, 'copilot');
-  writeFileSync(bin, '#!/bin/sh\necho copilot-fake\n', { mode: 0o700 });
-  try {
-    const profiles = JSON.stringify({ profiles: [{ id: 'review', companion: 'copilot', model: 'not-a-real-model' }], defaultProfile: 'review' });
-    const r = run(['--plan', '--target', 'copilot', '--set-default', '--yes', '--json'], { COPILOT_BIN: bin }, { 'profiles.json': profiles });
-    assert.equal(r.code, 3, r.stdout + r.stderr);
-    assert.equal(JSON.parse(r.stdout).plan.ready, false);
-    assert.match(JSON.stringify(JSON.parse(r.stdout).plan.report.blockers), /model_invalid/);
-    assert.equal(r.stored['profiles.json'], profiles);
-    assert.equal(r.stored['default-target'], null);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  assert.equal(preserved.stored['profiles.json'], files['profiles.json']);
+  assert.equal(Object.hasOwn(JSON.parse(preserved.stdout).configuration, 'profiles'), false);
 });
