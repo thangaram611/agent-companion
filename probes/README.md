@@ -11,6 +11,16 @@ rollouts. `codex-app-server/probe.mjs` and `wsclient.mjs` write logs in the shel
 working directory; run them from a scratch directory and give them a scratch
 workspace. These are not read-only checks.
 
+## `host-qualification/claude/` — Phase 2 host measurements
+
+An isolated, passive fake MCP/provider fixture for Claude Code ownership,
+cancellation, connection loss, cwd, follow-up and long-call measurements.
+Preparation and `verify.mjs` are offline; live runs require explicit operator
+execution and credentials and spend Claude tokens. Each run keeps its own
+config, agents, logs and PID cleanup evidence. See the
+[runbook](host-qualification/claude/RUNBOOK.md) for the first smoke command,
+scenario matrix, TUI actions and limits. No production plugin is loaded.
+
 ## `smoke/` — end-to-end against the real bridge
 
 These scripts drive `bridge-server/server.mjs` over MCP stdio. The repo root is
