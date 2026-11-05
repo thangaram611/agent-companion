@@ -11,7 +11,7 @@
 // Driven through a companion's `binaryEnv` (`FAKE_ACP_BIN` for its own
 // descriptor, `COPILOT_BIN` for Copilot's, `ANTIGRAVITY_ACP_BIN` for
 // Antigravity's), the
-// idiom bridge-server/codex-runtime.test.mjs uses for its fake codex. It never
+// idiom bridge-server/adapters/codex.test.mjs uses for its fake codex. It never
 // runs a model and never spends a token. Everything it does is scripted from
 // its environment, so a test orders it around before the spawn:
 //

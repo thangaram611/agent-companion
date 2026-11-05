@@ -1,5 +1,5 @@
 import { Agent, request } from 'node:http';
-import { createTurnAccumulator, parseOpenCodeModel } from '../opencode-server-runtime.mjs';
+import { createTurnAccumulator, parseOpenCodeModel } from './opencode-protocol.mjs';
 import { openCodeCliMajor } from '../../lib/opencode-cli.mjs';
 import { getTargetById } from '../../lib/target-registry.mjs';
 import { lastTargetChecks } from '../../lib/target-diagnostics.mjs';

@@ -1,7 +1,7 @@
 import { accessSync, constants, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { AcpConnection } from '../../scripts/acp-daemon.mjs';
+import { AcpConnection } from './acp-protocol.mjs';
 import { getTargetById } from '../../lib/target-registry.mjs';
 import { lastTargetChecks } from '../../lib/target-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';

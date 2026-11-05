@@ -84,7 +84,7 @@ if (args.join(' ') === 'mcp list --json') {
       args: ['hooks/launch-agent-bridge.sh'],
       env: {
         AGENT_COMPANION_HOST: 'codex',
-        CODEX_RUNTIME_ADAPTER: 'appserver',
+        AGENT_COMPANION_OWNER_GRACE_MS: '120000',
       },
       env_vars: [],
       cwd: path.join(codexHome, 'plugins', 'cache', 'agent-companion', 'agent-companion', '0.0.1')

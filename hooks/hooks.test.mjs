@@ -18,7 +18,7 @@ for (const [host, manifest, rootVar, installer] of [
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const root = join(dir, 'plugin root');
     mkdirSync(join(root, 'hooks'), { recursive: true });
-    const scripts = [installer, 'prewarm-target.sh', 'install-deps.sh', 'drain-completions.sh'];
+    const scripts = [installer, 'install-deps.sh', 'drain-completions.sh'];
     for (const script of [...scripts, 'name-thread.sh', 'stop-owner.sh']) {
       writeFileSync(join(root, 'hooks', script),
         `printf '%s\\n' '${script}' "\${AGENT_COMPANION_HOST:-claude}"\n`);

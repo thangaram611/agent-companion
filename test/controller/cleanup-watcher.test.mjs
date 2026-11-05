@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SANDBOX_HOME } from '../sandbox-home.mjs';
-import { pidAlive } from '../../lib/shared-runtime-registry.mjs';
+import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
 import { Controller } from '../../bridge-server/controller/controller.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
 import { cleanupExecution, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';

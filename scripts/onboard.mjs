@@ -19,7 +19,6 @@
 // --yes); 3 target chosen but not ready (actionable next steps printed),
 // unless --no-target-check is passed.
 
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -35,8 +34,11 @@ import {
   probeCommand,
 } from '../lib/target-diagnostics.mjs';
 import { writeDefaultTarget, readDefaultTarget, writeTargetChecks } from '../lib/state.mjs';
-import { startOpenCodeRun } from '../bridge-server/opencode-runtime.mjs';
-import { createCodexCollector } from '../bridge-server/codex-runtime.mjs';
+import { Controller } from '../bridge-server/controller/controller.mjs';
+import { codexProvider } from '../bridge-server/adapters/codex.mjs';
+import { opencodeProvider } from '../bridge-server/adapters/opencode.mjs';
+import { acpProvider } from '../bridge-server/adapters/acp.mjs';
+import { Records } from '../bridge-server/controller/records.mjs';
 const VALID_HOSTS = new Set(['claude', 'codex', 'both']);
 const VALID_TARGET_OPTS = new Set([...TARGET_IDS, 'auto', 'none']);
 
@@ -140,67 +142,30 @@ function printTargetReport(report, { json } = {}) {
   }
 }
 
-// Opt-in, clearly-warned smoke. Single-shot only for targets with a
-// non-interactive run path (OpenCode, Codex). Returns { supported, passed, detail }.
-function runSmoke(id, env) {
-  if (id === 'opencode') return runOpenCodeSmoke(env);
-  if (id === 'codex') return runCodexSmoke(env);
-  return { supported: false, passed: null, detail: `${id} has no non-interactive smoke path; start it once interactively to verify.` };
-}
-
-async function runOpenCodeSmoke(env) {
-  const dir = mkdtempSync(join(tmpdir(), 'agent-onboard-smoke-'));
+// Opt-in smoke: one controller-owned execution, with a two-minute budget.
+export async function runSmoke(id, env, controllerOptions = {}) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'agent-onboard-smoke-')));
+  const controller = new Controller({ env, records: new Records({ dir: join(dir, 'state') }),
+    providers: { codex: codexProvider({ env }), opencode: opencodeProvider({ env }),
+      copilot: acpProvider('copilot', { env }), antigravity: acpProvider('antigravity', { env }) },
+    ...controllerOptions });
+  const abort = new AbortController();
+  const timer = controller.clock.setTimeout(() => abort.abort(), 120_000);
+  const owner = `onboard-${process.pid}`;
+  let executionId;
   try {
-    const result = await startOpenCodeRun({
-      jobId: `onboard-opencode-${process.pid}`, cwd: dir,
-      prompt: 'Reply with the single word: ready',
-      model: String(env.AGENT_COMPANION_OPENCODE_MODEL || '').trim() || null,
-      env, timeoutMs: 120_000,
-    });
-    const message = result.summary?.message?.trim() || '';
-    return { supported: true, passed: result.status === 'completed' && /^ready[.!]?$/i.test(message), detail: message || result.error || result.status };
+    ({ executionId } = await controller.send({ owner, provider: id, cwd: dir,
+      text: 'Reply with the single word: ready', signal: abort.signal }));
+    await controller.wait({ owner, executionId, timeoutMs: 120_000, signal: abort.signal });
+    const result = controller.status({ executionId })?.result;
+    const message = result?.text?.trim() || '';
+    return { supported: true, passed: result?.outcome === 'completed' && /^ready[.!]?$/i.test(message),
+      detail: message || result?.detail || result?.outcome || 'smoke budget expired' };
   } catch (err) {
-    return { supported: true, passed: false, detail: String(err.stderr || err.message || 'smoke failed').trim() };
+    return { supported: true, passed: false, detail: String(err.message || 'smoke failed').trim() };
   } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-// Config-isolated by design (the one deliberate exception to "inherit the
-// user's codex config", D11): without --ignore-user-config the user's
-// enabled MCP servers boot on this turn too, and node_repl's 120s
-// startup_timeout_sec races this smoke's own 120s budget → false-fail.
-// --ephemeral additionally skips persisting a rollout file for this
-// throwaway turn (auth still resolves via CODEX_HOME).
-function runCodexSmoke(env) {
-  const bin = String(env.CODEX_BIN || 'codex').trim() || 'codex';
-  const dir = mkdtempSync(join(tmpdir(), 'agent-onboard-smoke-'));
-  try {
-    const out = execFileSync(bin, [
-      'exec', '--sandbox', 'read-only', '--skip-git-repo-check',
-      '--ignore-user-config', '--ephemeral', '--json', '-C', dir, '-',
-    ], {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      input: 'Reply with the single word: ready',
-      timeout: 120_000,
-      // Bound the synchronous wait even if the child ignores SIGTERM.
-      killSignal: 'SIGKILL',
-      env,
-    });
-    const collector = createCodexCollector();
-    collector.push(out);
-    const result = collector.finish();
-    const message = result.message.trim();
-    const error = result.turnFailedReason || result.fatalError;
-    return {
-      supported: true,
-      passed: result.turnCompleted && !error && /^ready[.!]?$/i.test(message),
-      detail: error || message || 'No assistant reply received.',
-    };
-  } catch (err) {
-    return { supported: true, passed: false, detail: String(err.stderr || err.message || 'smoke failed').trim() };
-  } finally {
+    controller.clock.clearTimeout(timer);
+    if (executionId) await controller.cancel({ owner, executionId });
     rmSync(dir, { recursive: true, force: true });
   }
 }

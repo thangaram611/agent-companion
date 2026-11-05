@@ -76,7 +76,7 @@ test('Claude references the plugin session server by name and preserves its budg
   assert.equal(server.timeout, 1320000);
   assert.ok(server.timeout > 1200 * 1000);
   assert.equal(server.env.MCP_TOOL_TIMEOUT, undefined);
-  assert.equal(server.env.CODEX_RUNTIME_ADAPTER, 'appserver');
+  assert.equal(server.env.AGENT_COMPANION_OWNER_GRACE_MS, '120000');
   assert.match(text, /THIS FILE IS THE SOURCE/);
   assert.match(text, /re-materializes/);
 });

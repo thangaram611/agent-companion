@@ -9,7 +9,7 @@ import { ManualClock, until } from '../../test/controller/helpers.mjs';
 import { ProcessSupervisor } from '../controller/process-supervisor.mjs';
 import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
-import { pidAlive } from '../../lib/shared-runtime-registry.mjs';
+import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
 import { writeTargetChecks } from '../../lib/state.mjs';
 import { opencodeProvider } from './opencode.mjs';
 

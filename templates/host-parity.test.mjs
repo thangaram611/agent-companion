@@ -59,8 +59,8 @@ test('both hosts ship the same capability knobs, with the same values', () => {
   const claude = claudeEnv();
   const codex = codexEnv();
 
-  assert.deepEqual(capabilityKeys(claude), ['CODEX_RUNTIME_ADAPTER'],
-    'Phase 1 adds no configuration knobs');
+  assert.deepEqual(capabilityKeys(claude), ['AGENT_COMPANION_OWNER_GRACE_MS'],
+    'Both hosts configure the owner attachment grace');
   assert.deepEqual(capabilityKeys(claude), capabilityKeys(codex),
     'a knob set for one host and not the other gives the two an unequal feature set — '
     + 'set it in both templates, or neither');
@@ -89,17 +89,6 @@ test('both hosts offer the same six private tools and conversational send fields
   }
   assert.deepEqual([...claude.matchAll(/^# (.+)$/gm)].map((m) => m[1]),
     [...codex.matchAll(/^# (.+)$/gm)].map((m) => m[1]));
-});
-
-test('the codex transport is the app-server adapter on both hosts', () => {
-  // Pinned by name rather than left to the generic comparison above, because
-  // this is the one knob whose absence is silently destructive: on `exec` a job
-  // dies with the bridge that started it, and the operator is told the truth
-  // only after the work is gone.
-  for (const [host, env] of [['claude', claudeEnv()], ['codex', codexEnv()]]) {
-    assert.equal(env.CODEX_RUNTIME_ADAPTER, 'appserver',
-      `the ${host} host must select the app-server transport`);
-  }
 });
 
 test('each plugin identifies its host for the shared launcher', () => {

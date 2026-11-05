@@ -201,7 +201,6 @@ printf "Checking plugin surface...\n"
 SURFACE_PATHS=(
   "$SCRIPT_DIR/hooks/drain-completions.sh"
   "$SCRIPT_DIR/hooks/install-deps.sh"
-  "$SCRIPT_DIR/hooks/prewarm-target.sh"
 )
 if [ "$DO_CLAUDE" = 1 ]; then
   SURFACE_PATHS+=(
@@ -440,7 +439,7 @@ if [ "$DO_CODEX" = 1 ]; then
         and (.transport.args | length) == 1
         and .transport.args[0] == "hooks/launch-agent-bridge.sh"
         and .transport.env.AGENT_COMPANION_HOST == "codex"
-        and .transport.env.CODEX_RUNTIME_ADAPTER == "appserver"
+        and .transport.env.AGENT_COMPANION_OWNER_GRACE_MS == "120000"
         and (.transport.env_vars | type) == "array"
         and (.transport.env_vars | length) == 0
         and .startup_timeout_sec == 120

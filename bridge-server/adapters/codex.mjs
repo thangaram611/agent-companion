@@ -1,5 +1,5 @@
-import { LineReader } from '../../scripts/codex-app-server-broker.mjs';
-import { codexAppServerSandbox, resolveSteerConfirmMs } from '../codex-app-server-runtime.mjs';
+import { LineReader } from './codex-protocol.mjs';
+import { codexAppServerSandbox, resolveSteerConfirmMs } from './codex-protocol.mjs';
 import { inspectCodexAppServerInstallation } from '../../lib/codex-install.mjs';
 import { connectionScopedNotificationMethods, routeNotification } from '../../lib/codex-app-server-contract.mjs';
 import { codexTurnBaseline, usageFromCodexTokenUsage } from '../../lib/usage.mjs';
@@ -7,6 +7,46 @@ import { getTargetById } from '../../lib/target-registry.mjs';
 import { lastTargetChecks } from '../../lib/target-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 import { bounded, systemClock } from '../controller/clock.mjs';
+import { execFile } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SCHEMA_GENERATOR_ARGS, codexAppServerContract, distillAppServerSchema, compareContracts } from '../../lib/codex-app-server-contract.mjs';
+
+let contractStatus = 'unverified';
+let contractCheck;
+export const getCodexContractStatus = () => contractStatus;
+
+// One advisory schema dump per bridge process, even when executions overlap.
+// The probe never blocks a provider start and never refuses a drifting binary.
+export function checkCodexContract(installation, env) {
+  return contractCheck ??= new Promise((resolve) => {
+    let dir;
+    try { dir = mkdtempSync(join(tmpdir(), 'codex-adapter-schema-')); }
+    catch { resolve(contractStatus); return; }
+    let child;
+    const cleanup = () => {
+      if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    };
+    const finish = (err) => {
+      process.removeListener('exit', cleanup);
+      try {
+        if (!err) {
+          const live = distillAppServerSchema(dir, installation.selected.version || 'unknown');
+          contractStatus = compareContracts(codexAppServerContract(), live).identical ? 'match' : 'drift';
+        }
+      } catch { contractStatus = 'unverified'; }
+      finally { cleanup(); resolve(contractStatus); }
+    };
+    process.once('exit', cleanup);
+    try {
+      child = execFile(installation.selected.path, [...SCHEMA_GENERATOR_ARGS, dir], {
+        env, timeout: 30_000, killSignal: 'SIGKILL',
+      }, finish);
+    } catch (err) { finish(err); }
+  });
+}
 
 const PROTOCOL_MS = 10_000;
 const capabilities = Object.freeze({ followUp: true, steer: true, modelSelection: true, loadsHistory: true });
@@ -48,6 +88,7 @@ export class CodexAdapter {
       if (!installation?.ready || !installation.selected?.path || !installation.selected?.helperPath) {
         throw new Error(installation?.blocker?.message || 'Codex executable/helper pair unavailable');
       }
+      void checkCodexContract(installation, env);
       const runtime = this.runtime = await supervisor.spawn([installation.selected.path, 'app-server'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
       runtime.stdout.setEncoding('utf8');
       runtime.stdout.on('data', (chunk) => {

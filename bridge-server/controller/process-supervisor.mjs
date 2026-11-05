@@ -165,3 +165,14 @@ export class ProcessSupervisor {
     }
   }
 }
+
+export function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means the pid exists but belongs to another user — still alive.
+    return err.code === 'EPERM';
+  }
+}

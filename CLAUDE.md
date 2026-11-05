@@ -86,7 +86,7 @@ second reader/definition is how these break.
 | `lib/host.mjs` | The only place that chooses claude-vs-codex conventions. `AGENT_COMPANION_HOST` is authoritative; `.host` marker files are diagnostic only, never a fallback. |
 | `lib/target-registry.mjs` | What a companion can do (capabilities) **and** what it takes to be ready (onboarding). Two concerns, one descriptor, deliberately. For the ACP companions the `acp` block is also everything the daemon needs to run them. |
 | `lib/command-probe.mjs` | `probeCommand` is the **only** sanctioned synchronous shell-out from bridge code. It stays dependency-free so broker preflight does not initialize durable state. `test/exec-timeout-guard.test.mjs` fails on any duplicate or unbounded one. |
-| `lib/shared-runtime-registry.mjs` | Leases + two-phase disposal for the detached shared runtimes (one per host home). A `dispose` that does anything before the destructive act must call `confirmDisposal()` as late as possible and abort when it returns false. |
+| `bridge-server/controller/process-supervisor.mjs` | Owned process groups, descendant census, termination and birth-identity verification; shared pid-liveness helper. |
 
 ## Things that will bite you
 
