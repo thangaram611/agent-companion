@@ -103,8 +103,11 @@ Wait for its actual reply. TaskStop the control child only after this observatio
       : `Ordinary follow-up, no interrupt requested: when this message reaches you, call catalog with marker=${marker}, then finish.`;
     return base + spawn + observe() + `\nSendMessage to that SAME busy child with exactly: "${message}"\nUse TaskOutput to await its answer. Report actual native delivery result and whether the wait had ended. Do not simulate steering with TaskStop.`;
   }
-  if (config.action === 'long') return base + `Spawn BACKGROUND fixture-native with: "Call send with cwd=${childCwd}; call wait exactly ONCE with its executionId, cwd=${childCwd}, seconds=${config.waitSec}. Record whether the actual return is running, finished, timeout, error, or a host background-task handle; then finish. Do not retry."
-Wait for this child using native TaskOutput (repeat bounded native waits if necessary), then finish. No early TaskStop. MCP per-server timeout=${config.serverTimeoutMs} ms; progress=${config.progress}.`;
+  // Headless parents have no TaskOutput and a session with only background children
+  // closes after roughly ten minutes (measured 2026-11-05), so the long wait must
+  // block the parent's own Agent call: spawn in the foreground.
+  if (config.action === 'long') return base + `Spawn fixture-native in the FOREGROUND (run_in_background false; your Agent call blocks until the child returns) with: "Call send with cwd=${childCwd}; call wait exactly ONCE with its executionId, cwd=${childCwd}, seconds=${config.waitSec}. Record whether the actual return is running, finished, timeout, error, or a host background-task handle; then finish. Do not retry."
+When the Agent call returns, report the child's recorded return verbatim and finish. No early TaskStop. MCP per-server timeout=${config.serverTimeoutMs} ms; progress=${config.progress}.`;
   return base + spawn + '\nReturn PARENT_READY with the native child ID while leaving it running. The operator will perform the named TUI action. On a later operator prompt attempt SendMessage to that SAME child with marker=resume-confirmed; never create a replacement. No automatic /clear, /compact or /exit.';
 }
 
