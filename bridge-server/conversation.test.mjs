@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync, existsSync, rmSync } from 'node:fs';
 import { validateAgentArgs } from './validation.mjs';
 import { callArgs, mcp, resolveRouting, dispatch, jobs, getHostSessionId, _resetForTest } from './server.mjs';
-import { BASE_DIR, readJob, writeJob, writeTargetChecks, writeDefaultTarget, writeDefaultModel } from '../lib/state.mjs';
+import { BASE_DIR, writeJob, writeTargetChecks, writeDefaultTarget, writeDefaultModel } from '../lib/state.mjs';
 import { _setForTest, _resetForTest as resetDaemon } from './daemon-client.mjs';
 
 test('conversational send accepts exact text and an explicit model, with no framing fields', () => {
@@ -39,30 +39,6 @@ test('explicit invalid models are refused for each companion', () => {
   }
 });
 
-test('a starting job retains cwd for request equality before the runtime responds', async () => {
-  _resetForTest();
-  const prior = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'starting-request';
-  let release;
-  _setForTest({ ensureDaemon: () => new Promise((resolve, reject) => { release = () => reject(new Error('test startup stopped')); }) });
-  let jobId;
-  try {
-    const args = { action: 'send', target: 'copilot', task: 'same task', cwd: tmpdir(), thread: 'starting-thread' };
-    jobId = (await dispatch(args)).structuredContent.job_id;
-    assert.equal(readJob(jobId).cwd, args.cwd);
-    const changed = (await dispatch({ ...args, model: 'gpt-5.4' })).structuredContent;
-    assert.equal(changed.status, 'thread_busy');
-    const retry = (await dispatch({ ...args, max_wait_sec: 1 })).structuredContent;
-    assert.equal(retry.job_id, jobId);
-    assert.equal(retry.reattached, true);
-  } finally {
-    release?.();
-    if (jobId) await dispatch({ action: 'wait', job_id: jobId, max_wait_sec: 1 });
-    resetDaemon();
-    if (prior === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = prior;
-    _resetForTest();
-  }
-});
 
 function snapshot(path) {
   if (!existsSync(path)) return null;

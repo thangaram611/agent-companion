@@ -34,13 +34,29 @@ export class Records {
     catch (err) { if (err.code === 'ENOENT') return []; throw err; }
     return files.filter((f) => f.endsWith('.json')).map((f) => this.readExecution(f.slice(0, -5)));
   }
-  readLegacyHistory(owner) {
+  readLegacyHistory(owner, provider) {
     const file = (suffix) => {
       try { return readFileSync(join(this.dir, 'threads', `${segment(owner)}.${suffix}`), 'utf8').trim(); }
       catch (err) { if (err.code === 'ENOENT') return null; throw err; }
     };
-    if (file('ambiguous')) throw error('AMBIGUOUS_HISTORY');
-    return file('sid');
+    const conflict = file('ambiguous');
+    if (conflict) throw Object.assign(error('AMBIGUOUS_HISTORY'), { message: `legacy thread ${owner} has conflicting histories: ${conflict}` });
+    const sid = file('sid');
+    if (!sid) return null;
+    // A bare legacy sid has no provider identity. Adopt it only when the last
+    // ledger job for this owner proves the same target; never silently reset.
+    let files = [];
+    try { files = readdirSync(join(this.dir, 'jobs')); }
+    catch (err) { if (err.code !== 'ENOENT') throw err; }
+    const jobs = files.filter((f) => f.endsWith('.json')).map((f) => this.read('jobs', f.slice(0, -5)))
+      .filter((job) => job?.thread === owner).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+    const latest = jobs[0];
+    if (!latest?.target || latest.target !== provider) {
+      throw Object.assign(error('thread_ambiguous'), {
+        message: `legacy thread ${owner} belongs to ${latest?.target || 'an unknown target'}; requested ${provider}`,
+      });
+    }
+    return sid;
   }
   readStop(owner) {
     const value = this.read('stops', owner);
@@ -77,7 +93,7 @@ export class Records {
     }
     return true;
   }
-  begin({ owner, provider, cwd, modelOverride, historyId = null, executionId, text, now }, expectedGeneration) {
+  begin({ owner, provider, cwd, modelOverride, historyId = null, executionId, text, hostSessionId, now }, expectedGeneration) {
     return this._locked(owner, () => {
       const old = this.readConversation(owner);
       if ((old?.generation ?? 0) !== expectedGeneration) {
@@ -91,7 +107,7 @@ export class Records {
       }
       const generation = expectedGeneration + 1;
       if (this.readExecution(executionId)) throw error('execution_id_busy');
-      const execution = { owner, executionId, generation, provider, cwd, text, modelOverride, state: 'starting', writer: 'controller', startedAt: now, processes: null };
+      const execution = { owner, executionId, generation, provider, cwd, text, modelOverride, hostSessionId, state: 'starting', writer: 'controller', startedAt: now, processes: null };
       this._write('executions', executionId, execution);
       this._write('conversations', owner, { owner, generation, executionId, provider, cwd, modelOverride, historyId });
       return execution;

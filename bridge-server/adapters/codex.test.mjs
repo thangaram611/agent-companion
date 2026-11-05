@@ -284,6 +284,7 @@ test('unknown history fails HistoryUnavailable without starting a replacement', 
   const h = setup(t);
   mkdirSync(join(h.records.dir, 'threads'), { recursive: true });
   writeFileSync(join(h.records.dir, 'threads', 'child.sid'), 'missing-thread');
+  h.records._write('jobs', 'legacy', { thread: 'child', target: 'codex', startedAt: 1 });
   const result = await h.send();
   assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'history_unavailable');
   assert.equal(h.records.readExecution(result.executionId).terminal.error, 'HistoryUnavailable');

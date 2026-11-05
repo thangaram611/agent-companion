@@ -200,7 +200,7 @@ test('non-end_turn stop reasons fail and unknown update kinds are logged once', 
 test('protocol v2 is refused with ACP_PROTOCOL_MISMATCH before session creation', async (t) => {
   const h = setup(t, { env: { ACP_FAKE_PROTOCOL_VERSION: '2' } });
   const result = await h.send();
-  assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'runtime_unavailable');
+  assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'ACP_PROTOCOL_MISMATCH');
   assert.equal(h.records.readExecution(result.executionId).terminal.error, 'ACP_PROTOCOL_MISMATCH');
   assert.equal(h.frames('session/new').length, 0); assert.ok(result.stopEvidence.gone);
 });

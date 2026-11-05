@@ -170,14 +170,12 @@ function validateStatus(args) {
 
 function validateSend(args) {
   assertString('task', args.task);
-  assertCwd(args.cwd);
+  try { assertCwd(args.cwd); }
+  catch (err) { err.code = 'INVALID_CWD'; throw err; }
   assertThreadName(args.thread);
   assertString('target', args.target, { optional: true });
   assertString('model', args.model, { optional: true });
   const target = String(args.target || '').trim().toLowerCase();
-  if (target && !VALID_TARGETS.has(target)) {
-    throw new Error(`agent: target must be one of ${[...VALID_TARGETS].join('|')}, got "${args.target}"`);
-  }
   if (args.max_wait_sec !== undefined && typeof args.max_wait_sec !== 'number') {
     throw new Error('agent: max_wait_sec must be a number');
   }

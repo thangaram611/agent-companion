@@ -24,7 +24,7 @@ function setup(options = {}) {
       capabilities: { followUp: true, steer: false, modelSelection: true, loadsHistory: true, ...options.capabilities },
       calls: [], terminal, ack,
       async start(args) { this.calls.push(['start', args]); if (options.startCrash) throw new Error('startup crash'); return { runtime: await args.supervisor.spawn(['fake'], { cwd: args.cwd }) }; },
-      async openHistory(args) { this.calls.push(['openHistory', args]); if (options.historyCrash) throw new Error('HistoryUnavailable'); return { historyId: args.historyId || 'native-history', effectiveModel: 'effective-model' }; },
+      async openHistory(args) { this.calls.push(['openHistory', args]); if (options.historyError) throw Object.assign(new Error(options.historyError), { code: options.historyError }); if (options.historyCrash) throw new Error('HistoryUnavailable'); return { historyId: args.historyId || 'native-history', effectiveModel: 'effective-model' }; },
       async deliver(args) { this.calls.push(['deliver', args]); if (options.lostAck) return ack.promise; return { nativeTurnId: 'turn-1' }; },
       observe(args) { this.calls.push(['observe', args]); this.progress = args.onProgress; return terminal.promise; },
       async interrupt() { this.calls.push(['interrupt']); if (options.racingComplete) terminal.resolve({ outcome: 'completed', text: 'native answer', usage: { tokens: 7 } }); if (options.hungInterrupt) return new Promise(() => {}); },
@@ -331,4 +331,38 @@ test('recovery can confirm late absence after failed watcher cleanup without rew
   assert.equal((await fresh.recover({ owner: 'old' })).state, 'closed');
   assert.equal(readFileSync(h.records.path('results', 'old'), 'utf8'), resultBytes);
   assert.equal(h.records.begin({ owner: 'old', provider: 'fake', cwd: h.dir, text: 'next', executionId: 'next', now: h.clock.now() }, 1).generation, 2);
+});
+
+
+test('terminal model and effort supersede history-opening metadata in immutable results', async () => {
+  const h = setup(); const sent = await h.send({ model: 'a' });
+  const result = await h.finish(sent.executionId, { outcome: 'completed', text: 'answer', effectiveModel: 'rerouted', effectiveEffort: 'high' });
+  assert.equal(result.selectedModel, 'a');
+  assert.equal(result.effectiveModel, 'rerouted');
+  assert.equal(result.effectiveEffort, 'high');
+  assert.deepEqual(await h.done(sent.executionId), result);
+});
+
+test('explicit adapter refusal codes survive history and observe failures', async () => {
+  for (const code of ['MODEL_NOT_ALLOWED', 'ACP_PROTOCOL_MISMATCH']) {
+    const h = setup({ historyError: code });
+    assert.equal((await h.send()).detail, code);
+    const observing = setup(); const sent = await observing.send();
+    observing.adapters[0].terminal.reject(Object.assign(new Error(code), { code }));
+    assert.equal((await observing.done(sent.executionId)).detail, code);
+  }
+});
+
+test('watcher terminal result releases the observed attachment without rewriting the lease', async () => {
+  const h = setup(); const sent = await h.send();
+  h.controller.beginRequest({ owner: 'child', executionId: sent.executionId, requestId: 'pending', kind: 'wait' });
+  await h.controller.bridgeLost();
+  const execution = h.records.readExecution(sent.executionId);
+  h.records.writeResult({ owner: 'child', executionId: sent.executionId, generation: execution.generation,
+    outcome: 'stopped', cause: 'bridge_loss', stopEvidence: { gone: true } }, 'watcher');
+  const before = disk(h.dir);
+  const view = h.controller.status({ executionId: sent.executionId });
+  assert.equal(view.lease.attached, false);
+  assert.equal(view.lease.remainingMs, null);
+  assert.deepEqual(disk(h.dir), before);
 });

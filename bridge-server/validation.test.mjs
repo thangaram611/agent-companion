@@ -52,7 +52,7 @@ test('send requires a task and an absolute existing cwd, and validates internal 
   assert.throws(() => validateAgentArgs(sendArgs({ thread: '../etc' })), /thread must match/);
   assert.throws(() => validateAgentArgs(sendArgs({ thread: 42 })), /thread must be a string/);
   for (const target of VALID_TARGETS) assert.equal(validateAgentArgs(sendArgs({ target })).target, target);
-  assert.throws(() => validateAgentArgs(sendArgs({ target: 'unknown' })), /target must be one of/);
+  assert.equal(validateAgentArgs(sendArgs({ target: 'unknown' })).target, 'unknown', 'controller returns TARGET_UNSUPPORTED');
   assert.throws(() => validateAgentArgs(sendArgs({ target: 42 })), /target must be a string/);
   assert.throws(() => validateAgentArgs(sendArgs({ model: 42 })), /model must be a string/);
   assert.throws(() => validateAgentArgs(sendArgs({ max_wait_sec: 'five' })), /max_wait_sec must be a number/);
