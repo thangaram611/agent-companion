@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.164.0",
+  "codexVersion": "0.166.0",
   "clientRequests": [
     {
       "method": "account/gatewayOAuth/cancel",
@@ -1189,6 +1189,7 @@
       "optional": false,
       "params": {
         "exitCode": "integer",
+        "outputDrainTimedOut": "boolean?",
         "processHandle": "string",
         "stderr": "string",
         "stderrCapReached": "boolean",
@@ -1790,6 +1791,7 @@
     },
     "imageGeneration": {
       "failure": "ImageGenerationFailure?",
+      "generationId": "string?",
       "id": "string",
       "inputImages": "ImageGenerationInputImage[]?",
       "revisedPrompt": "string?",

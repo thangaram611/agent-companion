@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, copyFileSync, statSync, rmSync, chmodSync, realpathSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, statSync, rmSync, realpathSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,17 +50,14 @@ function destPath(variant, home) {
   return join(home, ...variant.dest);
 }
 
-// A real, distinct node binary: a byte copy, so `process.execPath` inside it
-// reports the copy's own path and we can prove which candidate was chosen.
-// (A symlink would canonicalize straight back to the original.)
-// realpath because the resolver reports `process.execPath`, which is already
-// canonical — on macOS the temp dir arrives as /var/... but resolves to
-// /private/var/..., and comparing the two forms would fail for the wrong reason.
-function copyOfNode(dir) {
-  const copy = join(dir, 'node-copy');
-  copyFileSync(process.execPath, copy);
-  chmodSync(copy, 0o755);
-  return realpathSync(copy);
+// Run Node in place: Homebrew's executable cannot be relocated without its
+// dylibs. Mark each wrapper invocation because the resolver canonicalizes both
+// candidates to the same process.execPath; the PATH candidate must stay unused.
+function nodeWrapper(dir, name) {
+  const wrapper = join(dir, name);
+  const executable = `'${process.execPath.replaceAll("'", "'\\''")}'`;
+  writeFileSync(wrapper, `#!/bin/sh\n: > "$0.used"\nexec ${executable} "$@"\n`, { mode: 0o755 });
+  return realpathSync(wrapper);
 }
 
 for (const variant of VARIANTS) {
@@ -68,10 +65,13 @@ for (const variant of VARIANTS) {
     test(`${variant.name}: AGENT_COMPANION_NODE selects the node baked into the MCP config`, () => {
       const home = makeHome();
       try {
-        const override = copyOfNode(home);
-        run(variant, home, { AGENT_COMPANION_NODE: override });
+        const override = nodeWrapper(home, 'node-override');
+        const pathNode = nodeWrapper(home, 'node');
+        run(variant, home, { AGENT_COMPANION_NODE: override, PATH: `${home}:${process.env.PATH}` });
         const written = variant.commandOf(readFileSync(destPath(variant, home), 'utf8'));
-        assert.equal(written, override, 'the documented AGENT_COMPANION_NODE override must be honored');
+        assert.equal(written, realpathSync(process.execPath), 'the override must resolve to its usable Node binary');
+        assert.ok(existsSync(`${override}.used`), 'the explicit override must be invoked');
+        assert.equal(existsSync(`${pathNode}.used`), false, 'the usable PATH candidate must not be tried');
       } finally {
         rmSync(home, { recursive: true, force: true });
       }
@@ -197,12 +197,15 @@ test('codex: CODEX_HOME selects the materialized agent directory', () => {
 test('the shared node resolver honors AGENT_COMPANION_NODE', () => {
   const home = makeHome();
   try {
-    const override = copyOfNode(home);
+    const override = nodeWrapper(home, 'node-override');
+    const pathNode = nodeWrapper(home, 'node');
     const out = execFileSync('bash', ['-c', `. "${join(__dirname, 'node-tools.sh')}" && resolve_node`], {
-      env: { ...process.env, HOME: home, AGENT_COMPANION_NODE: override },
+      env: { ...process.env, HOME: home, AGENT_COMPANION_NODE: override, PATH: `${home}:${process.env.PATH}` },
       encoding: 'utf8',
     }).trim();
-    assert.equal(out, override);
+    assert.equal(out, realpathSync(process.execPath));
+    assert.ok(existsSync(`${override}.used`), 'the explicit override must be invoked');
+    assert.equal(existsSync(`${pathNode}.used`), false, 'the usable PATH candidate must not be tried');
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
