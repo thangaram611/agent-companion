@@ -29,6 +29,8 @@ process.env.AGENT_COMPANION_DEFAULT_TARGET = 'copilot';
 const TEST_CWD = tmpdir();
 const EXACT_TASK = '  First line.\n\nSecond line: `quoted` — keep whitespace.  \n';
 
+const { Records } = await import('./controller/records.mjs');
+
 test.after(() => {
   rmSync(STATE_SANDBOX, { recursive: true, force: true });
   rmSync(RUNTIME_SANDBOX, { recursive: true, force: true });
@@ -92,90 +94,6 @@ function terminalJob(jobId, status, extra = {}) {
   };
 }
 
-test('server imports safely and dispatch handles the public boundary errors/status shapes', async () => {
-  const mod = await bridge();
-  assert.equal(typeof mod.dispatch, 'function');
-  assert.ok(mod.jobs && typeof mod.jobs.get === 'function');
-  assert.ok(mod.mcp);
-  const tools = await mod.mcp._requestHandlers.get('tools/list')({ method: 'tools/list', params: {} });
-  assert.deepEqual(
-    tools.tools.map((tool) => tool.name),
-    [
-      'agent_catalog', 'agent_send', 'agent_wait', 'agent_status', 'agent_reply', 'agent_cancel',
-    ],
-  );
-  assert.equal(tools.tools.some((tool) => tool.name === 'copilot_send'), false);
-  assert.ok(tools.tools.find((tool) => tool.name === 'agent_send').inputSchema.properties.target);
-  assert.equal(tools.tools.find((tool) => tool.name === 'agent_send').inputSchema.properties.action, undefined);
-  await assert.rejects(() => mod.mcp._requestHandlers.get('tools/call')({
-    method: 'tools/call',
-    params: { name: 'copilot_status', arguments: { action: 'status' } },
-  }), /unknown tool: copilot_status/);
-  const splitWithAction = parse(await mod.mcp._requestHandlers.get('tools/call')({
-    method: 'tools/call',
-    params: { name: 'agent_status', arguments: { action: 'status' } },
-  }));
-  assert.equal(splitWithAction.ok, false);
-  assert.equal(splitWithAction.code, 'INVALID_ARGUMENTS');
-  const statusViaTool = parse(await mod.mcp._requestHandlers.get('tools/call')({
-    method: 'tools/call',
-    params: { name: 'agent_status', arguments: {} },
-  }));
-  assert.equal(statusViaTool.ok, true);
-  assert.equal(statusViaTool.action, 'status');
-  assert.equal(statusViaTool.diagnostics, undefined);
-  const statusWithDiagnostics = parse(await mod.mcp._requestHandlers.get('tools/call')({
-    method: 'tools/call',
-    params: { name: 'agent_status', arguments: { diagnostics: true } },
-  }));
-  assert.equal(statusWithDiagnostics.ok, true);
-  assert.equal(statusWithDiagnostics.action, 'status');
-  assert.equal(statusWithDiagnostics.diagnostics.runtime.adapter, process.env.COPILOT_RUNTIME_ADAPTER || 'acp');
-  // Exact, not a regex that also accepted `agent-companion` — the operator's
-  // REAL runtime dir contains that substring, so the loose match passed while
-  // this suite was writing its fake ledger rows and digests there. This is now
-  // the in-suite proof that the AGENT_RUNTIME_DIR pin still reaches runtimeDir().
-  assert.equal(statusWithDiagnostics.diagnostics.runtime.dir, RUNTIME_SANDBOX);
-  assert.equal(typeof statusWithDiagnostics.diagnostics.node.ok, 'boolean');
-  await assert.rejects(() => mod.dispatch({ action: 'frobnicate' }), /unhandled action/);
-
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  mod._resetForTest();
-  delete process.env.CLAUDE_CODE_SESSION_ID;
-  try {
-    const send = parse(await mod.dispatch({ action: 'send', task: 'do thing', cwd: TEST_CWD }));
-    assert.equal(send.ok, false);
-    assert.match(send.error, /CLAUDE_CODE_SESSION_ID/);
-
-    assert.equal(parse(await mod.dispatch({ action: 'wait', job_id: 'no-such', max_wait_sec: 1 })).status, 'unknown_job');
-    assert.match(parse(await mod.dispatch({ action: 'cancel', job_id: 'no-such' })).error, /unknown job_id/);
-
-    assert.match(parse(await mod.dispatch({ action: 'reply', job_id: 'nonexistent-job', message: 'hi' })).error, /unknown job_id/);
-    mod.jobs.set('job-no-prompt', { jobId: 'job-no-prompt', target: 'copilot', status: 'starting', startedAt: Date.now() });
-    assert.match(parse(await mod.dispatch({ action: 'reply', job_id: 'job-no-prompt', message: 'hi' })).error, /no prompt yet/);
-    mod.jobs.set('job-done', terminalJob('job-done', 'completed', { promptId: 'p1' }));
-    assert.match(parse(await mod.dispatch({ action: 'reply', job_id: 'job-done', message: 'hi' })).error, /already completed/);
-    mod.jobs.delete('job-no-prompt');
-    mod.jobs.delete('job-done');
-
-    const status = parse(await mod.dispatch({ action: 'status', job_id: null, verbose: false }));
-    assert.equal(status.ok, true);
-    assert.equal(status.action, 'status');
-    assert.equal(status.default_target.target, 'copilot');
-    assert.equal(status.targets.some((target) => target.id === 'opencode' && target.implemented), true);
-    assert.equal(status.opencode_runtime.permission.mode, 'default');
-    assert.equal(typeof status.opencode_runtime.timeout_ms, 'number');
-    assert.ok(Array.isArray(status.running_jobs));
-    assert.ok(status.default_model);
-    assert.equal(status.active, undefined);
-    assert.equal(status.paused, undefined);
-    assert.equal(status.active_sessions_total, undefined);
-  } finally {
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    mod._resetForTest();
-  }
-});
 
 test('wait-budget clamping keeps the existing bounds', async () => {
   const { clampWaitSec } = await bridge();
@@ -186,135 +104,6 @@ test('wait-budget clamping keeps the existing bounds', async () => {
   assert.equal(clampWaitSec(0.4), 1);
 });
 
-test('wait response formatting covers timeout, digest metadata, unreachable details, and clean terminal meta', async () => {
-  const mod = await bridge();
-  const { jobs } = mod;
-
-  jobs.set('job-timeout', terminalJob('job-timeout', 'timeout', {
-    task: 'analyze a giant file',
-    durationMs: 540_000,
-    failedTools: ['view', 'grep'],
-    promptId: 'p-timeout',
-    sessionId: 's-timeout',
-    thread: 'companion-test',
-  }));
-  let body = parse(await mod.dispatch({ action: 'wait', job_id: 'job-timeout', max_wait_sec: 1 }));
-  assert.equal(body.status, 'timeout');
-  assert.match(body.content, /GitHub Copilot CLI's model turn did not finish/);
-  assert.match(body.content, /Decompose the task/);
-  assert.doesNotMatch(body.content, /parallel|scope_hint/);
-  assert.match(body.content, /\*\*Failed tools:\*\* view, grep/);
-  assert.match(body.content, /Partial transcript digest/);
-  assert.equal(body.meta.digest_uri, 'agent-digest://job-timeout');
-  assert.equal(body.meta.digest_path, undefined);
-  assert.match(body.meta.debug_digest_path, /agent-digest-job-timeout\.md$/);
-  jobs.delete('job-timeout');
-
-  jobs.set('job-timeout-nopid', terminalJob('job-timeout-nopid', 'timeout', { promptId: null }));
-  body = parse(await mod.dispatch({ action: 'wait', job_id: 'job-timeout-nopid', max_wait_sec: 1 }));
-  assert.equal(body.status, 'timeout');
-  assert.doesNotMatch(body.content, /Partial transcript digest/);
-  assert.equal(body.meta.digest_uri, undefined);
-  assert.equal(body.meta.debug_digest_path, undefined);
-  jobs.delete('job-timeout-nopid');
-
-  jobs.set('job-unreachable', terminalJob('job-unreachable', 'unreachable', {
-    detail: 'bridge_daemon_unreachable',
-  }));
-  body = parse(await mod.dispatch({ action: 'wait', job_id: 'job-unreachable', max_wait_sec: 1 }));
-  assert.equal(body.status, 'unreachable');
-  assert.match(body.content, /Bridge could not reach the GitHub Copilot CLI runtime/);
-  assert.match(body.content, /detail: bridge_daemon_unreachable/);
-  assert.equal(body.meta.detail, 'bridge_daemon_unreachable');
-  jobs.delete('job-unreachable');
-
-  jobs.set('job-completed', terminalJob('job-completed', 'completed', {
-    summary: { message: 'done.\n\nRUBBER-DUCK: clean.' },
-  }));
-  body = parse(await mod.dispatch({ action: 'wait', job_id: 'job-completed', max_wait_sec: 1 }));
-  assert.equal(body.status, 'completed');
-  assert.equal(body.meta.detail, undefined);
-  jobs.delete('job-completed');
-
-  jobs.set('job-empty-completed', terminalJob('job-empty-completed', 'completed', {
-    summary: { message: '', thoughts: '', toolCalls: [], plan: null },
-  }));
-  body = parse(await mod.dispatch({ action: 'wait', job_id: 'job-empty-completed', max_wait_sec: 1 }));
-  assert.equal(body.status, 'completed');
-  assert.match(body.content, /reported completion but returned no assistant message/);
-  assert.doesNotMatch(body.content, /Unexpected terminal status/);
-  jobs.delete('job-empty-completed');
-});
-
-test('digest MCP resources list, read, template, and tool resource links', async () => {
-  const mod = await bridge();
-  const {
-    digestJobIdFromResourceUri,
-    digestResourceForJobId,
-    digestResourceUri,
-    listDigestResourceTemplates,
-    listDigestResources,
-    readDigestResource,
-  } = mod;
-  const { jobs } = mod;
-  const { digestPath } = await import('../lib/prompt-digest.mjs');
-
-  const jobId = 'job-resource-1';
-  const path = digestPath(jobId);
-  writeFileSync(path, '# Digest\n\nResource body.\n');
-
-  assert.equal(digestResourceUri(jobId), `agent-digest://${jobId}`);
-  assert.equal(digestJobIdFromResourceUri(`agent-digest://${jobId}`), jobId);
-  assert.equal(digestJobIdFromResourceUri('file:///tmp/nope'), null);
-
-  const resource = digestResourceForJobId(jobId);
-  assert.equal(resource.uri, `agent-digest://${jobId}`);
-  assert.equal(resource.mimeType, 'text/markdown');
-  assert.equal(resource.description.includes(jobId), true);
-  assert.equal(resource._meta, undefined);
-  assert.equal(resource.annotations, undefined);
-  assert.equal(listDigestResources().some((r) => r.uri === resource.uri), true);
-
-  const templates = listDigestResourceTemplates();
-  assert.equal(templates[0].uriTemplate, 'agent-digest://{job_id}');
-
-  const read = readDigestResource(resource.uri);
-  assert.equal(read.contents[0].uri, resource.uri);
-  assert.match(read.contents[0].text, /Resource body/);
-  assert.throws(() => readDigestResource('agent-digest://missing-resource'), /digest not found/);
-  assert.throws(() => readDigestResource('agent-digest://bad/path'), /unknown digest resource uri/);
-
-  const listedViaMcp = await mod.mcp._requestHandlers.get('resources/list')({
-    method: 'resources/list',
-    params: {},
-  });
-  assert.equal(listedViaMcp.resources.some((r) => r.uri === resource.uri), true);
-  const templatesViaMcp = await mod.mcp._requestHandlers.get('resources/templates/list')({
-    method: 'resources/templates/list',
-    params: {},
-  });
-  assert.equal(templatesViaMcp.resourceTemplates[0].uriTemplate, 'agent-digest://{job_id}');
-  const readViaMcp = await mod.mcp._requestHandlers.get('resources/read')({
-    method: 'resources/read',
-    params: { uri: resource.uri },
-  });
-  assert.match(readViaMcp.contents[0].text, /Resource body/);
-
-  jobs.set(jobId, terminalJob(jobId, 'completed', {
-    promptId: 'p-resource',
-    summary: { message: 'done.\n\nRUBBER-DUCK: clean.', toolCalls: [] },
-  }));
-  const result = await mod.dispatch({ action: 'status', job_id: jobId, verbose: false });
-  const body = parse(result);
-  assert.equal(body.digest_uri, resource.uri);
-  assert.equal(body.digest_path, undefined);
-  assert.equal(body.debug.digest_path, path);
-  assert.equal(result.content[0].type, 'text');
-  const link = result.content.find((entry) => entry.type === 'resource_link');
-  assert.equal(link.uri, resource.uri);
-  assert.equal(link.mimeType, 'text/markdown');
-  jobs.delete(jobId);
-});
 
 test('buildJobResponse and session-reborn content preserve bridge-owned status/detail metadata', async () => {
   const { buildJobResponse, formatTerminalContent } = await bridge();
@@ -350,36 +139,6 @@ test('buildJobResponse and session-reborn content preserve bridge-owned status/d
   assert.ok(content.indexOf('respawned mid-thread') < content.indexOf('Task:'));
 });
 
-test('still-running and terminal wait responses surface session_reborn and reattached metadata', async () => {
-  const mod = await bridge();
-  const { jobs } = mod;
-
-  jobs.set('jr-still', {
-    jobId: 'jr-still', target: 'copilot', status: 'running', task: 't',
-    promptId: 'p', sessionId: 's-new', thread: 'companion-x',
-    startedAt: Date.now() - 5000,
-    sessionReborn: true,
-  });
-  let body = parse(await mod.dispatch({ action: 'wait', job_id: 'jr-still', max_wait_sec: 1 }));
-  assert.equal(body.status, 'still_running');
-  assert.equal(body.session_reborn, true);
-  assert.equal(body.digest_uri, 'agent-digest://jr-still');
-  assert.equal(body.digest_path, undefined);
-  assert.match(body.debug.digest_path, /agent-digest-jr-still\.md$/);
-  jobs.delete('jr-still');
-
-  jobs.set('jr-wait', terminalJob('jr-wait', 'completed', {
-    promptId: 'p', sessionId: 's-new', thread: 'companion-x',
-    summary: { message: 'k\n\nRUBBER-DUCK: clean.', toolCalls: [] },
-    sessionReborn: true,
-    reattached: true,
-  }));
-  body = parse(await mod.dispatch({ action: 'wait', job_id: 'jr-wait', max_wait_sec: 1 }));
-  assert.equal(body.meta.session_reborn, 'true');
-  assert.equal(body.meta.reattached, 'true');
-  assert.match(body.content, /respawned mid-thread/);
-  jobs.delete('jr-wait');
-});
 
 test('emitNotification writes queue rows with status remaps, detail/session metadata and private permissions', async () => {
   const { emitNotification } = await bridge();
@@ -447,72 +206,6 @@ test('emitNotification writes queue rows with status remaps, detail/session meta
   });
 });
 
-test('job ledger persistence, GC, and queue consumption protect resumed terminal jobs', async () => {
-  const mod = await bridge();
-  const { jobs, gcExpiredJobs, persistJob, hydrateJobsFromLedger, dispatch } = mod;
-  const state = await import('../lib/state.mjs');
-
-  jobs.set('j-gc', {
-    jobId: 'j-gc',
-    target: 'copilot',
-    claudeSessionId: 'sid-X',
-    sessionId: 'cop-sid-1',
-    status: 'completed',
-    terminalAt: Date.now() - 10_000,
-    retentionExpiresAt: Date.now() - 5_000,
-  });
-  persistJob('j-gc');
-  const filePath = join(state.JOBS_DIR, 'j-gc.json');
-  assert.equal(existsSync(filePath), true);
-  // The in-memory `sessionId` persists under the target-neutral key.
-  assert.equal(state.readJob('j-gc').companionSessionId, 'cop-sid-1');
-  gcExpiredJobs();
-  assert.equal(jobs.has('j-gc'), false);
-  assert.equal(existsSync(filePath), false);
-
-  jobs.set('j-untagged', { jobId: 'j-untagged', status: 'starting', startedAt: Date.now() });
-  persistJob('j-untagged');
-  assert.equal(existsSync(join(state.JOBS_DIR, 'j-untagged.json')), false);
-  jobs.delete('j-untagged');
-
-  await withQueue(async (queueFile) => {
-    const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-    process.env.CLAUDE_CODE_SESSION_ID = 'sid-rehydrate-A';
-    try {
-      state.writeJob('j-rehydrated', {
-        jobId: 'j-rehydrated', claudeSessionId: 'sid-rehydrate-A',
-        target: 'copilot', companionSessionId: 'cop-rh', thread: null,
-        task: 'old task',
-        status: 'completed',
-        summary: { message: 'all done' },
-        error: null, stuckReason: null, detail: null,
-        startedAt: Date.now() - 5000, terminalAt: Date.now() - 1000,
-        retentionExpiresAt: Date.now() + 60_000,
-      });
-      writeFileSync(queueFile, JSON.stringify({
-        ts: Date.now() - 1000, kind: 'terminal', jobId: 'j-rehydrated',
-        claudeSessionId: 'sid-rehydrate-A', consumed: false,
-        content: 'all done', meta: { status: 'completed' },
-      }) + '\n');
-
-      jobs.clear();
-      mod._resetForTest();
-      hydrateJobsFromLedger();
-      assert.equal(jobs.has('j-rehydrated'), true);
-
-      const body = parse(await dispatch({ action: 'wait', job_id: 'j-rehydrated', max_wait_sec: 1 }));
-      assert.equal(body.status, 'completed');
-      assert.equal(readQueue(queueFile)[0].consumed, true);
-
-      state.deleteJob('j-rehydrated');
-      jobs.clear();
-    } finally {
-      if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-      else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-      mod._resetForTest();
-    }
-  });
-});
 
 // The host session id reaches the bridge from the host, never from the model:
 // Claude Code's bridge inherits CLAUDE_CODE_SESSION_ID, Codex's reads it from
@@ -520,7 +213,7 @@ test('job ledger persistence, GC, and queue consumption protect resumed terminal
 test('the host session id comes from the host: inherited env on Claude, _meta on Codex', async () => {
   const { callArgs, getHostSessionId, _resetForTest } = await bridge();
   const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const codex = (sid) => ({ arguments: {}, _meta: { 'x-codex-turn-metadata': { session_id: sid, thread_id: 't' } } });
+  const codex = (sid) => ({ arguments: { job_id: 'missing' }, _meta: { 'x-codex-turn-metadata': { session_id: sid, thread_id: 't', thread_source: 'subagent' } } });
 
   _resetForTest();
   try {
@@ -530,9 +223,9 @@ test('the host session id comes from the host: inherited env on Claude, _meta on
     assert.equal(getHostSessionId(), 'sid-claude-env');
 
     delete process.env.CLAUDE_CODE_SESSION_ID;
-    callArgs('status', codex('sid-codex-meta'));
+    callArgs('wait', codex('sid-codex-meta'));
     assert.equal(getHostSessionId(), 'sid-codex-meta');
-    assert.throws(() => callArgs('status', codex('sid-other')), (err) => err.code === 'BRIDGE_SID_CONFLICT');
+    assert.throws(() => callArgs('wait', codex('sid-other')), (err) => err.code === 'BRIDGE_SID_CONFLICT');
     assert.equal(getHostSessionId(), 'sid-codex-meta');
   } finally {
     if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
@@ -698,52 +391,6 @@ test('hydrateJobsFromLedger preserves host/thread continuity and orphan recovery
   }
 });
 
-test('hydrateJobsFromLedger marks SDK in-flight prompts as non-resumable after restart', async () => {
-  const mod = await bridge();
-  const { jobs, hydrateJobsFromLedger, dispatch, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const oldAdapter = process.env.COPILOT_RUNTIME_ADAPTER;
-
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-sdk-hydrate';
-  process.env.COPILOT_RUNTIME_ADAPTER = 'sdk';
-  try {
-    _resetForTest();
-    jobs.clear();
-    state.writeThreadSid('thread-sdk-hydrate', 'sdk-session-1');
-    state.writeJob('j-sdk-hydrate', {
-      jobId: 'j-sdk-hydrate', claudeSessionId: 'sid-sdk-hydrate',
-      target: 'copilot', companionSessionId: 'sdk-session-1', thread: 'thread-sdk-hydrate',
-      task: 'sdk in-flight before restart',
-      status: 'running', promptId: 'prompt-sdk-hydrate',
-      startedAt: Date.now() - 5000,
-    });
-
-    hydrateJobsFromLedger();
-    const job = jobs.get('j-sdk-hydrate');
-    assert.equal(job.status, 'unreachable');
-    assert.equal(job.detail, 'sdk_adapter_non_resumable_after_restart');
-    assert.equal(job.sessionRetired, true);
-    assert.equal(state.readThreadSid('thread-sdk-hydrate'), null);
-
-    const body = parse(await dispatch({
-      action: 'wait',
-      job_id: 'j-sdk-hydrate',
-      max_wait_sec: 1,
-    }));
-    assert.equal(body.status, 'unreachable');
-    assert.match(body.content, /SDK adapter cannot reattach/);
-  } finally {
-    state.deleteJob('j-sdk-hydrate');
-    state.clearThread('thread-sdk-hydrate');
-    jobs.clear();
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    if (oldAdapter === undefined) delete process.env.COPILOT_RUNTIME_ADAPTER;
-    else process.env.COPILOT_RUNTIME_ADAPTER = oldAdapter;
-    _resetForTest();
-  }
-});
 
 test('hydrateJobsFromLedger skips a ledger entry with no target (no silent fallback)', async () => {
   const mod = await bridge();
@@ -790,366 +437,6 @@ test('sweepOwnSessionStaleQueueRows drops only stale rows for the current host s
   });
 });
 
-test('handleSend returns immediately, reattaches a retried send, and refuses a new request on a busy thread', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, retainTerminalJob, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-send';
-
-  try {
-    const instant = await withDaemonStubs(
-      { ensureDaemon: async () => {}, sendToSocket: async () => ({ ok: true, data: {} }) },
-      async () => {
-        const t0 = performance.now();
-        const res = await dispatch({
-          action: 'send', task: 'instant-return smoke',
-          cwd: TEST_CWD,
-          max_wait_sec: 9999,
-
-        });
-        return { body: parse(res), elapsed: performance.now() - t0 };
-      },
-    );
-    assert.ok(instant.elapsed < 200, `handleSend must return synchronously (got ${instant.elapsed}ms)`);
-    assert.equal(instant.body.status, 'still_running');
-    assert.equal(instant.body.current_status, 'starting');
-    assert.match(instant.body.hint, /agent_wait/);
-
-    jobs.set('copilot-existing-1', {
-      jobId: 'copilot-existing-1',
-      target: 'copilot',
-      claudeSessionId: 'sid-send',
-      thread: 'thread-reattach',
-      task: 'reattach me',
-      cwd: TEST_CWD,
-      status: 'running',
-      promptId: 'prompt-existing-1',
-      sessionId: 'cop-sid-1',
-      startedAt: Date.now() - 5_000,
-    });
-    let socketCalls = 0;
-    const reattached = await withDaemonStubs(
-      {
-        ensureDaemon: async () => { socketCalls++; },
-        sendToSocket: async () => { socketCalls++; throw new Error('reattach must not touch the daemon'); },
-      },
-      async () => parse(await dispatch({
-        action: 'send', task: 'reattach me',
-
-        thread: 'thread-reattach',
-        cwd: TEST_CWD,
-        max_wait_sec: 1,
-      })),
-    );
-    assert.equal(reattached.status, 'still_running');
-    assert.equal(reattached.job_id, 'copilot-existing-1');
-    assert.equal(reattached.reattached, true);
-    assert.equal(socketCalls, 0);
-
-    // A different request on that busy conversation is refused, never folded
-    // into the running job, where it would vanish without being run.
-    const busy = await withDaemonStubs(
-      {
-        ensureDaemon: async () => { throw new Error('a busy thread must refuse before daemon startup'); },
-        sendToSocket: async () => { throw new Error('a busy thread must not touch the daemon'); },
-      },
-      async () => parse(await dispatch({
-        action: 'send', task: 'and also check the tests',
-
-        thread: 'thread-reattach',
-        cwd: TEST_CWD,
-        max_wait_sec: 1,
-      })),
-    );
-    assert.equal(busy.ok, false);
-    assert.equal(busy.status, 'thread_busy');
-    assert.equal(busy.job_id, 'copilot-existing-1');
-    assert.match(busy.error, /agent_reply/);
-    const changedModel = parse(await dispatch({ action: 'send', target: 'copilot', task: 'reattach me',
-      model: 'gpt-5.4', thread: 'thread-reattach', cwd: TEST_CWD }));
-    assert.equal(changedModel.status, 'thread_busy');
-    assert.equal(changedModel.job_id, 'copilot-existing-1');
-
-
-    jobs.set('copilot-existing-mismatch', {
-      jobId: 'copilot-existing-mismatch',
-      target: 'copilot',
-      claudeSessionId: 'sid-send',
-      thread: 'thread-cwd-mismatch',
-      cwd: null,
-      status: 'running',
-      promptId: 'prompt-existing-mismatch',
-      sessionId: 'cop-sid-mismatch',
-      startedAt: Date.now() - 5_000,
-    });
-    const mismatch = await withDaemonStubs(
-      {
-        ensureDaemon: async () => { throw new Error('cwd mismatch must fail before daemon startup'); },
-        sendToSocket: async () => { throw new Error('cwd mismatch must not touch the daemon'); },
-      },
-      async () => parse(await dispatch({
-        action: 'send', task: 'corrected cwd must not attach to unknown old cwd',
-
-        thread: 'thread-cwd-mismatch',
-        cwd: TEST_CWD,
-        max_wait_sec: 1,
-      })),
-    );
-    assert.equal(mismatch.ok, false);
-    assert.equal(mismatch.status, 'cwd_mismatch');
-    assert.equal(mismatch.existing_cwd, null);
-    assert.equal(mismatch.requested_cwd, TEST_CWD);
-
-    jobs.set('copilot-existing-2', {
-      jobId: 'copilot-existing-2',
-      target: 'copilot',
-      claudeSessionId: 'sid-send',
-      thread: 'thread-terminal',
-      task: 'reattach terminal',
-      cwd: TEST_CWD,
-      status: 'running',
-      promptId: 'prompt-existing-2',
-      sessionId: 'cop-sid-2',
-      startedAt: Date.now() - 5_000,
-    });
-    const terminal = await withDaemonStubs(
-      {
-        ensureDaemon: async () => {},
-        sendToSocket: async () => { throw new Error('reattach must not touch the daemon'); },
-      },
-      async () => {
-        setImmediate(() => {
-          retainTerminalJob('copilot-existing-2', {
-            status: 'completed',
-            summary: { message: 'done.\n\nRUBBER-DUCK: clean.' },
-            durationMs: 4_000,
-            terminalAt: Date.now(),
-          });
-        });
-        return parse(await dispatch({
-          action: 'send', task: 'reattach terminal',
-
-          thread: 'thread-terminal',
-          cwd: TEST_CWD,
-          max_wait_sec: 5,
-        }));
-      },
-    );
-    assert.equal(terminal.status, 'completed');
-    assert.equal(terminal.meta.reattached, 'true');
-  } finally {
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId === 'sid-send') jobs.delete(id);
-    }
-    _resetForTest();
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    await new Promise((r) => setImmediate(r));
-  }
-});
-
-test('OpenCode companion adapter runs a fake CLI and surfaces terminal job state', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-
-  const tmp = mkdtempSync(join(tmpdir(), 'opencode-fake-'));
-  const fakeBin = join(tmp, 'opencode-fake.mjs');
-  writeFileSync(fakeBin, [
-    '#!/usr/bin/env node',
-    'if (process.argv.includes("--version")) { console.log("opencode v1.18.30"); process.exit(0); }',
-    'const args = process.argv.slice(2);',
-    `import { writeFileSync } from 'node:fs';`,
-    `writeFileSync(${JSON.stringify(join(tmp, 'prompt.txt'))}, args.at(-1));`,
-    'if (args[0] !== "run" || !args.includes("--format")) {',
-    '  console.error("unexpected args: " + args.join(" "));',
-    '  process.exit(2);',
-    '}',
-    'console.log(JSON.stringify({ type: "message", message: "OpenCode fake completed" }));',
-    '',
-  ].join('\n'), { mode: 0o700 });
-  chmodSync(fakeBin, 0o700);
-
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const oldBin = process.env.OPENCODE_BIN;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-opencode';
-  process.env.OPENCODE_BIN = fakeBin;
-
-  try {
-    const send = parse(await dispatch({
-      action: 'send',
-      target: 'opencode',
-      task: EXACT_TASK,
-      cwd: TEST_CWD,
-      max_wait_sec: 5,
-    }));
-    assert.equal(send.ok, true);
-    assert.equal(send.target, 'opencode');
-    assert.match(send.job_id, /^opencode-/);
-    assert.equal(send.status, 'still_running');
-    assert.match(send.hint, /agent_wait/);
-
-    const terminal = parse(await dispatch({
-      action: 'wait',
-      job_id: send.job_id,
-      max_wait_sec: 5,
-    }));
-    assert.equal(terminal.status, 'completed');
-    assert.equal(readFileSync(join(tmp, 'prompt.txt'), 'utf8'), EXACT_TASK);
-    assert.equal(terminal.target, 'opencode');
-    assert.equal(terminal.meta.target, 'opencode');
-    assert.match(terminal.content, /OpenCode fake completed/);
-    assert.match(terminal.meta.digest_uri, new RegExp(`agent-digest://${send.job_id}`));
-
-    const status = parse(await dispatch({
-      action: 'status',
-      job_id: send.job_id,
-      verbose: true,
-    }));
-    assert.equal(status.ok, true);
-    assert.equal(status.target, 'opencode');
-    assert.equal(status.inspect_available, false);
-
-    jobs.set('opencode-running-reply', {
-      jobId: 'opencode-running-reply',
-      target: 'opencode',
-      claudeSessionId: 'sid-opencode',
-      status: 'running',
-      promptId: 'opencode-reply',
-      task: 'running opencode job',
-      cwd: TEST_CWD,
-      startedAt: Date.now(),
-    });
-    const reply = parse(await dispatch({
-      action: 'reply',
-      job_id: 'opencode-running-reply',
-      message: 'revise this',
-    }));
-    assert.equal(reply.ok, false);
-    assert.equal(reply.code, 'TARGET_UNSUPPORTED');
-    assert.equal(reply.target, 'opencode');
-  } finally {
-    jobs.delete('opencode-running-reply');
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId === 'sid-opencode') jobs.delete(id);
-    }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    if (oldBin === undefined) delete process.env.OPENCODE_BIN;
-    else process.env.OPENCODE_BIN = oldBin;
-    rmSync(tmp, { recursive: true, force: true });
-    _resetForTest();
-  }
-});
-
-test('OpenCode cancel returns a standard terminal envelope', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-
-  const tmp = mkdtempSync(join(tmpdir(), 'opencode-cancel-fake-'));
-  const fakeBin = join(tmp, 'opencode-fake.mjs');
-  writeFileSync(fakeBin, [
-    '#!/usr/bin/env node',
-    'if (process.argv.includes("--version")) { console.log("opencode v1.18.30"); process.exit(0); }',
-    'process.on("SIGTERM", () => {',
-    '  console.log(JSON.stringify({ type: "message", message: "cancelled partial output" }));',
-    '  process.exit(0);',
-    '});',
-    'setInterval(() => {}, 1000);',
-    '',
-  ].join('\n'), { mode: 0o700 });
-  chmodSync(fakeBin, 0o700);
-
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const oldBin = process.env.OPENCODE_BIN;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-opencode-cancel';
-  process.env.OPENCODE_BIN = fakeBin;
-
-  try {
-    const send = parse(await dispatch({
-      action: 'send',
-      target: 'opencode',
-      task: 'cancel the OpenCode adapter',
-      cwd: TEST_CWD,
-    }));
-    assert.equal(send.status, 'still_running');
-
-    const cancelled = parse(await dispatch({
-      action: 'cancel',
-      job_id: send.job_id,
-    }));
-    assert.equal(cancelled.status, 'cancelled');
-    assert.equal(cancelled.target, 'opencode');
-    assert.equal(cancelled.meta.target, 'opencode');
-    assert.match(cancelled.content, /OpenCode job was cancelled/);
-  } finally {
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId === 'sid-opencode-cancel') jobs.delete(id);
-    }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    if (oldBin === undefined) delete process.env.OPENCODE_BIN;
-    else process.env.OPENCODE_BIN = oldBin;
-    rmSync(tmp, { recursive: true, force: true });
-    _resetForTest();
-  }
-});
-
-test('OpenCode timeout is terminal and target-specific', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-
-  const tmp = mkdtempSync(join(tmpdir(), 'opencode-timeout-fake-'));
-  const fakeBin = join(tmp, 'opencode-fake.mjs');
-  writeFileSync(fakeBin, [
-    '#!/usr/bin/env node',
-    'if (process.argv.includes("--version")) { console.log("opencode v1.18.30"); process.exit(0); }',
-    'setInterval(() => {}, 1000);',
-    '',
-  ].join('\n'), { mode: 0o700 });
-  chmodSync(fakeBin, 0o700);
-
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const oldBin = process.env.OPENCODE_BIN;
-  const oldTimeout = process.env.AGENT_COMPANION_OPENCODE_TIMEOUT_MS;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-opencode-timeout';
-  process.env.OPENCODE_BIN = fakeBin;
-  process.env.AGENT_COMPANION_OPENCODE_TIMEOUT_MS = '50';
-
-  try {
-    const send = parse(await dispatch({
-      action: 'send',
-      target: 'opencode',
-      task: 'timeout the OpenCode adapter',
-      cwd: TEST_CWD,
-    }));
-    const terminal = parse(await dispatch({
-      action: 'wait',
-      job_id: send.job_id,
-      max_wait_sec: 5,
-    }));
-    assert.equal(terminal.status, 'timeout');
-    assert.equal(terminal.target, 'opencode');
-    assert.equal(terminal.meta.detail, 'opencode_timeout');
-    assert.match(terminal.content, /OpenCode did not finish within the target timeout/);
-    assert.doesNotMatch(terminal.content, /\/fleet/);
-  } finally {
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId === 'sid-opencode-timeout') jobs.delete(id);
-    }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    if (oldBin === undefined) delete process.env.OPENCODE_BIN;
-    else process.env.OPENCODE_BIN = oldBin;
-    if (oldTimeout === undefined) delete process.env.AGENT_COMPANION_OPENCODE_TIMEOUT_MS;
-    else process.env.AGENT_COMPANION_OPENCODE_TIMEOUT_MS = oldTimeout;
-    rmSync(tmp, { recursive: true, force: true });
-    _resetForTest();
-  }
-});
 
 // --- Codex CLI adapter (bridge-server/codex-runtime.mjs) --------------------
 //
@@ -1158,255 +445,6 @@ test('OpenCode timeout is terminal and target-specific', async () => {
 // `run --format json` NDJSON. Per the safety contract, this NEVER invokes a
 // real `codex` binary — CODEX_BIN always points at a fake script.
 
-test('Codex companion adapter runs a fake CLI and surfaces terminal job state', async (t) => {
-  const priorAdapter = process.env.CODEX_RUNTIME_ADAPTER;
-  t.after(() => {
-    if (priorAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER;
-    else process.env.CODEX_RUNTIME_ADAPTER = priorAdapter;
-  });
-  process.env.CODEX_RUNTIME_ADAPTER = 'exec';
-
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-
-  const tmp = mkdtempSync(join(tmpdir(), 'codex-fake-'));
-  const fakeBin = join(tmp, 'codex-fake.mjs');
-  writeFileSync(fakeBin, [
-    '#!/usr/bin/env node',
-    'const args = process.argv.slice(2);',
-    'if (args[0] !== "exec" || !args.includes("--json")) {',
-    '  console.error("unexpected args: " + args.join(" "));',
-    '  process.exit(2);',
-    '}',
-    `import { writeFileSync } from 'node:fs';`,
-    'let prompt = "";',
-    'process.stdin.setEncoding("utf8");',
-    'process.stdin.on("data", (part) => { prompt += part; });',
-    'process.stdin.on("end", () => {',
-    `  writeFileSync(${JSON.stringify(join(tmp, 'prompt.json'))}, JSON.stringify({ prompt, args }));`,
-    '  console.log(JSON.stringify({ type: "thread.started", thread_id: "th-fake-codex" }));',
-    '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Codex fake completed" } }));',
-    '  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 21219, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 0 } }));',
-    '});',
-    '',
-  ].join('\n'), { mode: 0o700 });
-  chmodSync(fakeBin, 0o700);
-
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const oldBin = process.env.CODEX_BIN;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-codex';
-  process.env.CODEX_BIN = fakeBin;
-
-  try {
-    const send = parse(await dispatch({
-      action: 'send',
-      target: 'codex',
-      task: EXACT_TASK,
-      cwd: TEST_CWD,
-      max_wait_sec: 5,
-    }));
-    assert.equal(send.ok, true);
-    assert.equal(send.target, 'codex');
-    assert.match(send.job_id, /^codex-/);
-    assert.equal(send.status, 'still_running');
-    assert.match(send.hint, /agent_wait/);
-
-    const terminal = parse(await dispatch({
-      action: 'wait',
-      job_id: send.job_id,
-      max_wait_sec: 5,
-    }));
-    assert.equal(terminal.status, 'completed');
-    const captured = JSON.parse(readFileSync(join(tmp, 'prompt.json'), 'utf8'));
-    assert.equal(captured.prompt, EXACT_TASK);
-    assert.equal(captured.args.includes('-m'), false);
-    assert.equal(terminal.target, 'codex');
-    assert.equal(terminal.meta.target, 'codex');
-    assert.match(terminal.content, /Codex fake completed/);
-    assert.match(terminal.meta.digest_uri, new RegExp(`agent-digest://${send.job_id}`));
-
-    // Digest renders through the SHARED writer (writeOpenCodeDigest) — the
-    // header names the job's own target, not a codex-only renderer (D7).
-    const { digestPath } = await import('../lib/prompt-digest.mjs');
-    const digestText = readFileSync(digestPath(send.job_id), 'utf8');
-    assert.match(digestText, /^# codex job /);
-
-    const status = parse(await dispatch({
-      action: 'status',
-      job_id: send.job_id,
-      verbose: true,
-    }));
-    assert.equal(status.ok, true);
-    assert.equal(status.target, 'codex');
-    assert.equal(status.inspect_available, false);
-    // Send-only is a property of the EXEC transport, which is what this job ran
-    // on (CODEX_RUNTIME_ADAPTER unset). Both flags are per-job, not per-target:
-    // the same assertions are made the other way round for an appserver job,
-    // where turn/steer and thread/resume make them true.
-    assert.equal(status.reply_available, false);
-    assert.equal(status.resume_available, false);
-
-    // The codex thread_id lands in the existing target-neutral
-    // companionSessionId slot. On exec it is still write-only groundwork;
-    // the appserver adapter is the consumer that reads it back to resume.
-    const state = await import('../lib/state.mjs');
-    const persisted = state.readJob(send.job_id);
-    assert.equal(persisted.companionSessionId, 'th-fake-codex');
-
-    jobs.set('codex-running-reply', {
-      jobId: 'codex-running-reply',
-      target: 'codex',
-      claudeSessionId: 'sid-codex',
-      status: 'running',
-      promptId: 'codex-reply',
-      task: 'running codex job',
-      cwd: TEST_CWD,
-      startedAt: Date.now(),
-    });
-    const reply = parse(await dispatch({
-      action: 'reply',
-      job_id: 'codex-running-reply',
-      message: 'revise this',
-    }));
-    assert.equal(reply.ok, false);
-    assert.equal(reply.code, 'TARGET_UNSUPPORTED');
-    assert.equal(reply.target, 'codex');
-  } finally {
-    jobs.delete('codex-running-reply');
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId === 'sid-codex') jobs.delete(id);
-    }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    if (oldBin === undefined) delete process.env.CODEX_BIN;
-    else process.env.CODEX_BIN = oldBin;
-    rmSync(tmp, { recursive: true, force: true });
-    _resetForTest();
-  }
-});
-
-test("Codex cancel kills the codex child via codex-runtime (not OpenCode's maps) and returns a standard terminal envelope", async (t) => {
-  const priorAdapter = process.env.CODEX_RUNTIME_ADAPTER;
-  t.after(() => {
-    if (priorAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER;
-    else process.env.CODEX_RUNTIME_ADAPTER = priorAdapter;
-  });
-  process.env.CODEX_RUNTIME_ADAPTER = 'exec';
-
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-
-  const tmp = mkdtempSync(join(tmpdir(), 'codex-cancel-fake-'));
-  const fakeBin = join(tmp, 'codex-fake.mjs');
-  writeFileSync(fakeBin, [
-    '#!/usr/bin/env node',
-    'process.on("SIGTERM", () => {',
-    '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "cancelled partial output" } }));',
-    '  process.exit(0);',
-    '});',
-    'process.stdin.on("data", () => {});',
-    'setInterval(() => {}, 1000);',
-    '',
-  ].join('\n'), { mode: 0o700 });
-  chmodSync(fakeBin, 0o700);
-
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const oldBin = process.env.CODEX_BIN;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-codex-cancel';
-  process.env.CODEX_BIN = fakeBin;
-
-  try {
-    const send = parse(await dispatch({
-      action: 'send',
-      target: 'codex',
-      task: 'cancel the codex adapter',
-      cwd: TEST_CWD,
-    }));
-    assert.equal(send.status, 'still_running');
-
-    const cancelled = parse(await dispatch({
-      action: 'cancel',
-      job_id: send.job_id,
-    }));
-    assert.equal(cancelled.status, 'cancelled');
-    assert.equal(cancelled.target, 'codex');
-    assert.equal(cancelled.meta.target, 'codex');
-    assert.match(cancelled.content, /Codex CLI job was cancelled/);
-  } finally {
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId === 'sid-codex-cancel') jobs.delete(id);
-    }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    if (oldBin === undefined) delete process.env.CODEX_BIN;
-    else process.env.CODEX_BIN = oldBin;
-    rmSync(tmp, { recursive: true, force: true });
-    _resetForTest();
-  }
-});
-
-test('Codex timeout is terminal, tagged codex_timeout, and names the codex timeout env var', async (t) => {
-  const priorAdapter = process.env.CODEX_RUNTIME_ADAPTER;
-  t.after(() => {
-    if (priorAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER;
-    else process.env.CODEX_RUNTIME_ADAPTER = priorAdapter;
-  });
-  process.env.CODEX_RUNTIME_ADAPTER = 'exec';
-
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-
-  const tmp = mkdtempSync(join(tmpdir(), 'codex-timeout-fake-'));
-  const fakeBin = join(tmp, 'codex-fake.mjs');
-  writeFileSync(fakeBin, [
-    '#!/usr/bin/env node',
-    'setInterval(() => {}, 1000);',
-    '',
-  ].join('\n'), { mode: 0o700 });
-  chmodSync(fakeBin, 0o700);
-
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const oldBin = process.env.CODEX_BIN;
-  const oldTimeout = process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-codex-timeout';
-  process.env.CODEX_BIN = fakeBin;
-  process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS = '50';
-
-  try {
-    const send = parse(await dispatch({
-      action: 'send',
-      target: 'codex',
-      task: 'timeout the codex adapter',
-      cwd: TEST_CWD,
-    }));
-    const terminal = parse(await dispatch({
-      action: 'wait',
-      job_id: send.job_id,
-      max_wait_sec: 5,
-    }));
-    assert.equal(terminal.status, 'timeout');
-    assert.equal(terminal.target, 'codex');
-    assert.equal(terminal.meta.detail, 'codex_timeout');
-    assert.match(terminal.content, /Codex CLI did not finish within the target timeout/);
-    assert.match(terminal.content, /AGENT_COMPANION_CODEX_TIMEOUT_MS/);
-    assert.doesNotMatch(terminal.content, /\/fleet/);
-  } finally {
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId === 'sid-codex-timeout') jobs.delete(id);
-    }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    if (oldBin === undefined) delete process.env.CODEX_BIN;
-    else process.env.CODEX_BIN = oldBin;
-    if (oldTimeout === undefined) delete process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS;
-    else process.env.AGENT_COMPANION_CODEX_TIMEOUT_MS = oldTimeout;
-    rmSync(tmp, { recursive: true, force: true });
-    _resetForTest();
-  }
-});
 
 // --- OpenCode server-mode adapter (OPENCODE_RUNTIME_ADAPTER=server) ---------
 //
@@ -1449,129 +487,6 @@ async function withOpenCodeServer(stubs, body) {
   }
 }
 
-test('OpenCode server mode: send routes through the HTTP server and completes', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-oc-srv';
-  try {
-    await withOpenCodeServer({
-      fetchJson: async (url, opts = {}) => {
-        if (url.includes('/global/health')) return { ok: true, data: { healthy: true } };
-        if (url.endsWith('/session?directory=' + encodeURIComponent(TEST_CWD)) || (url.includes('/session?directory=') && opts.method === 'POST')) return { ok: true, data: { id: 'ses_send' } };
-        if (url.includes('/prompt_async')) {
-          assert.deepEqual(opts.body.parts, [{ type: 'text', text: EXACT_TASK }]);
-          return { ok: true, data: {} };
-        }
-        return { ok: true, data: {} };
-      },
-      openEventStream: _ocSse([
-        _ocFrame({ type: 'message.part.updated', properties: { sessionID: 'ses_send', part: { id: 'p1', messageID: 'm1', type: 'text', text: 'server adapter done' } } }),
-        _ocFrame({ type: 'session.idle', properties: { sessionID: 'ses_send' } }),
-      ]),
-    }, async () => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'opencode', task: EXACT_TASK,
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      assert.equal(send.ok, true);
-      assert.match(send.job_id, /^opencode-/);
-      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      assert.equal(terminal.status, 'completed');
-      assert.equal(terminal.target, 'opencode');
-      assert.match(terminal.content, /server adapter done/);
-      const job = jobs.get(send.job_id);
-      assert.equal(job.opencodeAdapter, 'server');
-      assert.equal(job.sessionId, 'ses_send');
-      assert.equal(job.baseUrl, 'http://127.0.0.1:4096');
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-oc-srv') jobs.delete(id);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('OpenCode server mode: a watch that breaks after the session opened records WHY in the digest', async () => {
-  // The twin of the codex app-server test below. Both watch catches must store
-  // the failure on `adapterResult`, not only write it: once the session is open
-  // the job HAS a promptId, so emitNotification re-renders the digest body from
-  // `adapterResult` a moment later — and this branch used to leave the previous
-  // snapshot there, which rebuilt the file with the error text gone.
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const { digestPath } = await import('../lib/prompt-digest.mjs');
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-oc-watchfail';
-  try {
-    await withOpenCodeServer({
-      fetchJson: async (url) => {
-        if (url.includes('/global/health')) return { ok: true, data: { healthy: true } };
-        if (url.includes('/session?directory=')) return { ok: true, data: { id: 'ses_watchfail' } };
-        return { ok: true, data: {} };
-      },
-      // The session exists; the event stream the watcher needs does not.
-      openEventStream: async () => { throw new Error('event stream refused the connection'); },
-    }, async () => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'opencode', task: 'watch breaks',
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      assert.equal(terminal.status, 'failed');
-      const job = jobs.get(send.job_id);
-      assert.equal(job.detail, 'opencode_server_watch_error');
-      assert.ok(job.promptId, 'the session opened, so the digest refresh on notify is live');
-      assert.match(readFileSync(digestPath(send.job_id), 'utf8'), /event stream refused the connection/,
-        'the digest names the failure, not just the header');
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-oc-watchfail') jobs.delete(id);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('REGRESSION OpenCode server model: an explicit model reaches startOpenCodeServerPrompt body', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-oc-model';
-  let promptBody = null;
-  try {
-    await withOpenCodeServer({
-      fetchJson: async (url, opts = {}) => {
-        if (url.includes('/global/health')) return { ok: true, data: { healthy: true } };
-        if (url.endsWith('/session?directory=' + encodeURIComponent(TEST_CWD)) || (url.includes('/session?directory=') && opts.method === 'POST')) return { ok: true, data: { id: 'ses_model' } };
-        if (url.includes('/prompt_async')) { promptBody = opts.body; return { ok: true, data: {} }; }
-        return { ok: true, data: {} };
-      },
-      openEventStream: _ocSse([
-        _ocFrame({ type: 'message.part.updated', properties: { sessionID: 'ses_model', part: { id: 'p1', messageID: 'm1', type: 'text', text: 'done' } } }),
-        _ocFrame({ type: 'session.idle', properties: { sessionID: 'ses_model' } }),
-      ]),
-    }, async () => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'opencode', model: 'anthropic/claude-sonnet-4.6', task: 'server-mode model',
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      assert.equal(send.ok, true);
-      assert.equal(send.target, 'opencode');
-      parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      // The explicit model (not the env default) reaches the prompt body in
-      // the server prompt API's { providerID, modelID } shape.
-      assert.deepEqual(promptBody.model, { providerID: 'anthropic', modelID: 'claude-sonnet-4.6' });
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-oc-model') jobs.delete(id);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
 
 test('OpenCode server mode: reply re-steers and bumps the watch generation before aborting', async () => {
   const mod = await bridge();
@@ -1610,83 +525,6 @@ test('OpenCode server mode: reply re-steers and bumps the watch generation befor
   }
 });
 
-test('OpenCode server mode: cancel aborts the turn and reports cancelled even when the stream goes idle without an abort error', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-oc-cancel2';
-  let resolveAbort;
-  const abortGate = new Promise((r) => { resolveAbort = r; });
-  try {
-    await withOpenCodeServer({
-      fetchJson: async (url, opts = {}) => {
-        if (url.includes('/global/health')) return { ok: true, data: { healthy: true } };
-        if (url.includes('/session?directory=') && opts.method === 'POST') return { ok: true, data: { id: 'ses_cancel2' } };
-        if (url.includes('/abort')) { resolveAbort(); return { ok: true, data: true }; }
-        return { ok: true, data: {} };
-      },
-      // The turn streams nothing until the abort lands, then goes idle with NO
-      // MessageAbortedError — exactly the case where the bridge's cancel intent
-      // is the only signal that this was a cancellation.
-      openEventStream: async () => (async function* () {
-        await abortGate;
-        yield _ocFrame({ type: 'session.idle', properties: { sessionID: 'ses_cancel2' } });
-      })(),
-    }, async () => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'opencode', task: 'long task',
-        cwd: TEST_CWD, max_wait_sec: 1,
-      }));
-      // wait until the worker has a live session/running status
-      for (let i = 0; i < 80 && jobs.get(send.job_id)?.status !== 'running'; i++) await new Promise((r) => setImmediate(r));
-      const cancel = parse(await dispatch({ action: 'cancel', job_id: send.job_id }));
-      // buildCancelFollowup waits up to 5s; the abort unblocks the stream → idle → terminal
-      let term = cancel;
-      for (let i = 0; i < 10 && (term.status === 'cancelling' || term.status === 'still_running'); i++) {
-        term = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      }
-      assert.equal(term.status, 'cancelled');
-      assert.equal(jobs.get(send.job_id).detail, 'cancelled');
-    });
-  } finally {
-    resolveAbort?.();
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-oc-cancel2') jobs.delete(id);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('OpenCode server mode: an empty completed turn is remapped to failed', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-oc-empty';
-  try {
-    await withOpenCodeServer({
-      fetchJson: async (url, opts = {}) => {
-        if (url.includes('/global/health')) return { ok: true, data: { healthy: true } };
-        if (url.includes('/session?directory=') && opts.method === 'POST') return { ok: true, data: { id: 'ses_empty' } };
-        return { ok: true, data: {} };
-      },
-      // session.idle with no message parts at all → empty completed
-      openEventStream: _ocSse([_ocFrame({ type: 'session.idle', properties: { sessionID: 'ses_empty' } })]),
-    }, async () => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'opencode', task: 'produce nothing',
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      assert.equal(terminal.status, 'failed');
-      assert.equal(jobs.get(send.job_id).detail, 'empty_completed');
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-oc-empty') jobs.delete(id);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
 
 test('OpenCode server mode: per-job status flags reflect reply/resume availability', async () => {
   const mod = await bridge();
@@ -1775,15 +613,6 @@ async function _cxUntil(predicate, tries = 400) {
 
 // Wall-clock variant, for the one test that waits on a real process booting
 // rather than on this process's own microtasks.
-async function _cxUntilMs(predicate, budgetMs = 8000, stepMs = 20) {
-  const deadline = Date.now() + budgetMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return true;
-    await new Promise((r) => setTimeout(r, stepMs));
-  }
-  return predicate();
-}
-
 async function withCodexAppServer({ handlers = {}, statuses = {}, turns = {}, connect = null, spawnBroker = null } = {}, body) {
   const cx = await import('./codex-app-server-runtime.mjs');
   const regDir = mkdtempSync(join(tmpdir(), 'cx-srv-reg-'));
@@ -1861,637 +690,10 @@ function _cxLiveJob(jobs, jobId, sid, extra = {}) {
 // A `codex exec` stand-in that emits one D10 thread: enough for the exec worker
 // to bank a thread id and settle `completed`. It refuses anything but `exec`,
 // so a `resume` or an app-server argv is a loud failure rather than a green run.
-function _cxExecFakeBin(dir, threadId = 'th-exec-default') {
-  const fakeBin = join(dir, 'codex-fake.mjs');
-  writeFileSync(fakeBin, [
-    '#!/usr/bin/env node',
-    'if (process.argv[2] !== "exec") { console.error("not exec"); process.exit(2); }',
-    'process.stdin.on("data", () => {});',
-    'process.stdin.on("end", () => {',
-    `  console.log(JSON.stringify({ type: "thread.started", thread_id: ${JSON.stringify(threadId)} }));`,
-    '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "exec path ran" } }));',
-    '  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 21219, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 0 } }));',
-    '});',
-    '',
-  ].join('\n'), { mode: 0o700 });
-  chmodSync(fakeBin, 0o700);
-  return fakeBin;
-}
-
-test('Codex dispatch stays on the exec adapter when CODEX_RUNTIME_ADAPTER is unset', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const cx = await import('./codex-app-server-runtime.mjs');
-  _resetForTest();
-
-  const tmp = mkdtempSync(join(tmpdir(), 'codex-exec-default-'));
-  const fakeBin = _cxExecFakeBin(tmp);
-
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const oldBin = process.env.CODEX_BIN;
-  const oldAdapter = process.env.CODEX_RUNTIME_ADAPTER;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-exec';
-  process.env.CODEX_BIN = fakeBin;
-  delete process.env.CODEX_RUNTIME_ADAPTER;
-
-  // Positively: the app-server transport is not merely unused, it is never even
-  // asked for a connection.
-  let brokerTouches = 0;
-  cx._resetForTest();
-  cx._setForTest({
-    connect: async () => { brokerTouches++; throw new Error('exec dispatch must not open a broker connection'); },
-    spawnBroker: () => { brokerTouches++; throw new Error('exec dispatch must not spawn a broker'); },
-  });
-  try {
-    const send = parse(await dispatch({
-      action: 'send', target: 'codex', task: 'default adapter',
-      cwd: TEST_CWD, max_wait_sec: 5,
-    }));
-    const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-    assert.equal(terminal.status, 'completed');
-    assert.match(terminal.content, /exec path ran/);
-    assert.equal(brokerTouches, 0, 'the codex broker must never be contacted on the exec path');
-
-    const job = jobs.get(send.job_id);
-    // The exec worker records a child pid and no adapter marker; the app-server
-    // worker records the opposite. That asymmetry is the positive evidence.
-    assert.equal(job.codexAdapter, undefined);
-    assert.ok(job.pid > 0, 'the exec path spawns a child and records its pid');
-    assert.equal(job.sessionId, 'th-exec-default');
-
-    const status = parse(await dispatch({ action: 'status', job_id: send.job_id }));
-    assert.equal(status.reply_available, false);
-    assert.equal(status.resume_available, false);
-
-    // The global status payload keeps its exec shape: no broker block leaks in.
-    const global = parse(await dispatch({ action: 'status' }));
-    assert.deepEqual(Object.keys(global.codex_runtime).sort(), ['bin', 'sandbox', 'timeout_ms']);
-    assert.equal(global.targets.find((t) => t.id === 'codex').capabilities.reply, false);
-  } finally {
-    cx._resetForTest();
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-exec') jobs.delete(id);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    if (oldBin === undefined) delete process.env.CODEX_BIN; else process.env.CODEX_BIN = oldBin;
-    if (oldAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER; else process.env.CODEX_RUNTIME_ADAPTER = oldAdapter;
-    rmSync(tmp, { recursive: true, force: true });
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: the thread id is persisted while the job is still running, and deltas stream into the digest', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  const { digestPath } = await import('../lib/prompt-digest.mjs');
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-send';
-  try {
-    await withCodexAppServer({}, async ({ live }) => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'codex', task: EXACT_TASK,
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      assert.equal(send.ok, true);
-      assert.match(send.job_id, /^codex-/);
-
-      // W1.1's guarantee on this transport: `thread/start` answers before the
-      // model does anything, so the resumable id is in the ledger while the job
-      // is still running — not after it ends.
-      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.sessionId === 'T1'), 'thread id captured');
-      const running = jobs.get(send.job_id);
-      assert.equal(running.status, 'running');
-      assert.equal(running.terminalAt, undefined);
-      assert.equal(running.codexAdapter, 'appserver');
-      assert.equal(running.promptId, `codex-${send.job_id}`);
-      const persisted = state.readJob(send.job_id);
-      assert.equal(persisted.companionSessionId, 'T1');
-      assert.equal(persisted.terminalAt, undefined, 'persisted while still in flight');
-
-      const st = parse(await dispatch({ action: 'status', job_id: send.job_id }));
-      assert.equal(st.session_id, 'T1');
-      assert.equal(st.reply_available, true);
-      assert.equal(st.resume_available, true);
-
-      const sock = live();
-      assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'turn started');
-      // The turn is guarded: the status check runs before turn/start, and a
-      // thread this connection created is known-idle so it costs no resume.
-      assert.deepEqual(sock.wire(), ['thread/start', 'broker/subscribe', 'turn/start']);
-      const turnParams = sock.paramsFor('turn/start')[0];
-      assert.deepEqual(turnParams.input, [{ type: 'text', text: EXACT_TASK }]);
-      assert.equal(Object.hasOwn(turnParams, 'model'), false);
-      const startParams = sock.paramsFor('thread/start')[0];
-      assert.equal(startParams.approvalPolicy, 'never');
-      assert.equal(startParams.ephemeral, false);
-      assert.equal('model' in startParams, false, 'no pin, so config.toml stays authoritative');
-
-      // Sub-turn streaming (F7): a delta mid-turn is visible in the digest
-      // before anything terminal has happened.
-      sock.notify('item/agentMessage/delta', { itemId: 'm1', delta: 'partway through the work' });
-      assert.ok(await _cxUntil(() => /partway through the work/.test(readFileSync(digestPath(send.job_id), 'utf8'))),
-        'the live digest carries the streamed delta');
-      assert.equal(jobs.get(send.job_id).terminalAt, undefined, 'still running while streaming');
-
-      sock.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text: 'ALL DONE', phase: 'final_answer' } });
-      sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
-
-      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      assert.equal(terminal.status, 'completed');
-      assert.equal(terminal.target, 'codex');
-      assert.match(terminal.content, /ALL DONE/);
-      // Shared digest writer, target-neutral header — no third writer.
-      assert.match(readFileSync(digestPath(send.job_id), 'utf8'), /^# codex job /);
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-send') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: a zero-tool code-mode-host blocker is persisted and surfaced as runtime unavailable', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  const { digestPath } = await import('../lib/prompt-digest.mjs');
-  const incident =
-    'Unable to complete the review: every read-only command failed before execution because ' +
-    '/opt/homebrew/bin/codex-code-mode-host is missing';
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-code-host';
-  try {
-    await withQueue(async (queueFile) => {
-      await withCodexAppServer({}, async ({ live }) => {
-        const send = parse(await dispatch({
-          action: 'send', target: 'codex', task: 'review the repository',
-          cwd: TEST_CWD, max_wait_sec: 5,
-        }));
-        assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.sessionId === 'T1'), 'thread id captured');
-        const sock = live();
-        assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'turn started');
-
-        sock.notify('item/completed', {
-          item: { id: 'm1', type: 'agentMessage', text: incident, phase: 'final_answer' },
-        });
-        sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
-        assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.terminalAt), 'job settled');
-
-        // Normalize before retention: process memory and the restart ledger must
-        // agree, while the protocol-level stop reason remains salvage evidence.
-        const job = jobs.get(send.job_id);
-        assert.equal(job.status, 'unreachable');
-        assert.equal(job.detail, 'codex_code_mode_host_unavailable');
-        assert.match(job.error, /no task verdict was produced/);
-        assert.equal(job.summary.message, incident);
-        assert.deepEqual(job.summary.toolCalls, []);
-        assert.equal(job.summary.stopReason, 'turn/completed');
-
-        const persisted = state.readJob(send.job_id);
-        assert.equal(persisted.status, 'unreachable');
-        assert.equal(persisted.detail, 'codex_code_mode_host_unavailable');
-        assert.equal(persisted.summary.message, incident);
-        assert.equal(persisted.summary.stopReason, 'turn/completed');
-
-        const digest = readFileSync(digestPath(send.job_id), 'utf8');
-        assert.match(digest, /\*\*Status:\*\* `unreachable`/);
-        assert.match(digest, /Unable to complete the review/);
-
-        const status = parse(await dispatch({
-          action: 'status', job_id: send.job_id,
-        }));
-        assert.equal(status.status, 'unreachable');
-        assert.equal(status.detail, 'codex_code_mode_host_unavailable');
-        assert.equal(status.failure_class, 'runtime_unavailable');
-
-        assert.ok(await _cxUntil(() => existsSync(queueFile) && readQueue(queueFile).some((row) => row.jobId === send.job_id)),
-          'terminal queued');
-        const event = readQueue(queueFile).find((row) => row.jobId === send.job_id);
-        assert.equal(event.meta.status, 'unreachable');
-        assert.equal(event.meta.detail, 'codex_code_mode_host_unavailable');
-        assert.equal(event.meta.failure_class, 'runtime_unavailable');
-        assert.equal(event.meta.stop_reason, 'turn/completed');
-        assert.match(event.content, /app-server was reachable, but its command runner was unavailable/);
-        assert.match(event.content, /not a task verdict/);
-        assert.match(event.content, /Unable to complete the review/);
-
-        const terminal = parse(await dispatch({
-          action: 'wait', job_id: send.job_id, max_wait_sec: 5,
-        }));
-        assert.equal(terminal.status, 'unreachable');
-        assert.equal(terminal.meta.detail, 'codex_code_mode_host_unavailable');
-        assert.equal(terminal.meta.failure_class, 'runtime_unavailable');
-        assert.equal(terminal.meta.stop_reason, 'turn/completed');
-        assert.match(terminal.content, /not a task verdict/);
-      });
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId !== 'sid-cx-code-host') continue;
-      try { state.deleteJob(id); } catch {}
-      jobs.delete(id);
-    }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: end to end through the REAL broker and the shared fake app-server', async (t) => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const cx = await import('./codex-app-server-runtime.mjs');
-  const { fakeCodexBin } = await import('../test/fake-codex-app-server.mjs');
-  const { note, threadItem } = await import('../test/codex-wire-frames.mjs');
-  _resetForTest();
-
-  // Unix socket paths are truncated at SUN_LEN (~104 bytes), so the root stays
-  // short. Everything the bridge writes is redirected into it.
-  const dir = mkdtempSync(join(tmpdir(), 'cxb-'));
-  const prior = {
-    sock: process.env.CODEX_BROKER_SOCKET_PATH,
-    reg: process.env.AGENT_CODEX_BROKER_REGISTRY,
-    runtime: process.env.AGENT_RUNTIME_DIR,
-    hb: process.env.AGENT_HEARTBEAT_DIR,
-    adapter: process.env.CODEX_RUNTIME_ADAPTER,
-    bin: process.env.CODEX_BIN,
-    sid: process.env.CLAUDE_CODE_SESSION_ID,
-    logLevel: process.env.CODEX_BROKER_LOG_LEVEL,
-  };
-  process.env.CODEX_BROKER_SOCKET_PATH = join(dir, 'b.sock');
-  process.env.AGENT_CODEX_BROKER_REGISTRY = join(dir, 'broker.json');
-  process.env.AGENT_RUNTIME_DIR = dir;
-  process.env.AGENT_HEARTBEAT_DIR = join(dir, 'hb');
-  process.env.CODEX_RUNTIME_ADAPTER = 'appserver';
-  process.env.CODEX_BIN = fakeCodexBin(dir);
-  // Installation selection now requires a complete executable pair before it
-  // will spawn the real broker. The fake parent never invokes this helper, but
-  // it must have the same regular-file shape as the package Codex resolves.
-  const fakeHelper = join(dir, 'codex-code-mode-host');
-  writeFileSync(fakeHelper, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
-  chmodSync(fakeHelper, 0o700);
-  process.env.CODEX_BROKER_LOG_LEVEL = 'ERROR';
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-e2e';
-  cx._resetForTest();
-  t.after(() => {
-    const pid = cx.codexBrokerSnapshot()?.pid;
-    if (pid) { try { process.kill(pid, 'SIGKILL'); } catch {} }
-    cx._resetForTest();
-    for (const [k, v] of Object.entries({
-      CODEX_BROKER_SOCKET_PATH: prior.sock, AGENT_CODEX_BROKER_REGISTRY: prior.reg,
-      AGENT_RUNTIME_DIR: prior.runtime, AGENT_HEARTBEAT_DIR: prior.hb,
-      CODEX_RUNTIME_ADAPTER: prior.adapter, CODEX_BIN: prior.bin,
-      CLAUDE_CODE_SESSION_ID: prior.sid, CODEX_BROKER_LOG_LEVEL: prior.logLevel,
-    })) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-e2e') jobs.delete(id);
-    rmSync(dir, { recursive: true, force: true });
-    _resetForTest();
-  });
-
-  const send = parse(await dispatch({
-    action: 'send', target: 'codex', task: 'real broker',
-    cwd: dir, max_wait_sec: 5,
-  }));
-  assert.equal(send.ok, true);
-  // The bridge spawned a real detached broker, which spawned the fake
-  // app-server over stdio and handshook with it.
-  assert.ok(
-    await _cxUntilMs(() => jobs.get(send.job_id)?.sessionId === 'T1'),
-    `thread opened through the real broker (job=${JSON.stringify(jobs.get(send.job_id)?.error || jobs.get(send.job_id)?.status)})`,
-  );
-  assert.equal(jobs.get(send.job_id).codexAdapter, 'appserver');
-  assert.ok(cx.codexBrokerSnapshot()?.pid > 0, 'the broker is recorded in the shared registry');
-
-  // Drive the turn from a SECOND client, so every frame below travels
-  // app-server stdout -> broker -> threadId routing -> the bridge's own
-  // connection. Nothing is injected into the bridge locally.
-  const driver = await cx.connectCodexBroker({ socketPath: process.env.CODEX_BROKER_SOCKET_PATH });
-  // Built from the pinned contract (test/codex-wire-frames.mjs), not written by
-  // hand: these three frames are the bridge's only end-to-end proof that the
-  // digest it publishes came off a real wire, so their shape is the assertion.
-  await driver.call('fake/emit', { frames: [
-    note('item/agentMessage/delta', { threadId: 'T1', itemId: 'm1', delta: 'through the real broker' }),
-    note('item/completed', { threadId: 'T1', item: threadItem('agentMessage', {
-      id: 'm1', text: 'through the real broker', phase: 'final_answer',
-    }) }),
-    note('turn/completed', { threadId: 'T1', turn: { id: 'TURN1', status: 'completed', items: [] } }),
-  ] });
-  driver.close();
-
-  const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 10 }));
-  assert.equal(terminal.status, 'completed');
-  assert.match(terminal.content, /through the real broker/);
-});
-
-test('Codex app-server mode: a follow-up send on a thread resumes the recorded codex thread instead of starting one, and the id is the thread sid', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-follow';
-  const THREAD = 'cx-follow-up';
-  const FRESH = 'cx-follow-up-fresh';
-  try {
-    await withCodexAppServer({}, async ({ live, sockets }) => {
-      const send = (thread, task) => dispatch({
-        action: 'send', target: 'codex', task,
-        cwd: TEST_CWD, max_wait_sec: 5, thread,
-      });
-      const finish = async (sock, text) => {
-        sock.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text, phase: 'final_answer' } });
-        sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
-      };
-
-      // Round one: no sid for this thread yet, so it opens fresh.
-      const first = parse(await send(THREAD, 'round one'));
-      assert.equal(first.ok, true);
-      assert.ok(await _cxUntil(() => jobs.get(first.job_id)?.sessionId === 'T1'), 'thread id captured');
-      const sock1 = live();
-      assert.ok(await _cxUntil(() => sock1.wire().includes('turn/start')), 'turn started');
-      assert.deepEqual(sock1.wire(), ['thread/start', 'broker/subscribe', 'turn/start']);
-      // Persisted the way Copilot's ACP session id is — while the job is still
-      // running, so a bridge that dies now still leaves the next send its thread.
-      assert.equal(state.readThreadSid(THREAD), 'T1');
-      assert.equal(jobs.get(first.job_id).terminalAt, undefined);
-      await finish(sock1, 'round one done');
-      const terminal1 = parse(await dispatch({ action: 'wait', job_id: first.job_id, max_wait_sec: 5 }));
-      assert.equal(terminal1.status, 'completed');
-
-      // Round two on the SAME thread: thread/resume on the recorded id, never
-      // thread/start. The second resume is startCodexTurn's own status probe —
-      // `turn/start` on a busy thread does not reject, so the check is not
-      // optional, and it is the same shape the reply path puts on the wire.
-      const second = parse(await send(THREAD, 'round two'));
-      assert.equal(second.ok, true);
-      assert.notEqual(second.job_id, first.job_id);
-      assert.equal(second.thread, THREAD);
-      assert.ok(await _cxUntil(() => sockets.length >= 2 && live().wire().includes('turn/start')), 'second turn started');
-      const sock2 = live();
-      assert.deepEqual(sock2.wire(), ['thread/resume', 'broker/subscribe', 'thread/resume', 'turn/start']);
-      const resumeParams = sock2.paramsFor('thread/resume')[0];
-      assert.equal(resumeParams.threadId, 'T1');
-      // Resume re-derives its context from config when these are omitted —
-      // measured de-escalating the sandbox — so they ride the resume too.
-      assert.equal(resumeParams.approvalPolicy, 'never');
-      assert.ok(resumeParams.sandbox);
-      assert.equal(jobs.get(second.job_id).sessionId, 'T1');
-      assert.equal(jobs.get(second.job_id).codexAdapter, 'appserver');
-      assert.equal(state.readJob(second.job_id).companionSessionId, 'T1');
-      assert.equal(state.readThreadSid(THREAD), 'T1');
-      await finish(sock2, 'round two done');
-      const terminal2 = parse(await dispatch({ action: 'wait', job_id: second.job_id, max_wait_sec: 5 }));
-      assert.equal(terminal2.status, 'completed');
-      assert.equal(terminal2.meta.session_id, 'T1');
-      assert.equal(terminal2.meta.thread, THREAD);
-
-      // A fresh thread name opts out: no sid, so thread/start as before.
-      const third = parse(await send(FRESH, 'fresh thread'));
-      assert.ok(await _cxUntil(() => sockets.length >= 3 && live().wire().includes('turn/start')), 'third turn started');
-      assert.deepEqual(live().wire(), ['thread/start', 'broker/subscribe', 'turn/start']);
-      await finish(live(), 'fresh done');
-      assert.equal(parse(await dispatch({ action: 'wait', job_id: third.job_id, max_wait_sec: 5 })).status, 'completed');
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-follow') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
-    for (const thread of [THREAD, FRESH]) state.clearThread(thread);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: a recorded thread id that no longer resumes fails the send explicitly and retires the sid — no fallback to thread/start', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-stale';
-  const THREAD = 'cx-stale-sid';
-  state.writeThreadSid(THREAD, 'T-gone');
-  try {
-    await withCodexAppServer({
-      handlers: {
-        // The rollout under $CODEX_HOME/sessions was removed: the broker is
-        // healthy and answers, but the thread cannot be loaded.
-        'thread/resume': () => ({ __error: { code: -32600, message: 'no rollout found for thread T-gone' } }),
-      },
-    }, async ({ live }) => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'codex', task: 'continue',
-        cwd: TEST_CWD, max_wait_sec: 5, thread: THREAD,
-      }));
-      assert.equal(send.ok, true);
-      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      assert.equal(terminal.status, 'failed');
-      assert.equal(terminal.meta.detail, 'codex_server_worker_error');
-      assert.match(terminal.content, /T-gone/);
-      assert.match(terminal.content, /cx-stale-sid/);
-      assert.match(terminal.content, /retired/);
-      assert.deepEqual(live().wire(), ['thread/resume'], 'no silent fallback to a fresh thread');
-      // The next send on this thread opens fresh instead of failing the same way forever.
-      assert.equal(state.readThreadSid(THREAD), null);
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-stale') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
-    state.clearThread(THREAD);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('Codex exec adapter ignores a recorded thread sid: single-shot, nothing to resume, nothing written', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const cx = await import('./codex-app-server-runtime.mjs');
-  const state = await import('../lib/state.mjs');
-  _resetForTest();
-  const tmp = mkdtempSync(join(tmpdir(), 'codex-exec-sid-'));
-  const fakeBin = _cxExecFakeBin(tmp, 'th-exec-second');
-  const THREAD = 'cx-exec-thread';
-  state.writeThreadSid(THREAD, 'T-prior-appserver');
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const oldBin = process.env.CODEX_BIN;
-  const oldAdapter = process.env.CODEX_RUNTIME_ADAPTER;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-exec-sid';
-  process.env.CODEX_BIN = fakeBin;
-  delete process.env.CODEX_RUNTIME_ADAPTER;
-  cx._resetForTest();
-  cx._setForTest({
-    connect: async () => { throw new Error('exec dispatch must not open a broker connection'); },
-    spawnBroker: () => { throw new Error('exec dispatch must not spawn a broker'); },
-  });
-  try {
-    const send = parse(await dispatch({
-      action: 'send', target: 'codex', task: 'exec on a thread with a sid',
-      cwd: TEST_CWD, max_wait_sec: 5, thread: THREAD,
-    }));
-    const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-    assert.equal(terminal.status, 'completed');
-    assert.equal(jobs.get(send.job_id).sessionId, 'th-exec-second', 'the exec run\'s own thread, not the recorded one');
-    assert.equal(jobs.get(send.job_id).codexAdapter, undefined);
-    // The exec stream's turn.completed usage rides the same path as every
-    // other transport's: onto the job, into the ledger, out on wait meta.
-    assert.equal(jobs.get(send.job_id).usage.source, 'codex-exec');
-    assert.equal(jobs.get(send.job_id).usage.input_tokens, 21219);
-    assert.equal(terminal.meta.usage.total_tokens, 21224);
-    assert.equal(state.readJob(send.job_id).usage.source, 'codex-exec');
-    assert.equal(state.readThreadSid(THREAD), 'T-prior-appserver', 'exec neither reads nor rewrites the sid');
-  } finally {
-    cx._resetForTest();
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-exec-sid') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
-    state.clearThread(THREAD);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    if (oldBin === undefined) delete process.env.CODEX_BIN; else process.env.CODEX_BIN = oldBin;
-    if (oldAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER; else process.env.CODEX_RUNTIME_ADAPTER = oldAdapter;
-    rmSync(tmp, { recursive: true, force: true });
-    _resetForTest();
-  }
-});
-
 const _cxTokens = (input, output, cached, reasoning, total) => ({
   inputTokens: input, outputTokens: output, cachedInputTokens: cached, reasoningOutputTokens: reasoning, totalTokens: total,
 });
 
-test('usage: a codex app-server turn\'s token usage lands on the job, the ledger, wait meta, status, the queue event and the digest — and moves off the summary', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  const { digestPath } = await import('../lib/prompt-digest.mjs');
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-usage';
-  try {
-    await withQueue(async (queueFile) => {
-      await withCodexAppServer({}, async ({ live }) => {
-        const send = parse(await dispatch({
-          action: 'send', target: 'codex', task: 'count tokens',
-          cwd: TEST_CWD, max_wait_sec: 5,
-        }));
-        assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.sessionId === 'T1'), 'thread id captured');
-        const sock = live();
-        assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'turn started');
-
-        // Mid-turn: the live digest already shows what has been spent.
-        sock.notify('thread/tokenUsage/updated', { turnId: 'TURN1', tokenUsage: {
-          total: _cxTokens(120, 30, 100, 5, 150), last: _cxTokens(120, 30, 100, 5, 150),
-        } });
-        assert.ok(await _cxUntil(() => /\*\*Usage:\*\* in=120 out=30/.test(readFileSync(digestPath(send.job_id), 'utf8'))),
-          'the live digest carries the streamed usage');
-        assert.equal(jobs.get(send.job_id).terminalAt, undefined);
-
-        sock.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text: 'DONE', phase: 'final_answer' } });
-        sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
-        const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-        const expected = {
-          source: 'codex-app-server',
-          input_tokens: 120, output_tokens: 30, cached_input_tokens: 100,
-          cache_write_input_tokens: null, reasoning_output_tokens: 5, total_tokens: 150,
-        };
-        assert.equal(terminal.status, 'completed');
-        assert.deepEqual(terminal.meta.usage, expected);
-        const job = jobs.get(send.job_id);
-        assert.deepEqual(job.usage, expected);
-        assert.equal('usage' in job.summary, false, 'one home on the job, not a second copy under summary');
-        assert.deepEqual(state.readJob(send.job_id).usage, expected);
-        const status = parse(await dispatch({ action: 'status', job_id: send.job_id }));
-        assert.deepEqual(status.usage, expected);
-        const event = readQueue(queueFile).find((row) => row.jobId === send.job_id && row.kind === 'terminal');
-        assert.deepEqual(event.meta.usage, expected);
-        assert.match(readFileSync(digestPath(send.job_id), 'utf8'), /\*\*Usage:\*\* in=120 out=30 cached=100 reasoning=5 total=150 \(codex-app-server\)/);
-      });
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-usage') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('usage: a job whose transport reported nothing carries no usage key anywhere', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  const { digestPath } = await import('../lib/prompt-digest.mjs');
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-nousage';
-  try {
-    await withQueue(async (queueFile) => {
-      await withCodexAppServer({}, async ({ live }) => {
-        const send = parse(await dispatch({
-          action: 'send', target: 'codex', task: 'no usage frames',
-          cwd: TEST_CWD, max_wait_sec: 5,
-        }));
-        assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.sessionId === 'T1'), 'thread id captured');
-        const sock = live();
-        assert.ok(await _cxUntil(() => sock.wire().includes('turn/start')), 'turn started');
-        sock.notify('item/completed', { item: { id: 'm1', type: 'agentMessage', text: 'DONE', phase: 'final_answer' } });
-        sock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
-        const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-        assert.equal(terminal.status, 'completed');
-        assert.equal('usage' in terminal.meta, false);
-        assert.equal('usage' in jobs.get(send.job_id), false);
-        assert.equal('usage' in state.readJob(send.job_id), false);
-        const status = parse(await dispatch({ action: 'status', job_id: send.job_id }));
-        assert.equal('usage' in status, false);
-        const event = readQueue(queueFile).find((row) => row.jobId === send.job_id && row.kind === 'terminal');
-        assert.equal('usage' in event.meta, false);
-        assert.doesNotMatch(readFileSync(digestPath(send.job_id), 'utf8'), /\*\*Usage:/);
-      });
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-nousage') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('usage: Copilot\'s OTEL-derived usage rides the daemon summary onto the job and out on wait meta', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cop-usage';
-  const usage = {
-    source: 'copilot-otel',
-    input_tokens: 24869, output_tokens: 4, cached_input_tokens: null,
-    cache_write_input_tokens: 24867, reasoning_output_tokens: null, total_tokens: 24873,
-    model: 'claude-sonnet-5', cost: 1, cost_unit: 'copilot_premium_requests',
-  };
-  try {
-    await withDaemonStubs({
-      ensureDaemon: async () => {},
-      sendToSocket: async (msg) => {
-        if (msg.command === 'prompt-bg') return { ok: true, data: { promptId: 'prompt-usage-1', sessionId: 'cop-sid-usage' } };
-        if (msg.command === 'watch') {
-          return { ok: true, data: { status: 'completed', summary: { message: 'done', thoughts: '', toolCalls: [], plan: null, stopReason: 'end_turn', usage } } };
-        }
-        return { ok: true, data: {} };
-      },
-    }, async () => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'copilot', task: 'spend some premium requests',
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      assert.equal(send.status, 'still_running');
-      const terminal = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      assert.equal(terminal.status, 'completed');
-      assert.deepEqual(terminal.meta.usage, usage);
-      assert.deepEqual(jobs.get(send.job_id).usage, usage);
-      assert.equal('usage' in jobs.get(send.job_id).summary, false);
-      assert.deepEqual(state.readJob(send.job_id).usage, usage);
-      const status = parse(await dispatch({ action: 'status', job_id: send.job_id }));
-      assert.deepEqual(status.usage, usage);
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cop-usage') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
 
 test('usage: a turn resumed mid-flight by a fresh bridge reports only what it observed, flagged partial', async () => {
   const mod = await bridge();
@@ -2531,276 +733,6 @@ test('usage: a turn resumed mid-flight by a fresh bridge reports only what it ob
   }
 });
 
-test('Codex app-server mode: cancel maps to turn/interrupt and settles cancelled although the stream says interrupted', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-cancel';
-  let workerSock = null;
-  try {
-    await withCodexAppServer({
-      handlers: {
-        // The interrupt is what ends the turn, so the stream answers it — with
-        // `interrupted`, which carries NO assistant answer.
-        'turn/interrupt': () => {
-          workerSock?.notify('turn/completed', { turn: { id: 'TURN1', status: 'interrupted', items: [] } });
-          return {};
-        },
-      },
-    }, async ({ live, sockets }) => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'codex', task: 'long codex turn',
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.status === 'running'), 'job running');
-      workerSock = live();
-      assert.ok(await _cxUntil(() => workerSock.wire().includes('turn/start')), 'turn started');
-      workerSock.notify('item/agentMessage/delta', { itemId: 'm1', delta: 'half an answer' });
-
-      const cancel = parse(await dispatch({ action: 'cancel', job_id: send.job_id }));
-      const cancelSock = sockets[sockets.length - 1];
-      assert.notEqual(cancelSock, workerSock, 'cancel opens its own connection');
-      // Resume-before-act: a connection that did not start the thread would
-      // otherwise meet `thread not found`, which means "not loaded here".
-      assert.deepEqual(cancelSock.wire(), ['thread/resume', 'turn/interrupt']);
-
-      let term = cancel;
-      for (let i = 0; i < 10 && (term.status === 'cancelling' || term.status === 'still_running'); i++) {
-        term = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      }
-      assert.equal(term.status, 'cancelled');
-      const job = jobs.get(send.job_id);
-      assert.equal(job.detail, 'cancelled');
-      assert.equal(job.error, null);
-      // The thread outlives the interrupt — that is the whole difference from
-      // the exec adapter's SIGTERM — and the response says so.
-      assert.equal(job.sessionId, 'T1');
-      assert.match(String(cancel.note || term.content || ''), /stays live|resumable|cancelled/i);
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-cancel') jobs.delete(id);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: cancel sends the turn id the protocol REQUIRES, taken from the live turn', async () => {
-  // The shipped defect: `interruptCodexTurn` omitted `turnId` when null and the
-  // bridge never passed one, so every app-server cancel was
-  // `-32600 missing field \`turnId\`` on the real server. The fakes validate the
-  // contract now, so this cannot pass by omission — and the id asserted here is
-  // the one the worker banked from `turn/start`.
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-turnid';
-  try {
-    await withCodexAppServer({}, async ({ sockets }) => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'codex', task: 'long codex turn',
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.turnId), 'the worker banks the turn id');
-      assert.equal(jobs.get(send.job_id).turnId, 'TURN1');
-
-      const cancel = parse(await dispatch({ action: 'cancel', job_id: send.job_id }));
-      const cancelSock = sockets[sockets.length - 1];
-      assert.deepEqual(cancelSock.paramsFor('turn/interrupt')[0], { threadId: 'T1', turnId: 'TURN1' });
-      assert.equal(cancel.turn_id, 'TURN1');
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-turnid') jobs.delete(id);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: a RESTARTED bridge cancels by reading the running turn off thread/read', async () => {
-  // The turn began before this bridge existed, so `turn/started` is gone for
-  // good and the ledger row carries no turn id. `thread/read{includeTurns:true}`
-  // reports the last turn as `{id, status}`, and the running one reads
-  // `inProgress` — the only other place this id exists.
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  try {
-    await withCodexAppServer({
-      statuses: { T1: 'active' },
-      turns: { T1: [{ id: 'TURN_OLD', status: 'completed' }, { id: 'TURN_LIVE', status: 'inProgress' }] },
-    }, async ({ sockets }) => {
-      _cxLiveJob(jobs, 'codex-restarted', 'sid-cx-restart', { turnId: null });
-      const cancel = parse(await dispatch({ action: 'cancel', job_id: 'codex-restarted' }));
-      const sock = sockets[sockets.length - 1];
-      assert.equal(cancel.ok, true);
-      assert.equal(cancel.turn_id, 'TURN_LIVE');
-      assert.deepEqual(sock.wire(), ['thread/read', 'thread/resume', 'turn/interrupt']);
-      assert.deepEqual(sock.paramsFor('turn/interrupt')[0], { threadId: 'T1', turnId: 'TURN_LIVE' });
-    });
-  } finally {
-    jobs.delete('codex-restarted');
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: a cancel with no resolvable turn id fails LOUDLY and leaves the job running', async () => {
-  // The alternative is what shipped: omit the field, get a -32600 the operator
-  // never sees, and tell them the cancel was accepted. A cancel that cannot be
-  // sent must also not leave `cancelRequested` behind — a stale flag relabels
-  // whatever the turn actually produced as `cancelled`.
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  try {
-    await withCodexAppServer({ statuses: { T1: 'active' }, turns: { T1: [] } }, async ({ sockets }) => {
-      _cxLiveJob(jobs, 'codex-noturn', 'sid-cx-noturn', { turnId: null });
-      const cancel = parse(await dispatch({ action: 'cancel', job_id: 'codex-noturn' }));
-      assert.equal(cancel.ok, false);
-      assert.equal(cancel.status, 'cancel_failed');
-      assert.match(cancel.error, /needs the running turn's id on thread T1/);
-      assert.match(cancel.error, /no turns at all/);
-      assert.equal(jobs.get('codex-noturn').cancelRequested, false);
-      assert.equal(jobs.get('codex-noturn').terminalAt, undefined);
-      assert.equal(sockets[sockets.length - 1].wire().includes('turn/interrupt'), false);
-    });
-  } finally {
-    jobs.delete('codex-noturn');
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: the bridge owns the cancel verdict when the turn races the interrupt to completed', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-race';
-  let workerSock = null;
-  try {
-    await withCodexAppServer({
-      handlers: {
-        // The turn had already finished when the interrupt landed, so the
-        // stream reports `completed`. Only the intent recorded before the
-        // interrupt tells the operator their cancel was honoured.
-        'turn/interrupt': () => {
-          workerSock?.notify('item/completed', {
-            item: {
-              id: 'm1', type: 'agentMessage', phase: 'final_answer',
-              text: 'I cannot run commands because codex-code-mode-host is missing.',
-            },
-          });
-          workerSock?.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [] } });
-          return {};
-        },
-      },
-    }, async ({ live }) => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'codex', task: 'racing turn',
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.status === 'running'), 'job running');
-      workerSock = live();
-      assert.ok(await _cxUntil(() => workerSock.wire().includes('turn/start')), 'turn started');
-      let term = parse(await dispatch({ action: 'cancel', job_id: send.job_id }));
-      for (let i = 0; i < 10 && (term.status === 'cancelling' || term.status === 'still_running'); i++) {
-        term = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      }
-      assert.equal(term.status, 'cancelled');
-      assert.equal(jobs.get(send.job_id).detail, 'cancelled');
-      assert.equal(term.meta.failure_class, undefined, 'cancellation wins over runtime blocker remapping');
-      assert.match(term.content, /Partial output:[\s\S]*codex-code-mode-host is missing/);
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-race') jobs.delete(id);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: a cancel whose interrupt never lands does not later relabel a finished turn as cancelled', async () => {
-  // The intent is recorded BEFORE the interrupt so the watch can own the
-  // verdict. If the interrupt then fails, that intent has to go with it —
-  // otherwise the turn runs to a normal completion and the watch stamps it
-  // `cancelled` with `error: null`, so the parent throws away a finished answer
-  // it was already told the cancel had failed to stop.
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-cancelfail';
-  let workerSock = null;
-  try {
-    await withCodexAppServer({
-      handlers: {
-        'turn/interrupt': () => { throw new Error('broker busy: interrupt not acknowledged'); },
-      },
-    }, async ({ live }) => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'codex', task: 'uncancellable turn',
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.status === 'running'), 'job running');
-      workerSock = live();
-      assert.ok(await _cxUntil(() => workerSock.wire().includes('turn/start')), 'turn started');
-
-      const cancel = parse(await dispatch({ action: 'cancel', job_id: send.job_id }));
-      assert.equal(cancel.ok, false);
-      assert.equal(cancel.status, 'cancel_failed');
-      assert.equal(cancel.cancelled, false);
-      assert.equal(jobs.get(send.job_id).cancelRequested, false, 'the unfulfilled intent was withdrawn');
-
-      // The turn the operator was told could not be cancelled now finishes.
-      workerSock.notify('turn/completed', { turn: { id: 'TURN1', status: 'completed', items: [
-        { id: 'm1', type: 'agentMessage', text: 'finished anyway', phase: 'final_answer' },
-      ] } });
-      const term = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-      assert.equal(term.status, 'completed', 'a turn that finished is reported as finished');
-      assert.match(term.content, /finished anyway/);
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-cancelfail') jobs.delete(id);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
-
-test('Codex app-server mode: a watch that breaks after the thread opened records WHY in the digest', async () => {
-  // The digest is where the operator is sent for salvage, so a failed
-  // app-server job that leaves a header-only file tells them nothing. Once the
-  // thread is open the job HAS a promptId, which is what makes
-  // emitNotification re-render the body from `adapterResult` — so the failure
-  // text has to live there, not only in the write just above it.
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  const { digestPath } = await import('../lib/prompt-digest.mjs');
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-cx-watchfail';
-  try {
-    await withCodexAppServer({
-      // The thread opens, then the subscription the watcher needs is refused.
-      handlers: { 'broker/subscribe': () => { throw new Error('broker refused the subscription'); } },
-    }, async () => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'codex', task: 'watch breaks',
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      assert.ok(await _cxUntil(() => jobs.get(send.job_id)?.terminalAt), 'the job settles');
-      const job = jobs.get(send.job_id);
-      assert.equal(job.status, 'failed');
-      assert.equal(job.detail, 'codex_server_watch_error');
-      assert.ok(job.promptId, 'the thread opened, so the digest refresh on notify is live');
-      assert.match(readFileSync(digestPath(send.job_id), 'utf8'), /broker refused the subscription/,
-        'the digest names the failure, not just the header');
-    });
-  } finally {
-    for (const id of [...jobs.keys()]) if (jobs.get(id)?.claudeSessionId === 'sid-cx-watchfail') { try { state.deleteJob(id); } catch {} jobs.delete(id); }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
 
 test('Codex app-server mode: reply on a running turn steers it — no cancel, no restart, no generation bump', async () => {
   const mod = await bridge();
@@ -3109,88 +1041,6 @@ test('Codex app-server mode: hydrate resumes the job instead of retiring it, and
   }
 });
 
-test('Codex app-server mode: a thread/read-recovered named runner blocker never persists completed', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  const state = await import('../lib/state.mjs');
-  const { digestPath } = await import('../lib/prompt-digest.mjs');
-  const jobId = 'codex-hydrate-code-host';
-  const hostSid = 'sid-cx-hydrate-code-host';
-  const incident =
-    'Unable to complete the review: every read-only command failed before execution because ' +
-    '/opt/homebrew/bin/codex-code-mode-host is missing';
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = hostSid;
-  try {
-    await withQueue(async (queueFile) => {
-      await withCodexAppServer({
-        statuses: { T1: 'idle' },
-        handlers: {
-          'thread/read': (p) => ({ thread: {
-            id: p.threadId,
-            turns: [{ id: 'TURN1', status: 'completed', items: [
-              { id: 'm1', type: 'agentMessage', text: incident, phase: 'final_answer' },
-            ] }],
-          } }),
-        },
-      }, async () => {
-        _cxLiveJob(jobs, jobId, hostSid);
-        mod.persistJob(jobId);
-        jobs.delete(jobId);
-        mod._resetForTest();
-
-        mod.hydrateJobsFromLedger();
-        assert.ok(await _cxUntil(() => jobs.get(jobId)?.terminalAt), 'the recovered job settles');
-        const job = jobs.get(jobId);
-        assert.equal(job.status, 'unreachable');
-        assert.equal(job.detail, 'codex_code_mode_host_unavailable');
-        assert.equal(job.summary.message, incident);
-        assert.deepEqual(job.summary.toolCalls, []);
-        assert.equal(job.summary.stopReason, 'thread/read');
-
-        const persisted = state.readJob(jobId);
-        assert.equal(persisted.status, 'unreachable');
-        assert.equal(persisted.detail, 'codex_code_mode_host_unavailable');
-        assert.equal(persisted.summary.message, incident);
-        assert.equal(persisted.summary.stopReason, 'thread/read');
-
-        const digest = readFileSync(digestPath(jobId), 'utf8');
-        assert.match(digest, /\*\*Status:\*\* `unreachable`/);
-        assert.match(digest, /Unable to complete the review/);
-
-        const status = parse(await dispatch({ action: 'status', job_id: jobId }));
-        assert.equal(status.status, 'unreachable');
-        assert.equal(status.detail, 'codex_code_mode_host_unavailable');
-        assert.equal(status.failure_class, 'runtime_unavailable');
-
-        assert.ok(await _cxUntil(() => existsSync(queueFile) && readQueue(queueFile).some((row) => row.jobId === jobId)),
-          'recovered terminal queued');
-        const event = readQueue(queueFile).find((row) => row.jobId === jobId);
-        assert.equal(event.meta.status, 'unreachable');
-        assert.equal(event.meta.detail, 'codex_code_mode_host_unavailable');
-        assert.equal(event.meta.failure_class, 'runtime_unavailable');
-        assert.equal(event.meta.stop_reason, 'thread/read');
-        assert.match(event.content, /not a task verdict/);
-
-        const terminal = parse(await dispatch({
-          action: 'wait', job_id: jobId, max_wait_sec: 5,
-        }));
-        assert.equal(terminal.status, 'unreachable');
-        assert.equal(terminal.meta.detail, 'codex_code_mode_host_unavailable');
-        assert.equal(terminal.meta.failure_class, 'runtime_unavailable');
-        assert.equal(terminal.meta.stop_reason, 'thread/read');
-        assert.match(terminal.content, /not a task verdict/);
-      });
-    });
-  } finally {
-    try { state.deleteJob(jobId); } catch {}
-    jobs.delete(jobId);
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    _resetForTest();
-  }
-});
 
 test('a hydrated adapterResult does not latch the carry-forward off for the renders after it', async () => {
   // The other side of W1.4'. Hydrate restores `job.adapterResult` from the
@@ -3425,168 +1275,6 @@ test('applyAdapterCapabilities flips codex only under the app-server adapter', a
   }
 });
 
-test('agent_status keeps contract skew separate from installed-vs-running upgrade skew', async () => {
-  const mod = await bridge();
-  const { dispatch, _resetForTest } = mod;
-  _resetForTest();
-  await withCodexAppServer({}, async () => {
-    const status = parse(await dispatch({ action: 'status' }));
-    const rt = status.codex_runtime;
-    assert.equal(rt.adapter, 'appserver');
-    assert.equal(rt.approvalPolicy, 'never');
-    assert.ok(rt.socket.endsWith('.sock'));
-    assert.ok(rt.pinned_version);
-    assert.ok(rt.broker_registry !== undefined, 'the shared-broker registry entry is reported');
-    // No broker has spoken to this process yet, so skew is unknown — which is
-    // not the same as "no skew". There is no protocol version field on this
-    // transport, so this is the only drift warning there is.
-    assert.equal(rt.contract_version_skew, null);
-    assert.equal(rt.upgrade_version_skew, null);
-    // The exec knobs are still there: the app-server block merges onto them.
-    assert.ok(rt.timeout_ms > 0);
-    assert.ok(rt.bin);
-    const codex = status.targets.find((t) => t.id === 'codex');
-    assert.equal(codex.capabilities.reply, true);
-    assert.equal(codex.capabilities.resume, true);
-  });
-  _resetForTest();
-});
-
-test('runWorker retires persisted thread sid on prompt timeout and empty completion', async () => {
-  const mod = await bridge();
-  const state = await import('../lib/state.mjs');
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-retire';
-
-  async function runTerminalScenario({ thread, promptId, daemonResult }) {
-    let watchCalls = 0;
-    return withDaemonStubs(
-      {
-        ensureDaemon: async () => {},
-        sendToSocket: async (msg) => {
-          if (msg.command === 'prompt-bg') {
-            return { ok: true, data: { promptId, sessionId: 'cop-sid-retire' } };
-          }
-          if (msg.command === 'watch') {
-            watchCalls++;
-            return { ok: true, data: daemonResult };
-          }
-          return { ok: true, data: {} };
-        },
-      },
-      async () => {
-        const sendBody = parse(await dispatch({
-          action: 'send',
-          task: `retire ${thread}`,
-          cwd: TEST_CWD,
-          thread,
-          max_wait_sec: 5,
-        }));
-        assert.equal(sendBody.status, 'still_running');
-        for (let i = 0; i < 20 && !jobs.get(sendBody.job_id)?.terminalAt; i++) {
-          await new Promise((r) => setImmediate(r));
-        }
-        assert.equal(watchCalls, 1);
-        return parse(await dispatch({
-          action: 'wait',
-          job_id: sendBody.job_id,
-          max_wait_sec: 1,
-        }));
-      },
-    );
-  }
-
-  try {
-    state.clearThread('thread-timeout-retire');
-    let body = await runTerminalScenario({
-      thread: 'thread-timeout-retire',
-      promptId: 'prompt-timeout-retire',
-      daemonResult: { status: 'failed', error: 'prompt timeout', sessionRetired: true },
-    });
-    assert.equal(body.status, 'timeout');
-    assert.equal(body.meta.detail, 'prompt_timeout');
-    assert.equal(body.meta.session_retired, 'true');
-    assert.match(body.content, /timed-out GitHub Copilot CLI session was retired/);
-    assert.equal(state.readThreadSid('thread-timeout-retire'), null);
-
-    state.clearThread('thread-empty-retire');
-    body = await runTerminalScenario({
-      thread: 'thread-empty-retire',
-      promptId: 'prompt-empty-retire',
-      daemonResult: {
-        status: 'completed',
-        summary: { message: '', thoughts: '', toolCalls: [], plan: null },
-      },
-    });
-    assert.equal(body.status, 'failed');
-    assert.equal(body.meta.detail, 'empty_completed');
-    assert.equal(body.meta.session_retired, 'true');
-    assert.match(body.content, /without any assistant message/);
-    assert.equal(state.readThreadSid('thread-empty-retire'), null);
-  } finally {
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId === 'sid-retire') jobs.delete(id);
-    }
-    state.clearThread('thread-timeout-retire');
-    state.clearThread('thread-empty-retire');
-    _resetForTest();
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-  }
-});
-
-test('runWorker maps daemon SESSION_BUSY into a terminal unreachable response', async () => {
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-busy-C';
-  try {
-    const body = await withDaemonStubs(
-      {
-        ensureDaemon: async () => {},
-        sendToSocket: async (msg) => {
-          if (msg.command === 'prompt-bg') {
-            return {
-              ok: false,
-              code: 'SESSION_BUSY',
-              error: 'session busy: prompt p1 is in flight (status=running)',
-              data: { existingPromptId: 'p1', sessionId: 'cop-sid-busy' },
-            };
-          }
-          return { ok: true, data: {} };
-        },
-      },
-      async () => {
-        const sendBody = parse(await dispatch({
-          action: 'send',
-          task: 'this one races the daemon mutex',
-          cwd: TEST_CWD,
-          thread: 'thread-busy-C',
-          max_wait_sec: 5,
-        }));
-        assert.equal(sendBody.status, 'still_running');
-        return parse(await dispatch({
-          action: 'wait',
-          job_id: sendBody.job_id,
-          max_wait_sec: 5,
-        }));
-      },
-    );
-    assert.equal(body.status, 'unreachable');
-    assert.equal(body.meta.detail, 'session_busy');
-    assert.equal(body.meta.existing_prompt_id, 'p1');
-  } finally {
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId === 'sid-busy-C') jobs.delete(id);
-    }
-    _resetForTest();
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-  }
-});
 
 test('handleReply rebinds a running job to the replacement prompt and watcher result', async () => {
   const mod = await bridge();
@@ -3685,56 +1373,6 @@ async function withAcpSession(sid, body) {
   }
 }
 
-test('Copilot ACP receives task verbatim without critic instructions or a fleet prefix', async () => {
-  await withAcpSession('sid-verbatim-acp', async ({ dispatch }) => {
-    let prompt;
-    const terminal = await withDaemonStubs({
-      ensureDaemon: async () => {},
-      sendToSocket: async (msg) => {
-        if (msg.command === 'prompt-bg') {
-          prompt = msg.text;
-          return { ok: true, data: { promptId: 'verbatim-prompt', sessionId: 'verbatim-session' } };
-        }
-        return { ok: true, data: { status: 'completed', summary: { message: 'done', toolCalls: [] } } };
-      },
-    }, async () => {
-      const send = parse(await dispatch({ action: 'send', target: 'copilot', task: EXACT_TASK, cwd: TEST_CWD }));
-      return parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 1 }));
-    });
-    assert.equal(terminal.status, 'completed');
-    assert.equal(prompt, EXACT_TASK);
-  });
-});
-
-test('acp: an agent answering another protocol version settles the job unreachable, named, in the runtime_unavailable class', async () => {
-  await withAcpSession('sid-acp-proto', async (mod) => {
-    const { dispatch } = mod;
-    const terminal = await withDaemonStubs({
-      ensureDaemon: async () => {},
-      sendToSocket: async (msg) => {
-        if (msg.command === 'prompt-bg') {
-          return {
-            ok: false, code: 'ACP_PROTOCOL_MISMATCH',
-            error: 'GitHub Copilot CLI answered protocolVersion 2; this daemon pins 1 and does not adapt (agent: Copilot 9.0.0)',
-            data: { protocol: { pinned: 1, answered: 2, status: 'mismatch' } },
-          };
-        }
-        return { ok: true, data: {} };
-      },
-    }, async () => {
-      const send = parse(await dispatch({ action: 'send', target: 'copilot', task: 'hello', cwd: TEST_CWD, max_wait_sec: 5 }));
-      assert.equal(send.status, 'still_running');
-      return parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-    });
-    assert.equal(terminal.status, 'unreachable');
-    assert.equal(terminal.meta.detail, 'acp_protocol_mismatch');
-    assert.equal(terminal.meta.failure_class, 'runtime_unavailable');
-    assert.equal(terminal.meta.protocol_answered, '2');
-    assert.match(terminal.content, /answered protocolVersion 2/);
-    assert.match(terminal.content, /pins 1/);
-    assert.match(terminal.content, /node scripts\/doctor.mjs/, 'the body says what to do next');
-  });
-});
 
 test('acp: the reply acknowledgement says the turn was cancelled and re-prompted — ACP has no mid-turn steer', async () => {
   await withAcpSession('sid-acp-reply', async (mod) => {
@@ -3773,54 +1411,7 @@ test('acp: the agent_send target enum is the registry, not a literal', async () 
 // runtime dir, the daemon spawns test/fake-acp-agent.mjs as `copilot`
 // (COPILOT_BIN), and a send/wait pair settles — no stubs anywhere below the
 // bridge. The second send on the same thread reuses the ACP session.
-test('acp: end to end through a real detached daemon and the fake agent — one daemon, one session, two sends', async (t) => {
-  const { fakeAcpAgentBin } = await import('../test/fake-acp-agent.mjs');
-  const { daemonSocketPath, daemonLogFile, promptEventsPath } = await import('../lib/runtime-paths.mjs');
-  const daemonClient = await import('./daemon-client.mjs');
-  const fixtureDir = mkdtempSync(join(tmpdir(), 'ac-acp-e2e-'));
-  const fakeBin = fakeAcpAgentBin(fixtureDir);
-  const cwd = mkdtempSync(join(tmpdir(), 'ac-acp-cwd-'));
-  const oldBin = process.env.COPILOT_BIN;
-  process.env.COPILOT_BIN = fakeBin;
-  t.after(async () => {
-    try { await daemonClient.sendToSocket({ command: 'stop' }, 2000, 'copilot'); } catch {}
-    if (oldBin === undefined) delete process.env.COPILOT_BIN; else process.env.COPILOT_BIN = oldBin;
-    rmSync(fixtureDir, { recursive: true, force: true });
-    rmSync(cwd, { recursive: true, force: true });
-  });
-  await withAcpSession('sid-acp-e2e', async (mod, state) => {
-    const { dispatch, jobs } = mod;
-    const send = parse(await dispatch({ action: 'send', target: 'copilot', task: 'what is the magic word?', cwd, max_wait_sec: 5 }));
-    assert.equal(send.status, 'still_running', JSON.stringify(send));
-    const first = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 20 }));
-    assert.equal(first.status, 'completed', JSON.stringify(first).slice(0, 600));
-    assert.match(first.content, /ready/);
-    assert.equal('usage' in first.meta, false, 'the Copilot descriptor reads OTEL, and the fake writes none: absent, never zeroed');
-    assert.equal(first.meta.session_id, 'fake-sess-1');
-    assert.equal(existsSync(daemonSocketPath('copilot')), true);
-    assert.equal(existsSync(daemonLogFile('copilot')), true);
-    assert.equal(existsSync(promptEventsPath(first.meta.prompt_id, 'copilot')), true);
-    assert.match(readFileSync(first.meta.debug_digest_path, 'utf8'), /^# GitHub Copilot CLI job /);
 
-    // The registry recorded the daemon this bridge adopted, pid and all.
-    const status = parse(await dispatch({ action: 'status' }));
-    assert.equal(status.acp_daemons.copilot.socketPath, daemonSocketPath('copilot'));
-    assert.ok(Number.isInteger(status.acp_daemons.copilot.pid) && status.acp_daemons.copilot.pid > 0);
-
-    // Round two on the same thread: the recorded session continues.
-    const again = parse(await dispatch({ action: 'send', target: 'copilot', task: 'and again?', cwd, thread: send.thread, max_wait_sec: 5 }));
-    const second = parse(await dispatch({ action: 'wait', job_id: again.job_id, max_wait_sec: 20 }));
-    assert.equal(second.status, 'completed', JSON.stringify(second).slice(0, 600));
-    assert.equal(second.meta.session_id, 'fake-sess-1', 'same ACP session');
-    assert.equal(second.meta.session_reborn, undefined);
-    const daemonStatus = await daemonClient.sendToSocket({ command: 'status' }, 2000, 'copilot');
-    assert.equal(daemonStatus.data.sessions.find((s) => s.sessionId === 'fake-sess-1').promptCount, 2);
-    assert.equal(daemonStatus.data.companion, 'copilot');
-    assert.deepEqual(daemonStatus.data.protocol, { pinned: 1, answered: 1, status: 'match' });
-    for (const id of [send.job_id, again.job_id]) { try { state.deleteJob(id); } catch {} jobs.delete(id); }
-    state.clearThread(send.thread);
-  });
-});
 
 // ---- TRACK: acp-antigravity ----
 //
@@ -3830,89 +1421,6 @@ test('acp: end to end through a real detached daemon and the fake agent — one 
 // real detached daemon with `session/load` across a daemon restart) and what
 // it does not (usage — the ACP surface carries none, measured 2026-09-11).
 
-test('Antigravity ACP receives the exact task and settles with no usage key', async () => {
-  await withAcpSession('sid-agy-send', async (mod, state) => {
-    const { dispatch, jobs } = mod;
-    const calls = [];
-    const terminal = await withDaemonStubs({
-      ensureDaemon: async (opts) => { calls.push(['ensure', opts]); },
-      sendToSocket: async (msg, _timeout, companion) => {
-        calls.push([msg.command, companion, msg]);
-        if (msg.command === 'prompt-bg') return { ok: true, data: { promptId: 'ap-1', sessionId: 'agy-sess-1', sessionReborn: false, sessionLoaded: false } };
-        if (msg.command === 'watch') {
-          return { ok: true, data: { status: 'completed', summary: { message: 'ready', thoughts: '', toolCalls: [{ name: 'read README.md', kind: 'read', status: 'completed' }], plan: null, stopReason: 'end_turn' } } };
-        }
-        if (msg.command === 'inspect') return { ok: true, data: { status: 'completed' } };
-        return { ok: true, data: {} };
-      },
-    }, async () => {
-      const send = parse(await dispatch({
-        action: 'send', target: 'antigravity', task: EXACT_TASK,
-        cwd: TEST_CWD, max_wait_sec: 5,
-      }));
-      assert.equal(send.status, 'still_running');
-      assert.equal(send.target, 'antigravity');
-      assert.equal(Object.hasOwn(send, 'fleet'), false);
-      return parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 5 }));
-    });
-    assert.equal(terminal.status, 'completed');
-    assert.match(terminal.content, /ready/);
-    assert.equal('usage' in terminal.meta, false, 'no usage on the ACP surface: no key, never zeros');
-    assert.equal(Object.hasOwn(terminal.meta, 'fleet'), false);
-    assert.equal(terminal.meta.session_id, 'agy-sess-1');
-
-    assert.deepEqual(calls[0], ['ensure', { reqId: calls[0][1].reqId, companion: 'antigravity' }]);
-    const promptBg = calls.find((c) => c[0] === 'prompt-bg');
-    assert.equal(promptBg[1], 'antigravity', 'the prompt goes to the antigravity daemon socket');
-    assert.equal(promptBg[2].text, EXACT_TASK);
-    assert.equal(promptBg[2].model, null, 'no model pin: the account\'s default serves');
-    assert.ok(calls.every((c) => c[0] === 'ensure' || c[1] === 'antigravity'), 'no call reached another companion\'s socket');
-
-    const job = jobs.get(terminal.job_id);
-    assert.equal(job.inspectAvailable, true);
-    assert.equal(state.readThreadSid(job.thread), 'agy-sess-1', 'the thread .sid is written the way Copilot\'s is');
-    const status = parse(await withDaemonStubs({ sendToSocket: async () => ({ ok: true, data: {} }) },
-      () => dispatch({ action: 'status', job_id: terminal.job_id })));
-    assert.equal(status.reply_available, false, 'terminal: nothing to reply to');
-    assert.equal(status.resume_available, true, 'the daemon is detached, so the job is resumable by construction');
-    assert.equal('usage' in status, false);
-    assert.ok(Object.hasOwn(parse(await dispatch({ action: 'status' })).acp_daemons, 'antigravity'));
-  });
-});
-
-test('antigravity: reply is cancel-then-re-prompt on the same session, and the acknowledgement names Google Antigravity', async () => {
-  await withAcpSession('sid-agy-reply', async (mod) => {
-    const { dispatch, jobs } = mod;
-    jobs.set('antigravity-reply-1', {
-      jobId: 'antigravity-reply-1', target: 'antigravity', reqId: 'req-ar', claudeSessionId: 'sid-agy-reply',
-      thread: 'thread-agy-reply', task: 'original task',
-      status: 'running', promptId: 'ap-old', sessionId: 'agy-sess-r', startedAt: Date.now() - 1000, inspectAvailable: true,
-    });
-    const calls = [];
-    const body = await withDaemonStubs({
-      sendToSocket: async (msg, _timeout, companion) => {
-        calls.push([msg.command, companion]);
-        if (msg.command === 'reply') return { ok: true, data: { ok: true, original_prompt_id: 'ap-old', new_prompt_id: 'ap-new', session_id: 'agy-sess-r' } };
-        if (msg.command === 'watch') return { ok: true, data: { promptId: 'ap-new', sessionId: 'agy-sess-r', status: 'completed', summary: { message: 'continued', toolCalls: [] } } };
-        return { ok: true, data: {} };
-      },
-    }, async () => {
-      const status = parse(await dispatch({ action: 'status', job_id: 'antigravity-reply-1' }));
-      assert.equal(status.reply_available, true);
-      assert.equal(status.resume_available, true);
-      return parse(await dispatch({ action: 'reply', job_id: 'antigravity-reply-1', message: 'use this instead' }));
-    });
-    assert.equal(body.ok, true);
-    assert.equal(body.new_prompt_id, 'ap-new');
-    assert.match(body.hint, /cancelled/);
-    assert.match(body.hint, /no mid-turn steer/);
-    assert.match(body.hint, /same Google Antigravity session/);
-    assert.ok(calls.every(([, companion]) => companion === 'antigravity'));
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    assert.equal(jobs.get('antigravity-reply-1').status, 'completed');
-  });
-});
 
 // End to end through a REAL detached `acp-daemon --companion antigravity` and
 // the fake agent (ANTIGRAVITY_ACP_BIN), no stubs below the bridge — and then
@@ -3920,60 +1428,7 @@ test('antigravity: reply is cancel-then-re-prompt on the same session, and the a
 // to `session/load` the recorded session on a fresh daemon: the descriptor
 // honours it, the fake advertises it, and the bridge reports the same session
 // with no rebirth. Copilot's e2e above can never take this branch.
-test('antigravity: end to end through a real detached daemon, then session/load on a fresh daemon after the first is stopped', async (t) => {
-  const { fakeAcpAgentBin } = await import('../test/fake-acp-agent.mjs');
-  const { daemonSocketPath, daemonLogFile, promptEventsPath } = await import('../lib/runtime-paths.mjs');
-  const daemonClient = await import('./daemon-client.mjs');
-  const fixtureDir = mkdtempSync(join(tmpdir(), 'ac-agy-e2e-'));
-  const fakeBin = fakeAcpAgentBin(fixtureDir);
-  const cwd = mkdtempSync(join(tmpdir(), 'ac-agy-cwd-'));
-  const prior = { ANTIGRAVITY_ACP_BIN: process.env.ANTIGRAVITY_ACP_BIN, ACP_FAKE_LOAD_SESSION: process.env.ACP_FAKE_LOAD_SESSION };
-  process.env.ANTIGRAVITY_ACP_BIN = fakeBin;
-  process.env.ACP_FAKE_LOAD_SESSION = '1';
-  t.after(async () => {
-    try { await daemonClient.sendToSocket({ command: 'stop' }, 2000, 'antigravity'); } catch {}
-    for (const [k, v] of Object.entries(prior)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-    rmSync(fixtureDir, { recursive: true, force: true });
-    rmSync(cwd, { recursive: true, force: true });
-  });
-  await withAcpSession('sid-agy-e2e', async (mod, state) => {
-    const { dispatch, jobs } = mod;
-    const send = parse(await dispatch({ action: 'send', target: 'antigravity', task: 'what is the magic word?', cwd, max_wait_sec: 5 }));
-    assert.equal(send.status, 'still_running', JSON.stringify(send));
-    const first = parse(await dispatch({ action: 'wait', job_id: send.job_id, max_wait_sec: 20 }));
-    assert.equal(first.status, 'completed', JSON.stringify(first).slice(0, 600));
-    assert.match(first.content, /ready/);
-    assert.equal('usage' in first.meta, false, 'the fake answers `_meta.quota`; the Antigravity descriptor reads no usage');
-    assert.equal(first.meta.session_id, 'fake-sess-1');
-    assert.equal(existsSync(daemonSocketPath('antigravity')), true, 'the antigravity daemon owns its own socket');
-    assert.equal(existsSync(daemonLogFile('antigravity')), true);
-    assert.equal(existsSync(promptEventsPath(first.meta.prompt_id, 'antigravity')), true, 'the prompt stream is keyed by companion');
-    assert.match(readFileSync(first.meta.debug_digest_path, 'utf8'), /^# Google Antigravity job /);
-    const status = parse(await dispatch({ action: 'status' }));
-    assert.equal(status.acp_daemons.antigravity.socketPath, daemonSocketPath('antigravity'));
-    const firstPid = status.acp_daemons.antigravity.pid;
-    assert.ok(Number.isInteger(firstPid) && firstPid > 0);
-    assert.equal(state.readThreadSid(send.thread), 'fake-sess-1');
 
-    // Stop the daemon: the next send on the thread meets a fresh one that no
-    // longer holds the session, and loads it instead of minting.
-    await daemonClient.sendToSocket({ command: 'stop' }, 2000, 'antigravity');
-    for (let i = 0; i < 100 && existsSync(daemonSocketPath('antigravity')); i++) await new Promise((r) => setTimeout(r, 50));
-    const again = parse(await dispatch({ action: 'send', target: 'antigravity', task: 'and again?', cwd, thread: send.thread, max_wait_sec: 5 }));
-    const second = parse(await dispatch({ action: 'wait', job_id: again.job_id, max_wait_sec: 20 }));
-    assert.equal(second.status, 'completed', JSON.stringify(second).slice(0, 600));
-    assert.equal(second.meta.session_id, 'fake-sess-1', 'the same ACP session, loaded on the fresh daemon');
-    assert.equal(second.meta.session_reborn, undefined, 'a loaded session is not a rebirth');
-    const daemonStatus = await daemonClient.sendToSocket({ command: 'status' }, 2000, 'antigravity');
-    assert.equal(daemonStatus.data.companion, 'antigravity');
-    const secondPid = parse(await dispatch({ action: 'status' })).acp_daemons.antigravity.pid;
-    assert.notEqual(secondPid, firstPid, 'a different daemon process served round two');
-    assert.equal(daemonStatus.data.sessions.find((s) => s.sessionId === 'fake-sess-1')?.loaded, true);
-    assert.deepEqual(daemonStatus.data.protocol, { pinned: 1, answered: 1, status: 'match' });
-    for (const id of [send.job_id, again.job_id]) { try { state.deleteJob(id); } catch {} jobs.delete(id); }
-    state.clearThread(send.thread);
-  });
-});
 
 // ---- TRACK: codex-adapter ----
 //
@@ -3981,85 +1436,7 @@ test('antigravity: end to end through a real detached daemon, then session/load 
 // id the moment `thread.started` arrives, not when the run resolves. Same
 // fakeBin discipline as the codex adapter tests above — CODEX_BIN never points
 // at a real binary.
-test('a codex job persists its thread id while still running, not only at terminal', async (t) => {
-  const priorAdapter = process.env.CODEX_RUNTIME_ADAPTER;
-  t.after(() => {
-    if (priorAdapter === undefined) delete process.env.CODEX_RUNTIME_ADAPTER;
-    else process.env.CODEX_RUNTIME_ADAPTER = priorAdapter;
-  });
-  process.env.CODEX_RUNTIME_ADAPTER = 'exec';
 
-  const mod = await bridge();
-  const { dispatch, jobs, _resetForTest } = mod;
-  _resetForTest();
-
-  const tmp = mkdtempSync(join(tmpdir(), 'codex-early-sid-'));
-  const fakeBin = join(tmp, 'codex-fake.mjs');
-  writeFileSync(fakeBin, [
-    '#!/usr/bin/env node',
-    'process.stdin.on("data", () => {});',
-    'process.stdin.on("end", () => {',
-    // Line 1 of the stream, exactly as measured on 0.147.0 — then the child
-    // holds the turn open, which is the whole point: the id has to be usable
-    // long before any terminal result exists.
-    '  console.log(JSON.stringify({ type: "thread.started", thread_id: "th-early-capture" }));',
-    '});',
-    'process.on("SIGTERM", () => process.exit(0));',
-    'setInterval(() => {}, 1000);',
-    '',
-  ].join('\n'), { mode: 0o700 });
-  chmodSync(fakeBin, 0o700);
-
-  const oldS = process.env.CLAUDE_CODE_SESSION_ID;
-  const oldBin = process.env.CODEX_BIN;
-  process.env.CLAUDE_CODE_SESSION_ID = 'sid-codex-early';
-  process.env.CODEX_BIN = fakeBin;
-
-  try {
-    const send = parse(await dispatch({
-      action: 'send',
-      target: 'codex',
-      task: 'capture the thread id early',
-      cwd: TEST_CWD,
-      max_wait_sec: 1,
-    }));
-    assert.equal(send.status, 'still_running');
-
-    let captured = null;
-    for (let i = 0; i < 300 && !captured; i++) {
-      await new Promise((r) => setTimeout(r, 10));
-      captured = jobs.get(send.job_id)?.sessionId || null;
-    }
-    assert.equal(captured, 'th-early-capture');
-    assert.equal(jobs.get(send.job_id)?.status, 'running', 'the id landed while the job was still running');
-
-    // On disk too — that is what makes it survive the bridge dying mid-run.
-    const state = await import('../lib/state.mjs');
-    assert.equal(state.readJob(send.job_id).companionSessionId, 'th-early-capture');
-
-    const cancelled = parse(await dispatch({
-      action: 'cancel',
-      job_id: send.job_id,
-    }));
-    assert.equal(cancelled.ok, true);
-    // The terminal patch must not walk the id back: it reads
-    // `result.sessionId ?? jobs.get(jobId)?.sessionId ?? null`, so a run that
-    // resolves without one (the child.on('error') path resolves
-    // `sessionId: null` by construction) keeps what onSession already banked.
-    assert.equal(jobs.get(send.job_id)?.sessionId, 'th-early-capture');
-    assert.equal(state.readJob(send.job_id).companionSessionId, 'th-early-capture');
-  } finally {
-    for (const id of [...jobs.keys()]) {
-      if (jobs.get(id)?.claudeSessionId === 'sid-codex-early') jobs.delete(id);
-    }
-    if (oldS === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
-    else process.env.CLAUDE_CODE_SESSION_ID = oldS;
-    if (oldBin === undefined) delete process.env.CODEX_BIN;
-    else process.env.CODEX_BIN = oldBin;
-    rmSync(tmp, { recursive: true, force: true });
-    _resetForTest();
-  }
-});
 
 // ---- TRACK: hydrate-guard ----
 // W1.4′: hydrate must neither mislabel nor overwrite a job it did not start.
@@ -4552,58 +1929,6 @@ test('runtime_unavailable is the only unreachable class that names descriptor.bi
   assert.match(others[2], /will not guess a cause/);
 });
 
-test('failure content inlines BOTH captured channels, since either one can be empty', async () => {
-  const mod = await bridge();
-  const { formatTerminalContent } = mod;
-
-  // Measured on codex 0.147.0: a bad `-m` exits 1 with an EMPTY stderr and the
-  // whole error on stdout. stderr-only rendering would show the operator nothing.
-  const badModel = formatTerminalContent({
-    jobId: 'jf-model', status: 'failed', task: 't', target: 'codex',
-    error: 'codex exited with code 1',
-    adapterResult: { stdout: '{"type":"error","status":400}', stderr: '' },
-  });
-  assert.match(badModel, /\*\*stdout \(tail\):\*\*/);
-  assert.doesNotMatch(badModel, /\*\*stderr \(tail\):\*\*/, 'an empty channel renders as nothing');
-
-  // The mirror image: a bogus resume gives an EMPTY stdout with everything on stderr.
-  const badResume = formatTerminalContent({
-    jobId: 'jf-resume', status: 'unreachable', task: 't', target: 'codex',
-    adapterResult: { stdout: '', stderr: 'ERROR: -32600 no rollout found for thread id 0199a1' },
-  });
-  assert.match(badResume, /\*\*Failure class:\*\* `thread_not_resumable`/);
-  assert.match(badResume, /\*\*stderr \(tail\):\*\*/);
-  assert.match(badResume, /no rollout found for thread id/);
-  assert.doesNotMatch(badResume, /\*\*stdout \(tail\):\*\*/);
-
-  // Both present, both rendered.
-  const both = formatTerminalContent({
-    jobId: 'jf-both', status: 'failed', task: 't', target: 'codex',
-    error: 'boom', stdout: 'OUT-MARKER', stderr: 'ERR-MARKER',
-  });
-  assert.match(both, /OUT-MARKER/);
-  assert.match(both, /ERR-MARKER/);
-
-  // Long channels are tail-truncated (the tail carries the failure), not dropped.
-  const long = formatTerminalContent({
-    jobId: 'jf-long', status: 'failed', task: 't', target: 'codex',
-    error: 'boom', stdout: `${'x'.repeat(5000)}LAST-LINE`, stderr: '',
-  });
-  assert.match(long, /LAST-LINE/);
-  assert.match(long, /…/);
-  assert.ok(long.length < 2500, `channel excerpt stays bounded (was ${long.length})`);
-
-  // The wait path spreads the whole job, so adapterResult arrives for free.
-  mod.jobs.set('jf-wait', terminalJob('jf-wait', 'unreachable', {
-    target: 'codex', detail: 'codex_worker_error',
-    adapterResult: { stdout: 'STDOUT-VIA-JOB', stderr: 'STDERR-VIA-JOB' },
-  }));
-  const body = parse(await mod.dispatch({ action: 'wait', job_id: 'jf-wait', max_wait_sec: 1 }));
-  assert.equal(body.status, 'unreachable');
-  assert.match(body.content, /STDOUT-VIA-JOB/);
-  assert.match(body.content, /STDERR-VIA-JOB/);
-  mod.jobs.delete('jf-wait');
-});
 
 test('unwrapErrorMessage peels exactly one JSON level and never throws on anything else', async () => {
   const { unwrapErrorMessage, formatTerminalContent } = await bridge();
@@ -4730,4 +2055,304 @@ test('the queue-drain surface renders the same class and channel excerpts as the
     jobs.delete('jf-drain');
     jobs.delete('jf-drain2');
   }
+});
+
+// Phase 3 dispatch contract: fake protocol adapters, real durable records.
+import { deferred, until } from '../test/controller/helpers.mjs';
+import { mkdirSync, readdirSync, statSync, appendFileSync, realpathSync } from 'node:fs';
+import { fakeCodexBin } from '../test/fake-codex-app-server.mjs';
+import { note, threadItem } from '../test/codex-wire-frames.mjs';
+import { fixtureSupervisor } from '../test/controller/fixture-table.mjs';
+
+async function wireFixture(t, options = {}) {
+  const mod = await bridge();
+  const dir = realpathSync(mkdtempSync(join(STATE_SANDBOX, 'wire-')));
+  const records = new Records({ dir, log: () => {} });
+  const adapters = [];
+  const create = () => {
+    const done = deferred();
+    const adapter = {
+      capabilities: { followUp: true, loadsHistory: true, modelSelection: true }, done, calls: [],
+      async start(args) { this.calls.push(['start', args]); if (options.start) await options.start; },
+      async openHistory(args) { this.calls.push(['history', args]); return { historyId: args.historyId || 'native-history', effectiveModel: 'configured' }; },
+      async deliver(args) { this.calls.push(['deliver', args]); return { nativeTurnId: 'native-turn' }; },
+      observe({ onProgress }) { this.progress = onProgress; return done.promise; },
+      async interrupt() {}, async close() {},
+    };
+    adapters.push(adapter); return adapter;
+  };
+  const providers = Object.fromEntries(['codex', 'opencode', 'copilot', 'antigravity'].map((target) => [target,
+    { enabled: true, ready: true, modelAllowed: (model) => !model.includes('bad'), create }]));
+  const active = mod.createBridgeController({ records, providers,
+    createSupervisor: () => ({ terminate: async () => ({ gone: true, signals: [], survivors: [] }) }) });
+  const call = async (args, request = {}) => (await mod.dispatch(args, { controller: active, ...request })).structuredContent;
+  const send = (args = {}, request) => call({ action: 'send', target: 'codex', thread: 'child', task: EXACT_TASK, cwd: dir, ...args }, request);
+  t.after(async () => {
+    for (const a of [...active.live.values()]) await active.cancel({ owner: a.record.owner, executionId: a.record.executionId });
+  });
+  return { mod, active, records, adapters, providers, dir, call, send };
+}
+function wireDisk(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { recursive: true }).sort().filter((f) => statSync(join(dir, f)).isFile())
+    .map((f) => [f, statSync(join(dir, f)).mtimeMs, readFileSync(join(dir, f), 'utf8')]);
+}
+
+test('controller dispatch preserves the conversational tools and named refusals', async (t) => {
+  const h = await wireFixture(t);
+  const tools = (await h.mod.mcp._requestHandlers.get('tools/list')({ method: 'tools/list', params: {} })).tools;
+  assert.deepEqual(tools.map((x) => x.name), ['agent_catalog', 'agent_send', 'agent_wait', 'agent_status', 'agent_reply', 'agent_cancel']);
+  assert.deepEqual(Object.keys(tools[1].inputSchema.properties).sort(), ['cwd', 'max_wait_sec', 'model', 'target', 'task']);
+  assert.equal((await h.send({ thread: null })).code, 'NATIVE_OWNER_REQUIRED');
+  assert.equal((await h.send({ cwd: 'relative' })).code, 'INVALID_CWD');
+  assert.equal((await h.send({ target: 'unsupported' })).code, 'TARGET_UNSUPPORTED');
+  h.providers.codex.ready = false;
+  assert.equal((await h.send()).code, 'CAPABILITY_UNAVAILABLE');
+  h.providers.codex.ready = true;
+  assert.equal((await h.send({ model: 'bad-model' })).code, 'MODEL_NOT_ALLOWED');
+  const { clearDefaultTarget } = await import('../lib/state.mjs');
+  clearDefaultTarget();
+  await withEnv('AGENT_COMPANION_DEFAULT_TARGET', undefined, async () => {
+    assert.equal((await h.send({ target: null })).code, 'TARGET_UNCONFIGURED');
+  });
+  const callTool = h.mod.mcp._requestHandlers.get('tools/call');
+  const invalid = (await callTool({ method: 'tools/call', params: { name: 'agent_send', arguments: { task: 'x', thread: 'child', cwd: 'relative' } } })).structuredContent;
+  assert.equal(invalid.code, 'INVALID_CWD');
+  const malformed = (await callTool({ method: 'tools/call', params: { name: 'agent_status', arguments: { extra: true } } })).structuredContent;
+  assert.equal(malformed.code, 'INVALID_ARGUMENTS');
+  assert.equal((await h.call({ action: 'wait', job_id: 'missing', thread: 'child' })).status, 'unknown_job');
+  assert.equal((await h.call({ action: 'cancel', job_id: 'missing', thread: 'child' })).ok, false);
+  assert.equal((await h.call({ action: 'status', job_id: 'missing' })).ok, false);
+});
+
+test('all four providers receive exact task text, inherit models, and reattach only identical work', async (t) => {
+  const h = await wireFixture(t);
+  for (const target of Object.keys(h.providers)) {
+    const sent = await h.send({ target, thread: target });
+    assert.deepEqual(sent, { ok: true, status: 'still_running', job_id: sent.job_id, thread: target });
+    const adapter = h.adapters.at(-1);
+    assert.equal(adapter.calls.find(([name]) => name === 'deliver')[1].text, EXACT_TASK);
+    assert.equal(Object.hasOwn(adapter.calls[0][1], 'model'), false);
+    assert.deepEqual(await h.send({ target, thread: target }), sent);
+    const busy = await h.send({ target, thread: target, task: 'new' });
+    assert.equal(busy.status, 'thread_busy'); assert.equal(busy.job_id, sent.job_id);
+    assert.equal((await h.send({ target, thread: target, model: 'changed' })).status, 'thread_busy');
+    assert.equal((await h.send({ target, thread: target, cwd: tmpdir() })).status, 'cwd_mismatch');
+    assert.equal((await h.send({ target: target === 'codex' ? 'copilot' : 'codex', thread: target })).status, 'provider_mismatch');
+  }
+  assert.equal(h.adapters.length, 4);
+});
+
+test('starting requests retain cwd and hold attachment through acknowledgement', async (t) => {
+  const gate = deferred(); const h = await wireFixture(t, { start: gate.promise });
+  const sending = h.send({}, { requestId: 'send-request' });
+  await until(() => h.adapters.length === 1);
+  const e = h.records.listExecutions()[0];
+  assert.equal(e.cwd, h.dir);
+  assert.equal(h.records.readLease(e.executionId).attached, true);
+  assert.equal((await h.send({ model: 'changed' })).status, 'thread_busy');
+  const retry = h.send({}, { requestId: 'retry-request' });
+  gate.resolve();
+  assert.deepEqual(await retry, await sending);
+  assert.equal(h.records.readLease(e.executionId).attached, false);
+});
+
+test('wait progress, read-only status, digest resources and immutable terminal queue projection', async (t) => {
+  const h = await wireFixture(t);
+  await withEnv('CLAUDE_CODE_SESSION_ID', 'wire-session', async () => withQueue(async (queue) => {
+    h.mod._resetForTest();
+    const sent = await h.send({ model: 'selected' });
+    const id = sent.job_id;
+    const progress = { lastActivityAt: Date.now(), activeCommand: 'build', retry: { attempt: 2 }, partialText: 'partial answer' };
+    h.adapters[0].progress(progress);
+    assert.match(h.mod.readDigestResource(`agent-digest://${id}`).contents[0].text, /partial answer/);
+    const snapshot = [wireDisk(h.dir), wireDisk(RUNTIME_SANDBOX)];
+    for (let i = 0; i < 3; i++) {
+      const status = await h.call({ action: 'status', job_id: id, verbose: true, diagnostics: true });
+      assert.equal(status.status, 'running'); assert.equal(status.thread, 'child');
+      assert.equal(status.lease.attached, false); assert.ok(status.lease.remainingMs > 0);
+      assert.equal(status.native_turn_state, 'running'); assert.equal(status.last_native_activity, progress.lastActivityAt);
+      assert.equal(status.active_command, 'build'); assert.deepEqual(status.retry, { attempt: 2 });
+      assert.equal(status.partial_text, 'partial answer');
+      await h.call({ action: 'status' });
+    }
+    assert.deepEqual([wireDisk(h.dir), wireDisk(RUNTIME_SANDBOX)], snapshot);
+    const running = await h.call({ action: 'wait', job_id: id, thread: 'child', max_wait_sec: 1 });
+    assert.equal(running.status, 'still_running'); assert.equal(running.current_status, 'running');
+    assert.equal(running.thread, 'child'); assert.equal(running.digest_uri, `agent-digest://${id}`);
+    const usage = { input_tokens: 12, output_tokens: 3 };
+    h.adapters[0].done.resolve({ outcome: 'completed', text: 'final answer', usage, effectiveModel: 'resolved', effectiveEffort: 'high' });
+    await until(() => h.records.readResult(id), 'background terminal publication');
+    assert.equal(readQueue(queue).find((row) => row.jobId === id).consumed, false);
+    const terminal = await h.call({ action: 'wait', job_id: id, thread: 'child', max_wait_sec: 1 });
+    assert.equal(terminal.content, 'final answer'); assert.equal(terminal.status, 'completed');
+    assert.deepEqual(terminal.meta.usage, usage); assert.equal(terminal.meta.selected_model, 'selected');
+    assert.equal(terminal.meta.effective_model, 'resolved'); assert.equal(terminal.meta.effective_effort, 'high');
+    assert.equal(terminal.meta.cause, 'native_complete'); assert.equal(terminal.meta.stop_evidence.gone, true);
+    assert.equal(terminal.meta.native_refs.historyId, 'native-history');
+    assert.equal(terminal.meta.digest_uri, `agent-digest://${id}`);
+    const bytes = readFileSync(h.records.path('results', id), 'utf8');
+    assert.deepEqual(await h.call({ action: 'wait', job_id: id, thread: 'child' }), terminal);
+    await h.mod.recoverController(h.active);
+    assert.equal(readFileSync(h.records.path('results', id), 'utf8'), bytes);
+    const rows = readQueue(queue).filter((row) => row.jobId === id);
+    assert.equal(rows.length, 1); assert.equal(rows[0].kind, 'terminal'); assert.equal(rows[0].consumed, true);
+    assert.equal(rows[0].claudeSessionId, 'wire-session'); assert.equal(rows[0].content, terminal.content);
+    assert.deepEqual(rows[0].meta, JSON.parse(JSON.stringify(terminal.meta)));
+    assert.match(h.mod.readDigestResource(`agent-digest://${id}`).contents[0].text, /final answer/);
+    assert.ok(h.mod.listDigestResources().some((r) => r.uri === terminal.meta.digest_uri));
+    assert.equal(h.mod.listDigestResourceTemplates()[0].uriTemplate, 'agent-digest://{job_id}');
+    assert.throws(() => h.mod.readDigestResource('file:///tmp/invalid'), /unknown digest/);
+    assert.equal(statSync(queue).mode & 0o777, 0o600);
+    rmSync(queue); // A drain must not make a later bridge re-enqueue the result.
+    await h.mod.recoverController(h.active);
+    assert.equal(existsSync(queue), false);
+  }));
+});
+
+for (const [outcome, status] of [['failed', 'failed'], ['interrupted', 'cancelled'], ['stopped', 'cancelled'], ['delivery_unknown', 'failed']]) {
+  test(`durable ${outcome} results map to ${status} without rewriting their text`, async (t) => {
+    const h = await wireFixture(t);
+    const e = h.records.begin({ owner: 'child', provider: 'codex', cwd: h.dir, text: 'task', executionId: 'saved', now: Date.now() }, 0);
+    h.records.writeResult({ owner: e.owner, executionId: e.executionId, generation: e.generation,
+      outcome, text: 'partial', cause: 'provider_error', detail: 'native detail', stopEvidence: { gone: true }, finishedAt: Date.now() });
+    const response = await h.call({ action: 'wait', thread: 'child', job_id: e.executionId });
+    assert.equal(response.status, status); assert.equal(response.meta.status, status); assert.equal(response.content, 'partial');
+    assert.equal(response.meta.detail, outcome === 'delivery_unknown' ? outcome : 'native detail');
+    assert.equal(Object.hasOwn(JSON.parse(JSON.stringify(response.meta)), 'usage'), false);
+  });
+}
+
+test('cancel and cancelled owner requests close only their own execution', async (t) => {
+  const h = await wireFixture(t);
+  const one = await h.send(), sibling = await h.send({ thread: 'sibling' });
+  assert.equal((await h.call({ action: 'cancel', job_id: one.job_id, thread: 'sibling' })).status, 'unknown_job');
+  const abort = new AbortController();
+  const waiting = h.call({ action: 'wait', job_id: one.job_id, thread: 'child', max_wait_sec: 30 }, { requestId: 'wait-request', signal: abort.signal });
+  await until(() => h.active.requests.has('wait-request'));
+  assert.equal(h.records.readLease(one.job_id).attached, true);
+  abort.abort();
+  const stopped = await waiting;
+  assert.equal(stopped.status, 'cancelled'); assert.equal(stopped.meta.cause, 'owner_stop');
+  assert.equal((await h.call({ action: 'status', job_id: sibling.job_id })).status, 'running');
+  const cancel = await h.call({ action: 'cancel', job_id: sibling.job_id, thread: 'sibling' });
+  assert.equal(cancel.action, 'cancel'); assert.equal(cancel.status, 'cancelled'); assert.equal(cancel.meta.stop_evidence.gone, true);
+  assert.deepEqual(await h.call({ action: 'cancel', job_id: sibling.job_id, thread: 'sibling' }), cancel);
+});
+
+test('legacy history requires latest same-target ledger evidence; cold follow-up keeps history', async (t) => {
+  const h = await wireFixture(t);
+  mkdirSync(join(h.dir, 'threads'));
+  writeFileSync(join(h.dir, 'threads', 'child.sid'), 'legacy-history');
+  assert.equal((await h.send()).code, 'thread_ambiguous');
+  h.records._write('jobs', 'old', { thread: 'child', target: 'codex', startedAt: 1 });
+  h.records._write('jobs', 'latest', { thread: 'child', target: 'opencode', startedAt: 2 });
+  assert.match((await h.send()).error, /opencode.*codex/);
+  h.records._write('jobs', 'latest', { thread: 'child', target: 'codex', startedAt: 2 });
+  const first = await h.send();
+  assert.equal(h.adapters[0].calls.find(([name]) => name === 'history')[1].historyId, 'legacy-history');
+  h.adapters[0].done.resolve({ outcome: 'completed', text: 'first' });
+  await h.call({ action: 'wait', job_id: first.job_id, thread: 'child' });
+  const second = await h.send({ task: 'follow-up' });
+  assert.notEqual(second.job_id, first.job_id);
+  assert.equal(h.adapters[1].calls.find(([name]) => name === 'history')[1].historyId, 'legacy-history');
+});
+
+test('startup recovery verifies process absence; status never recovers or adopts unknown work', async (t) => {
+  const h = await wireFixture(t);
+  const e = h.records.begin({ owner: 'child', provider: 'codex', cwd: h.dir, text: 'task', executionId: 'old', now: Date.now() }, 0);
+  h.records.writeExecution({ ...e, state: 'running', processes: { pid: 12345 }, progress: { partialText: 'saved' } });
+  let absent = false, checks = 0;
+  h.active.createSupervisor = () => ({ verifyGone: async () => { checks++; return { gone: absent }; } });
+  const before = wireDisk(h.dir);
+  assert.equal((await h.call({ action: 'status', job_id: 'old' })).status, 'unknown');
+  assert.deepEqual(wireDisk(h.dir), before); assert.equal(checks, 0);
+  await h.mod.recoverController(h.active);
+  assert.equal(checks, 1); assert.equal(h.records.readResult('old'), null);
+  assert.equal((await h.send()).code, 'execution_unknown');
+  absent = true; await h.mod.recoverController(h.active);
+  const result = await h.call({ action: 'wait', thread: 'child', job_id: 'old' });
+  assert.equal(result.status, 'cancelled'); assert.equal(result.meta.cause, 'bridge_loss'); assert.equal(result.content, 'saved');
+});
+
+test('dispatch uses codexProvider with a real fake app-server through complete, cancel and bridge-loss handoff', { timeout: 30_000 }, async (t) => {
+  const mod = await bridge();
+  const dir = mkdtempSync(join(STATE_SANDBOX, 'codex-wire-'));
+  const bin = fakeCodexBin(dir);
+  writeFileSync(join(dir, 'codex-code-mode-host'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  const frame = (status) => note('turn/completed', { threadId: 'T1', turn: { id: 'TURN1', status,
+    items: [threadItem('agentMessage', { id: 'answer', text: 'native answer', phase: 'final_answer' })] } });
+  appendFileSync(bin, `
+if (process.argv[2] === 'app-server') {
+  process.send({ rows: [{ pid: process.pid, ppid: process.ppid, pgid: process.pid, birthTime: process.pid + ':' + performance.timeOrigin }] });
+  process.stdin.on('end', () => { if (process.connected) process.disconnect(); });
+}
+const original = handle;
+handle = (msg) => {
+  original(msg);
+  if (msg.method === 'turn/start') {
+    out(${JSON.stringify(note('item/agentMessage/delta', { threadId: 'T1', turnId: 'TURN1', itemId: 'part', delta: 'native partial' }))});
+    if (msg.params.input[0].text === 'complete') out(${JSON.stringify(frame('completed'))});
+  }
+  if (msg.method === 'turn/interrupt') out(${JSON.stringify(frame('interrupted'))});
+};
+`);
+  const env = { ...process.env, CODEX_BIN: bin, CODEX_FAKE_TRACE: join(dir, 'trace.jsonl') };
+  const { writeTargetChecks } = await import('../lib/state.mjs');
+  writeTargetChecks({ codex: { ready: true } });
+  const records = new Records({ dir: join(dir, 'records') });
+  // Keep production adapters and real child processes. The existing identity
+  // fixture replaces ps, which the execution sandbox denies.
+  const supervisors = [];
+  const createSupervisor = (options) => {
+    const supervisor = fixtureSupervisor(options);
+    const spawnRuntime = supervisor.spawn.bind(supervisor);
+    supervisor.spawn = (argv, opts) => spawnRuntime(argv, { ...opts, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
+    supervisors.push(supervisor);
+    return supervisor;
+  };
+  const watcherPath = join(dir, 'watcher.mjs');
+  writeFileSync(watcherPath, `
+import { Records } from ${JSON.stringify(new URL('./controller/records.mjs', import.meta.url).href)};
+import { cleanupExecution } from ${JSON.stringify(new URL('../scripts/cleanup-watcher.mjs', import.meta.url).href)};
+import { fixtureSupervisor } from ${JSON.stringify(new URL('../test/controller/fixture-table.mjs', import.meta.url).href)};
+const records = new Records({ dir: process.argv[2] });
+await cleanupExecution({ records, execution: records.readExecution(process.argv[3]), createSupervisor: fixtureSupervisor });
+`);
+  let watcher;
+  const active = mod.createBridgeController({ env, records, createSupervisor,
+    launchWatcher: async ({ stateDir, executionId }) => {
+      watcher = spawn(process.execPath, [watcherPath, stateDir, executionId], { detached: true, stdio: 'ignore' });
+      await once(watcher, 'spawn');
+      return { pid: watcher.pid };
+    } });
+  const call = async (args) => (await mod.dispatch(args, { controller: active })).structuredContent;
+  const send = (thread, task) => call({ action: 'send', target: 'codex', cwd: dir, thread, task });
+  t.after(async () => {
+    for (const supervisor of supervisors) await supervisor.terminate({ graceMs: 0 });
+    if (watcher && watcher.exitCode === null) await once(watcher, 'exit');
+    mod.registerBridgeLossHandler(() => mod.controller.bridgeLost());
+  });
+  const completed = await send('complete-child', 'complete');
+  const answer = await call({ action: 'wait', thread: 'complete-child', job_id: completed.job_id, max_wait_sec: 5 });
+  assert.equal(answer.status, 'completed', JSON.stringify(answer)); assert.equal(answer.content, 'native answer');
+  const running = await send('cancel-child', 'wait for cancel');
+  const status = await call({ action: 'status', job_id: running.job_id });
+  assert.equal(status.status, 'running');
+  const cancelled = await call({ action: 'cancel', thread: 'cancel-child', job_id: running.job_id });
+  assert.equal(cancelled.status, 'cancelled'); assert.equal(cancelled.meta.stop_evidence.gone, true);
+  const lost = await send('lost-child', 'wait for bridge loss');
+  mod.registerBridgeLossHandler(() => active.bridgeLost());
+  await mod.onBridgeLoss();
+  assert.equal(records.readExecution(lost.job_id).writer, 'watcher');
+  await until(() => records.readResult(lost.job_id), 'cleanup watcher result');
+  const fresh = mod.createBridgeController({ env, records, createSupervisor });
+  await mod.recoverController(fresh);
+  const recovered = (await mod.dispatch({ action: 'wait', thread: 'lost-child', job_id: lost.job_id }, { controller: fresh })).structuredContent;
+  assert.equal(recovered.meta.cause, 'bridge_loss'); assert.equal(recovered.meta.stop_evidence.gone, true);
+  assert.equal(recovered.status, 'cancelled');
+  const trace = readQueue(env.CODEX_FAKE_TRACE);
+  assert.equal(trace.filter((x) => x.method === 'turn/start').length, 3);
+  assert.equal(trace.some((x) => x.method === 'turn/interrupt'), true);
+  assert.equal(Object.hasOwn(trace.find((x) => x.method === 'turn/start').params, 'model'), false);
 });

@@ -20,13 +20,15 @@ const deferred = () => {
 // The host supplies trusted owner/request identities; this module does no
 // metadata attribution. send/wait/cancel hold attachment until they return.
 export class Controller {
-  constructor({ providers, records = new Records(), clock = systemClock, env = process.env, createSupervisor = (opts) => new ProcessSupervisor(opts), launchWatcher = spawnCleanupWatcher } = {}) {
+  constructor({ providers, records = new Records(), clock = systemClock, env = process.env, createSupervisor = (opts) => new ProcessSupervisor(opts), launchWatcher = spawnCleanupWatcher, onProgress = () => {}, onResult = () => {} } = {}) {
     this.providers = providers;
     this.records = records;
     this.clock = clock;
     this.env = env;
     this.createSupervisor = createSupervisor;
     this.launchWatcher = launchWatcher;
+    this.onProgress = onProgress;
+    this.onResult = onResult;
     this.live = new Map();
     this.requests = new Map();
     this.graceMs = Number(env.AGENT_COMPANION_OWNER_GRACE_MS ?? 120_000);
@@ -37,7 +39,7 @@ export class Controller {
     if (!a.handedOff && !this.records.writeExecution(a.record)) throw error('writer_fenced');
   }
   _eventWrite(a) {
-    try { this._persist(a); }
+    try { this._persist(a); return true; }
     catch (err) { void Promise.resolve().then(() => this._abandon(a, err)); }
   }
   _lease(a) {
@@ -78,7 +80,7 @@ export class Controller {
     if (!request) return null;
     return this._close(request.a, 'owner_stop');
   }
-  async send({ owner, provider, cwd, text, model, requestId, signal }) {
+  async send({ owner, provider, cwd, text, model, requestId, signal, hostSessionId }) {
     this._owner(owner);
     if (this.lost) throw error('bridge_loss');
     if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw error('INVALID_CWD');
@@ -98,11 +100,11 @@ export class Controller {
     if (!selected?.enabled) throw error('TARGET_UNSUPPORTED');
     if (!selected.ready) throw error('CAPABILITY_UNAVAILABLE');
     if (modelOverride !== undefined && (typeof modelOverride !== 'string' || !selected.modelAllowed?.(modelOverride))) throw error('MODEL_NOT_ALLOWED');
-    const historyId = conversation?.historyId || this.records.readLegacyHistory(owner);
+    const historyId = conversation ? conversation.historyId : this.records.readLegacyHistory(owner, provider);
     const adapter = selected.create();
     if (historyId && (!adapter.capabilities.loadsHistory || !adapter.capabilities.followUp)) throw error('FOLLOWUP_UNSUPPORTED');
     const executionId = randomUUID();
-    const record = this.records.begin({ owner, provider, cwd, modelOverride, historyId, executionId, text, now: this.clock.now() }, conversation?.generation ?? 0);
+    const record = this.records.begin({ owner, provider, cwd, modelOverride, historyId, executionId, text, hostSessionId, now: this.clock.now() }, conversation?.generation ?? 0);
     const a = { record, adapter, requests: new Set(), ready: deferred(), done: deferred(), remainingMs: this.graceMs, lastTick: this.clock.monotonic() };
     a.supervisor = this.createSupervisor({ clock: this.clock, onRecord: (processes) => { a.record.processes = processes; this._eventWrite(a); } });
     // Snapshot the marker at dispatch. An old SubagentStop must not cancel a
@@ -134,8 +136,9 @@ export class Controller {
       if (!history?.historyId || (conversation.historyId && history.historyId !== conversation.historyId)) throw error('history_unavailable');
       a.record.historyId = history.historyId;
       a.record.effectiveModel = history.effectiveModel;
+      a.record.effectiveEffort = history.effectiveEffort;
       this.records.writeConversation({ ...conversation, historyId: history.historyId });
-      a.record.state = 'delivering'; this._persist(a);
+      a.record.state = 'delivering'; this._persist(a); this.onProgress(a.record);
       phase = 'delivery_unknown'; a.nativeActive = true;
       const ack = await bounded(this.clock, () => a.adapter.deliver({ text: a.record.text }), PROTOCOL_MS, 'DeliveryUnknown');
       if (a.stopping) return;
@@ -145,7 +148,7 @@ export class Controller {
       a.ready.resolve({ executionId: a.record.executionId, generation: a.record.generation, state: 'running', acknowledged: true });
       phase = 'provider_error';
       const terminal = await a.adapter.observe({ onProgress: (progress) => {
-        if (!a.closed && !a.handedOff && !a.record.terminal) { a.record.progress = { ...a.record.progress, ...progress }; this._eventWrite(a); }
+        if (!a.closed && !a.handedOff && !a.record.terminal) { a.record.progress = { ...a.record.progress, ...progress }; if (this._eventWrite(a)) this.onProgress(a.record); }
       } });
       if (a.closed || a.handedOff) return;
       if (!['completed', 'failed', 'interrupted'].includes(terminal?.outcome)) throw error('invalid_native_outcome');
@@ -154,7 +157,7 @@ export class Controller {
       await this._close(a, a.record.terminal.cause);
     } catch (err) {
       if (a.stopping || a.handedOff || a.closed) return;
-      this._terminal(a, { outcome: phase === 'delivery_unknown' ? 'delivery_unknown' : 'failed', cause: 'provider_error', detail: phase, error: err.code || err.name });
+      this._terminal(a, { outcome: phase === 'delivery_unknown' ? 'delivery_unknown' : 'failed', cause: 'provider_error', detail: typeof err.code === 'string' && !['RuntimeUnavailable', 'HistoryUnavailable', 'DeliveryUnknown', 'ProviderLost'].includes(err.code) ? err.code : phase, error: err.code || err.name });
       await this._close(a, 'provider_error');
     }
   }
@@ -223,7 +226,8 @@ export class Controller {
       outcome: terminal?.outcome || (cleanup.gone ? 'stopped' : 'failed'), cause: terminal?.cause || cause,
       detail: cleanup.gone ? terminal?.detail : 'cleanup_unverified', text: terminal?.text ?? a.record.progress?.partialText ?? '',
       usage: terminal?.usage, nativeRefs: { historyId: a.record.historyId, nativeTurnId: a.record.nativeTurnId, ...terminal?.nativeRefs },
-      selectedModel: a.record.modelOverride, effectiveModel: a.record.effectiveModel,
+      selectedModel: a.record.modelOverride, effectiveModel: terminal?.effectiveModel ?? a.record.effectiveModel,
+      effectiveEffort: terminal?.effectiveEffort ?? a.record.effectiveEffort,
       stopEvidence: a.record.cleanup, finishedAt: this.clock.now(),
     };
     if (!this.records.writeResult(result)) throw error('writer_fenced');
@@ -233,6 +237,7 @@ export class Controller {
     a.closed = true;
     for (const id of [...a.requests]) this.endRequest(id);
     const saved = this.records.readResult(a.record.executionId);
+    this.onResult(a.record, saved);
     this.live.delete(a.record.executionId);
     a.ready.resolve(saved); a.done.resolve(saved);
     return saved;
@@ -267,7 +272,13 @@ export class Controller {
     const execution = this.records.readExecution(executionId);
     if (!execution) return null;
     const result = this.records.readResult(executionId);
-    return { execution, result, state: result?.stopEvidence?.gone || execution.cleanup?.gone ? 'closed' : this.live.has(executionId) ? execution.state : 'unknown' };
+    const live = this.live.get(executionId);
+    const savedLease = this.records.readLease(executionId);
+    const lease = savedLease && (result
+      ? { ...savedLease, attached: false, requestIds: [], deadline: null, remainingMs: null }
+      : { ...savedLease, remainingMs: live ? live.remainingMs : savedLease.deadline == null ? null : Math.max(0, savedLease.deadline - this.clock.now()) });
+    return { execution, result, lease,
+      state: result?.stopEvidence?.gone || execution.cleanup?.gone ? 'closed' : live ? execution.state : 'unknown' };
   }
   // Explicit startup reconciliation, never invoked by an observer. It never
   // adopts or signals an old runtime: only positive absence permits recovery.
@@ -276,6 +287,7 @@ export class Controller {
     const conversation = this.records.readConversation(owner);
     if (!conversation) return null;
     const execution = this.records.readExecution(conversation.executionId);
+    if (!execution) return null;
     const saved = this.records.readResult(execution.executionId);
     if (this.live.has(execution.executionId) || saved?.stopEvidence?.gone || execution.cleanup?.gone || !execution.processes?.pid) return this.status({ owner });
     const supervisor = this.createSupervisor({ record: execution.processes, clock: this.clock });
@@ -283,7 +295,9 @@ export class Controller {
     if (!stopEvidence.gone) return this.status({ owner });
     const terminal = execution.terminal;
     if (!saved) this.records.writeResult({ owner, executionId: execution.executionId, generation: execution.generation,
-      outcome: terminal?.outcome || 'stopped', cause: 'bridge_loss', text: terminal?.text ?? execution.progress?.partialText ?? '',
+      outcome: terminal?.outcome || 'stopped', cause: 'bridge_loss', detail: terminal?.detail,
+      selectedModel: execution.modelOverride, effectiveModel: terminal?.effectiveModel ?? execution.effectiveModel,
+      effectiveEffort: terminal?.effectiveEffort ?? execution.effectiveEffort, text: terminal?.text ?? execution.progress?.partialText ?? '',
       usage: terminal?.usage, nativeRefs: { historyId: execution.historyId, nativeTurnId: execution.nativeTurnId, ...terminal?.nativeRefs },
       stopEvidence, finishedAt: this.clock.now() }, execution.writer);
     this.records.writeExecution({ ...execution, state: 'closed', cleanup: stopEvidence }, execution.writer);

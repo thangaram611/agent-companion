@@ -2,7 +2,7 @@ import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveRouting, dispatch, _resetForTest } from './server.mjs';
-import { clearDefaultTarget, writeDefaultTarget, writeDefaultModel, clearDefaultModel } from '../lib/state.mjs';
+import { clearDefaultTarget, writeDefaultTarget, writeDefaultModel, clearDefaultModel, writeTargetChecks } from '../lib/state.mjs';
 import { getTarget } from '../lib/target-registry.mjs';
 
 test('target routing is explicit or configured, with no silent substitute', () => {
@@ -51,17 +51,15 @@ test('a model override is refused when the selected companion cannot select mode
 
 test('routing refusals retain the envelope without profiles or strengths', async () => {
   _resetForTest();
+  writeTargetChecks({ copilot: { ready: true } });
   const prior = process.env.CLAUDE_CODE_SESSION_ID;
   process.env.CLAUDE_CODE_SESSION_ID = 'routing-test';
   try {
-    const result = (await dispatch({ action: 'send', target: 'copilot', model: 'unknown', task: 'x', cwd: '/tmp' })).structuredContent;
+    const result = (await dispatch({ action: 'send', target: 'copilot', model: 'unknown', task: 'x', cwd: '/tmp', thread: 'routing-child' })).structuredContent;
     assert.equal(result.ok, false);
     assert.equal(result.action, 'send');
     assert.equal(result.code, 'MODEL_NOT_ALLOWED');
-    assert.equal(result.reason, 'model-not-allowed');
-    assert.equal(result.model, 'unknown');
-    assert.ok(result.hint);
-    assert.ok(result.targets.length);
+    assert.equal(result.status, 'MODEL_NOT_ALLOWED');
     for (const field of ['profiles', 'strengths', 'candidates']) assert.equal(Object.hasOwn(result, field), false);
   } finally {
     if (prior === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = prior;
