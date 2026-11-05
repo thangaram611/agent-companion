@@ -1,6 +1,6 @@
 # Release Readiness
 
-Last updated: 2026-10-26
+Last updated: 2026-11-05
 
 Release metadata is `0.1.0` in both plugin manifests and the private bridge
 package. Readiness requires the gates below on the reviewed candidate commit;
@@ -8,9 +8,18 @@ installed versions and a matching wire fixture do not establish live transport
 qualification. Product vocabulary and supported capabilities belong in
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
+The current direction is the conversational, per-execution ownership design.
+In-flight bridge survival is retired; cold history resume, verified cleanup and
+native owner attribution are the acceptance contract. The
+[Claude report](../probes/host-qualification/claude/REPORT-2026-11-05.md) (2.1.318)
+and [Codex report](../probes/host-qualification/codex/REPORT-2026-11-05.md) (0.166.0)
+are measured host inputs, not installed-form cleanup qualification. Codex desktop,
+operator-only TUI rows and Copilot cold load remain open release gates.
+
 ## Source-Backed Compatibility Notes
 
-Installed versions checked on 2026-10-26 without model turns:
+Historical installed-version snapshot from 2026-10-26, without model turns
+(not current qualification; the newer host versions are cited above):
 
 | Component | Version | Evidence |
 | --- | --- | --- |
@@ -23,7 +32,7 @@ Installed versions checked on 2026-10-26 without model turns:
 Claude Code plugins:
 
 - The installation materializes a standalone agent through
-  `hooks/install-agent.sh`. Its agent-local MCP boundary is documented in
+  `hooks/install-agent.sh`. Its session-scoped plugin MCP boundary is documented in
   [ARCHITECTURE.md](ARCHITECTURE.md#mcp-registration-boundary).
 
 Codex plugins:
@@ -49,14 +58,11 @@ Codex plugins:
 
 OpenCode companion:
 
-- The 2.x CLI adapter uses a private `--standalone` server and sets both OS cwd
-  and `PWD` to the requested directory. `lib/opencode-cli.mjs` selects the
-  arguments shared by dispatch and onboarding; `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip`
-  opts into `--auto`. Server-mode permissions follow OpenCode's own config.
-- The HTTP adapter implements the authenticated `/api` contract, global
-  session-filtered events and paginated current-turn recovery. Captured wire
-  regressions live in `bridge-server/opencode-server-runtime.test.mjs`;
-  gate 10 checks the installed server.
+- Only OpenCode 2.x is supported. Each execution starts a private authenticated
+  loopback HTTP server, sets OS cwd and `PWD`, and validates the native pid/version.
+  Permissions follow server configuration. Cold follow-up loads a saved session;
+  steer is unsupported. The current wire tests are
+  `bridge-server/adapters/opencode*.test.mjs`.
 - Native provider connections establish local configuration, not provider
   availability or quota. Model validation can remain `unknown` until a real
   run; onboarding smoke requires a completed assistant `ready` reply.
@@ -67,33 +73,31 @@ GitHub Copilot CLI companion:
   OTEL. Its `usage_update` event is context occupancy, not per-turn tokens.
   Qualify usage on the installed CLI rather than assuming the wire shape from
   its version number.
-- A successful rubber-duck footer requires a recorded completed native critic
-  call. The footer verifies invocation, not critique quality or the critic's
-  model; `bridge-server/server.test.mjs` covers unavailable and unrecorded calls.
-  Supported model ids belong in `lib/state.mjs`, not a second catalog here.
+- Cold follow-up is refused until account access and cross-process session
+  loading are qualified. No critic footer or answer classification is added.
+  Supported model ids belong in `lib/state.mjs`.
 
 Codex CLI companion:
 
 - **Wire contract generated from codex-cli 0.164.0**:
   `lib/codex-app-server-contract.json` records provenance. The sibling test
   compares the installed CLI's schema; a version-only change passes, a schema
-  change fails. The broker reports `contractStatus: match|drift|unverified`
+  change fails. The adapter reports `contractStatus: match|drift|unverified`
   and keeps serving. Regenerate only with
   `scripts/gen-codex-app-server-contract.mjs` and inspect the classified diff,
   especially routing changes.
-- Both adapters share the sandbox resolver. The bridge defaults to
+- The app-server adapter uses the shared sandbox resolver. The bridge defaults to
   `workspace-write` with network enabled; app-server pins `approvalPolicy`
-  to `never`. Gate 7 must verify the applied network policy, and gate 8 must
-  verify the running binary/helper pair after an upgrade. Transport and
+  to `never`. Live acceptance must verify applied network policy and the selected
+  executable/helper pair after an upgrade. Transport and
   sandbox rationale belong in [Negative Results](ARCHITECTURE.md#negative-results).
 
 Antigravity companion:
 
 - The installer selects the live registry version, so a new install can differ
-  from the installed version above. The daemon applies a pinned model after
+  from the installed version above. The adapter applies a pinned model after
   both session creation and loading and answers permission requests under the
-  descriptor's policy. Usage is absent. Qualify those assumptions with gate 9 on the selected
-  binary. Access and terms boundaries are [tracker item 8](MVP_TRACKER.md).
+  descriptor's policy. Usage is absent. Qualify those assumptions on the selected binary. Access and terms boundaries are [tracker item 8](MVP_TRACKER.md).
 
 ## Release Gates
 
@@ -143,37 +147,40 @@ Manual smoke gates before a public tag (real delegations spend model tokens):
    `npm install`/fetch inside the sandbox) to prove the
    `AGENT_COMPANION_CODEX_NETWORK` override actually reaches the sandbox — not
    just that a send completes.
-8. Codex CLI companion on the app-server transport
-   (`CODEX_RUNTIME_ADAPTER=appserver`): `node probes/smoke/appserver.mjs` for
-   restart survival, `node probes/smoke/appserver-control.mjs` for the
-   reply/steer and cancel/interrupt control paths, and
-   `node probes/smoke/review-loop.mjs` for the review loop (a parsed `review`
-   verdict, and a follow-up send resuming the same codex thread across a
-   bridge SIGKILL). All three drive the real bridge against a real broker and
-   a real `codex app-server`, and all three spend real tokens. Run `CODEX_RUNTIME_ADAPTER=appserver node scripts/doctor.mjs --json`
-   before and after a Codex package upgrade; record the selected and running
-   path/version/helper, and require no stale-runtime warning before the smoke.
-9. `node probes/smoke/acp-antigravity.mjs` — Google's Antigravity ACP server on
-   the generic daemon: send, thread continuity on one ACP session, reply as
-   cancel + re-prompt, cancel, restart survival across a bridge SIGKILL, and a
-   model pin reaching the session; needs the server installed and signed in
-   (`scripts/install-antigravity-acp.mjs --login`) and spends real turns. Plus
-   one real Copilot send through the bridge after any change to
-   `scripts/acp-daemon.mjs` (Copilot rides the same daemon), checking the
-   spawn argv in `copilot-acp-daemon.log`, the rubber-duck footer, native ACP
-   `meta.usage` (with the implemented OTEL fallback) and the
-   `acp_daemons.copilot` registry entry on `agent_status`.
-10. OpenCode HTTP server (`OPENCODE_RUNTIME_ADAPTER=server`): verify two
-    working directories on one server, send, reply, confirmed cancellation,
-    streaming, per-turn usage, bridge-restart and completed-transcript recovery,
-    and idle disposal. Require a native running tool before interrupting a
-    turn; model prose alone does not establish that the control path was tested.
+8. Codex controller smokes: `node probes/smoke/smoke.mjs` verifies native work,
+   history/turn ids, usage, digest and runtime exit; `node probes/smoke/orphan.mjs`
+   verifies EOF-triggered watcher cleanup and immutable recovery. The latter is
+   not uncatchable SIGKILL coverage. Run doctor before/after an upgrade and record
+   the selected executable/helper pair and `contractStatus`.
+9. `node probes/smoke/acp-antigravity.mjs <available-model-id>` verifies cold
+   history reuse in a new process, unsupported-steer refusal, cancellation,
+   acknowledged model selection and bridge-loss cleanup. Requires login and
+   spends five turns. Also qualify a real Copilot first send and usage, then
+   explicitly test `FOLLOWUP_UNSUPPORTED`; enable cold load only after its own gate.
+10. OpenCode 2.x: verify new pid plus same native history on follow-up, canonical
+    cwd/worktree and symlink cases, model changes and inherited/resolved model,
+    transcript boundaries, cancellation and no surviving descendants. Two
+    same-provider children must have independent processes and remain isolated
+    when one stops. In-flight steer must refuse explicitly.
+11. Across Claude Code, Codex CLI and Codex desktop, qualify two parents, siblings,
+    repeated status observers, startup/active-turn/bridge-replacement races,
+    every stop/loss trigger, and suspend/wake. Record instruction/result accounting,
+    lease detection delay separately from cleanup time, and process absence.
+    Operator-only TUI actions and desktop cannot be inferred from headless CLI rows.
+12. Migrate quiescent legacy state, preserve history/results and refuse ambiguous
+    mappings. Verify installed artifacts and hooks, including Claude's plugin
+    namespace and both hosts' stop markers. No live legacy job may be adopted.
 
 For source installs, also verify that prerequisite failures precede installation,
-separate host defaults and profiles survive reruns, and a partial install reports
+separate host defaults and legacy migration inputs survive reruns, and a partial install reports
 completed stages and recovers on rerun. `scripts/setup-codex-install.test.mjs`
 and `scripts/onboard.test.mjs` cover these with fake CLIs. Setup itself spends
 no quota; its readiness report does not qualify a live companion response.
+
+Require the green Node 22 baseline, the full root-discovered regression suite
+on supported local runtimes (including Node 24), required compatibility/CI checks,
+qualified cold providers and installed-form smoke. No release/completion claim
+while a required capability remains unqualified.
 
 Record the candidate commit, binary versions and results with the release.
 Use isolated state/runtime directories for smokes, stop probe-owned processes,

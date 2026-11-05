@@ -56,7 +56,7 @@ test('Claude role relays answers, status, metadata and orphan events without req
   assert.match(prose, /Report success only after the bridge reports `completed`/);
   assert.match(prose, /per-job status has no `action`/);
   assert.match(prose, /fields the response supplies; never emit `undefined`/);
-  for (const field of ['meta.digest_uri', 'resource_link', 'meta.usage', 'meta.debug_digest_path', 'meta.detail', 'failure_class', 'session_retired']) {
+  for (const field of ['meta.digest_uri', 'resource_link', 'meta.usage', 'meta.debug_digest_path', 'meta.detail']) {
     assert.ok(body.includes(field), `${field} must reach the parent`);
   }
   assert.match(prose, /Orphan events surfaced during this turn/);
@@ -81,9 +81,9 @@ test('Claude references the plugin session server by name and preserves its budg
   assert.match(text, /re-materializes/);
 });
 
-test('Claude role relays the four refusals and leaves failed work with the companion', () => {
+test('Claude role relays routing and unsupported-follow-up refusals and leaves failed work with the companion', () => {
   assert.deepEqual([...new Set(body.match(/\b[A-Z]+_[A-Z_]+\b/g))].sort(), [
-    'CAPABILITY_UNAVAILABLE', 'MODEL_NOT_ALLOWED', 'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
+    'CAPABILITY_UNAVAILABLE', 'FOLLOWUP_UNSUPPORTED', 'MODEL_NOT_ALLOWED', 'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
   ]);
   assert.match(prose, /Relay a refusal verbatim and stop; never work around it/);
   assert.match(prose, /The delegated task itself stays with the companion/);
@@ -112,8 +112,11 @@ test('Claude template leaves thread and session id to the host: a spawn starts a
   assert.match(prose, /hooks\/name-thread.sh.*agent id/);
   assert.match(prose, /SendMessage.*keeps that id/);
   assert.match(prose, /new spawn.*new id/);
-  assert.match(prose, /single-shot adapters.*no in-process conversation/s);
-  assert.match(prose, /resume_available/);
+  assert.match(prose, /resumes saved native history cold under a new provider process/);
+  assert.match(prose, /Copilot follow-ups are refused with `FOLLOWUP_UNSUPPORTED`/);
+  assert.match(prose, /Bridge loss stops the owned provider tree and keeps history/);
+  assert.match(prose, /`agent_reply` steers only where capabilities.*`reply_unavailable`/);
+  assert.doesNotMatch(prose, /single-shot adapters|daemon no longer holds/);
 });
 
 test('Claude role preserves bounded waits, per-job reply checks and cancel acknowledgement handling', () => {
@@ -129,7 +132,7 @@ test('Claude role preserves bounded waits, per-job reply checks and cancel ackno
   assert.match(prose, /agent_status.*job_id.*reply_available: true.*that job/);
   assert.match(prose, /per-job fact/);
   assert.match(prose, /do not cancel-and-resend to fake a reply/);
-  assert.match(prose, /ACP.*cancelled turn plus a new prompt/);
+  assert.match(prose, /reply_unavailable/);
   assert.match(prose, /no tracked job to cancel/);
   assert.match(prose, /`cancelling`.*same `BUDGET` until terminal/);
 });

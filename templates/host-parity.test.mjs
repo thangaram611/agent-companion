@@ -17,7 +17,7 @@
 // Each template's own suite (agent-companion.md.test.mjs,
 // agent-companion.toml.test.mjs) owns the first.
 //
-// Why it exists: the app-server adapter shipped documented in the Claude
+// Historical origin (retired survival design): the app-server adapter shipped documented in the Claude
 // template only. Nothing compared the pair, so a codex-host operator would have
 // silently kept the transport whose jobs die with the bridge — the exact defect
 // the adapter was built to fix, present or absent depending on which host you

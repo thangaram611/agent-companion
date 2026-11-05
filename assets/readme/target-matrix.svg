@@ -1,6 +1,6 @@
 <svg width="3200" height="1876" viewBox="0 0 1600 938" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">Agent Companion companion capability matrix</title>
-  <desc id="desc">A capability matrix of the six companion transports Agent Companion supports: OpenCode cli, OpenCode server, GitHub Copilot CLI over ACP, Codex exec, Codex app-server, and Google Antigravity over ACP. Every transport supports send, wait, status and cancel; in-flight reply and restart resume are available on OpenCode server, Copilot and Codex app-server; parallel fan-out is Copilot's /fleet only.</desc>
+  <title id="title">Historical design retired 2026-11-05: Agent Companion companion capability matrix</title>
+  <desc id="desc">Historical evidence only: this diagram describes the design retired on 2026-11-05. See docs/ARCHITECTURE.md for the shipped controller. A capability matrix of the six companion transports Agent Companion supports: OpenCode cli, OpenCode server, GitHub Copilot CLI over ACP, Codex exec, Codex app-server, and Google Antigravity over ACP. Every transport supports send, wait, status and cancel; in-flight reply and restart resume are available on OpenCode server, Copilot and Codex app-server; parallel fan-out is Copilot's /fleet only.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="938" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#07111F"/>

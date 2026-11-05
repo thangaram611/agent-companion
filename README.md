@@ -18,7 +18,7 @@ or vice versa).
 
 Talk to the `agent-companion` subagent in plain language. Give it the task, the
 absolute repo or worktree path, and any companion or model preference. Follow-ups
-to the same subagent continue the same conversation; a new subagent starts
+to the same subagent cold-resume saved history where supported; a new subagent starts
 independent work. Run long work in the background.
 
 The product posture is deliberately companion-neutral:
@@ -28,9 +28,8 @@ The product posture is deliberately companion-neutral:
 - **Attach your companion.** Name OpenCode, Copilot, Codex or Antigravity, or let
   the subagent choose a ready companion from the catalog. Set a default if useful.
 - **Keep the parent workflow clean.** Delegated work runs through the isolated
-  subagent. Claude scopes the bridge to that agent; Codex must register the
-  internal bridge at plugin/session scope so the role can inherit it, but the
-  subagent remains the supported caller for delegated work.
+  subagent. Both hosts register the internal bridge at plugin/session scope;
+  execution calls require the native child owner.
 - **Discover available choices.** Ask what companions and models are available.
   The read-only catalog reports configuration, capabilities and readiness.
 - **Keep failures explicit.** The subagent relays refusals and terminal failures.
@@ -44,8 +43,9 @@ flags for the MVP.
 Current implementation status lives in [docs/MVP_TRACKER.md](docs/MVP_TRACKER.md).
 Architecture details live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Public release gates live in [docs/RELEASE_READINESS.md](docs/RELEASE_READINESS.md).
-The project is in active development. Phase 1 changes the conversation interface;
-runtime ownership, lifetime and recovery changes belong to later phases.
+The project is in active development. The shipped controller owns one cold
+provider runtime per answer. Codex desktop and Copilot cold follow-up remain
+unqualified; local tests do not replace installed-host acceptance.
 
 ## What It Does
 
@@ -56,8 +56,9 @@ runtime ownership, lifetime and recovery changes belong to later phases.
    to that companion's configuration.
 3. It sends a clear message with the task, context, constraints and desired
    answer. The bridge passes that message to the companion verbatim.
-4. The companion does the work in the requested directory. The bridge records
-   progress digests and emits a terminal completion event.
+4. The controller starts a provider process in its own process group, loads
+   saved history when continuing, and sends the message once. It records progress
+   and the result, terminates the owned tree and publishes completion.
 5. The subagent waits with a bounded budget, then returns the companion's answer
    as given. It relays questions to the parent and keeps any checks of its own
    under a separate heading.
@@ -74,74 +75,68 @@ as inheriting the companion's own configuration. A list that needs a session is
 reported as "not enumerable without a session". Reading the catalog starts no
 work and changes no job, ownership, lease, ledger or digest state.
 
-![Agent Companion architecture](assets/readme/architecture.png)
+![Historical Agent Companion architecture](assets/readme/architecture.png)
+
+Historical illustration of the design retired on 2026-11-05. The current flow
+is in [Architecture](docs/ARCHITECTURE.md#flow).
 
 ## Supported Companions
 
-![Agent Companion companion matrix](assets/readme/target-matrix.png)
+![Historical Agent Companion companion matrix](assets/readme/target-matrix.png)
 
-| Companion | Runtime | Send | Wait | Status | Cancel | Reply | Restart resume |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| OpenCode (cli, default) | `opencode run --format json` in the requested cwd (1.x and 2.x) | yes | yes | yes | yes | no | no |
-| OpenCode (server, 1.x and 2.x) | `opencode serve` over HTTP | yes | yes | yes | yes | yes | yes |
-| GitHub Copilot CLI | `copilot --acp` behind the shared ACP daemon | yes | yes | yes | yes | yes (cancel + re-prompt) | yes, with ACP |
-| Codex CLI (exec) | `codex exec --json` (one-shot subprocess) | yes | yes | yes | yes | no | no |
-| Codex CLI (app-server, installed default) | `codex app-server` behind a shared broker | yes | yes | yes | yes | yes | yes |
-| Google Antigravity | `agy_acp_server.par` (Google's ACP-registry server) behind the shared ACP daemon | yes | yes | yes | yes | yes (cancel + re-prompt) | yes, with ACP and `session/load` |
+Historical illustration of the retired transport matrix. The table below is
+the current capability contract.
 
-Notes:
+| Companion | Per-answer runtime | Follow-up by cold resume | Reply / steer | Model selection | History |
+| --- | --- | --- | --- | --- | --- |
+| OpenCode 2.x | Private authenticated `opencode serve` | Saved session | Unsupported | `provider/model`, optional variant | Vendor-persisted session |
+| GitHub Copilot CLI | `copilot --acp` | Unsupported until qualified | Unsupported | Inherit or supported explicit model | Session id retained; cold load unqualified |
+| Codex CLI | `codex app-server` | `thread/resume` | `turn/steer` while running | Inherit or explicit override | Native thread and rollouts |
+| Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Unsupported | Session model after new/load | Native SQLite history |
 
-- OpenCode defaults to `OPENCODE_RUNTIME_ADAPTER=cli`; select `server` for
-  in-flight reply and restart resume. Server mode binds `127.0.0.1`; 2.x uses
-  a private password, while 1.x is unsecured. Server permissions follow
-  OpenCode's config; `AGENT_COMPANION_OPENCODE_PERMISSION_MODE=skip` applies
-  only to CLI mode. `AGENT_COMPANION_OPENCODE_MODEL=provider/model` supplies
-  the default model; an explicit request overrides it. Job timeout defaults to
-  40 minutes, configurable with `AGENT_COMPANION_OPENCODE_TIMEOUT_MS`.
-- Copilot and Antigravity use detached ACP daemons. Their reply operation
-  cancels the running turn and re-prompts the same session; it is not mid-turn
-  steering.
-- Install and sign in to Google's Antigravity ACP server with
+All support send, wait, status and cancel. Every answer runs in a new process;
+there is no shared provider runtime or adapter-selection setting. Copilot
+follow-ups return `FOLLOWUP_UNSUPPORTED` until cold loading is qualified.
+`agent_reply` returns `reply_unavailable` unless that execution supports steer.
+Bridge loss stops the owned tree through the cleanup watcher and keeps native
+history; in-flight work does not survive bridge replacement. The next message
+to the same native child resumes cold. An unavailable history fails explicitly.
+
+Configuration:
+
+- `AGENT_COMPANION_OWNER_GRACE_MS` controls the owner attachment grace (default
+  120000 ms). Pending send/wait/reply/cancel calls hold the lease; status and
+  catalog do not. Stop hooks write owner markers. Total execution has no
+  40-minute cutoff; each wait is still bounded by the host's per-call timeout.
+- `AGENT_COMPANION_DEFAULT_TARGET` overrides the `default-target` file.
+  `AGENT_COMPANION_CODEX_MODEL` and `AGENT_COMPANION_OPENCODE_MODEL` set model
+  defaults. Per-companion default-model files are supported; an explicit request
+  overrides them. With neither set, the companion inherits its own configuration.
+- OpenCode requires 2.x and uses server permissions from its configuration.
+  Its private loopback password is kept in memory, never in durable records.
+- Codex defaults to `workspace-write` with network enabled. Use
+  `AGENT_COMPANION_CODEX_NETWORK=off` or
+  `AGENT_COMPANION_CODEX_SANDBOX_MODE=read-only|workspace-write|danger-full-access|bypass`.
+  `bypass` maps to `danger-full-access`; approval policy stays fixed at `never`.
+  `.git`/`.codex`/`.agents` remain read-only under `workspace-write`, even with
+  extra writable roots. The measured approval/sandbox constraints are in
+  [Architecture](docs/ARCHITECTURE.md#negative-results).
+- Codex inherits configured MCP servers, whose startup can delay a turn.
+  Rollouts persist under `$CODEX_HOME/sessions` (default `~/.codex/sessions`)
+  without automatic cleanup. No model key is sent when inheriting its model.
+- Install and sign in to Antigravity with
   `node scripts/install-antigravity-acp.mjs --login`. It verifies Google's
   signature on macOS and installs under
-  `~/.local/share/agent-companion/antigravity-acp/`; `ANTIGRAVITY_ACP_BIN`
-  overrides the binary path. Credentials belong to the server under
-  `~/.gemini/antigravity-acp/` and the login keychain.
+  `~/.local/share/agent-companion/antigravity-acp/`;
+  `ANTIGRAVITY_ACP_BIN` overrides the binary. Credentials remain with the
+  server under `~/.gemini/antigravity-acp/` and the login keychain.
   `AGENT_COMPANION_ANTIGRAVITY_PERMISSION=all|edit|none` controls permission
-  answers (default `all`). Use the real project directory as `cwd`: its
-  sandbox resolves symlinks. A request can name a model; omission uses the
-  companion's configuration. The account/terms assessment is in
-  [docs/MVP_TRACKER.md](docs/MVP_TRACKER.md), item 8.
-- Installed Codex surfaces set `CODEX_RUNTIME_ADAPTER=appserver`. The broker
-  survives bridge restarts, supports live steering and cancellation, and
-  continues the recorded Codex conversation on a follow-up send. If the broker
-  itself dies, the transcript survives on disk but its in-flight turn is lost.
-  A recorded thread that cannot resume fails explicitly. `CODEX_RUNTIME_ADAPTER=exec`
-  selects the one-shot transport, which cannot reply or resume after a bridge
-  restart. A bare bridge without the installed configuration defaults to `exec`.
-- Codex defaults to `workspace-write` with network access enabled. Set
-  `AGENT_COMPANION_CODEX_NETWORK=off` to disable network access, or
-  `AGENT_COMPANION_CODEX_SANDBOX_MODE=read-only|workspace-write|danger-full-access|bypass`
-  to choose the sandbox mode. `.git`/`.codex`/`.agents` remain read-only under
-  `workspace-write`, even with extra writable roots. `danger-full-access`
-  permits unrestricted filesystem access; `bypass` also bypasses approvals on
-  exec and maps to `danger-full-access` on app-server. The app-server approval
-  policy is fixed at `never`: accepting an approval was measured to permit a
-  write outside a read-only sandbox.
-- Codex inherits the user's configuration, including enabled MCP servers;
-  their startup timeouts can delay the first turn. Rollouts persist under
-  `$CODEX_HOME/sessions` (default `~/.codex/sessions`) without automatic cleanup.
-  `AGENT_COMPANION_CODEX_MODEL` supplies the per-companion default model; an
-  explicit request overrides it. With neither set, Codex inherits its own model
-  configuration and receives no model key. Job timeout defaults to 40 minutes,
-  configurable with `AGENT_COMPANION_CODEX_TIMEOUT_MS`.
+  answers (default `all`). Use the real project cwd: its sandbox resolves
+  symlinks. Model selection is reapplied after each history load. The
+  account/terms assessment remains [tracker item 8](docs/MVP_TRACKER.md).
 
-Transport internals and measured constraints live in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For Codex installation or broker
-problems, see [Diagnostics](#diagnostics).
-
-Transport selection uses `OPENCODE_RUNTIME_ADAPTER` / `CODEX_RUNTIME_ADAPTER` on
-the bridge. OpenCode and Codex jobs retain their starting adapter.
+See [Architecture](docs/ARCHITECTURE.md) for protocol and lifecycle details,
+and [Diagnostics](#diagnostics) for installation problems.
 
 ## Requirements
 
@@ -282,10 +277,12 @@ materializing `templates/agent-companion.md` to:
 ~/.claude/agents/agent-companion.md
 ```
 
-The standalone materialized Claude agent owns its private MCP bridge.
+The materialized agent references the session-scoped plugin server by name.
+The installer qualifies it to `plugin:agent-companion:agent-bridge` and tool
+names to `mcp__plugin_agent-companion_agent-bridge__*`.
 
 For MCP timeout configuration and the host idle watchdog, see
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), "Host budgets and observability".
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), "Host budgets".
 
 ### Claude Permissions
 
@@ -310,11 +307,13 @@ main sends the same agent-companion a message (`SendMessage` on Claude Code,
 `followup_task` on Codex); to start fresh, it spawns a new one. Neither main nor
 the subagent carries a thread: the host names it after the calling agent.
 Claude Code shows a subagent's `agent_id` only to hooks, so the plugin's
-`PreToolUse` hook (`hooks/name-thread.sh`) writes it into `agent_send`'s
-`thread`; Codex sends the caller's own thread id in MCP `_meta`, which the
+`PreToolUse` hook (`hooks/name-thread.sh`) overwrites `thread` on
+send/wait/reply/cancel; Codex sends the caller's own thread id in MCP `_meta`, which the
 bridge reads. A send that reaches the bridge with neither is refused. Measured
-on Claude Code 2.1.310 and codex-cli 0.164.0: two spawns get two ids, a resume
-keeps its id, and `SendMessage` needs no experimental flag.
+on [Claude Code 2.1.318](probes/host-qualification/claude/REPORT-2026-11-05.md)
+and [codex-cli 0.166.0](probes/host-qualification/codex/REPORT-2026-11-05.md):
+separate children have separate owners and same-child resume preserves identity.
+The earlier Claude 2.1.310 measurement required no experimental SendMessage flag.
 
 ## Install For Codex CLI
 
@@ -356,7 +355,7 @@ dependencies without relying on the GUI process's `PATH`. It has no root
 Codex normalizes the raw server id for its model-visible tool namespace:
 `agent-bridge` becomes `mcp__agent_bridge__agent_*`. The Codex role uses that
 underscore form through Codex's `functions.exec` deferred-tool wrapper; Claude
-keeps its native `mcp__agent-bridge__agent_*` names.
+uses installed `mcp__plugin_agent-companion_agent-bridge__agent_*` names.
 The plugin declares its internal bridge tools pre-approved so they remain
 usable in headless `codex exec` sessions whose approval policy is `never`.
 A user or managed plugin policy can still tighten that approval mode.
@@ -397,7 +396,7 @@ read-only. Execution and continuation belong to the subagent.
 | `agent_catalog` | none | Enabled companions, default, model configuration, capabilities, readiness and last checked version. No job hydration, state writes or session creation. |
 | `agent_send` | `task`, `cwd`; optional `target`, `model`, `max_wait_sec` | Send the child's exact message to one companion. |
 | `agent_wait` | `job_id`, `max_wait_sec` | Wait for the job within the same budget. |
-| `agent_status` | optional `job_id`, `verbose`, `diagnostics` | Inspect global or per-job state; diagnostics includes the doctor report. |
+| `agent_status` | optional `job_id`, `verbose`, `diagnostics` | Observe global or per-job records; diagnostics includes cached target checks. |
 | `agent_reply` | `job_id`, `message` | Reply only when that job reports `reply_available: true`. |
 | `agent_cancel` | `job_id` | Cancel the named job. |
 
@@ -410,19 +409,19 @@ companion's configuration. Refusals are `TARGET_UNCONFIGURED`,
 subagent relays them and stops instead of changing the request to get around them.
 
 `agent_send` returns `still_running` immediately with a `job_id`. An identical
-retry on the same in-flight job reattaches and waits up to `max_wait_sec`.
-Equality covers task, target, model, cwd and host session. A different task or
+retry on the same in-flight job reattaches to its delivery acknowledgement.
+The controller compares text/model after checking provider and canonical cwd. A different task or
 model on a busy conversation returns `thread_busy`; target and cwd conflicts
 have their own mismatch errors. Wait, cancel, or use `agent_reply` when that
 job's `reply_available` is true. `agent_wait` defaults to 480 seconds and is
 capped at 1200 seconds per call. The subagent reuses the chosen budget; new
 parent messages are visible between waits.
 
-Terminal statuses are `completed`, `failed`, `cancelled`, `stuck`, `timeout`,
-and `unreachable`. An unreachable job includes a machine-readable
-`failure_class`. For `codex_code_mode_host_unavailable`, the assistant text is
-partial runtime evidence, not a review/build/test verdict: repair the command
-runner and resend. See [Diagnostics](#diagnostics).
+Terminal envelope statuses are `completed`, `failed` and `cancelled`; durable
+results distinguish `completed`, `failed`, `interrupted`, `stopped` and
+`delivery_unknown`. Metadata includes cause, native references and stop evidence.
+A missing delivery acknowledgement is never retried automatically. Read the
+actual result; protocol completion alone does not prove a requested test ran.
 
 ## Usage
 
@@ -432,8 +431,8 @@ has no `usage` key. Transport readers and the shared shape are defined in
 `lib/usage.mjs`.
 
 Codex app-server follow-ups report the current turn's usage, not the thread's
-cumulative total. A fresh bridge resuming mid-turn reports only the model calls
-it observed, flagged `partial: true`; transcript-only salvage carries no usage.
+cumulative total. Bridge loss ends that execution; a replacement never resumes
+an in-flight turn. Missing native counters remain absent.
 Copilot uses native prompt counters when available and falls back to OTEL;
 `usage_update` measures context occupancy, not turn tokens. Antigravity's ACP
 surface reports no usage (measured on 1.1.1). OpenCode reports tokens and cost
@@ -448,20 +447,22 @@ Per-host state lives under:
 ~/.codex/agent-companion/
 ```
 
-Configuration, the job ledger and the structured `daemon.log` live at the state
-root. Runtime logs and digests live under `runtime/`. The full layout and
-recovery rules are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), "State".
+`AGENT_COMPANION_HOME` overrides the state home; `CODEX_HOME` relocates Codex.
+`conversations/`, `executions/`, `leases/` and immutable `results/` hold ownership,
+history references, progress and verified cleanup evidence. `stops/` carries
+advisory owner-stop markers; `completions/` holds per-execution publication
+receipts. The hook queue is `runtime/completions.jsonl`. Legacy history/configuration
+is migrated once, preserving native ids and refusing ambiguous mappings.
 
-The bridge surfaces progress as:
+Logs and digests live under `runtime/`; the structured event log retains the
+historical filename `daemon.log` at the state root. It does not imply a running
+service. See [State](docs/ARCHITECTURE.md#state) for record and recovery rules.
 
-```text
-agent-digest://<jobId>
-```
-
-Digests include the task, final or partial assistant output, target output,
-tool-call summaries, files touched, and latest todo snapshots when available.
-The MCP resource is the canonical way for the parent to inspect progress
-without another raw filesystem read.
+The bridge surfaces progress as `agent-digest://<executionId>`. Digests contain
+the request, status, final or partial assistant output and reported usage. They
+are projections of controller records, not a complete workspace-change ledger.
+The MCP resource is the normal link for inspecting progress. Status reads never
+refresh a digest or renew the owner's lease.
 
 ## Diagnostics
 
@@ -470,17 +471,17 @@ node scripts/doctor.mjs
 node scripts/doctor.mjs --json
 ```
 
-With `CODEX_RUNTIME_ADAPTER=appserver`, doctor reports the configured and
-selected Codex version/path, helper path, selection source and tri-state
-quarantine verdict (present, absent, or indeterminate),
-then compares them with the running broker/app-server PIDs, path, version and
-file identity. A stale or uninspectable broker makes doctor require attention;
-a broker that is simply not running is healthy when the selected installation
-pair is ready, because the next send starts it lazily. Doctor is read-only and
-never removes quarantine or creates a helper link.
-`agent_status` keeps fixture-provenance version skew
-(`contract_version_skew`) separate from selected-versus-running version skew
-(`upgrade_version_skew`).
+Doctor checks common prerequisites, target readiness and the selected Codex
+executable/helper installation, including quarantine evidence. It does not start
+model work or remove quarantine. There is no persistent provider process to
+compare against the selected installation.
+
+Catalog's Codex entry and `agent_status` expose the advisory contract status as
+`contractStatus: match|drift|unverified` (the shipped field name). The adapter
+checks the schema once per bridge when Codex starts; catalog/status do not run
+that probe. Diagnostics on status reads cached target checks. Execution status
+includes lease, last native activity, active command, retry state, partial text,
+selected/effective model, native refs and stop evidence.
 
 Install markers:
 
@@ -524,28 +525,32 @@ bash scripts/render-readme-assets.sh architecture # or one, by basename
 Validate Claude packaging with `claude plugin validate .`; Codex packaging and
 isolated validation commands are in [Install For Codex CLI](#install-for-codex-cli).
 
+Current live probes are listed in [probes/README.md](probes/README.md):
+`smoke.mjs`, `orphan.mjs`, `acp-antigravity.mjs`, and the two host-qualification
+harnesses. Live probes spend quota and are separate from the root test suite.
+
 ## Design Invariants
 
-- The parent delegates in plain language to `agent-companion` on both hosts.
-- The companion performs the delegated task. The subagent relays its answer,
-  questions and actual failures, with any focused checks clearly separated.
-- The catalog is ownerless and read-only; execution stays with the subagent.
-- Claude enforces agent-local MCP visibility. Codex registers the bridge at
-  plugin/session scope because roles may inherit MCP authority but may not add
-  it; main Codex can see the schemas but delegates work through the subagent.
-- Bridge process lifetime belongs to the host; detached companion runtimes own
-  any state that must survive a bridge replacement.
-- Sends are non-blocking — the one exception is a retried send reattaching to
-  its in-flight job, which blocks like a wait — and every wait is bounded.
-- Orphan completions are stored in `completions.jsonl` and drained by hooks.
-- An explicit companion or model preference is honoured. An open choice uses
-  the catalog; refusals never trigger a silent substitute.
-- The bridge delivers the child's message verbatim. Model omission preserves
-  the companion's configuration; an explicit override is a private send field.
-- Node dependencies persist under plugin data; bundled source updates with the
-  plugin package. Claude Code's bridge reaches them through a
+- The parent delegates in plain language to a native `agent-companion` child.
+  The companion does the work; the child relays answers and actual failures.
+- Both hosts register the bridge at plugin/session scope. Execution calls require
+  the host-supplied native child owner; catalog and status are ownerless reads.
+- One controller owns each execution and one cold provider process group per
+  answer. Provider processes and protocol connections are never shared by children.
+- Pending owner calls hold a lease; gaps consume configurable grace. Stop markers
+  and attributed cancellation close the owner. Observers cannot renew its lease.
+- Bridge loss hands recorded trees to the cleanup watcher. It terminates and
+  verifies them, keeps native history and writes a fenced immutable result.
+  A replacement never adopts live work; subsequent answers cold-resume history.
+- Delivery is acknowledged once and is never automatically resent after an
+  ambiguous failure. Busy matching sends reattach; different work is refused.
+- Results are immutable and generation-fenced. Completion publication is keyed
+  by execution id, and hooks drain the session-tagged queue. Every wait is bounded.
+- Companion/model choices are honoured and text is delivered verbatim. Missing
+  history and unsupported follow-up fail explicitly, with no silent substitute.
+- Node dependencies persist under plugin data. Claude reaches them through a
   `bridge-server/node_modules` link; Codex's launcher resolves them from plugin
-  data, because Codex refuses a plugin bundle that contains a symlink.
+  data because its plugin bundles cannot contain symlinks.
 
 ## License
 

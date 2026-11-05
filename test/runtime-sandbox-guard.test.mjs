@@ -13,7 +13,7 @@
 // Measured 2026-08-28: hooks/drain-completions.test.mjs had written five
 // fixture-session heartbeats (`sid-A`, `café-1`, …) into the real heartbeats
 // dir on every run, and HOST_LIVENESS_TTL_MS (30 min) then kept the shared
-// codex broker's idle reaper extended per run. A textual guard over the test
+// retired codex broker's idle reaper extended per run. A textual guard over the test
 // sources was tried first; it had a directory allowlist, missed hooks that
 // reach state through node, and could be satisfied by `= ''`. This one cannot.
 import { test } from 'node:test';

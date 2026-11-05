@@ -30,7 +30,7 @@ function binaryFor(descriptor, env) {
 
 // Reuse ACP framing, v1 initialization, session new/load, update parsing and
 // permission answers. The controller owns deadlines and process lifetime:
-// never use AcpConnection.spawn/sendPrompt/kill's daemon lifecycle here.
+// the inherited lifecycle methods are historical and unused here.
 class ProtocolConnection extends AcpConnection {
   constructor(descriptor, env, log, activity) {
     super({ ...descriptor, acp: { ...descriptor.acp, permission: () => descriptor.acp.permission(env) } });
@@ -93,7 +93,7 @@ export class AcpAdapter {
     this.paths = {};
     try {
       // Copilot's legacy usage fallback gets an execution-private exporter;
-      // no shared daemon files, rotation, leases or durable adapter state.
+      // no shared provider files, rotation, leases or durable adapter state.
       if (acp.rotate?.includes('otelTraces')) {
         this.telemetryDir = mkdtempSync(join(tmpdir(), 'acp-usage-'));
         this.paths.otelTraces = join(this.telemetryDir, 'traces.jsonl');

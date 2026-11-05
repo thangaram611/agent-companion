@@ -1,7 +1,7 @@
 // Single-probe guard. Diagnostics shell out to companion binaries (opencode,
 // copilot, claude, codex, npm, jq) SYNCHRONOUSLY, on the bridge's only thread.
 // A binary that hangs — stalled on a TTY auth prompt, a wedged network call, a
-// half-dead daemon socket — therefore does not just stall the diagnostics call;
+// unresponsive provider probe — therefore does not just stall the diagnostics call;
 // it wedges every in-flight job on that bridge, permanently. Both agent
 // templates instruct the subagent to call agent_status({diagnostics:true}), so
 // this is a routine code path.

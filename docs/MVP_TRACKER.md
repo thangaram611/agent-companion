@@ -3,8 +3,8 @@
 Last updated: 2026-11-05
 
 Current direction: active development of the approved conversational redesign.
-Phase 1 removes the dispatch protocol and adds read-only discovery. Ownership,
-lifetime and recovery changes have separate later gates.
+The shipped controller owns one cold provider runtime per execution. Qualification
+remains separate from implementation; see the release gates below.
 
 ## Current State
 
@@ -27,28 +27,34 @@ lifetime and recovery changes have separate later gates.
   a different request returns `thread_busy`. Wait, cancel, or use `agent_reply`
   when the job reports `reply_available`.
 
+- One controller owns each answer's process group, lease and immutable result.
+  Stop hooks and attributed cancellation close owned work; bridge loss hands its
+  tree to the cleanup watcher. Native history survives for a cold follow-up.
+- CLI host measurements are recorded in the
+  [Claude 2.1.318 report](../probes/host-qualification/claude/REPORT-2026-11-05.md)
+  and [Codex 0.166.0 report](../probes/host-qualification/codex/REPORT-2026-11-05.md).
+  They establish ownership/signals and the 1320 s per-call wall, not cleanup.
+
 ## MVP Limitations
 
-- The runtime-adapter environment setting selects the transport at spawn.
-  Reply availability is per job; the catalog's companion capabilities do not
-  establish that a particular job can accept a reply.
-- Catalog readiness reflects the last check. Models that require session
-  creation to enumerate are reported as such; a catalog read starts no session.
-- Phase 1 does not fix the existing ownership, timeout or recovery defects.
-  Live conversational acceptance follows integration. Codex desktop remains
-  an unqualified host target for the later host-qualification phase.
-- OpenCode `cli` and Codex `exec` cannot steer a running job or recover it
-  after bridge restart.
-  Copilot recovery depends on its ACP daemon surviving; Antigravity can load a
-  session after its server restarts. Use the companion matrix when choosing a
-  transport for follow-up work.
-- Usage is present only when reported by the transport. Antigravity carries
-  none; Codex app-server usage observed after a mid-turn bridge restart is
-  marked `partial`. Terminal jobs expire after one hour when GC runs, and
-  structured logs rotate, so neither is a durable adoption or cost ledger.
+- Copilot cold follow-up is unsupported (`FOLLOWUP_UNSUPPORTED`) pending account
+  resolution and qualification of cross-process history loading. It must not
+  silently open a new conversation. ACP and OpenCode in-flight steer are unsupported.
+- OpenCode 1.x is dropped; only the authenticated 2.x HTTP contract is shipped.
+- Codex desktop remains unqualified. TUI-only rows require operator actions:
+  compaction, UI stop/restart, native close, suspend/wake and clock observation.
+  Claude `/clear` was measured preserving the bridge; unattended `/compact`
+  was not evidenced. Neither result qualifies the rest of the TUI matrix.
+- In-flight survival across bridge replacement is deliberately given up.
+  SIGINT/SIGTERM/EOF trigger watcher handoff; uncatchable bridge SIGKILL cannot
+  execute that handoff. Startup never adopts a live/unverified tree.
+- Catalog readiness reflects the last check. Models requiring a session to
+  enumerate are reported as such; reading the catalog starts no session.
+- Usage is present only when reported by the provider. Antigravity 1.1.1 reports
+  none. New execution/result records have no one-hour expiry; delivery-queue TTLs
+  and rotating logs do not make a complete adoption/cost history.
 - Codex rollouts accumulate under `$CODEX_HOME/sessions` without automatic
-  cleanup. Sandbox and permission boundaries are documented in
-  [ARCHITECTURE.md](ARCHITECTURE.md#negative-results).
+  cleanup. Sandbox boundaries are in [Architecture](ARCHITECTURE.md#negative-results).
 
 ## Decisions
 
@@ -60,11 +66,14 @@ lifetime and recovery changes have separate later gates.
    the catalog. Explicit refusal and no silent substitution remain the rule.
    Routing contract: [ARCHITECTURE.md](ARCHITECTURE.md#routing-contract).
 
-3. OpenCode uses its HTTP server for reply, resume and streaming; an additional
-   ACP adapter is not scheduled because those workflows already have a transport.
+3. **Historical, superseded 2026-11-05:** OpenCode used a shared HTTP server
+   for reply/resume/streaming beside a CLI transport. It now starts a private
+   2.x server per answer, cold-loads history, and refuses in-flight steer.
 
-4. Codex uses the detached app-server broker for resumable work; the `exec`
-   transport is for single-shot jobs because it has no live control channel.
+4. **Historical, superseded 2026-11-05:** Codex used a detached app-server
+   broker for survival and an exec transport for single-shot work. It now uses
+   one owned app-server per answer; history resumes cold and live work stops
+   when its bridge is lost.
 
 5. **Historical, superseded 2026-11-05:** the review loop required parsed
    verdicts. Reviews now use ordinary conversation and the parent's requested
@@ -74,7 +83,8 @@ lifetime and recovery changes have separate later gates.
 6. Keep vendor-reported usage in one shared shape; model and cost are carried
    only when reported, so routing decisions cannot rely on invented prices.
 
-7. Copilot and Antigravity share the descriptor-driven ACP daemon. It pins
+7. Copilot and Antigravity share the descriptor-driven ACP protocol adapter, with separate
+   per-execution processes. It pins
    protocol v1 and refuses a different answer; protocol changes need explicit
    adapter qualification.
 
@@ -102,10 +112,13 @@ lifetime and recovery changes have separate later gates.
 
 ## Next Backlog
 
-- Harden the Codex exec smoke's digest assertion in `probes/smoke/smoke.mjs`:
-  its unconditional `|| true` makes the thread-id check pass without evidence.
-- Permission mirroring — the called agent should run with the calling agent's
-  access mode (auto/manual/full access).
+- Qualify Codex desktop as the third host and finish operator-only TUI rows.
+- Resolve Copilot account access, then qualify cold history loading before
+  enabling follow-up; a capability advertisement is insufficient.
+- Phase 5: include a workspace-diff summary on failure, with explicit observation
+  limits; partial assistant text does not establish what changed on disk.
+- Permission mirroring remains a separate decision: align called-agent access
+  with the caller only after the desired policy and acceptance checks are agreed.
 
 ## Validation Commands
 
