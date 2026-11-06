@@ -130,8 +130,8 @@ claude plugin validate .
 
 The Codex validator builds and installs into an isolated `CODEX_HOME`, checks
 package contents and the effective MCP registration, and starts no model turn.
-It checks README asset presence, not rendering correctness; re-render changed
-SVGs with `bash scripts/render-readme-assets.sh` and inspect the PNGs.
+It checks README asset presence, not content; regenerate images from
+`assets/readme/PROMPTS.md` and inspect every label.
 
 Manual smoke gates before a public tag (real delegations spend model tokens):
 

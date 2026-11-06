@@ -75,17 +75,17 @@ as inheriting the companion's own configuration. A list that needs a session is
 reported as "not enumerable without a session". Reading the catalog starts no
 work and changes no job, ownership, lease, ledger or digest state.
 
-![Historical Agent Companion architecture](assets/readme/architecture.png)
+![Agent Companion architecture](assets/readme/architecture.png)
 
-Historical illustration of the design retired on 2026-11-05. The current flow
-is in [Architecture](docs/ARCHITECTURE.md#flow).
+The shipped flow: harness, subagent, session-scoped bridge, one controller per
+answer, one cold companion runtime per answer. Details are in
+[Architecture](docs/ARCHITECTURE.md#flow).
 
 ## Supported Companions
 
-![Historical Agent Companion companion matrix](assets/readme/target-matrix.png)
+![Companion capabilities](assets/readme/target-matrix.png)
 
-Historical illustration of the retired transport matrix. The table below is
-the current capability contract.
+The table below is the current capability contract.
 
 | Companion | Per-answer runtime | Follow-up by cold resume | Reply / steer | Model selection | History |
 | --- | --- | --- | --- | --- | --- |
@@ -255,11 +255,11 @@ is described in [Architecture — State](docs/ARCHITECTURE.md#state).
 
 ## Install For Claude Code
 
-This repo is its own local marketplace. Register it once, then install the
-plugin:
+This repo is its own marketplace. Register it once, from GitHub or from a
+local checkout path, then install the plugin:
 
 ```bash
-claude plugin marketplace add /path/to/agent-companion
+claude plugin marketplace add thangaram611/agent-companion   # or /path/to/agent-companion
 claude plugin install agent-companion@agent-companion
 ```
 
@@ -514,13 +514,10 @@ the repo root rather than an allow-list of directories, because an allow-list
 omitting `test/` skips cross-cutting checks such as the sync-exec timeout guard
 and the runtime sandbox guard.
 
-README diagram assets (the PNGs are build output; the SVGs are the source).
-Re-render after SVG edits: CI does not check that the PNGs match.
-
-```bash
-bash scripts/render-readme-assets.sh              # all three
-bash scripts/render-readme-assets.sh architecture # or one, by basename
-```
+README images are generated bitmaps. Their specifications live in
+[assets/readme/PROMPTS.md](assets/readme/PROMPTS.md); regenerate from those
+prompts (Codex's `imagegen` skill produced the current set) and check every
+label before committing. CI checks only that the files exist.
 
 Validate Claude packaging with `claude plugin validate .`; Codex packaging and
 isolated validation commands are in [Install For Codex CLI](#install-for-codex-cli).

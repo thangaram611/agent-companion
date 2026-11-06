@@ -20,7 +20,7 @@ before "fixing" something surprising.
 ## Commands
 
 Use [README.md — Development](README.md#development) for checks, packaging and
-README asset rendering. Discover tests from the repo root: directory allowlists
+README asset regeneration. Discover tests from the repo root: directory allowlists
 can omit the three cross-cutting guards in `test/`. CI's command is in
 `.github/workflows/ci.yml`.
 
