@@ -18,12 +18,12 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'install-permissions.mjs');
 const REQUIRED_PERMISSIONS = [
-  'mcp__agent-bridge__agent_catalog',
-  'mcp__agent-bridge__agent_send',
-  'mcp__agent-bridge__agent_wait',
-  'mcp__agent-bridge__agent_status',
-  'mcp__agent-bridge__agent_reply',
-  'mcp__agent-bridge__agent_cancel',
+  'mcp__plugin_agent-companion_agent-bridge__agent_catalog',
+  'mcp__plugin_agent-companion_agent-bridge__agent_send',
+  'mcp__plugin_agent-companion_agent-bridge__agent_wait',
+  'mcp__plugin_agent-companion_agent-bridge__agent_status',
+  'mcp__plugin_agent-companion_agent-bridge__agent_reply',
+  'mcp__plugin_agent-companion_agent-bridge__agent_cancel',
 ];
 
 function withHome(fn) {
@@ -81,6 +81,19 @@ test('install adds missing permissions, preserves unrelated entries, and backs u
     for (const permission of REQUIRED_PERMISSIONS) assert.ok(allow.includes(permission), `${permission} installed`);
     assert.ok(readdirSync(join(home, '.claude')).some((name) => /settings\.json\.bak\./.test(name)),
       'existing settings file was backed up');
+  });
+});
+
+test('stale session-scope names are replaced by the plugin-qualified names', () => {
+  withHome((home) => {
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(home), JSON.stringify({
+      permissions: { allow: ['Bash(git status:*)', 'mcp__agent-bridge__agent_send', 'mcp__agent-bridge__agent_wait'] },
+    }));
+    const r = runScript(home);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status:*)', ...REQUIRED_PERMISSIONS]);
+    assert.match(r.stdout, /removed stale mcp__agent-bridge__agent_send, mcp__agent-bridge__agent_wait/);
   });
 });
 

@@ -30,14 +30,18 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
+// Claude registers the bridge at plugin scope, so the tool names carry the
+// plugin namespace. The bare session-scope names belong to the retired
+// registration and are removed when found.
 const PERMISSIONS = [
-  'mcp__agent-bridge__agent_catalog',
-  'mcp__agent-bridge__agent_send',
-  'mcp__agent-bridge__agent_wait',
-  'mcp__agent-bridge__agent_status',
-  'mcp__agent-bridge__agent_reply',
-  'mcp__agent-bridge__agent_cancel',
+  'mcp__plugin_agent-companion_agent-bridge__agent_catalog',
+  'mcp__plugin_agent-companion_agent-bridge__agent_send',
+  'mcp__plugin_agent-companion_agent-bridge__agent_wait',
+  'mcp__plugin_agent-companion_agent-bridge__agent_status',
+  'mcp__plugin_agent-companion_agent-bridge__agent_reply',
+  'mcp__plugin_agent-companion_agent-bridge__agent_cancel',
 ];
+const STALE = /^mcp__agent-bridge__agent_/;
 const SETTINGS = path.join(homedir(), '.claude', 'settings.json');
 const args = process.argv.slice(2);
 const yes = args.includes('--yes') || args.includes('-y');
@@ -94,8 +98,10 @@ const allow = Array.isArray(cfg.permissions.allow)
   ? cfg.permissions.allow.slice()
   : [];
 
-const missing = PERMISSIONS.filter((permission) => !allow.includes(permission));
-if (missing.length === 0) {
+const stale = allow.filter((permission) => STALE.test(permission));
+const kept = allow.filter((permission) => !STALE.test(permission));
+const missing = PERMISSIONS.filter((permission) => !kept.includes(permission));
+if (missing.length === 0 && stale.length === 0) {
   ok(`agent-companion permissions already in ${SETTINGS}`);
   process.exit(0);
 }
@@ -109,7 +115,7 @@ if (!yes) {
     input: process.stdin,
     output: process.stdout,
   });
-  const ans = (await rl.question(`Add ${missing.length} agent-companion permission(s) to ${SETTINGS}? [y/N] `))
+  const ans = (await rl.question(`Add ${missing.length} agent-companion permission(s) and remove ${stale.length} stale one(s) in ${SETTINGS}? [y/N] `))
     .trim()
     .toLowerCase();
   rl.close();
@@ -119,7 +125,7 @@ if (!yes) {
   }
 }
 
-cfg.permissions.allow = allow.concat(missing);
+cfg.permissions.allow = kept.concat(missing);
 
 const ts = new Date()
   .toISOString()
@@ -131,4 +137,4 @@ if (hadExisting) copyFileSync(SETTINGS, backup);
 const tmp = `${SETTINGS}.tmp.${process.pid}`;
 writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
 renameSync(tmp, SETTINGS);
-ok(`added ${missing.join(', ')}${hadExisting ? ` (backup: ${backup})` : ''}`);
+ok(`added ${missing.join(', ') || 'nothing'}${stale.length ? `; removed stale ${stale.join(', ')}` : ''}${hadExisting ? ` (backup: ${backup})` : ''}`);
