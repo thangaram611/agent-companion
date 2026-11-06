@@ -66,3 +66,13 @@ single white line entering from the left, four white lines fanning out to four
 small outlined rounded-square nodes stacked on the right. Smooth curved
 connectors, bold strokes, rounded caps, generous padding, no frame, no text,
 no logos, no gradients, no shadows.
+
+## demo.gif
+
+Not generated: a real Claude Code session recorded with vhs from `demo.tape`
+in this directory (see the tape header). Convert the recording with idle
+frames removed, a four-second hold on the final state and a 128-colour palette:
+
+```bash
+ffmpeg -y -i demo.mp4 -vf "mpdecimate=hi=768:lo=320:frac=0.33,setpts=N/10/TB,tpad=stop_mode=clone:stop_duration=4,scale=1000:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" -r 10 demo.gif
+```

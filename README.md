@@ -49,6 +49,8 @@ unqualified; local tests do not replace installed-host acceptance.
 
 ## What It Does
 
+![One plain-language delegation to the Codex companion from Claude Code](assets/readme/demo.gif)
+
 1. The parent spawns `agent-companion` with a plain-language request and an
    absolute repo or worktree path. The subagent asks if the path is missing.
 2. The subagent honours a named companion and model. When the choice is open,
