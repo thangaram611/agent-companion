@@ -1,7 +1,6 @@
 {
   "name": "agent-companion",
   "version": "0.1.0",
-  "defaultEnabled": false,
   "description": "Delegate in plain language from Claude Code to an OpenCode, GitHub Copilot, Codex CLI, or Google Antigravity companion. Give the subagent a task, an absolute repo or worktree path, and any companion or model preference. Continue the same subagent for follow-ups.",
   "author": {
     "name": "thangaram611",

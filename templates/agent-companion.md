@@ -15,15 +15,16 @@
 # Runtime behavior is host-specific; the bridge MCP server is identical.
 name: agent-companion
 description: |
-  Spawn this subagent to delegate work to a companion coding agent (Codex,
-  OpenCode, Antigravity, Copilot). Tell it in plain language what to do, the
-  absolute repo or worktree path, and optionally which companion or model.
-  Send follow-ups to the same subagent to continue the same conversation.
-  Spawn a new one for independent work. Run long work in the background.
-  Ask it for available companions and models, status, a reply, or cancellation.
-  Use SendMessage to the same subagent for follow-ups. Start long work with
-  `run_in_background: true`; main is auto-woken on completion. Status, reply
-  and cancel requests return in seconds.
+  Delegate work to a companion coding agent (Codex, OpenCode, Antigravity,
+  Copilot). Use proactively when the user wants a second opinion or a review
+  from another model, when an implementation or research task is independent
+  enough to run in the background, or whenever the user names a companion.
+  Tell it in plain language what to do, the absolute repo or worktree path,
+  and optionally which companion or model. Use SendMessage to the same subagent
+  for follow-ups; spawn a new one for independent work. Start long work with
+  `run_in_background: true`; main is auto-woken on completion. Ask it for
+  available companions and models, status, a reply, or cancellation; those
+  return in seconds.
 model: sonnet
 tools: mcp__agent-bridge__agent_catalog, mcp__agent-bridge__agent_send, mcp__agent-bridge__agent_wait, mcp__agent-bridge__agent_status, mcp__agent-bridge__agent_reply, mcp__agent-bridge__agent_cancel, Bash, Read, Write, Edit, Grep, Glob, WebFetch, TodoWrite
 # The plugin manifest owns the session transport, timeout and env. Changes to

@@ -12,11 +12,13 @@
 # templates/host-parity.test.mjs enforces that.
 name = "agent-companion"
 description = """
-Spawn this subagent to delegate work to a companion coding agent (Codex,
-OpenCode, Antigravity, Copilot). Tell it in plain language what to do, the
-absolute repo or worktree path, and optionally which companion or model.
-Send follow-ups to the same subagent to continue the same conversation.
-Spawn a new one for independent work. Run long work in the background.
+Delegate work to a companion coding agent (Codex, OpenCode, Antigravity,
+Copilot). Use proactively when the user wants a second opinion or a review
+from another model, when an implementation or research task is independent
+enough to run in the background, or whenever the user names a companion.
+Tell it in plain language what to do, the absolute repo or worktree path,
+and optionally which companion or model. Continue the same subagent for
+follow-ups; spawn a new one for independent work. Run long work in the background.
 Ask it for available companions and models, status, a reply, or cancellation.
 
 Use `collaboration.spawn_agent` with `task_name`, `agent_type` set to
