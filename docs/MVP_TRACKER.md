@@ -106,7 +106,7 @@ remains separate from implementation; see the release gates below.
 9. Additional companions or transports require recurring use and an adoption
    check; the available paired-review evidence is insufficient to justify expansion.
 
-10. Both plugin manifests and the private bridge package declare `0.1.0`.
+10. Both plugin manifests and the private bridge package declare `0.2.0`.
     Build release artifacts from the reviewed commit; version metadata alone
     does not establish that the release gates pass.
 
