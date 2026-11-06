@@ -5,3 +5,4 @@ dist/
 default-model
 *.log
 .DS_Store
+.drafts/

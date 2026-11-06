@@ -56,3 +56,13 @@ Title `Companion capabilities`. Columns `Companion`, `Transport`, `Follow-up`,
 
 Keep this table in step with the capability table in README.md.
 Kept variant: full gray grid, teal header row, teal `yes`, gray `no`.
+
+## ../../.claude-plugin/icon.png
+
+Square 1024x1024 listing icon for the Claude plugin directory, generated the
+same day with the same tool. Solid #0f172a background, flat vector style, teal
+(#2dd4bf) and white only. One teal-filled rounded-square node in the centre, a
+single white line entering from the left, four white lines fanning out to four
+small outlined rounded-square nodes stacked on the right. Smooth curved
+connectors, bold strokes, rounded caps, generous padding, no frame, no text,
+no logos, no gradients, no shadows.
