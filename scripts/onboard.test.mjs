@@ -110,7 +110,7 @@ function run(args, env = {}, files = {}) {
         AGENT_RUNTIME_DIR: join(home, 'runtime'), PATH: '/usr/bin:/bin',
         NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
         OPENCODE_BIN: '/missing-opencode', COPILOT_BIN: '/missing-copilot',
-        CODEX_BIN: '/missing-codex', ANTIGRAVITY_ACP_BIN: '/missing-antigravity', ...env,
+        CODEX_BIN: '/missing-codex', ANTIGRAVITY_ACP_BIN: '/missing-antigravity', CLAUDE_BIN: '/missing-claude', ...env,
       },
     });
     const stored = Object.fromEntries(['default-target', 'profiles.json', 'default-model'].map((name) => [
@@ -129,6 +129,8 @@ test('CLI --list-targets --json exits 0 with target readiness', () => {
   assert.ok(out.targets.opencode);
   assert.ok(out.targets.copilot);
   assert.ok(out.targets.codex);
+  assert.ok(out.targets.claude);
+  assert.equal(Object.keys(out.targets).length, 5);
   assert.equal(out.defaultTarget.target, null);
 });
 
@@ -201,4 +203,30 @@ test('plans explain an overriding environment default and never read legacy prof
   assert.equal(preserved.code, 0, preserved.stderr);
   assert.equal(preserved.stored['profiles.json'], files['profiles.json']);
   assert.equal(Object.hasOwn(JSON.parse(preserved.stdout).configuration, 'profiles'), false);
+});
+
+
+test('Claude onboarding persists a ready target without a smoke turn and rejects logged-out auth', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'onboard-claude-'));
+  const bin = join(dir, 'claude');
+  writeFileSync(bin, `#!${process.execPath}
+    const args = process.argv.slice(2).join(' ');
+    if (args === '--version') console.log('Claude fake');
+    else if (args === 'auth status') console.log(JSON.stringify({ loggedIn: process.env.FAKE_LOGGED_IN === '1', authMethod: 'claude.ai', apiProvider: 'firstParty' }));
+    else process.exit(99);
+  `, { mode: 0o700 });
+  try {
+    for (const loggedIn of ['1', '0']) {
+      const r = run(['--host', 'claude', '--target', 'claude', '--set-default', '--yes', '--json'],
+        { CLAUDE_BIN: bin, FAKE_LOGGED_IN: loggedIn }, { 'default-target': 'copilot\n' });
+      assert.equal(r.code, loggedIn === '1' ? 0 : 3, r.stderr);
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.report.authenticated, loggedIn === '1');
+      assert.equal(out.report.smoke.run, false);
+      assert.equal(r.stored['default-target'], loggedIn === '1' ? 'claude\n' : 'copilot\n');
+      assert.equal(out.report.permission.risk, 'dangerous');
+    }
+    const help = run(['--help']);
+    assert.match(help.stdout, /opencode\|copilot\|codex\|claude\|antigravity/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

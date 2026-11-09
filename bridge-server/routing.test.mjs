@@ -17,7 +17,7 @@ test('target routing is explicit or configured, with no silent substitute', () =
 });
 
 test('per-companion model defaults inherit when unset and explicit overrides win', () => {
-  for (const target of ['copilot', 'codex', 'opencode', 'antigravity']) {
+  for (const target of ['copilot', 'codex', 'opencode', 'antigravity', 'claude']) {
     clearDefaultModel(target);
     assert.equal(resolveRouting({ target }, {}).resolved.model, null);
     const configured = target === 'opencode' ? 'provider/default' : 'gpt-5.4';

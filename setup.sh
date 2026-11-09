@@ -34,11 +34,11 @@ while [ "$#" -gt 0 ]; do
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
       cat <<EOF
-Usage: $(basename "$0") [--host claude|codex|both] [--target opencode|copilot|codex|antigravity|auto|none]
+Usage: $(basename "$0") [--host claude|codex|both] [--target opencode|copilot|codex|claude|antigravity|auto|none]
                         [--no-target-check] [--skip-tests] [--yes] [--dry-run]
 
   --host claude|codex|both   install that harness surface (default: detect installed CLIs)
-  --target opencode|copilot|codex|antigravity|auto|none
+  --target opencode|copilot|codex|claude|antigravity|auto|none
                              choose a default companion (default: preserve existing config,
                              otherwise select the only ready target). none preserves
                              config; auto explicitly selects the only ready target.
@@ -62,8 +62,8 @@ case "$HOST" in
 esac
 
 case "$TARGET" in
-  ""|opencode|copilot|codex|antigravity|auto|none) ;;
-  *) fail "--target must be one of: opencode, copilot, codex, antigravity, auto, none (got: $TARGET)"; exit 2 ;;
+  ""|opencode|copilot|codex|claude|antigravity|auto|none) ;;
+  *) fail "--target must be one of: opencode, copilot, codex, claude, antigravity, auto, none (got: $TARGET)"; exit 2 ;;
 esac
 
 # Host selection never assumes that both CLIs are installed.
@@ -251,7 +251,7 @@ for h in "${HOSTS[@]}"; do
   jq -r '.targets[] | "  \(.displayName): " + (if .ready then "ready" else "not ready" end), (.blockers[], .warnings[] | "    " + .message), (.nextSteps[] | "    Next: " + .)' "$PLAN_DIR/$h.json"
   if [ "$PLAN_CODE" != 0 ] && [ -t 0 ] && [ "$YES" = 0 ] \
       && jq -e '.plan.code == "ambiguous_target" or .plan.code == "no_ready_target"' "$PLAN_DIR/$h.json" >/dev/null; then
-    read -r -p "Companion for $h [opencode/copilot/codex/antigravity/none]: " CHOICE
+    read -r -p "Companion for $h [opencode/copilot/codex/claude/antigravity/none]: " CHOICE
     PLAN_CODE=0
     AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" --target "$CHOICE" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
   fi

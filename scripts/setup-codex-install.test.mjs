@@ -236,7 +236,7 @@ function runSetup(sourceRoot, home, codexHome, binDir, logPath, extraEnv = {}, a
       CODEX_HOME: codexHome,
       AGENT_RUNTIME_DIR: path.join(home, 'runtime'),
       OPENCODE_BIN: '/missing-opencode', COPILOT_BIN: '/missing-copilot',
-      ANTIGRAVITY_ACP_BIN: '/missing-antigravity',
+      ANTIGRAVITY_ACP_BIN: '/missing-antigravity', CLAUDE_BIN: '/missing-claude',
       FAKE_CODEX_LOG: logPath,
       PATH: [binDir, '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(path.delimiter),
       ...extraEnv,
@@ -604,4 +604,28 @@ test('readiness lost after installation is explained without replacing the previ
   assert.match(r.stdout, /Codex CLI has no configured authentication/);
   assert.match(r.stdout, /codex login/);
   assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'copilot\n');
+});
+
+
+test('setup accepts independent Claude host and companion selections without a smoke turn', (t) => {
+  const f = setupFixture(t);
+  const claude = path.join(f.bin, 'claude');
+  // The host fixture succeeds without JSON; it cannot establish companion auth.
+  writeExecutable(claude, '#!/bin/sh\nexit 0\n');
+  const args = ['--host', 'claude', '--target', 'claude'];
+  const preview = f.run([...args, '--dry-run'], { CLAUDE_BIN: claude });
+  assert.equal(preview.status, 0, preview.stdout + preview.stderr);
+  assert.match(preview.stdout, /authentication could not be verified/);
+  f.assertNoInstall();
+  writeExecutable(claude, `#!${process.execPath}
+    const args = process.argv.slice(2).join(' ');
+    if (args === '--version') console.log('Claude fake');
+    else if (args === 'auth status') console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }));
+    else process.exit(99);
+  `);
+  const result = f.run([...args, '--skip-tests'], { CLAUDE_BIN: claude });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(path.join(f.state('claude'), 'default-target'), 'utf8'), 'claude\n');
+  assert.equal(existsSync(path.join(f.codexHome, 'agent-companion/default-target')), false);
+  assert.match(result.stdout, /Claude: agent and permissions installed; companion: claude/);
 });

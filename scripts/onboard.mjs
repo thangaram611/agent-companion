@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // onboard.mjs — first-class companion onboarding for agent-companion.
 //
-// "Attach your companion." Supported now: opencode, copilot, codex, and antigravity. This is the
+// "Attach your companion." Supported now: opencode, copilot, codex, claude, and antigravity. This is the
 // one place that selects today's target id, explains how to get it ready, and
 // (with --set-default) persists the choice. It never prompts for or stores
 // provider secrets — auth is delegated to the vendor tools (`opencode` /connect,
 // `copilot login`, `scripts/install-antigravity-acp.mjs --login`).
 //
 // Usage:
-//   node scripts/onboard.mjs --host claude|codex|both --target opencode|copilot|codex|antigravity|auto|none [--set-default] [--yes] [--json]
+//   node scripts/onboard.mjs --host claude|codex|both --target opencode|copilot|codex|claude|antigravity|auto|none [--set-default] [--yes] [--json]
 //   node scripts/onboard.mjs --list-targets [--json]
 //   node scripts/onboard.mjs --doctor [--json]
 //   node scripts/onboard.mjs --target opencode --smoke
@@ -36,6 +36,7 @@ import {
 import { writeDefaultTarget, readDefaultTarget, writeTargetChecks } from '../lib/state.mjs';
 import { Controller } from '../bridge-server/controller/controller.mjs';
 import { codexProvider } from '../bridge-server/adapters/codex.mjs';
+import { claudeProvider } from '../bridge-server/adapters/claude.mjs';
 import { opencodeProvider } from '../bridge-server/adapters/opencode.mjs';
 import { acpProvider } from '../bridge-server/adapters/acp.mjs';
 import { Records } from '../bridge-server/controller/records.mjs';
@@ -146,7 +147,7 @@ function printTargetReport(report, { json } = {}) {
 export async function runSmoke(id, env, controllerOptions = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'agent-onboard-smoke-')));
   const controller = new Controller({ env, records: new Records({ dir: join(dir, 'state') }),
-    providers: { codex: codexProvider({ env }), opencode: opencodeProvider({ env }),
+    providers: { codex: codexProvider({ env }), claude: claudeProvider({ env }), opencode: opencodeProvider({ env }),
       copilot: acpProvider('copilot', { env }), antigravity: acpProvider('antigravity', { env }) },
     ...controllerOptions });
   const abort = new AbortController();
@@ -171,12 +172,12 @@ export async function runSmoke(id, env, controllerOptions = {}) {
 }
 const HELP = `agent-companion onboarding
 
-  node scripts/onboard.mjs --target opencode|copilot|codex|antigravity|auto|none [--host claude|codex|both]
+  node scripts/onboard.mjs --target opencode|copilot|codex|claude|antigravity|auto|none [--host claude|codex|both]
                            [--set-default] [--yes] [--json] [--plan] [--smoke] [--no-target-check]
   node scripts/onboard.mjs --list-targets [--json]
   node scripts/onboard.mjs --doctor [--json]
 
-Attach your companion. Supported now: opencode, copilot, codex, and antigravity. Onboarding never
+Attach your companion. Supported now: opencode, copilot, codex, claude, and antigravity. Onboarding never
 asks for or stores provider secrets — authenticate with the vendor tools.
 With no --target, existing configuration is preserved. --target none also preserves it.
 --plan previews selection and readiness without writes or smoke tasks.
@@ -234,7 +235,7 @@ async function main() {
   // Interactive target selection when required and a tty is available.
   if (plan.kind === 'ask') {
     if (!process.stdin.isTTY) {
-      console.error('[FAIL] no --target given and not a tty; pass --target opencode|copilot|codex|antigravity|none.');
+      console.error('[FAIL] no --target given and not a tty; pass --target opencode|copilot|codex|claude|antigravity|none.');
       process.exit(2);
     }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

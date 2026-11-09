@@ -56,7 +56,7 @@ export function log(level, ...args) {
 // --- Constants --------------------------------------------------------------
 
 export const VALID_ACTIONS = new Set(['catalog', 'send', 'wait', 'status', 'reply', 'cancel']);
-export const VALID_TARGETS = new Set(['opencode', 'copilot', 'codex', 'antigravity']);
+export const VALID_TARGETS = new Set(['opencode', 'copilot', 'codex', 'claude', 'antigravity']);
 
 // Thread is an internal field injected by the host, not a model-facing input.
 const ALLOWED_FIELDS = {

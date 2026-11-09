@@ -1,3 +1,6 @@
+import { getTargetById } from '../../lib/target-registry.mjs';
+import { companionReady } from '../../lib/target-diagnostics.mjs';
+import { isModelAllowedFor } from '../../lib/state.mjs';
 import { randomUUID } from 'node:crypto';
 import { accessSync, constants, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -195,4 +198,13 @@ export class ClaudeAdapter {
     this.onProgress?.({ ...this.progress });
     if (this.terminal) this.done.resolve(this.terminal);
   }
+}
+
+export function claudeProvider({ env = process.env } = {}) {
+  return {
+    enabled: getTargetById('claude', env)?.implemented === true,
+    get ready() { return companionReady('claude', env); },
+    modelAllowed: (model) => isModelAllowedFor('claude', model),
+    create: () => new ClaudeAdapter({ env }),
+  };
 }

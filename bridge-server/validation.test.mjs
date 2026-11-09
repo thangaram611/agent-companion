@@ -4,6 +4,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { validateAgentArgs, VALID_ACTIONS, VALID_TARGETS } from './validation.mjs';
+import { TARGET_IDS, listTargetIds } from '../lib/target-registry.mjs';
+
+test('validation inventory matches the five registry targets', () => {
+  assert.deepEqual([...VALID_TARGETS].sort(), [...TARGET_IDS].sort());
+  assert.deepEqual([...VALID_TARGETS].sort(), listTargetIds().sort());
+  assert.equal(VALID_TARGETS.size, 5);
+});
+
 const TEST_CWD = tmpdir();
 const sendArgs = (extra = {}) => ({ action: 'send', task: 'x', cwd: TEST_CWD, ...extra });
 

@@ -30,6 +30,8 @@ const TEST_CWD = tmpdir();
 const EXACT_TASK = '  First line.\n\nSecond line: `quoted` — keep whitespace.  \n';
 
 const { Records } = await import('./controller/records.mjs');
+const { claudeProvider, ClaudeAdapter } = await import('./adapters/claude.mjs');
+const { writeTargetChecks } = await import('../lib/state.mjs');
 
 test.after(() => {
   rmSync(STATE_SANDBOX, { recursive: true, force: true });
@@ -244,7 +246,7 @@ async function wireFixture(t, options = {}) {
     };
     adapters.push(adapter); return adapter;
   };
-  const providers = Object.fromEntries(['codex', 'opencode', 'copilot', 'antigravity'].map((target) => [target,
+  const providers = Object.fromEntries(['codex', 'opencode', 'copilot', 'antigravity', 'claude'].map((target) => [target,
     { enabled: true, ready: true, modelAllowed: (model) => !model.includes('bad'), create }]));
   const active = mod.createBridgeController({ records, providers,
     createSupervisor: () => ({ terminate: async () => ({ gone: true, signals: [], survivors: [] }) }) });
@@ -289,24 +291,29 @@ test('controller dispatch preserves the conversational tools and named refusals'
   assert.equal((await h.call({ action: 'status', job_id: 'missing' })).ok, false);
 });
 
-test('a configured per-companion default model is applied to a new conversation and the stored override survives a follow-up', async (t) => {
+test('configured model defaults survive cold follow-up for OpenCode and Claude', async (t) => {
   const h = await wireFixture(t);
-  let first;
-  await withEnv('AGENT_COMPANION_OPENCODE_MODEL', 'ollama-cloud/configured', async () => {
-    first = await h.send({ target: 'opencode', thread: 'cfg' });
-    const adapter = h.adapters.at(-1);
-    assert.equal(adapter.calls[0][1].model, 'ollama-cloud/configured', 'the configured default is an explicit selection for a new conversation');
-    adapter.done.resolve({ outcome: 'completed', text: 'ok' });
-    await h.call({ action: 'wait', job_id: first.job_id, thread: 'cfg', max_wait_sec: 5 });
-  });
-  const again = await h.send({ target: 'opencode', thread: 'cfg', task: 'second question' });
-  assert.notEqual(again.job_id, first.job_id);
-  assert.equal(h.adapters.at(-1).calls[0][1].model, 'ollama-cloud/configured', 'the stored override survives when the knob is gone');
-  h.adapters.at(-1).done.resolve({ outcome: 'completed', text: 'ok' });
-  await h.call({ action: 'wait', job_id: again.job_id, thread: 'cfg', max_wait_sec: 5 });
+  for (const [target, model] of [['opencode', 'ollama-cloud/configured'], ['claude', 'haiku']]) {
+    let first, adapter;
+    await withEnv(`AGENT_COMPANION_${target.toUpperCase()}_MODEL`, model, async () => {
+      first = await h.send({ target, thread: target });
+      adapter = h.adapters.at(-1);
+      assert.equal(adapter.calls[0][1].model, model);
+      adapter.done.resolve({ outcome: 'completed', text: 'ok' });
+      await h.call({ action: 'wait', job_id: first.job_id, thread: target, max_wait_sec: 5 });
+    });
+    const again = await h.send({ target, thread: target, task: 'second question' });
+    assert.notEqual(again.job_id, first.job_id);
+    const next = h.adapters.at(-1);
+    assert.notEqual(next, adapter, 'follow-up creates a fresh adapter');
+    assert.equal(next.calls[0][1].model, model, 'stored override survives when the knob is gone');
+    assert.equal(next.calls.find(([name]) => name === 'history')[1].historyId, 'native-history');
+    next.done.resolve({ outcome: 'completed', text: 'ok' });
+    await h.call({ action: 'wait', job_id: again.job_id, thread: target, max_wait_sec: 5 });
+  }
 });
 
-test('all four providers receive exact task text, inherit models, and reattach only identical work', async (t) => {
+test('all five providers receive exact task text, inherit models, and reattach only identical work', async (t) => {
   const h = await wireFixture(t);
   for (const target of Object.keys(h.providers)) {
     const sent = await h.send({ target, thread: target });
@@ -321,7 +328,7 @@ test('all four providers receive exact task text, inherit models, and reattach o
     assert.equal((await h.send({ target, thread: target, cwd: tmpdir() })).status, 'cwd_mismatch');
     assert.equal((await h.send({ target: target === 'codex' ? 'copilot' : 'codex', thread: target })).status, 'provider_mismatch');
   }
-  assert.equal(h.adapters.length, 4);
+  assert.equal(h.adapters.length, 5);
 });
 
 test('starting requests retain cwd and hold attachment through acknowledgement', async (t) => {
@@ -599,7 +606,7 @@ test('controller reply refuses completed, foreign, missing and unowned execution
 
 test('controller reply refuses providers without steer capability without invoking their protocol', async (t) => {
   const h = await wireFixture(t);
-  for (const target of ['opencode', 'copilot', 'antigravity']) {
+  for (const target of ['opencode', 'copilot', 'antigravity', 'claude']) {
     const { job_id } = await h.send({ target, thread: target });
     const adapter = h.adapters.at(-1);
     adapter.capabilities.steer = false;
@@ -646,4 +653,60 @@ test('owner-attached execution survives forty minutes and retired timeout knobs;
   assert.equal((await h.call({ action: 'status', job_id })).status, 'running');
   const status = await h.call({ action: 'status' });
   assert.doesNotMatch(JSON.stringify(status), /timeout_ms|timeoutEnv|40 minutes|AGENT_COMPANION_(CODEX|OPENCODE)_TIMEOUT_MS/);
+});
+
+
+import { fakeClaudeBin } from '../test/fake-claude-stream.mjs';
+
+test('Claude provider uses cached readiness, accepts aliases and creates independent adapters', () => {
+  writeTargetChecks({ claude: { ready: false } });
+  const provider = claudeProvider({ env: { CLAUDE_BIN: '/missing-claude', PATH: '' } });
+  assert.equal(provider.enabled, true);
+  assert.equal(provider.ready, false);
+  writeTargetChecks({ claude: { ready: true } });
+  assert.equal(provider.ready, true, 'readiness getter observes updated cached evidence without probing');
+  assert.equal(provider.modelAllowed('haiku'), true);
+  assert.equal(provider.modelAllowed('bad model'), false);
+  assert.ok(provider.create() instanceof ClaudeAdapter);
+  assert.notEqual(provider.create(), provider.create());
+  writeTargetChecks({});
+  assert.equal(provider.ready, false);
+});
+
+test('dispatch wires the Claude provider through fake native send and cold resume', async (t) => {
+  const mod = await bridge();
+  const dir = mkdtempSync(join(STATE_SANDBOX, 'claude-wire-'));
+  const env = { ...process.env, HOME: dir, CLAUDE_CONFIG_DIR: join(dir, 'config'), CLAUDE_BIN: fakeClaudeBin(dir),
+    FAKE_CLAUDE_TRACE: join(dir, 'trace.jsonl') };
+  writeTargetChecks({ claude: { ready: true } });
+  const supervisors = [];
+  const active = mod.createBridgeController({ env, records: new Records({ dir: join(dir, 'records') }), createSupervisor: (options) => {
+    const supervisor = fixtureSupervisor(options), spawn = supervisor.spawn.bind(supervisor);
+    supervisor.spawn = (argv, opts) => spawn(argv, { ...opts, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
+    supervisors.push(supervisor);
+    return supervisor;
+  } });
+  t.after(async () => {
+    for (const live of [...active.live.values()]) await active.cancel({ owner: live.record.owner, executionId: live.record.executionId });
+    for (const supervisor of supervisors) await supervisor.terminate({ graceMs: 0 });
+    writeTargetChecks({});
+  });
+  const call = async (args) => (await mod.dispatch(args, { controller: active })).structuredContent;
+  const answers = [];
+  for (const task of [EXACT_TASK, 'follow-up']) {
+    const sent = await call({ action: 'send', target: 'claude', thread: 'claude-child', cwd: dir, task });
+    assert.equal(sent.ok, true);
+    const answer = await call({ action: 'wait', thread: 'claude-child', job_id: sent.job_id, max_wait_sec: 5 });
+    assert.equal(answer.status, 'completed');
+    assert.equal(answer.content, 'alpha');
+    answers.push(answer);
+  }
+  assert.notEqual(supervisors[0].child.pid, supervisors[1].child.pid);
+  assert.equal(answers[0].meta.native_refs.historyId, answers[1].meta.native_refs.historyId);
+  const frames = readFileSync(env.FAKE_CLAUDE_TRACE, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(frames.filter((f) => f.type === 'user').map((f) => f.message.content), [EXACT_TASK, 'follow-up']);
+  const argv = frames.filter((f) => f.type === 'argv').map((f) => f.args);
+  assert.ok(argv[0].includes('--session-id'));
+  assert.ok(argv[1].includes('--resume'));
+  assert.equal(argv.some((args) => args.includes('--model')), false);
 });

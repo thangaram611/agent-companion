@@ -2,7 +2,7 @@
 // agent-bridge MCP server (subagent-oriented, target-generic architecture)
 //
 // MCP tools: agent_catalog | agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
-// agent_send takes an optional `target` (opencode | copilot | codex | antigravity);
+// agent_send takes an optional `target` (opencode | copilot | codex | claude | antigravity);
 // omitting it uses the configured default target, and there is no silent
 // fallback.
 // Both hosts register this server at plugin/session scope. Owner-bound calls
@@ -46,6 +46,7 @@ import { Controller } from './controller/controller.mjs';
 import { Records } from './controller/records.mjs';
 import { systemClock } from './controller/clock.mjs';
 import { codexProvider, getCodexContractStatus } from './adapters/codex.mjs';
+import { claudeProvider } from './adapters/claude.mjs';
 import { opencodeProvider } from './adapters/opencode.mjs';
 import { acpProvider } from './adapters/acp.mjs';
 
@@ -344,7 +345,7 @@ function publishResult(records, execution, result) {
 export function createBridgeController({ env = process.env, records = new Records({ dir: BASE_DIR }), ...options } = {}) {
   const safely = (fn) => (...args) => { try { fn(...args); } catch (err) { log('WARN', 'execution publication failed:', err.message); } };
   return new Controller({ env, records, clock: systemClock,
-    providers: { codex: codexProvider({ env }), opencode: opencodeProvider({ env }),
+    providers: { codex: codexProvider({ env }), claude: claudeProvider({ env }), opencode: opencodeProvider({ env }),
       copilot: acpProvider('copilot', { env }), antigravity: acpProvider('antigravity', { env }) },
     ...options, onProgress: safely(writeExecutionDigest), onResult: safely((execution, result) => publishResult(records, execution, result)),
   });
@@ -423,9 +424,11 @@ function handleCatalog() {
         default: target.default,
         model: {
           ...model,
-          description: model.model ? 'configured default' : "inherits the companion's own configuration",
+          description: model.model ? 'configured default' : target.id === 'claude'
+            ? 'inherits the Claude Code default; any model id or alias accepted, validated by Claude Code'
+            : "inherits the companion's own configuration",
           enumeration: target.id === 'copilot' ? 'documented ids; account availability not checked'
-            : target.capabilities.acp || target.id === 'codex' ? 'not enumerable without a session' : 'not cached',
+            : target.capabilities.acp || ['codex', 'claude'].includes(target.id) ? 'not enumerable without a session' : 'not cached',
           ...(target.id === 'copilot' ? { allowed: [...ALLOWED_MODELS] } : {}),
         },
         capabilities: Object.fromEntries(['reply', 'resume', 'cancel', 'modelSelection']
