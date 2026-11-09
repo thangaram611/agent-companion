@@ -358,6 +358,15 @@ on either host. Step 4 will publish the companion qualification report.
   had `subtype: success` with `is_error: true`. Disable background tasks, honor
   the error flag, and still close and verify the process tree.
 
+**Codex host environment (2026-11-09)**
+
+- Codex does not pass the parent shell environment to the bridge it launches. In
+  the installed-plugin run, `AGENT_COMPANION_CLAUDE_MODEL=haiku` and a relocated
+  `CODEX_HOME` were both invisible to the bridge: the companion ran on the account's
+  default model and the controller records landed in the real `~/.codex/agent-companion`.
+  Only the plugin manifest's own `env` block and the saved state reach the bridge
+  on that host.
+
 **Provider-reported pids (2026-11-09)**
 
 - A pid reported by the provider is not proof of a descendant. Codex's

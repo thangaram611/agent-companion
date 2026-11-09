@@ -132,6 +132,9 @@ Configuration:
   dangerous in diagnostics. Permission prompts are disabled for every mode.
   `AGENT_COMPANION_CLAUDE_MODEL` optionally sets a model default; without an
   explicit or saved default, Claude Code uses its own model configuration.
+  Codex does not forward the shell environment to the bridge, so on the Codex
+  host this and the other model env knobs take no effect; a request's explicit
+  model still does.
 - Install and sign in to Antigravity with
   `node scripts/install-antigravity-acp.mjs --login`. It verifies Google's
   signature on macOS and installs under
@@ -163,8 +166,10 @@ session id and does not clean up those transcripts. There is no in-flight reply:
 `reply_unavailable` means wait or cancel. Usage reports per-turn tokens; cost is
 reported only for fresh history because Claude's resumed cost is cumulative.
 
-Claude Code 2.1.319 was measured; older versions and installed delegation on both
-hosts remain unverified. `--permission-prompts` requires at least 2.1.259.
+Claude Code 2.1.319 was measured as the companion, including installed delegation
+from Codex CLI 0.167.0 and a nested run from a Claude Code parent; see the
+[companion report](probes/host-qualification/claude-companion/REPORT-2026-11-09.md).
+Older versions remain unverified. `--permission-prompts` requires at least 2.1.259.
 See the [release gates](docs/RELEASE_READINESS.md#release-gates).
 
 ## Requirements

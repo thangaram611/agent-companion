@@ -117,8 +117,9 @@ remains separate from implementation; see the release gates below.
    delegation denied. Steps 1–2 implement the adapter and integration with
    hermetic tests; Step 3 adds role parity and documentation. This accepted
    addition does not remove the adoption policy for further expansion.
-   Live smoke on both hosts, including a Claude-host nested run, remains Step 4
-   work. Claude Code 2.1.319 was measured; older versions are **UNVERIFIED**.
+   Step 4 (2026-11-09) ran the live probe and installed runs on both hosts; see the
+   [companion report](../probes/host-qualification/claude-companion/REPORT-2026-11-09.md).
+   Claude Code 2.1.319 was measured; older versions are **UNVERIFIED**.
    `--permission-prompts` needs at least 2.1.259; that flag minimum does not
    qualify older versions of the complete integration.
 
@@ -128,8 +129,9 @@ remains separate from implementation; see the release gates below.
 
 ## Next Backlog
 
-- Step 4: qualify Claude companion live smoke on both hosts, including the
-  Claude-host nested run, and publish the companion measurement report.
+- Add an onboarding option that persists a per-companion default model. Codex
+  does not forward the shell environment to the bridge, so on the Codex host the
+  `AGENT_COMPANION_*_MODEL` knobs are inert and only a saved default can pin a model.
 - Qualify Codex desktop as the third host and finish operator-only TUI rows.
 - Resolve Copilot account access, then qualify cold history loading before
   enabling follow-up; a capability advertisement is insufficient.

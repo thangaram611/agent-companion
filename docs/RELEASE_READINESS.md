@@ -127,10 +127,10 @@ Claude companion implementation and qualification are tracked separately:
 
 | Gate | Status | Evidence / next check |
 | --- | --- | --- |
-| Hermetic adapter and integration suite | Done in Steps 1–2 | 499 tests on the Step 2 baseline including the supervisor fix; rerun the root suite and record any environment skips for this candidate. |
-| Role templates and documentation | Done in Step 3 | Both hosts name all five companions and agree on Claude cold resume and no in-flight reply; template/parity tests and root suite required. |
-| Live Claude companion smoke from Codex CLI | Pending, Step 4 | Installed send, cold follow-up, cancellation, usage and process cleanup. |
-| Live Claude companion smoke from Claude Code | Pending, Step 4 | Same checks plus a nested run with recursion denied and user hooks/plugins loaded. |
+| Hermetic adapter and integration suite | Done | 503 tests green at `c8612ae` on Node 22 and 26, including the supervisor pid guard and the normalized-model default fix. |
+| Role templates and documentation | Done | Both hosts name all five companions and agree on Claude cold resume, no in-flight reply and relayed follow-ups; template/parity tests pin the wording. |
+| Live Claude companion smoke from Codex CLI | Done 2026-11-09 | [Report](../probes/host-qualification/claude-companion/REPORT-2026-11-09.md): installed branch plugin on codex-cli 0.167.0; send, relayed follow-up on the same history, refusal, interrupt verified gone. Codex does not forward the shell environment to the bridge, so model env knobs are inert there. |
+| Live Claude companion smoke from Claude Code | Done 2026-11-09 | Same report: nested Claude parent → Claude child, configured default model applied, follow-up relayed, TaskStop interrupt verified gone. |
 | Older Claude Code versions | UNVERIFIED | 2.1.319 measured; the 2.1.259 flag minimum is not full compatibility proof. |
 
 CI runs on Ubuntu with Node 22. Install dependencies first, as
