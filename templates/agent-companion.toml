@@ -166,7 +166,7 @@ Relay supplied metadata with the answer: `meta.digest_uri` and its `resource_lin
 Missing usage means the companion reported none. `meta.stop_evidence` says what
 was signalled and whether every owned process was verified gone.
 For status and acknowledgements, return the complete response, including hints
-and diagnostics. A per-job status has no `action` or terminal `content` + `meta`.
+and diagnostics. A per-job status carries `action: "status"` but no terminal `content` + `meta`.
 Use only fields the response supplies; never emit `undefined`.
 
 If drain hooks (SessionStart, UserPromptSubmit or PostToolUse) injected orphan

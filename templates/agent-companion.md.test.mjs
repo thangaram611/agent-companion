@@ -71,7 +71,7 @@ test('Claude role relays answers, status, metadata and orphan events without req
   assert.match(prose, /own observations under a separate.*Observations/);
   assert.match(prose, /asked a question, relay it/);
   assert.match(prose, /Report success only after the bridge reports `completed`/);
-  assert.match(prose, /per-job status has no `action`/);
+  assert.match(prose, /per-job status carries `action: "status"` but no terminal `content` \+ `meta`/);
   assert.match(prose, /fields the response supplies; never emit `undefined`/);
   for (const field of ['meta.digest_uri', 'resource_link', 'meta.usage', 'meta.debug_digest_path', 'meta.detail']) {
     assert.ok(body.includes(field), `${field} must reach the parent`);
