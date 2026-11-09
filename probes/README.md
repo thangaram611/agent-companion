@@ -47,15 +47,22 @@ a live provider run.
 | `smoke.mjs` | Six MCP tools, invalid-model refusal, real Codex app-server work, persisted history and turn ids, native usage, digest content and verified runtime exit. Spends one turn. |
 | `orphan.mjs` | Bridge EOF hands work to the cleanup watcher; verified stopped result survives restart, and status preserves the digest and result. Spends one Codex turn. Does not test uncatchable SIGKILL. |
 | `acp-antigravity.mjs` | Completion without invented usage, cold history reuse in a new process, explicit unsupported-steer refusal, cancellation, acknowledged model selection and bridge-loss cleanup. Requires login and an available model id; spends five turns. |
+| `claude.mjs` | Catalog/readiness, invalid-model refusal, fresh usage/cost, cold history reuse in a new process without cost, unsupported reply then cancel, and read-only transcript presence. Requires `claude` installed and signed in; budget four Haiku turns. Writes native transcripts into the operator's `~/.claude/projects` for the temporary cwd. |
 | `bridge-client.mjs` | Shared stdio MCP client, owner attribution, bounded waits and durable-record reader; no standalone probe. |
 
 The probes use the selected host's state home, or `AGENT_COMPANION_HOME` when
-set. Their temporary workspaces remain available for inspection. Run readiness
-checks before spending tokens:
+set. Their temporary workspaces remain available for inspection.
+
+The Claude probe refreshes parsed auth-status readiness and skips model work if
+Claude is not ready or login is unverified. Use an isolated `AGENT_COMPANION_HOME`
+for its bridge records. Native Claude transcripts are not cleaned up by the probe.
+
+Run readiness checks before spending tokens:
 
 ```sh
 AGENT_COMPANION_HOST=claude node scripts/onboard.mjs --list-targets
 AGENT_COMPANION_HOST=claude node probes/smoke/smoke.mjs
 AGENT_COMPANION_HOST=claude node probes/smoke/orphan.mjs
 AGENT_COMPANION_HOST=claude node probes/smoke/acp-antigravity.mjs <available-model-id>
+AGENT_COMPANION_HOST=claude node probes/smoke/claude.mjs
 ```
