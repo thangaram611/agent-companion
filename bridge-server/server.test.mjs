@@ -313,6 +313,19 @@ test('configured model defaults survive cold follow-up for OpenCode and Claude',
   }
 });
 
+test('a send whose omitted model was normalized to null still applies the configured default', async (t) => {
+  // validation.mjs normalizes an omitted model to null before dispatch; the
+  // configured default must apply to that shape, not only to undefined.
+  const h = await wireFixture(t);
+  await withEnv('AGENT_COMPANION_CLAUDE_MODEL', 'haiku', async () => {
+    const sent = await h.send({ target: 'claude', thread: 'claude-null', model: null });
+    const adapter = h.adapters.at(-1);
+    assert.equal(adapter.calls[0][1].model, 'haiku');
+    adapter.done.resolve({ outcome: 'completed', text: 'ok' });
+    await h.call({ action: 'wait', job_id: sent.job_id, thread: 'claude-null', max_wait_sec: 5 });
+  });
+});
+
 test('all five providers receive exact task text, inherit models, and reattach only identical work', async (t) => {
   const h = await wireFixture(t);
   for (const target of Object.keys(h.providers)) {

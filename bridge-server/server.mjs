@@ -371,7 +371,8 @@ async function handleSend(args, active, request) {
   // keeps its stored override, and an omitted model with nothing configured inherits
   // the companion's own configuration (Codex then receives no model key at all).
   const known = Object.hasOwn(active.providers ?? {}, provider);
-  const configured = known && args.model === undefined && args.thread && !active.records.readConversation(args.thread)
+  // validation.mjs normalizes an omitted model to null; both shapes mean "not chosen".
+  const configured = known && args.model == null && args.thread && !active.records.readConversation(args.thread)
     ? (readDefaultModel(provider, active.env).model ?? undefined) : undefined;
   const sent = await active.send({ owner: args.thread, provider, cwd: args.cwd, text: args.task,
     model: args.model ?? configured, hostSessionId: getHostSessionId(), ...request });
