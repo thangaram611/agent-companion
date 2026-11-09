@@ -60,7 +60,7 @@ test('Codex role uses the catalog for an open choice and sends only the new fiel
   assert.match(prose, /enabled companions.*default companion.*model configuration.*capabilities.*readiness.*last check/);
   assert.match(prose, /not enumerable without a session/);
   assert.match(prose, /ask the parent.*do not guess/);
-  assert.match(prose, /`task` and `cwd`, plus optional `target`, `model` and `max_wait_sec`/);
+  assert.match(prose, /`task` and `cwd`, plus optional `target`, `model`, `effort` and `max_wait_sec`/);
   assert.match(prose, /bridge delivers `task` verbatim/);
   assert.match(prose, /Omit `model` to inherit/);
 });
@@ -82,7 +82,7 @@ test('Codex role relays answers, status, metadata and orphan events without requ
 
 test('Codex role relays routing and unsupported-follow-up refusals and leaves failed work with the companion', () => {
   assert.deepEqual([...new Set(body.match(/\b[A-Z]+_[A-Z_]+\b/g))].filter((code) => code !== 'ALL_TOOLS').sort(), [
-    'CAPABILITY_UNAVAILABLE', 'FOLLOWUP_UNSUPPORTED', 'MODEL_NOT_ALLOWED', 'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
+    'CAPABILITY_UNAVAILABLE', 'EFFORT_NOT_ALLOWED', 'FOLLOWUP_UNSUPPORTED', 'MODEL_NOT_ALLOWED', 'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
   ]);
   assert.match(prose, /Relay a refusal verbatim and stop; never work around it/);
   assert.match(prose, /The delegated task itself stays with the companion/);
@@ -103,7 +103,7 @@ test('Codex role preserves bounded waits, per-job reply checks and cancel acknow
   assert.match(prose, /numeric `max_wait_sec`.*480.*\[1,1200\]/);
   assert.match(prose, /Remember it as `BUDGET`.*same `BUDGET` for every wait/);
   assert.match(prose, /identical.*in-flight.*reattaches.*BUDGET/);
-  assert.match(prose, /different `task` or `model`.*thread_busy/);
+  assert.match(prose, /different `task`, `model` or `effort`.*thread_busy/);
   assert.equal(body.match(/Loop iter N: job <job_id> still running, re-waiting\./g)?.length, 1);
   assert.match(prose, /exactly one line/);
   assert.match(prose, /Keep looping until terminal.*no iteration cap/i);
@@ -158,4 +158,15 @@ test('Codex host names the conversation and parent controls remain natural messa
   assert.match(parent, /list_agents/);
   assert.match(parent, /interrupt_agent.*does not cancel the companion job/);
   assert.doesNotMatch(text, /send_input|resume_agent|trigger_turn|\bAgent\(\)|SendMessage\(\)/);
+});
+
+test('role passes named effort and relays launch metadata and running activity', () => {
+  assert.match(prose, /use Claude with low effort/);
+  assert.match(prose, /Codex, high effort/);
+  assert.match(prose, /Pass `model` and `effort` on `agent_send` only when named/);
+  assert.match(prose, /catalog lists each companion's effort levels/);
+  assert.match(prose, /unsupported effort is refused/);
+  assert.match(prose, /When the job starts, relay `effective_model`, `selected_effort` and `permission_mode`/);
+  assert.match(prose, /reporting a running job, relay `activity`/);
+  assert.match(prose, /still thinking.*running <cmd>/);
 });

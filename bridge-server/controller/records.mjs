@@ -93,7 +93,7 @@ export class Records {
     }
     return true;
   }
-  begin({ owner, provider, cwd, modelOverride, historyId = null, executionId, text, hostSessionId, now }, expectedGeneration) {
+  begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, historyId = null, executionId, text, hostSessionId, now }, expectedGeneration) {
     return this._locked(owner, () => {
       const old = this.readConversation(owner);
       if ((old?.generation ?? 0) !== expectedGeneration) {
@@ -109,9 +109,9 @@ export class Records {
       }
       const generation = expectedGeneration + 1;
       if (this.readExecution(executionId)) throw error('execution_id_busy');
-      const execution = { owner, executionId, generation, provider, cwd, text, modelOverride, hostSessionId, state: 'starting', writer: 'controller', startedAt: now, processes: null };
+      const execution = { owner, executionId, generation, provider, cwd, text, modelOverride, effortOverride, permissionMode, hostSessionId, state: 'starting', writer: 'controller', startedAt: now, processes: null };
       this._write('executions', executionId, execution);
-      this._write('conversations', owner, { owner, generation, executionId, provider, cwd, modelOverride, historyId });
+      this._write('conversations', owner, { owner, generation, executionId, provider, cwd, modelOverride, effortOverride, historyId });
       return execution;
     });
   }

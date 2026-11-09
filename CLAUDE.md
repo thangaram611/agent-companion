@@ -52,19 +52,27 @@ Provider processes and protocol connections are never shared across children.
 Uncatchable bridge SIGKILL cannot run the handoff; recovery refuses to adopt a
 live or unverified tree.
 
-**No silent fallback.** Target/model refusals are `TARGET_UNCONFIGURED`,
-`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE` and `MODEL_NOT_ALLOWED`. Ownership,
+**No silent fallback.** Target/model/effort refusals are `TARGET_UNCONFIGURED`,
+`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`. Ownership,
 history and execution refusals are separate, including `NATIVE_OWNER_REQUIRED`
 and `FOLLOWUP_UNSUPPORTED`. Both role templates relay failures without changing
 the parent's choice. Omitted target uses the configured default; omitted model
-inherits configuration unless the conversation already has an override. Codex
-receives no model key when inheriting. The bridge delivers task text verbatim.
+inherits configuration unless the conversation already has an override. Effort is
+a conversation override too: only Claude supports selection
+(`low`, `medium`, `high`, `xhigh`, `max`); omission inherits. No saved effort
+default exists. Codex effort selection remains unsupported because the saved
+schema omits optional request parameters; do not guess the wire name. Codex
+receives no model key when inheriting. Send acknowledgements expose target,
+selected/effective model and effort, and
+resolved permission mode; effective effort is null unless the provider reports it.
+Status adds activity (thinking, responding, running a command or retrying for Claude)
+without retaining thinking content. The bridge delivers task text verbatim.
 
 **Conversation identity comes from the host.** Claude's `hooks/name-thread.sh`
 unconditionally overwrites `thread` with the child's `agent_id` or clears it.
 Codex requires `_meta["x-codex-turn-metadata"].thread_source: subagent` and uses
 its `thread_id`. A fresh spawn starts independent work. An identical busy send
-reattaches; different text or model returns `thread_busy`, and provider/cwd
+reattaches; different text, model or effort returns `thread_busy`, and provider/cwd
 mismatches fail explicitly. Catalog and status are ownerless observers: they
 neither start work nor renew leases nor write execution state.
 

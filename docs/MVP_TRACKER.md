@@ -38,7 +38,19 @@ remains separate from implementation; see the release gates below.
   and [Codex 0.166.0 report](../probes/host-qualification/codex/REPORT-2026-11-05.md).
   They establish ownership/signals and the 1320 s per-call wall, not cleanup.
 
+- Step 6 (2026-11-09) closes the first-use feedback on invoker effort selection
+  for Claude, launch transparency, silent-thinking activity and companion/cwd
+  mismatch remedies. Both host roles pass named effort and relay launch/activity
+  fields. Selected effort survives cold follow-up and bridge-loss results;
+  provider-reported effective effort remains separate. No new state files.
+
 ## MVP Limitations
+
+- Saved effort defaults are not implemented. Claude accepts conversation-level
+  effort; Codex effort selection remains unsupported because the saved schema
+  omits optional request parameters and cannot confirm the wire name. OpenCode,
+  Copilot and Antigravity also refuse explicit effort. Step 6 uses hermetic tests;
+  this does not establish live qualification of the new controls.
 
 - Copilot cold follow-up is unsupported (`FOLLOWUP_UNSUPPORTED`) pending account
   resolution and qualification of cross-process history loading. It must not

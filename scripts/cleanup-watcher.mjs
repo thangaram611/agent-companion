@@ -23,7 +23,7 @@ export async function cleanupExecution({ execution, records = new Records(), clo
     detail: stopEvidence.gone ? native?.detail : 'cleanup_unverified',
     text: native?.text ?? execution.progress?.partialText ?? '', usage: native?.usage,
     nativeRefs: { historyId: execution.historyId, nativeTurnId: execution.nativeTurnId, ...native?.nativeRefs },
-    selectedModel: execution.modelOverride, effectiveModel: native?.effectiveModel ?? execution.effectiveModel,
+    selectedModel: execution.modelOverride, selectedEffort: execution.effortOverride, effectiveModel: native?.effectiveModel ?? execution.effectiveModel,
     effectiveEffort: native?.effectiveEffort ?? execution.effectiveEffort,
     stopEvidence, finishedAt: clock.now(),
   };

@@ -85,3 +85,13 @@ test('separate writer processes cannot both acquire a generation or replace a te
   await compete('result', { ...records.readExecution('e1'), outcome: 'completed', cause: 'native_complete', text: 'one answer' });
   assert.equal(records.readResult('e1').text, 'one answer');
 });
+
+test('effort override persists in both existing record kinds without an effort default file', () => {
+  const records = make();
+  const record = records.begin({ ...input(), effortOverride: 'low' }, 0);
+  assert.equal(record.effortOverride, 'low');
+  const fresh = new Records({ dir: records.dir });
+  assert.equal(fresh.readExecution('e1').effortOverride, 'low');
+  assert.equal(fresh.readConversation('child').effortOverride, 'low');
+  assert.deepEqual(readdirSync(records.dir).sort(), ['conversations', 'executions', 'locks']);
+});

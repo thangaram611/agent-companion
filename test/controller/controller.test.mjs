@@ -278,7 +278,7 @@ test('bridge loss serializes all live executions and fences late provider writes
 
 test('startup recovery verifies absence without adopting live work or mutating status reads', async () => {
   const h = setup();
-  const execution = h.records.begin({ owner: 'old', provider: 'fake', cwd: h.dir, text: 'old text', executionId: 'old-execution', now: h.clock.now() }, 0);
+  const execution = h.records.begin({ owner: 'old', provider: 'fake', cwd: h.dir, text: 'old text', effortOverride: 'low', executionId: 'old-execution', now: h.clock.now() }, 0);
   h.records.writeExecution({ ...execution, state: 'running', processes: { pid: 91001, pgid: 91001, birthTime: 'old', processes: [{ pid: 91001, birthTime: 'old' }] }, progress: { partialText: 'saved partial' } });
   let gone = false;
   const fresh = new Controller({ records: h.records, clock: h.clock, providers: h.controller.providers, createSupervisor: () => ({ verifyGone: async () => ({ gone, survivors: gone ? [] : [{ pid: 91001 }] }) }) });
@@ -289,6 +289,7 @@ test('startup recovery verifies absence without adopting live work or mutating s
   const recovered = await fresh.recover({ owner: 'old' });
   assert.equal(recovered.result.cause, 'bridge_loss');
   assert.equal(recovered.result.text, 'saved partial');
+  assert.equal(recovered.result.selectedEffort, 'low');
   assert.equal(recovered.state, 'closed');
 });
 
@@ -377,4 +378,27 @@ test('watcher terminal result releases the observed attachment without rewriting
   assert.equal(view.lease.attached, false);
   assert.equal(view.lease.remainingMs, null);
   assert.deepEqual(disk(h.dir), before);
+});
+
+test('effort inherits on follow-up, participates in busy equality and reaches adapters and results', async () => {
+  const h = setup();
+  const first = await h.send({ effort: 'low' });
+  assert.equal(first.selectedEffort, 'low');
+  assert.equal(first.effectiveEffort, null);
+  assert.equal((await h.send()).executionId, first.executionId);
+  await assert.rejects(h.send({ effort: 'high' }), { code: 'thread_busy' });
+  for (const method of ['start', 'openHistory']) assert.equal(calls(h.adapters[0], method)[0][1].effort, 'low');
+  assert.equal((await h.finish(first.executionId)).selectedEffort, 'low');
+  const second = await h.send({ text: 'follow-up' });
+  assert.equal(second.selectedEffort, 'low');
+  assert.equal(h.records.readConversation('child').effortOverride, 'low');
+  assert.equal(calls(h.adapters[1], 'openHistory')[0][1].effort, 'low');
+  await h.finish(second.executionId, undefined, h.adapters[1]);
+  const third = await h.send({ text: 'change effort', effort: 'high' });
+  assert.equal(third.selectedEffort, 'high');
+  assert.equal((await h.finish(third.executionId, undefined, h.adapters[2])).selectedEffort, 'high');
+  const inherited = await h.send({ owner: 'other' });
+  assert.equal(inherited.selectedEffort, null);
+  for (const method of ['start', 'openHistory']) assert.equal(Object.hasOwn(calls(h.adapters[3], method)[0][1], 'effort'), false);
+  await h.finish(inherited.executionId, undefined, h.adapters[3]);
 });

@@ -76,8 +76,9 @@ test('watcher stale generation is refused before any destructive action', async 
 });
 
 test('watcher records failed cleanup honestly without claiming stopped', async () => {
-  const records = makeRecords(); const execution = records.begin(input('unverified'), 0); records.handoff(execution);
+  const records = makeRecords(); const execution = records.begin({ ...input('unverified'), effortOverride: 'low' }, 0); records.handoff(execution);
   const result = await cleanupExecution({ records, execution, clock: new ManualClock(), createSupervisor: () => ({ terminate: async () => ({ gone: false, survivors: [{ pid: 123, birthTime: 'birth' }] }) }) });
+  assert.equal(result.selectedEffort, 'low');
   assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'cleanup_unverified'); assert.equal(result.cause, 'bridge_loss');
 });
 

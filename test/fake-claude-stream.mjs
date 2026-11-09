@@ -23,6 +23,7 @@ export function runFakeClaude() {
       args.filter((arg) => ['--session-id', '--resume'].includes(arg)).length !== 1 ||
       value('--input-format') !== 'stream-json' || value('--output-format') !== 'stream-json' || value('--permission-prompts') !== 'none') fail('invalid Claude argv');
   if (!['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'].includes(value('--permission-mode'))) fail('invalid permission mode');
+  if (args.includes('--effort') && !['low', 'medium', 'high', 'xhigh', 'max'].includes(value('--effort'))) fail('invalid effort');
   const denies = args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--disallowedTools') + 4);
   if (JSON.stringify(denies) !== JSON.stringify(['mcp__plugin_agent-companion_agent-bridge__*', 'mcp__agent-bridge__*', 'Agent(agent-companion)'])) fail('missing recursion denies');
   const resumed = args.includes('--resume'), session_id = value(resumed ? '--resume' : '--session-id');
@@ -47,6 +48,7 @@ export function runFakeClaude() {
   const event = (event, extra = {}) => scoped({ type: 'stream_event', event, ...extra });
   const partial = () => {
     event({ type: 'message_start', message: { id: 'a1' } });
+    scoped({ type: 'system', subtype: 'thinking_tokens', thinking_tokens: 7 });
     event({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'private' } });
     event({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'al' } });
     event({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'pha' } });

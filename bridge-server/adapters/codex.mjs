@@ -143,7 +143,7 @@ export class CodexAdapter {
       this.nativeTurnId = this.activeTurnId = id;
       this._metadata(result);
       for (const [msg, at] of this.buffered.splice(0)) this._notification(msg, at);
-      return { nativeTurnId: id };
+      return { nativeTurnId: id, effectiveModel: this.effectiveModel, effectiveEffort: this.effectiveEffort };
     } catch (err) {
       this.buffered.length = 0;
       throw failure('DeliveryUnknown', err);

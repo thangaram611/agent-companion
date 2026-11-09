@@ -45,15 +45,15 @@ export class ClaudeAdapter {
     this.env = env; this.clock = clock; this.transcriptExists = transcriptExists;
     this.reader = new LineReader(); this.init = deferred(); this.done = deferred();
     this.commands = new Map(); this.pending = new Map();
-    this.progress = { lastActivityAt: null, activeCommand: null, retry: null, partialText: '', effectiveModel: undefined };
+    this.progress = { lastActivityAt: null, activeCommand: null, retry: null, partialText: '', activity: null, effectiveModel: undefined };
   }
 
-  async start({ cwd, env = this.env, model, supervisor, historyId }) {
+  async start({ cwd, env = this.env, model, effort, supervisor, historyId }) {
     try {
       if (this.closed) throw new Error('adapter closed');
       this.env = claudeEnv(env, cwd); this.resume = historyId != null;
       this.historyId = historyId ?? randomUUID();
-      const argv = [binaryFor(env, cwd), ...claudeArgs({ historyId: this.historyId, resume: this.resume, model, env })];
+      const argv = [binaryFor(env, cwd), ...claudeArgs({ historyId: this.historyId, resume: this.resume, model, effort, env })];
       const runtime = this.runtime = await supervisor.spawn(argv, { cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'] });
       runtime.stdout.setEncoding('utf8');
       runtime.stdout.on('data', (chunk) => {
@@ -91,7 +91,7 @@ export class ClaudeAdapter {
         message: { role: 'user', content: text }, parent_tool_use_id: null });
       await this.init.promise;
       if (this.closed) throw failure('DeliveryUnknown');
-      return { nativeTurnId: this.nativeTurnId };
+      return { nativeTurnId: this.nativeTurnId, effectiveModel: this.progress.effectiveModel };
     } catch (err) {
       if (this.earlyError?.errors?.some((text) => typeof text === 'string' && text.includes('No conversation found'))) throw failure('history_not_found', err);
       throw failure(this.identityError ? 'history_mismatch' : 'DeliveryUnknown', err);
@@ -178,18 +178,24 @@ export class ClaudeAdapter {
       } else if (frame.type === 'system' && frame.subtype === 'api_retry') {
         const { attempt, max_retries, retry_delay_ms, error } = frame;
         this.progress.retry = { attempt, max_retries, retry_delay_ms, error };
+      } else if (frame.type === 'system' && frame.subtype === 'thinking_tokens' && frame.parent_tool_use_id == null) {
+        this.progress.retry = null; this.progress.activity = 'thinking';
       } else if (['assistant', 'user', 'stream_event'].includes(frame.type) && frame.parent_tool_use_id === null) {
+        if (this.progress.retry) this.progress.activity = null;
         this.progress.retry = null;
         if (frame.type === 'stream_event') {
           const event = frame.event;
           if (event?.type === 'message_start') this.progress.partialText = '';
-          if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') this.progress.partialText += event.delta.text;
+          if (event?.type === 'content_block_delta') {
+            if (event.delta?.type === 'thinking_delta') this.progress.activity = 'thinking';
+            if (event.delta?.type === 'text_delta') { this.progress.partialText += event.delta.text; this.progress.activity = 'responding'; }
+          }
         } else if (frame.type === 'assistant') {
           const content = frame.message?.content;
           if (frame.message?.model) this.progress.effectiveModel = frame.message.model;
           if (Array.isArray(content)) {
             const text = content.filter((block) => block.type === 'text').map((block) => block.text).join('');
-            if (content.some((block) => block.type === 'text')) this.progress.partialText = text;
+            if (content.some((block) => block.type === 'text')) { this.progress.partialText = text; this.progress.activity = 'responding'; }
             for (const block of content) if (block.type === 'tool_use' && block.name === 'Bash') this.commands.set(block.id, block.input?.command);
           }
         } else if (Array.isArray(frame.message?.content)) {
@@ -198,6 +204,10 @@ export class ClaudeAdapter {
         this.progress.activeCommand = [...this.commands.values()].at(-1) ?? null;
       } else return;
     }
+    if (this.terminal) this.progress.activity = null;
+    else if (this.progress.retry) this.progress.activity = 'retrying';
+    else if (this.progress.activeCommand) this.progress.activity = `running ${this.progress.activeCommand}`;
+    else if (this.progress.activity?.startsWith('running ')) this.progress.activity = null;
     this.progress.lastActivityAt = this.clock.now();
     this.onProgress?.({ ...this.progress });
     if (this.terminal) this.done.resolve(this.terminal);

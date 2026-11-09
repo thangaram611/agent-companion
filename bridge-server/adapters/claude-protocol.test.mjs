@@ -55,3 +55,12 @@ test('result mapping prioritizes requested interruption, then errors, then succe
   }
   assert.equal(claudeTerminal({ ...success, subtype: 'error_during_execution', result: '' }, options).detail, 'error_during_execution');
 });
+
+test('Claude argv includes only an explicitly selected effort for fresh and resumed history', () => {
+  for (const resume of [false, true]) {
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+      assert.deepEqual(claudeArgs({ historyId: 'id', resume, effort, env: {} }).slice(-2), ['--effort', effort]);
+    }
+    assert.equal(claudeArgs({ historyId: 'id', resume, env: {} }).includes('--effort'), false);
+  }
+});

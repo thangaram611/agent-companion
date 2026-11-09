@@ -61,7 +61,7 @@ export const VALID_TARGETS = new Set(['opencode', 'copilot', 'codex', 'claude', 
 // Thread is an internal field injected by the host, not a model-facing input.
 const ALLOWED_FIELDS = {
   catalog: new Set(['action']),
-  send:   new Set(['action', 'task', 'cwd', 'thread', 'target', 'model', 'max_wait_sec']),
+  send:   new Set(['action', 'task', 'cwd', 'thread', 'target', 'model', 'effort', 'max_wait_sec']),
   wait:   new Set(['action', 'job_id', 'max_wait_sec']),
   status: new Set(['action', 'job_id', 'verbose', 'diagnostics']),
   reply:  new Set(['action', 'job_id', 'message']),
@@ -175,6 +175,7 @@ function validateSend(args) {
   assertThreadName(args.thread);
   assertString('target', args.target, { optional: true });
   assertString('model', args.model, { optional: true });
+  assertString('effort', args.effort, { optional: true });
   const target = String(args.target || '').trim().toLowerCase();
   if (args.max_wait_sec !== undefined && typeof args.max_wait_sec !== 'number') {
     throw new Error('agent: max_wait_sec must be a number');
@@ -186,6 +187,7 @@ function validateSend(args) {
     thread: args.thread || null,
     target: target || null,
     model: args.model?.trim() || null,
+    effort: args.effort?.trim() || null,
     max_wait_sec: args.max_wait_sec,
   };
 }

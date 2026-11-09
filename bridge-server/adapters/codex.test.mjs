@@ -42,6 +42,7 @@ process.stdout.write = (line) => {
       if (current.method === 'thread/start') writeFileSync(process.env.CODEX_TEST_HISTORY, frame.result.thread.id);
     }
     if (current.method === 'turn/start') {
+      if (process.env.CODEX_TEST_TURN_EFFORT) frame.result.reasoningEffort = process.env.CODEX_TEST_TURN_EFFORT;
       if (process.env.CODEX_TEST_FAULT === 'early') out(${JSON.stringify(terminal())});
       if (['lost', 'late'].includes(process.env.CODEX_TEST_FAULT)) { held = frame; return true; }
       if (process.env.CODEX_TEST_FAULT === 'missing-id') frame.result = { turn: {} };
@@ -137,6 +138,10 @@ test('new conversation and cold follow-up use new processes and exactly the save
   const h = setup(t, { env: { AGENT_COMPANION_CODEX_MODEL: 'must-not-pin' } });
   const one = await h.send();
   assert.equal(one.acknowledged, true);
+  assert.equal(one.effectiveModel, 'configured-model');
+  assert.equal(one.effectiveEffort, 'high');
+  assert.equal(one.selectedEffort, null);
+  assert.equal(one.permissionMode, 'workspace-write');
   await h.emit(terminal());
   const first = await h.wait(one.executionId);
   assert.equal(first.outcome, 'completed');
@@ -152,6 +157,7 @@ test('new conversation and cold follow-up use new processes and exactly the save
     [['thread/start', undefined], ['thread/resume', 'T1']]);
   for (const m of h.trace().filter((m) => ['thread/start', 'thread/resume', 'turn/start'].includes(m.method))) {
     assert.equal(Object.hasOwn(m.params, 'model'), false);
+    for (const key of ['effort', 'reasoningEffort', 'reasoning_effort']) assert.equal(Object.hasOwn(m.params, key), false);
     assert.equal(m.params.approvalPolicy, 'never');
   }
   const sent = h.trace().filter((m) => m.method === 'turn/start');
@@ -327,4 +333,14 @@ test('provider entry uses cached readiness, validates models and creates indepen
   assert.equal(provider.modelAllowed('chosen-model'), true); assert.equal(provider.modelAllowed('two models'), false);
   assert.notEqual(provider.create(), provider.create());
   assert.deepEqual(provider.create().capabilities, { followUp: true, steer: true, modelSelection: true, loadsHistory: true });
+});
+
+
+test('delivery metadata refreshes reported effort without inventing a selected override', async (t) => {
+  const h = setup(t, { env: { CODEX_TEST_TURN_EFFORT: 'medium' } });
+  const sent = await h.send();
+  assert.equal(sent.effectiveEffort, 'medium');
+  assert.equal(sent.selectedEffort, null);
+  await h.emit(terminal());
+  assert.equal((await h.wait(sent.executionId)).effectiveEffort, 'medium');
 });

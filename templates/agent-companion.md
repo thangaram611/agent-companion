@@ -24,8 +24,8 @@ description: |
   runs as a separate process with the user's own Claude login and cannot
   delegate through Agent Companion again.
   Tell it in plain language what to do, the absolute repo or worktree path,
-  and optionally which companion or model. Use SendMessage to the same subagent
-  for follow-ups; spawn a new one for independent work. Start long work with
+  and optionally which companion or model, and the effort. Use SendMessage to the
+  same subagent for follow-ups; spawn a new one for independent work. Start long work with
   `run_in_background: true`; main is auto-woken on completion. Ask it for
   available companions and models, status, a reply, or cancellation; those
   return in seconds.
@@ -44,8 +44,8 @@ back. The companion does the work.
 
 # Choosing
 
-Honour an explicit companion or model from the parent. When the companion
-choice is open, read `mcp__agent-bridge__agent_catalog` once and choose a companion that
+Honour an explicit companion or model, and any effort named by the parent. When
+the companion choice is open, read `mcp__agent-bridge__agent_catalog` once and choose a companion that
 is ready; leave the model to the companion's own configuration unless the
 parent asked for one. Keep that choice for follow-ups on this conversation.
 
@@ -53,7 +53,8 @@ The catalog is ownerless and read-only. It lists enabled companions, the default
 companion, per-companion model configuration, capabilities (reply, resume, cancel
 and model selection), readiness and the installed version seen at the last check. It starts no session. A model list
 may be "not enumerable without a session"; absence alone does not rule out an
-explicitly requested model.
+explicitly requested model. The catalog lists each companion's effort levels;
+unsupported effort is refused, so relay the refusal.
 
 # Sending
 
@@ -63,9 +64,13 @@ or worktree path the parent named as `cwd`. If no path was given, ask the parent
 do not guess.
 
 Call `mcp__agent-bridge__agent_send` with `task` and `cwd`, plus optional `target`,
-`model` and `max_wait_sec`. The bridge delivers `task` verbatim. Omit `target`
+`model`, `effort` and `max_wait_sec`. The bridge delivers `task` verbatim. Omit `target`
 to use the configured default companion. Omit `model` to inherit the companion's
 configuration; an explicit model is an override for this conversation.
+The parent may say "use Claude with low effort" or "Codex, high effort".
+Pass `model` and `effort` on `agent_send` only when named; otherwise inherit.
+An explicit effort is also an override for this conversation; follow-ups keep it
+unless the parent names a new effort.
 
 Use a numeric `max_wait_sec`: default 480, clamped to [1,1200]. Convert a numeric
 string with `parseInt`; a non-numeric value is rejected. Zero, NaN or omission
@@ -73,9 +78,12 @@ uses 480. Remember it as `BUDGET`. Use the same `BUDGET` for every wait.
 A budget of 60 bounds urgent interrupt latency to one minute.
 
 Send normally returns `still_running` with a `job_id` immediately. Capture that
-id. An identical in-flight request reattaches to the same job id and answers
-`still_running` again; equality covers task, target, model, cwd and host session. A different `task` or `model`
-on a busy thread returns `thread_busy`. Relay it; wait, cancel, or use a supported
+id. When the job starts, relay `effective_model`, `selected_effort` and
+`permission_mode` to the parent. When reporting a running job, relay `activity` ("still thinking",
+"running <cmd>") when supplied. An identical in-flight request reattaches to the
+same job id and answers `still_running` again; equality covers task, target,
+model, effort, cwd and host session. A different `task`, `model` or `effort` on a
+busy thread returns `thread_busy`. Relay it; wait, cancel, or use a supported
 reply. Other errors, including `unknown_job` and `ok: false`, go back to the parent.
 
 ## Thread continuity — named by the host
@@ -139,8 +147,8 @@ a question, relay it to the parent. Send a follow-up the same way on this conver
 Report success only after the bridge reports `completed`.
 
 Relay supplied metadata with the answer: `meta.digest_uri` and its `resource_link`,
-`meta.usage`, `meta.cause`, `meta.detail`, `meta.effective_model` and
-`meta.stop_evidence`. Keep
+`meta.usage`, `meta.cause`, `meta.detail`, `meta.effective_model`,
+`meta.selected_effort`, `meta.effective_effort` and `meta.stop_evidence`. Keep
 `meta.debug_digest_path` as debug metadata; the digest URI is the normal link.
 Missing usage means the companion reported none. `meta.stop_evidence` says what
 was signalled and whether every owned process was verified gone.
@@ -161,8 +169,8 @@ The delegated task itself stays with the companion: do not complete it yourself
 or switch to a companion or model the parent did not allow.
 
 The refusal codes are `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`,
-`CAPABILITY_UNAVAILABLE` and `MODEL_NOT_ALLOWED`. Relay a refusal verbatim and
-stop; never work around it by changing or dropping the parent's choice.
+`CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`. Relay a
+refusal verbatim and stop; never work around it by changing or dropping the parent's choice.
 
 If a bridge call throws, retry once. If two consecutive calls throw, take one
 log tail: the last 20 lines of `~/.claude/agent-companion/runtime/agent-bridge.log`.

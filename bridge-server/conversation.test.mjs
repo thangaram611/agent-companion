@@ -22,7 +22,7 @@ test('conversational send accepts exact text and an explicit model, with no fram
 test('registered send and catalog expose only conversational inputs', async () => {
   const { tools } = await mcp._requestHandlers.get('tools/list')({ method: 'tools/list', params: {} });
   const send = tools.find((t) => t.name === 'agent_send').inputSchema;
-  assert.deepEqual(Object.keys(send.properties).sort(), ['cwd', 'max_wait_sec', 'model', 'target', 'task']);
+  assert.deepEqual(Object.keys(send.properties).sort(), ['cwd', 'effort', 'max_wait_sec', 'model', 'target', 'task']);
   assert.deepEqual(send.required.sort(), ['cwd', 'task']);
   const catalog = tools.find((t) => t.name === 'agent_catalog');
   assert.ok(catalog);
@@ -67,7 +67,7 @@ test('catalog is ownerless and leaves cold and populated state/runtime directori
     assert.equal(claude.model.model, null);
     assert.equal(claude.model.description, 'inherits the Claude Code default; any model id or alias accepted, validated by Claude Code');
     assert.equal(claude.model.enumeration, 'not enumerable without a session');
-    assert.deepEqual(claude.capabilities, { reply: false, resume: true, cancel: true, modelSelection: true });
+    assert.deepEqual(claude.capabilities, { reply: false, resume: true, cancel: true, modelSelection: true, effortSelection: true });
     assert.equal(Object.hasOwn(claude, 'contractStatus'), false);
     assert.equal(first.targets[0].readiness.ready, null);
 
@@ -97,5 +97,20 @@ test('catalog is ownerless and leaves cold and populated state/runtime directori
   } finally {
     if (prior === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = prior;
     _resetForTest();
+  }
+});
+
+test('catalog reports effort levels and permissions from the execution environment without probing', async () => {
+  const { probePermission } = await import('../lib/target-diagnostics.mjs');
+  const { getTarget } = await import('../lib/target-registry.mjs');
+  const env = { AGENT_COMPANION_CLAUDE_PERMISSION: 'plan', AGENT_COMPANION_DEFAULT_TARGET: 'claude' };
+  const catalog = (await dispatch({ action: 'catalog' }, { controller: { env } })).structuredContent;
+  assert.equal(catalog.default_target.target, 'claude');
+  for (const target of catalog.targets) {
+    assert.equal(target.effort.selection, target.id === 'claude');
+    assert.deepEqual(target.effort.levels, target.id === 'claude' ? ['low', 'medium', 'high', 'xhigh', 'max'] : null);
+    assert.equal(typeof target.effort.description, 'string');
+    const { mode, source, risk } = probePermission(getTarget(target.id), env);
+    assert.deepEqual(target.permission, { mode, source, risk });
   }
 });

@@ -268,7 +268,7 @@ test('controller dispatch preserves the conversational tools and named refusals'
   const tools = (await h.mod.mcp._requestHandlers.get('tools/list')({ method: 'tools/list', params: {} })).tools;
   assert.deepEqual(tools.map((x) => x.name), ['agent_catalog', 'agent_send', 'agent_wait', 'agent_status', 'agent_reply', 'agent_cancel']);
   assert.match(tools.find((x) => x.name === 'agent_reply').inputSchema.properties.message.description, /reply_unavailable/);
-  assert.deepEqual(Object.keys(tools[1].inputSchema.properties).sort(), ['cwd', 'max_wait_sec', 'model', 'target', 'task']);
+  assert.deepEqual(Object.keys(tools[1].inputSchema.properties).sort(), ['cwd', 'effort', 'max_wait_sec', 'model', 'target', 'task']);
   assert.equal((await h.send({ thread: null })).code, 'NATIVE_OWNER_REQUIRED');
   assert.equal((await h.send({ cwd: 'relative' })).code, 'INVALID_CWD');
   assert.equal((await h.send({ target: 'unsupported' })).code, 'TARGET_UNSUPPORTED');
@@ -330,7 +330,9 @@ test('all five providers receive exact task text, inherit models, and reattach o
   const h = await wireFixture(t);
   for (const target of Object.keys(h.providers)) {
     const sent = await h.send({ target, thread: target });
-    assert.deepEqual(sent, { ok: true, status: 'still_running', job_id: sent.job_id, thread: target });
+    assert.deepEqual(sent, { ok: true, status: 'still_running', job_id: sent.job_id, thread: target, target,
+      selected_model: null, selected_effort: null, effective_model: 'configured', effective_effort: null,
+      permission_mode: ({ codex: 'workspace-write', claude: 'bypassPermissions', antigravity: 'all' })[target] || 'managed' });
     const adapter = h.adapters.at(-1);
     assert.equal(adapter.calls.find(([name]) => name === 'deliver')[1].text, EXACT_TASK);
     assert.equal(Object.hasOwn(adapter.calls[0][1], 'model'), false);
@@ -690,7 +692,7 @@ test('dispatch wires the Claude provider through fake native send and cold resum
   const mod = await bridge();
   const dir = mkdtempSync(join(STATE_SANDBOX, 'claude-wire-'));
   const env = { ...process.env, HOME: dir, CLAUDE_CONFIG_DIR: join(dir, 'config'), CLAUDE_BIN: fakeClaudeBin(dir),
-    FAKE_CLAUDE_TRACE: join(dir, 'trace.jsonl') };
+    FAKE_CLAUDE_TRACE: join(dir, 'trace.jsonl'), AGENT_COMPANION_CLAUDE_PERMISSION: 'plan' };
   writeTargetChecks({ claude: { ready: true } });
   const supervisors = [];
   const active = mod.createBridgeController({ env, records: new Records({ dir: join(dir, 'records') }), createSupervisor: (options) => {
@@ -707,8 +709,14 @@ test('dispatch wires the Claude provider through fake native send and cold resum
   const call = async (args) => (await mod.dispatch(args, { controller: active })).structuredContent;
   const answers = [];
   for (const task of [EXACT_TASK, 'follow-up']) {
-    const sent = await call({ action: 'send', target: 'claude', thread: 'claude-child', cwd: dir, task });
+    const sent = await call({ action: 'send', target: 'claude', thread: 'claude-child', cwd: dir, task, effort: task === EXACT_TASK ? 'low' : null });
     assert.equal(sent.ok, true);
+    assert.equal(sent.effective_model, 'claude-haiku-5-5');
+    assert.equal(sent.selected_effort, 'low');
+    assert.equal(sent.effective_effort, null);
+    assert.equal(sent.permission_mode, 'plan');
+    const catalog = await call({ action: 'catalog' });
+    assert.equal(catalog.targets.find((target) => target.id === 'claude').permission.mode, sent.permission_mode);
     const answer = await call({ action: 'wait', thread: 'claude-child', job_id: sent.job_id, max_wait_sec: 5 });
     assert.equal(answer.status, 'completed');
     assert.equal(answer.content, 'alpha');
@@ -722,4 +730,65 @@ test('dispatch wires the Claude provider through fake native send and cold resum
   assert.ok(argv[0].includes('--session-id'));
   assert.ok(argv[1].includes('--resume'));
   assert.equal(argv.some((args) => args.includes('--model')), false);
+  assert.ok(argv.every((args) => args[args.indexOf('--effort') + 1] === 'low'));
+  assert.ok(answers.every((answer) => answer.meta.selected_effort === 'low' && answer.meta.effective_effort === null));
+});
+
+test('effort refusals precede startup and acknowledgement/status/result retain launch selections', async (t) => {
+  const h = await wireFixture(t);
+  for (const target of ['codex', 'opencode', 'copilot', 'antigravity']) {
+    const refusal = await h.send({ target, effort: 'low' });
+    assert.equal(refusal.code, 'CAPABILITY_UNAVAILABLE');
+    assert.match(refusal.error, /cannot select effort/);
+  }
+  const invalid = await h.send({ target: 'claude', effort: 'invalid' });
+  assert.equal(invalid.code, 'EFFORT_NOT_ALLOWED');
+  assert.equal(invalid.effort, 'invalid');
+  assert.match(invalid.hint, /low, medium, high, xhigh, max/);
+  assert.equal(h.adapters.length, 0);
+  const sent = await h.send({ target: 'claude', model: 'haiku', effort: 'low' });
+  assert.equal(sent.selected_model, 'haiku'); assert.equal(sent.selected_effort, 'low');
+  assert.equal(sent.effective_model, 'configured'); assert.equal(sent.effective_effort, null);
+  assert.equal(sent.permission_mode, 'bypassPermissions');
+  assert.equal((await h.send({ target: 'claude', effort: 'high' })).status, 'thread_busy');
+  assert.deepEqual(await h.send({ target: 'claude', model: null, effort: null }), sent);
+  const status = await h.call({ action: 'status', job_id: sent.job_id });
+  assert.equal(status.selected_effort, 'low'); assert.equal(status.permission_mode, sent.permission_mode);
+  h.active.env = { ...h.active.env, AGENT_COMPANION_CLAUDE_PERMISSION: 'plan' };
+  assert.equal((await h.call({ action: 'catalog' })).targets.find((target) => target.id === 'claude').permission.mode, 'plan');
+  assert.equal((await h.call({ action: 'status', job_id: sent.job_id })).permission_mode, sent.permission_mode);
+  h.adapters[0].done.resolve({ outcome: 'completed', text: 'ok' });
+  const result = await h.call({ action: 'wait', job_id: sent.job_id, thread: 'child', max_wait_sec: 5 });
+  assert.equal(result.meta.selected_effort, 'low'); assert.equal(result.meta.effective_effort, null);
+  const next = await h.send({ target: 'claude', task: 'follow-up', effort: null });
+  assert.equal(next.selected_effort, 'low');
+});
+
+test('mismatch hints name the bound conversation and the normalized requested companion', async (t) => {
+  const h = await wireFixture(t);
+  await h.send({ target: 'claude' });
+  const mismatch = await h.call(h.mod.callArgs('send', { arguments: { target: ' CODEX ', thread: 'child', task: EXACT_TASK, cwd: h.dir } }));
+  assert.equal(mismatch.hint, `This conversation is bound to claude in ${h.dir}. To use codex, spawn a new agent-companion and restate the task.`);
+  const configured = await h.send({ target: null });
+  assert.match(configured.hint, /To use copilot, spawn a new agent-companion/);
+  const cwd = await h.send({ target: 'claude', cwd: tmpdir() });
+  assert.equal(cwd.hint, `This conversation is bound to ${h.dir}. Use that path, or spawn a new agent-companion for the other repo.`);
+});
+
+test('status activity uses native state or command/text fallback and clears at terminal', async (t) => {
+  const h = await wireFixture(t), sent = await h.send();
+  const status = () => h.call({ action: 'status', job_id: sent.job_id });
+  assert.equal((await status()).activity, null);
+  for (const [progress, expected] of [
+    [{ partialText: 'some text' }, 'responding'],
+    [{ activeCommand: 'npm test' }, 'running npm test'],
+    [{ activity: 'thinking' }, 'thinking'],
+    [{ activity: null }, null],
+  ]) {
+    h.adapters[0].progress(progress);
+    assert.equal((await status()).activity, expected);
+  }
+  h.adapters[0].done.resolve({ outcome: 'completed', text: 'done' });
+  await h.call({ action: 'wait', job_id: sent.job_id, thread: 'child', max_wait_sec: 5 });
+  assert.equal((await status()).activity, null);
 });

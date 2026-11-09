@@ -87,3 +87,10 @@ test('execution timeout is not a tool argument; the bounded wait remains support
   assert.equal(validateAgentArgs({ action: 'wait', job_id: 'j', max_wait_sec: 1200 }).max_wait_sec, 1200);
   assert.equal(Object.hasOwn(validateAgentArgs(sendArgs()), 'timeout_ms'), false);
 });
+
+test('send accepts and normalizes effort only on sends', () => {
+  for (const effort of [undefined, null, '', '  ']) assert.equal(validateAgentArgs(sendArgs({ effort })).effort, null);
+  assert.equal(validateAgentArgs(sendArgs({ effort: ' low ' })).effort, 'low');
+  for (const effort of [1, false, {}]) assert.throws(() => validateAgentArgs(sendArgs({ effort })), /effort must be a string/);
+  assert.throws(() => validateAgentArgs({ action: 'reply', job_id: 'j', message: 'x', effort: 'low' }), /unknown field "effort"/);
+});

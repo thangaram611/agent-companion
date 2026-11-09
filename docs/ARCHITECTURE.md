@@ -113,8 +113,9 @@ The parent supplies plain-language requests to the subagent. The six tools are
 `agent_cancel`; their arguments are listed in [README.md](../README.md#internal-mcp-surface).
 
 `agent_catalog` takes no arguments. It reports enabled companions, the default,
-per-companion model configuration, reply/resume/cancel/model-selection
-capabilities, readiness and the installed version seen at the last check. An
+per-companion model configuration, `effort: { selection, levels, description }`,
+`permission: { mode, source, risk }` (null without a permission descriptor),
+reply/resume/cancel/model/effort-selection capabilities, readiness and the installed version seen at the last check. An
 unset model default is labelled as inheriting the companion's configuration.
 The call is ownerless and observational: no hydration, ownership change, lease
 renewal, ledger/digest write or session creation. If model enumeration needs a
@@ -122,12 +123,40 @@ session, it reports "not enumerable without a session". A missing catalog entry
 alone does not prove an explicitly requested model invalid.
 
 `agent_send` accepts `task` and an absolute existing `cwd`, with optional `target`,
-`model` and `max_wait_sec`. It passes the child's exact message to the companion.
+`model`, `effort` and `max_wait_sec`. It passes the child's exact message to the companion.
 The bridge adds no task instructions or required answer format. Omitted `target`
 uses `AGENT_COMPANION_DEFAULT_TARGET`, then the `default-target` file. If neither
 exists, the send returns `TARGET_UNCONFIGURED`. An explicit `model` overrides
 per-companion configuration; with no override or configured default, the native
 configuration is inherited. Codex receives no model key in that case.
+
+`effort` is a conversation override like `model`, stored as `effortOverride` on
+conversation and execution records, with no saved default or environment knob.
+Omission retains a conversation's override, otherwise inherits native configuration;
+start/openHistory omit the key when inherited. Registry `capabilities.effortSelection`
+is true only for Claude, with `capabilities.effortLevels` of `low`, `medium`, `high`,
+`xhigh`, `max`; its adapter passes `--effort`. Other companions refuse effort with
+`CAPABILITY_UNAVAILABLE`. Invalid levels return `EFFORT_NOT_ALLOWED` with a level hint.
+Codex remains unsupported: the pinned contract and `test/codex-schema-dump.mjs`
+retain only required request fields, so neither confirms an optional effort
+parameter on thread/start or turn/start. No guessed parameter is sent.
+
+The send acknowledgement adds `target`, `selected_model`, `selected_effort`,
+`effective_model`, `effective_effort` and `permission_mode`. The controller resolves
+these from records and history/delivery metadata, including Claude's init model;
+the server does not inspect adapters. Overrides are distinct from provider reports:
+Claude's effective effort stays null. Results publish `selected_effort` alongside
+`effective_effort`; status also carries `selected_effort` and `permission_mode`.
+The pure exported `probePermission(descriptor, env)` is shared with diagnostics,
+catalog and the execution's permission snapshot; changing env later cannot change
+an existing execution's reported permission mode.
+
+Status adds `activity`. Claude reports `thinking` for thinking deltas/counters,
+`responding` for text, `running <command>` for an active Bash tool and `retrying`
+during a retry. Thinking content is never retained. Other adapters may omit
+activity; the server falls back to active command, then partial text, then null.
+An explicit native null is preserved, and terminal activity is null. Digest and
+progress publication are unchanged.
 
 Wait, status, reply and cancel retain their existing control semantics. Replies
 require that specific job's `reply_available: true`, based on its adapter capabilities
@@ -203,19 +232,22 @@ Catalog and status are ownerless reads; neither renews a lease nor changes recor
 The parent session id scopes completion delivery, not companion continuity.
 
 The first send requires an absolute existing directory and records its canonical
-path, provider, optional model override and native history id. Follow-ups retain
-provider and cwd; mismatches are explicit refusals. Omitted model retains an
+path, provider, optional model/effort overrides and native history id. Follow-ups retain
+provider and cwd; mismatches are explicit refusals. `provider_mismatch` supplies
+a hint naming the existing provider/cwd and requesting a new agent-companion
+for the requested target. `cwd_mismatch` suggests the bound path or a new
+agent-companion for the other repo. Omitted model retains an
 existing override, otherwise inherits the provider's configuration. A configured
 per-companion default is applied to a new conversation. An explicit model can
 change on a later, closed execution; the resolved model is recorded separately.
 
-On a busy conversation, identical text and model reattach to the same execution
-after provider/cwd validation. Different text or model returns `thread_busy`.
+On a busy conversation, identical text, model and effort reattach to the same execution
+after provider/cwd validation. Different text, model or effort returns `thread_busy`.
 Reattachment returns the existing delivery acknowledgement, not a second prompt;
 use bounded `agent_wait` calls for completion. There is no hidden work queue.
 
 Target/model refusals include `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`,
-`CAPABILITY_UNAVAILABLE` and `MODEL_NOT_ALLOWED`. The child relays the failure
+`CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`. The child relays the failure
 without substituting a companion/model or completing the delegated work itself.
 See historical substitution failure [F5](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
 Missing history fails as `history_unavailable`; unsupported cold follow-up fails
@@ -231,10 +263,10 @@ processes. The provider factories create an adapter with this interface:
 
 | Method / property | Contract |
 | --- | --- |
-| `start({ cwd, env, model, supervisor, historyId })` | Spawn via `supervisor.spawn(argv, opts)`; return `{ runtime }`. Startup failure becomes `failed: runtime_unavailable`. |
-| `openHistory({ historyId, model })` | Null id creates history; a saved id must load unchanged or throw `HistoryUnavailable`. Apply model rules and return `{ historyId, effectiveModel }`, plus effective effort where reported. |
-| `deliver({ text })` | Send verbatim once; return `{ nativeTurnId }` on native acknowledgement. Ambiguous failure throws `DeliveryUnknown`; never retry delivery. |
-| `observe({ onProgress })` | Resolve one native outcome (`completed`, `failed`, `interrupted`) with text, usage, native refs and cause. Progress carries last activity, active command, retry state and partial text. Transport loss throws `ProviderLost`. |
+| `start({ cwd, env, model, effort, supervisor, historyId })` | Spawn via `supervisor.spawn(argv, opts)`; return `{ runtime }`. Startup failure becomes `failed: runtime_unavailable`. |
+| `openHistory({ historyId, model, effort })` | Null id creates history; a saved id must load unchanged or throw `HistoryUnavailable`. Apply model/effort rules and return `{ historyId, effectiveModel }`, plus effective effort where reported. |
+| `deliver({ text })` | Send verbatim once; return `{ nativeTurnId, effectiveModel?, effectiveEffort? }` on native acknowledgement, carrying newly reported launch metadata. Ambiguous failure throws `DeliveryUnknown`; never retry delivery. |
+| `observe({ onProgress })` | Resolve one native outcome (`completed`, `failed`, `interrupted`) with text, usage, native refs and cause. Progress carries `lastActivityAt`, `activeCommand`, `retry`, `partialText` and optional `activity` (string or null). Transport loss throws `ProviderLost`. |
 | `interrupt()` | Request native turn interruption; never signal a process. |
 | `close()` | Close protocol channels; process termination belongs to the supervisor. |
 | `capabilities` | `{ followUp, steer, modelSelection, loadsHistory }`; unsupported history load refuses follow-up. |
@@ -272,10 +304,10 @@ alone is never proof of exit.
 | --- | --- |
 | `default-target`, `default-model`, `default-model-<companion>` | Companion/model defaults written by onboarding; reads resolve environment → file → unset. |
 | `target-checks.json` | Last explicit readiness evidence; catalog/status read it without probing. |
-| `conversations/<owner>.json` | Provider, canonical cwd, model override, native history, generation and current execution id. |
+| `conversations/<owner>.json` | Provider, canonical cwd, model/effort overrides, native history, generation and current execution id. |
 | `executions/<id>.json` | Request, native references, process identities, progress, lifecycle and writer authority. |
 | `leases/<id>.json` | Attached owner requests and remaining grace. |
-| `results/<id>.json` | Immutable outcome, text/usage, native refs, selected/effective model, stop cause and cleanup evidence. |
+| `results/<id>.json` | Immutable outcome, text/usage, native refs, selected/effective model and effort, stop cause and cleanup evidence. |
 | `locks/<owner>.lock` | Exclusive record mutation lock; crash leftovers fail closed as `RECORD_BUSY`. |
 | `stops/<owner>.json` | Advisory TaskStop/SubagentStop marker. Its snapshot at dispatch prevents an old stop from cancelling new work. |
 | `completions/<id>.json` | Publication receipt keyed by execution id. |

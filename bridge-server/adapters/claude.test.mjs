@@ -52,11 +52,14 @@ test('fresh send and cold follow-up use new processes, saved history, exact text
   const controller = new Controller({ env: h.env, records, createSupervisor: h.createSupervisor,
     providers: { claude: { enabled: true, ready: true, modelAllowed: () => true, create: () => h.create() } } });
   t.after(() => { for (const a of controller.live.values()) controller.clock.clearTimeout(a.timer); });
-  const send = (text, model) => controller.send({ owner: 'child', provider: 'claude', cwd: h.dir, text, model });
+  const send = (text, model, effort) => controller.send({ owner: 'child', provider: 'claude', cwd: h.dir, text, model, effort });
   const first = await send('exact\n  whitespace ');
   assert.equal(first.acknowledged, true);
   const one = await controller.wait({ owner: 'child', executionId: first.executionId });
-  const second = await send('follow-up', 'haiku');
+  const second = await send('follow-up', 'haiku', 'low');
+  assert.equal(second.selectedEffort, 'low');
+  assert.equal(second.effectiveModel, 'claude-haiku-5-5');
+  assert.equal(second.effectiveEffort, null);
   const two = await controller.wait({ owner: 'child', executionId: second.executionId });
   assert.notEqual(h.supervisors[0].child.pid, h.supervisors[1].child.pid);
   assert.equal(one.nativeRefs.historyId, two.nativeRefs.historyId);
@@ -71,7 +74,9 @@ test('fresh send and cold follow-up use new processes, saved history, exact text
   assert.equal(writes[1].uuid, two.nativeRefs.nativeTurnId);
   const argv = h.trace().filter((frame) => frame.type === 'argv').map((frame) => frame.args);
   assert.equal(argv[0].includes('--model'), false);
-  assert.deepEqual(argv[1].slice(-4), ['--resume', one.nativeRefs.historyId, '--model', 'haiku']);
+  assert.deepEqual(argv[1].slice(-6), ['--resume', one.nativeRefs.historyId, '--model', 'haiku', '--effort', 'low']);
+  assert.equal(argv[0].includes('--effort'), false);
+  assert.equal(two.selectedEffort, 'low');
 });
 
 test('start is silent; init acknowledges delivery without waiting for the three-second replay', async (t) => {
@@ -122,13 +127,18 @@ for (const scenario of ['success', 'bash', 'retry', 'malformed', 'stderr-flood',
     assert.equal(terminal.outcome, scenario === 'auth-error' ? 'failed' : 'completed');
     assert.equal(terminal.text, scenario === 'auth-error' ? 'Not logged in · Please run /login' : 'alpha');
     assert.equal(terminal.effectiveModel, 'claude-haiku-5-5');
-    assert.ok(snapshots.some((progress) => progress.partialText === 'al'));
+    assert.ok(snapshots.some((progress) => progress.partialText === 'al' && progress.activity === 'responding'));
+    assert.ok(snapshots.some((progress) => progress.activity === 'thinking'));
+    assert.equal(snapshots.at(-1).activity, null);
+    assert.doesNotMatch(JSON.stringify(snapshots), /private|nested|wrong/);
     assert.ok(snapshots.every((progress) => !/private|nested|wrong/.test(progress.partialText)));
     assert.equal(snapshots.at(-1).activeCommand, null); assert.equal(snapshots.at(-1).retry, null);
     if (scenario === 'bash') {
       const commands = snapshots.map((progress) => progress.activeCommand).filter(Boolean);
+      assert.ok(snapshots.filter((p) => p.activeCommand).every((p) => p.activity === `running ${p.activeCommand}`));
       assert.deepEqual(commands.slice(0, 3), ['sleep 8 && echo slept', 'echo second', 'echo second']);
     }
+    if (scenario === 'retry') assert.equal(snapshots.find((p) => p.retry)?.activity, 'retrying');
     if (scenario === 'retry') assert.deepEqual(snapshots.find((progress) => progress.retry)?.retry,
       { attempt: 1, max_retries: 3, retry_delay_ms: 25, error: 'busy' });
     if (scenario === 'auth-error') {
@@ -250,4 +260,17 @@ test('PATH lookup uses only the fake binary; fake rejects invalid argv', async (
   const { adapter } = await h.launch(); await adapter.close();
   const bad = spawnSync(join(h.dir, 'claude'), ['--bare'], { env: h.env, encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' });
   assert.equal(bad.status, 2); assert.match(bad.stderr, /invalid Claude argv/);
+});
+
+test('thinking counters and deltas set activity without retaining thinking content', () => {
+  const adapter = new ClaudeAdapter({ env: {} });
+  adapter.historyId = 's';
+  const send = (frame) => adapter._message({ session_id: 's', parent_tool_use_id: null, ...frame });
+  send({ type: 'system', subtype: 'thinking_tokens', thinking_tokens: 7 });
+  assert.equal(adapter.progress.activity, 'thinking');
+  send({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'answer' } } });
+  assert.equal(adapter.progress.activity, 'responding');
+  send({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'private thought' } } });
+  assert.equal(adapter.progress.activity, 'thinking');
+  assert.doesNotMatch(JSON.stringify(adapter.progress), /private thought/);
 });

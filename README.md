@@ -449,8 +449,8 @@ read-only. Execution and continuation belong to the subagent.
 
 | Tool | Arguments | Purpose |
 | --- | --- | --- |
-| `agent_catalog` | none | Enabled companions, default, model configuration, capabilities, readiness and last checked version. No job hydration, state writes or session creation. |
-| `agent_send` | `task`, `cwd`; optional `target`, `model`, `max_wait_sec` | Send the child's exact message to one companion. |
+| `agent_catalog` | none | Enabled companions, default, model configuration, effort selection/levels, resolved permission (mode, source, risk), capabilities, readiness and last checked version. No job hydration, state writes or session creation. |
+| `agent_send` | `task`, `cwd`; optional `target`, `model`, `effort`, `max_wait_sec` | Send the child's exact message to one companion. |
 | `agent_wait` | `job_id`, `max_wait_sec` | Wait for the job within the same budget. |
 | `agent_status` | optional `job_id`, `verbose`, `diagnostics` | Observe global or per-job records; diagnostics includes cached target checks. |
 | `agent_reply` | `job_id`, `message` | Reply only when that job reports `reply_available: true`. |
@@ -461,14 +461,34 @@ conversation identity as described in
 [One agent-companion, one companion conversation](#one-agent-companion-one-companion-conversation).
 Omitting `target` uses the configured default. Omitting `model` uses the
 companion's configuration. Refusals are `TARGET_UNCONFIGURED`,
-`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE` and `MODEL_NOT_ALLOWED`; the
+`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`; the
 subagent relays them and stops instead of changing the request to get around them.
 
-`agent_send` returns `still_running` immediately with a `job_id`. An identical
+Name effort naturally, for example "use Claude with low effort". The child passes
+`effort` only when named. Claude accepts `low`, `medium`, `high`, `xhigh`, `max`.
+Codex, OpenCode, Copilot and Antigravity currently refuse explicit effort with
+`CAPABILITY_UNAVAILABLE`; an invalid Claude level returns `EFFORT_NOT_ALLOWED`
+with the allowed levels. Codex's saved schema omits optional request parameters,
+so the bridge has not confirmed its effort parameter name. Effort is stored for
+the conversation: omitted follow-ups keep the override, and an explicit effort
+can change after completion. There is no saved effort default or new environment knob.
+
+`agent_send` returns `still_running` with a `job_id` after delivery acknowledgement.
+It includes `target`, `selected_model`, `selected_effort`, `effective_model`,
+`effective_effort` and `permission_mode`. Selected fields are overrides; effective
+fields reflect provider reports and are null when unknown. Claude reports its
+model at init but does not report effective effort. Catalog permissions use the
+same resolver as launch and onboarding diagnostics. Per-job status also includes
+`selected_effort`, `permission_mode` and `activity`: Claude can report `thinking`,
+`responding`, `running <command>` or `retrying`; other companions fall back to
+command/text activity. Thinking content is never included, and terminal activity is null. An identical
 retry on the same in-flight job reattaches to its delivery acknowledgement.
-The controller compares text/model after checking provider and canonical cwd. A different task or
-model on a busy conversation returns `thread_busy`; target and cwd conflicts
-have their own mismatch errors. Wait, cancel, or use `agent_reply` when that
+The controller compares text/model/effort after checking provider and canonical cwd. A different task,
+model or effort on a busy conversation returns `thread_busy`; target and cwd conflicts
+have their own mismatch errors. `provider_mismatch` names the bound companion
+and cwd and tells the parent to spawn a new agent-companion for the requested
+companion. `cwd_mismatch` names the bound path and offers that path or a new
+agent-companion for the other repo. Wait, cancel, or use `agent_reply` when that
 job's `reply_available` is true. `agent_wait` defaults to 480 seconds and is
 capped at 1200 seconds per call. The subagent reuses the chosen budget; new
 parent messages are visible between waits.

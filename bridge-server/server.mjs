@@ -52,7 +52,7 @@ import { acpProvider } from './adapters/acp.mjs';
 
 import { log, validateAgentArgs } from './validation.mjs';
 import { BASE_DIR, readDefaultModel, migrateLegacyState, isModelAllowedFor, readDefaultTarget, ALLOWED_MODELS } from '../lib/state.mjs';
-import { lastTargetChecks } from '../lib/target-diagnostics.mjs';
+import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
 import { queuePath, runtimeDir, digestDir, appendPrivateFile, writePrivateFileAtomic } from '../lib/runtime-paths.mjs';
 import { logEvent } from '../lib/log.mjs';
 import { digestPath, renderDigest } from '../lib/prompt-digest.mjs';
@@ -164,7 +164,18 @@ const UNCONFIGURED_SEND_ERROR =
   'no companion target configured and none passed. Pass target on agent_send, ' +
   'or set a default with `node scripts/onboard.mjs --target <id> --set-default`.';
 
-export function resolveRouting({ target = null, model = null } = {}, env = process.env) {
+function effortRefusal(descriptor, effort) {
+  if (!descriptor || effort == null) return null;
+  const companion = descriptor.id, { effortSelection, effortLevels } = descriptor.capabilities;
+  if (!effortSelection) return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion,
+    error: `companion "${companion}" cannot select effort` };
+  if (effortLevels && !effortLevels.includes(effort)) return { ok: false, code: 'EFFORT_NOT_ALLOWED', companion, effort,
+    error: `effort "${effort}" is not valid for ${companion}`,
+    hint: `Use one of: ${effortLevels.join(', ')}, or omit it to inherit configuration.` };
+  return null;
+}
+
+export function resolveRouting({ target = null, model = null, effort = null } = {}, env = process.env) {
   const companion = target ? String(target).trim().toLowerCase() : readDefaultTarget(env).target;
   if (!companion) return { ok: false, code: 'TARGET_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR };
   const descriptor = getTarget(companion, env);
@@ -184,7 +195,7 @@ export function resolveRouting({ target = null, model = null } = {}, env = proce
         ? `set the Copilot model to one of: ${[...ALLOWED_MODELS].join(', ')}, or omit it to inherit configuration`
         : companion === 'opencode' ? 'Use a provider/model id.' : 'Model ids must contain no whitespace.' };
   }
-  return { ok: true, resolved: { companion, model: selectedModel, capabilities: descriptor.capabilities } };
+  return effortRefusal(descriptor, effort) || { ok: true, resolved: { companion, model: selectedModel, effort, capabilities: descriptor.capabilities } };
 }
 
 function targetLabel(id) {
@@ -308,7 +319,7 @@ function terminalEnvelope(execution, result, action = 'wait') {
     status, job_id: result.executionId, thread: result.owner, target: execution.provider,
     cause: result.cause, detail: result.outcome === 'delivery_unknown' ? 'delivery_unknown' : result.detail ?? null,
     usage: result.usage, selected_model: result.selectedModel ?? null, effective_model: result.effectiveModel ?? null,
-    effective_effort: result.effectiveEffort ?? null, native_refs: result.nativeRefs ?? {},
+    selected_effort: result.selectedEffort ?? null, effective_effort: result.effectiveEffort ?? null, native_refs: result.nativeRefs ?? {},
     stop_evidence: evidence ? { gone: evidence.gone, signals: evidence.signals?.length ?? 0,
       survivors: evidence.survivors?.length ?? 0, cleanup_ms: evidence.cleanupMs ?? null,
       detection_delay_ms: evidence.detectionDelayMs ?? null, protocol: evidence.protocol ?? [] } : null,
@@ -366,6 +377,8 @@ export async function recoverController(active = controller) {
 async function handleSend(args, active, request) {
   const provider = args.target || readDefaultTarget(active.env).target;
   if (!provider) return asJson({ ok: false, action: 'send', code: 'TARGET_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR });
+  const refusal = effortRefusal(getTarget(provider, active.env), args.effort);
+  if (refusal) return asJson({ ...refusal, action: 'send', status: refusal.code });
   // A configured per-companion default model (the env knob or the default-model
   // file) is an explicit selection for a NEW conversation. An existing conversation
   // keeps its stored override, and an omitted model with nothing configured inherits
@@ -375,8 +388,10 @@ async function handleSend(args, active, request) {
   const configured = known && args.model == null && args.thread && !active.records.readConversation(args.thread)
     ? (readDefaultModel(provider, active.env).model ?? undefined) : undefined;
   const sent = await active.send({ owner: args.thread, provider, cwd: args.cwd, text: args.task,
-    model: args.model ?? configured, hostSessionId: getHostSessionId(), ...request });
-  return asJson({ ok: true, status: 'still_running', job_id: sent.executionId, thread: args.thread });
+    model: args.model ?? configured, effort: args.effort ?? undefined, hostSessionId: getHostSessionId(), ...request });
+  return asJson({ ok: true, status: 'still_running', job_id: sent.executionId, thread: args.thread,
+    target: sent.target ?? provider, selected_model: sent.selectedModel ?? null, selected_effort: sent.selectedEffort ?? null,
+    effective_model: sent.effectiveModel ?? null, effective_effort: sent.effectiveEffort ?? null, permission_mode: sent.permissionMode ?? null });
 }
 
 function runningEnvelope(view, action) {
@@ -411,13 +426,14 @@ async function handleReply({ job_id, message, thread }, active, request) {
   return asJson({ action: 'reply', job_id, ...response });
 }
 
-function handleCatalog() {
+function handleCatalog(env) {
   const checks = lastTargetChecks();
   return asJson({
     ok: true, action: 'catalog',
-    default_target: defaultTargetInfo(),
-    targets: listTargets().filter((t) => t.implemented).map((target) => {
-      const model = readDefaultModel(target.id);
+    default_target: defaultTargetInfo(env),
+    targets: listTargets(env).filter((t) => t.implemented).map((target) => {
+      const model = readDefaultModel(target.id, env);
+      const permission = probePermission(target, env);
       const checked = checks[target.id];
       return {
         id: target.id,
@@ -432,7 +448,10 @@ function handleCatalog() {
             : target.capabilities.acp || ['codex', 'claude'].includes(target.id) ? 'not enumerable without a session' : 'not cached',
           ...(target.id === 'copilot' ? { allowed: [...ALLOWED_MODELS] } : {}),
         },
-        capabilities: Object.fromEntries(['reply', 'resume', 'cancel', 'modelSelection']
+        effort: { selection: target.capabilities.effortSelection, levels: target.capabilities.effortLevels ?? null,
+          description: target.capabilities.effortSelection ? 'Omit to inherit the companion configuration; an explicit effort overrides this conversation.' : 'Effort selection is unsupported.' },
+        permission: permission ? { mode: permission.mode, source: permission.source, risk: permission.risk } : null,
+        capabilities: Object.fromEntries(['reply', 'resume', 'cancel', 'modelSelection', 'effortSelection']
           .map((key) => [key, target.capabilities[key]])),
         readiness: {
           ready: checked?.ready ?? null,
@@ -453,9 +472,12 @@ function handleStatus({ job_id, diagnostics }, active) {
       status: r ? executionStatus(r) : state, native_turn_state: e.terminal?.outcome ?? e.state,
       started_at: iso(e.startedAt), terminal_at: iso(r?.finishedAt), lease,
       last_native_activity: e.progress?.lastActivityAt ?? null, active_command: e.progress?.activeCommand ?? null,
+      activity: r || e.terminal ? null : e.progress?.activity !== undefined ? e.progress.activity
+        : e.progress?.activeCommand ? `running ${e.progress.activeCommand}` : e.progress?.partialText ? 'responding' : null,
       retry: e.progress?.retry ?? null, partial_text: r?.text ?? e.progress?.partialText ?? '',
       stop_evidence: r?.stopEvidence ?? e.cleanup ?? null, usage: r?.usage,
       selected_model: r?.selectedModel ?? e.modelOverride ?? null,
+      selected_effort: r?.selectedEffort ?? e.effortOverride ?? null, permission_mode: e.permissionMode ?? null,
       effective_model: r?.effectiveModel ?? e.progress?.effectiveModel ?? e.effectiveModel ?? null,
       effective_effort: r?.effectiveEffort ?? e.progress?.effectiveEffort ?? e.effectiveEffort ?? null,
       cause: r?.cause ?? null, detail: r?.detail ?? null, native_refs: r?.nativeRefs ?? { historyId: e.historyId, nativeTurnId: e.nativeTurnId },
@@ -581,6 +603,7 @@ const AGENT_TOOLS = [
         target: TARGET_FIELD,
         task: { type: 'string', description: 'Exact text delivered to the companion, without framing or appended instructions.' },
         model: { type: 'string', description: 'Explicit model override. Omit to inherit the companion configuration.' },
+        effort: { type: 'string', description: 'Explicit reasoning effort for this conversation. Omit to inherit the companion configuration.' },
         cwd: {
           type: 'string',
           description: 'Required absolute target repo/worktree path. The bridge refuses to default cwd.',
@@ -733,7 +756,7 @@ export async function dispatch(normalized, { controller: active = controller, re
   const request = { requestId, signal };
   try {
     switch (normalized.action) {
-      case 'catalog': return handleCatalog();
+      case 'catalog': return handleCatalog(active.env);
       case 'send':   return await handleSend(normalized, active, request);
       case 'wait':   return await handleWait(normalized, active, request);
       case 'status': return handleStatus(normalized, active);
@@ -745,7 +768,11 @@ export async function dispatch(normalized, { controller: active = controller, re
     if (!err.code) throw err;
     const existing = ['thread_busy', 'provider_mismatch', 'cwd_mismatch'].includes(err.code)
       ? active.status({ owner: normalized.thread }) : null;
-    return asJson({ ok: false, action: normalized.action, code: err.code,
+    const bound = existing?.execution;
+    const hint = err.code === 'provider_mismatch'
+      ? `This conversation is bound to ${bound.provider} in ${bound.cwd}. To use ${normalized.target || readDefaultTarget(active.env).target}, spawn a new agent-companion and restate the task.`
+      : err.code === 'cwd_mismatch' ? `This conversation is bound to ${bound.cwd}. Use that path, or spawn a new agent-companion for the other repo.` : null;
+    return asJson({ ok: false, action: normalized.action, code: err.code, ...(hint ? { hint } : {}),
       status: ({ execution_unknown: 'unknown_job', AMBIGUOUS_HISTORY: 'thread_ambiguous' })[err.code] || err.code,
       thread: normalized.thread, job_id: normalized.job_id ?? existing?.execution.executionId,
       ...(existing ? { target: existing.execution.provider, current_status: existing.state } : {}), error: err.message });

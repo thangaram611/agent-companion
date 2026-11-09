@@ -1,12 +1,12 @@
 import { resolveClaudePermission } from '../../lib/target-registry.mjs';
 import { usageFromClaudeResult } from '../../lib/usage.mjs';
 
-export function claudeArgs({ historyId, resume, model, env }) {
+export function claudeArgs({ historyId, resume, model, effort, env }) {
   return ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--replay-user-messages', '--include-partial-messages', '--permission-mode', resolveClaudePermission(env),
     '--permission-prompts', 'none', '--disallowedTools', 'mcp__plugin_agent-companion_agent-bridge__*',
     'mcp__agent-bridge__*', 'Agent(agent-companion)', resume ? '--resume' : '--session-id', historyId,
-    ...(model === undefined ? [] : ['--model', model])];
+    ...(model === undefined ? [] : ['--model', model]), ...(effort === undefined ? [] : ['--effort', effort])];
 }
 
 export function claudeEnv(env, cwd) {

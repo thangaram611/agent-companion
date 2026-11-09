@@ -2,6 +2,8 @@ import { realpathSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Records } from './records.mjs';
+import { getTargetById } from '../../lib/target-registry.mjs';
+import { probePermission } from '../../lib/target-diagnostics.mjs';
 import { ProcessSupervisor } from './process-supervisor.mjs';
 import { systemClock, bounded } from './clock.mjs';
 import { cleanupExecution, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';
@@ -82,7 +84,7 @@ export class Controller {
     if (!request) return null;
     return this._close(request.a, 'owner_stop');
   }
-  async send({ owner, provider, cwd, text, model, requestId, signal, hostSessionId }) {
+  async send({ owner, provider, cwd, text, model, effort, requestId, signal, hostSessionId }) {
     this._owner(owner);
     if (this.lost) throw error('bridge_loss');
     if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw error('INVALID_CWD');
@@ -93,9 +95,10 @@ export class Controller {
     if (conversation && conversation.provider !== provider) throw error('provider_mismatch');
     if (conversation && conversation.cwd !== cwd) throw error('cwd_mismatch');
     const modelOverride = model === undefined ? conversation?.modelOverride : model;
+    const effortOverride = effort === undefined ? conversation?.effortOverride : effort;
     const existing = conversation && this.live.get(conversation.executionId);
     if (existing && !existing.closed) {
-      if (existing.record.text !== text || existing.record.modelOverride !== modelOverride) throw error('thread_busy');
+      if (existing.record.text !== text || existing.record.modelOverride !== modelOverride || existing.record.effortOverride !== effortOverride) throw error('thread_busy');
       return this._sendAttached(existing, { owner, requestId, signal });
     }
     const selected = this.providers?.[provider];
@@ -106,7 +109,8 @@ export class Controller {
     const adapter = selected.create();
     if (historyId && (!adapter.capabilities.loadsHistory || !adapter.capabilities.followUp)) throw error('FOLLOWUP_UNSUPPORTED');
     const executionId = randomUUID();
-    const record = this.records.begin({ owner, provider, cwd, modelOverride, historyId, executionId, text, hostSessionId, now: this.clock.now() }, conversation?.generation ?? 0);
+    const permissionMode = probePermission(getTargetById(provider), this.env)?.mode ?? null;
+    const record = this.records.begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, historyId, executionId, text, hostSessionId, now: this.clock.now() }, conversation?.generation ?? 0);
     const a = { record, adapter, requests: new Set(), ready: deferred(), done: deferred(), remainingMs: this.graceMs, lastTick: this.clock.monotonic() };
     a.supervisor = this.createSupervisor({ clock: this.clock, onRecord: (processes) => { a.record.processes = processes; this._eventWrite(a); } });
     // Snapshot the marker at dispatch. An old SubagentStop must not cancel a
@@ -124,16 +128,19 @@ export class Controller {
     finally { this.endRequest(id); }
   }
   async _run(a) {
-    const model = a.record.modelOverride === undefined ? {} : { model: a.record.modelOverride };
+    const selection = {
+      ...(a.record.modelOverride === undefined ? {} : { model: a.record.modelOverride }),
+      ...(a.record.effortOverride === undefined ? {} : { effort: a.record.effortOverride }),
+    };
     let phase = 'runtime_unavailable';
     try {
       if (a.stopping) return;
       a.started = true;
-      await bounded(this.clock, () => a.adapter.start({ cwd: a.record.cwd, env: this.env, ...model, supervisor: a.supervisor, historyId: this.records.readConversation(a.record.owner).historyId }), PROTOCOL_MS, 'runtime_unavailable');
+      await bounded(this.clock, () => a.adapter.start({ cwd: a.record.cwd, env: this.env, ...selection, supervisor: a.supervisor, historyId: this.records.readConversation(a.record.owner).historyId }), PROTOCOL_MS, 'runtime_unavailable');
       if (a.stopping) return;
       phase = 'history_unavailable';
       const conversation = this.records.readConversation(a.record.owner);
-      const history = await bounded(this.clock, () => a.adapter.openHistory({ historyId: conversation.historyId, ...model }), PROTOCOL_MS, 'history_unavailable');
+      const history = await bounded(this.clock, () => a.adapter.openHistory({ historyId: conversation.historyId, ...selection }), PROTOCOL_MS, 'history_unavailable');
       if (a.stopping) return;
       if (!history?.historyId || (conversation.historyId && history.historyId !== conversation.historyId)) throw error('history_unavailable');
       a.record.historyId = history.historyId;
@@ -146,8 +153,12 @@ export class Controller {
       if (a.stopping) return;
       if (!ack?.nativeTurnId) throw error('DeliveryUnknown');
       a.record.nativeTurnId = ack.nativeTurnId;
+      a.record.effectiveModel = ack.effectiveModel ?? a.record.effectiveModel;
+      a.record.effectiveEffort = ack.effectiveEffort ?? a.record.effectiveEffort;
       a.record.state = 'running'; a.record.deliveredAt = this.clock.now(); this._persist(a);
-      a.ready.resolve({ executionId: a.record.executionId, generation: a.record.generation, state: 'running', acknowledged: true });
+      a.ready.resolve({ executionId: a.record.executionId, generation: a.record.generation, state: 'running', acknowledged: true,
+        target: a.record.provider, selectedModel: a.record.modelOverride ?? null, selectedEffort: a.record.effortOverride ?? null,
+        effectiveModel: a.record.effectiveModel ?? null, effectiveEffort: a.record.effectiveEffort ?? null, permissionMode: a.record.permissionMode });
       phase = 'provider_error';
       const terminal = await a.adapter.observe({ onProgress: (progress) => {
         if (!a.closed && !a.handedOff && !a.record.terminal) { a.record.progress = { ...a.record.progress, ...progress }; if (this._eventWrite(a)) this.onProgress(a.record); }
@@ -228,7 +239,7 @@ export class Controller {
       outcome: terminal?.outcome || (cleanup.gone ? 'stopped' : 'failed'), cause: terminal?.cause || cause,
       detail: cleanup.gone ? terminal?.detail : 'cleanup_unverified', text: terminal?.text ?? a.record.progress?.partialText ?? '',
       usage: terminal?.usage, nativeRefs: { historyId: a.record.historyId, nativeTurnId: a.record.nativeTurnId, ...terminal?.nativeRefs },
-      selectedModel: a.record.modelOverride, effectiveModel: terminal?.effectiveModel ?? a.record.effectiveModel,
+      selectedModel: a.record.modelOverride, selectedEffort: a.record.effortOverride, effectiveModel: terminal?.effectiveModel ?? a.record.effectiveModel,
       effectiveEffort: terminal?.effectiveEffort ?? a.record.effectiveEffort,
       stopEvidence: a.record.cleanup, finishedAt: this.clock.now(),
     };
@@ -313,7 +324,7 @@ export class Controller {
     const terminal = execution.terminal;
     if (!saved) this.records.writeResult({ owner, executionId: execution.executionId, generation: execution.generation,
       outcome: terminal?.outcome || 'stopped', cause: 'bridge_loss', detail: terminal?.detail,
-      selectedModel: execution.modelOverride, effectiveModel: terminal?.effectiveModel ?? execution.effectiveModel,
+      selectedModel: execution.modelOverride, selectedEffort: execution.effortOverride, effectiveModel: terminal?.effectiveModel ?? execution.effectiveModel,
       effectiveEffort: terminal?.effectiveEffort ?? execution.effectiveEffort, text: terminal?.text ?? execution.progress?.partialText ?? '',
       usage: terminal?.usage, nativeRefs: { historyId: execution.historyId, nativeTurnId: execution.nativeTurnId, ...terminal?.nativeRefs },
       stopEvidence, finishedAt: this.clock.now() }, execution.writer);

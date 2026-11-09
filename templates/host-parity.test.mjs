@@ -84,7 +84,7 @@ test('both hosts offer the same six private tools and conversational send fields
   for (const body of [claude, codex]) {
     const names = [...new Set([...body.matchAll(/mcp__agent[-_]bridge__agent_([a-z]+)/g)].map((m) => m[1]))].sort();
     assert.deepEqual(names, ['cancel', 'catalog', 'reply', 'send', 'status', 'wait']);
-    assert.match(body.replace(/\s+/g, ' '), /`task` and `cwd`, plus optional `target`, `model` and `max_wait_sec`/);
+    assert.match(body.replace(/\s+/g, ' '), /`task` and `cwd`, plus optional `target`, `model`, `effort` and `max_wait_sec`/);
     assert.doesNotMatch(body, /\b(?:templates?|modes?|strengths?|profiles?|verdicts?|fleet|parallel)\b/i);
   }
   assert.deepEqual([...claude.matchAll(/^# (.+)$/gm)].map((m) => m[1]),
@@ -113,4 +113,14 @@ test('both hosts describe the same five companions and Claude follow-up limits',
   assert.match(continuity[0], /Send every follow-up to the companion through `agent_send`/);
   assert.match(continuity[0], /A different companion is a new conversation/);
   assert.match(continuity[0], /running Claude Code job is refused with `reply_unavailable`; tell the parent to wait or cancel/);
+});
+
+test('both roles offer the same invoker effort and launch transparency instructions', () => {
+  for (const source of [md, toml]) {
+    const prose = source.replace(/\s+/g, ' ');
+    assert.match(prose, /Pass `model` and `effort` on `agent_send` only when named/);
+    assert.match(prose, /When the job starts, relay `effective_model`, `selected_effort` and `permission_mode`/);
+    assert.match(prose, /reporting a running job, relay `activity`/);
+    assert.match(prose, /EFFORT_NOT_ALLOWED/);
+  }
 });
