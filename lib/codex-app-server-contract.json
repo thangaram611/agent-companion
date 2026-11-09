@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.166.0",
+  "codexVersion": "0.167.0",
   "clientRequests": [
     {
       "method": "account/gatewayOAuth/cancel",
@@ -1512,6 +1512,16 @@
       }
     },
     {
+      "method": "thread/section/changed",
+      "routing": "threadId",
+      "key": "params.threadId",
+      "optional": false,
+      "params": {
+        "sectionId": "string",
+        "threadId": "string"
+      }
+    },
+    {
       "method": "thread/settings/updated",
       "routing": "threadId",
       "key": "params.threadId",
@@ -2207,8 +2217,7 @@
         "type": "enum:localImage"
       },
       {
-        "type": "enum:audio",
-        "url": "string"
+        "type": "enum:audio"
       },
       {
         "path": "string",
