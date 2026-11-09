@@ -1,3 +1,4 @@
+import '../test/sandbox-home.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
@@ -628,4 +629,56 @@ test('setup accepts independent Claude host and companion selections without a s
   assert.equal(readFileSync(path.join(f.state('claude'), 'default-target'), 'utf8'), 'claude\n');
   assert.equal(existsSync(path.join(f.codexHome, 'agent-companion/default-target')), false);
   assert.match(result.stdout, /Claude: agent and permissions installed; companion: claude/);
+});
+
+test('setup rejects model arguments without an explicit companion before preflight', (t) => {
+  const f = setupFixture(t);
+  for (const args of [[], ['--target', 'auto'], ['--target', 'none']]) {
+    const r = f.run(['--host', 'codex', ...args, '--model', 'haiku', '--dry-run']);
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stdout, /\[FAIL\].*--model requires.*--target/);
+  }
+  for (const args of [['--model'], ['--model='], ['--model', '--dry-run']]) {
+    const r = f.run(['--host', 'codex', '--target', 'claude', ...args]);
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stdout, /--model requires a value/);
+  }
+  f.assertNoInstall();
+});
+
+test('setup passes model to plan and apply, previews intent, and clears a saved model', (t) => {
+  const f = setupFixture(t);
+  const capture = path.join(f.tmp, 'onboard.jsonl');
+  rmSync(path.join(f.bin, 'node'));
+  writeExecutable(path.join(f.bin, 'node'), `#!${process.execPath}
+    import { appendFileSync } from 'node:fs';
+    import { spawnSync } from 'node:child_process';
+    const args = process.argv.slice(2);
+    if (args[0]?.endsWith('/onboard.mjs')) appendFileSync(${JSON.stringify(capture)}, JSON.stringify(args) + '\\n');
+    const r = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' });
+    process.exit(r.status ?? 1);
+  `);
+  const args = ['--host', 'codex', '--target', 'codex'];
+  const preview = f.run([...args, '--model=gpt-5.4', '--dry-run']);
+  assert.equal(preview.status, 0, preview.stdout + preview.stderr);
+  assert.match(preview.stdout.split('Intended installation changes:')[1], /model gpt-5\.4 for codex on codex/);
+  assert.equal(existsSync(path.join(f.state(), 'default-model-codex')), false);
+  f.assertNoInstall();
+  for (const model of ['gpt-5.4', 'inherit']) {
+    const result = f.run([...args, '--model', model, '--skip-tests']);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const file = path.join(f.state(), 'default-model-codex');
+    if (model === 'inherit') assert.equal(existsSync(file), false);
+    else assert.equal(readFileSync(file, 'utf8'), 'gpt-5.4\n');
+  }
+  const calls = readCalls(capture);
+  assert.equal(calls.length, 5);
+  assert.equal(calls.filter((args) => args.includes('--plan')).length, 3);
+  assert.deepEqual(calls.map((args) => args[args.indexOf('--model') + 1]),
+    ['gpt-5.4', 'gpt-5.4', 'gpt-5.4', 'inherit', 'inherit']);
+});
+
+test('setup shell syntax is valid', () => {
+  const r = spawnSync('/bin/bash', ['-n', path.join(REPO_ROOT, 'setup.sh')], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
 });

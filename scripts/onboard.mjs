@@ -3,12 +3,12 @@
 //
 // "Attach your companion." Supported now: opencode, copilot, codex, claude, and antigravity. This is the
 // one place that selects today's target id, explains how to get it ready, and
-// (with --set-default) persists the choice. It never prompts for or stores
+// (with --set-default) persists the choice and optional per-companion model. It never prompts for or stores
 // provider secrets — auth is delegated to the vendor tools (`opencode` /connect,
 // `copilot login`, `scripts/install-antigravity-acp.mjs --login`).
 //
 // Usage:
-//   node scripts/onboard.mjs --host claude|codex|both --target opencode|copilot|codex|claude|antigravity|auto|none [--set-default] [--yes] [--json]
+//   node scripts/onboard.mjs --host claude|codex|both --target opencode|copilot|codex|claude|antigravity|auto|none [--model <id|inherit>] [--set-default] [--yes] [--json]
 //   node scripts/onboard.mjs --list-targets [--json]
 //   node scripts/onboard.mjs --doctor [--json]
 //   node scripts/onboard.mjs --target opencode --smoke
@@ -33,7 +33,8 @@ import {
   memoizeProbe,
   probeCommand,
 } from '../lib/target-diagnostics.mjs';
-import { writeDefaultTarget, readDefaultTarget, writeTargetChecks } from '../lib/state.mjs';
+import { writeDefaultTarget, readDefaultTarget, writeTargetChecks,
+  readDefaultModel, writeDefaultModel, clearDefaultModel, isModelAllowedFor, ALLOWED_MODELS } from '../lib/state.mjs';
 import { Controller } from '../bridge-server/controller/controller.mjs';
 import { codexProvider } from '../bridge-server/adapters/codex.mjs';
 import { claudeProvider } from '../bridge-server/adapters/claude.mjs';
@@ -62,6 +63,7 @@ export function parseArgs(argv) {
     switch (flag) {
       case '--host': opts.host = valueOf(inline); break;
       case '--target': opts.target = String(valueOf(inline) || '').trim().toLowerCase(); break;
+      case '--model': opts.model = String(inline ?? (argv[i + 1]?.startsWith('-') ? '' : argv[++i]) ?? '').trim(); break;
       case '--set-default': opts.setDefault = true; break;
       case '--yes': case '-y': opts.yes = true; break;
       case '--json': opts.json = true; break;
@@ -86,8 +88,27 @@ export function parseArgs(argv) {
 export function planOnboard({ options, targets, configuration }) {
   const t = options.target;
 
-  if (t === 'none') return { kind: 'host-only' };
-  if (!t && configuration?.exists) return { kind: 'preserved' };
+  if (options.model !== undefined) {
+    if (!TARGET_IDS.has(t)) return { kind: 'error', code: 'model_target_required', message: '--model requires an explicit --target <companion> (not auto or none).' };
+    if (!options.model) return { kind: 'error', code: 'model_required', message: '--model requires a value: <id|inherit>.' };
+    if (!targets[t]?.capabilities?.modelSelection) {
+      return { kind: 'error', code: 'CAPABILITY_UNAVAILABLE', message: `companion "${t}" cannot select a model` };
+    }
+    if (options.model !== 'inherit' && !isModelAllowedFor(t, options.model)) {
+      // Mirror resolveRouting's hints without importing the MCP server during setup.
+      const hint = t === 'copilot'
+        ? `set the Copilot model to one of: ${[...ALLOWED_MODELS].join(', ')}, or omit it to inherit configuration`
+        : t === 'opencode' ? 'Use a provider/model id.' : 'Model ids must contain no whitespace.';
+      return { kind: 'error', code: 'MODEL_NOT_ALLOWED', message: `model "${options.model}" is not valid for ${t}. ${hint}` };
+    }
+  }
+
+  const current = targets[TARGET_IDS.has(t) ? t : configuration?.defaultTarget?.target]?.defaultModel;
+  const model = { requested: options.model ?? null,
+    action: options.model === undefined ? 'none' : options.model === 'inherit' ? 'clear' : 'set',
+    current: current?.model ?? null, source: current?.source ?? 'unset' };
+  if (t === 'none') return { kind: 'host-only', model };
+  if (!t && configuration?.exists) return { kind: 'preserved', model };
 
   if (t && TARGET_IDS.has(t)) {
     if (options.setDefault && configuration) {
@@ -96,7 +117,7 @@ export function planOnboard({ options, targets, configuration }) {
       }
     }
     const report = targets[t];
-    return { kind: 'chosen', id: t, ready: !!report?.ready, report, writeDefault: options.setDefault };
+    return { kind: 'chosen', id: t, ready: !!report?.ready, report, writeDefault: options.setDefault, model };
   }
 
   if (t && !VALID_TARGET_OPTS.has(t)) {
@@ -134,6 +155,7 @@ function inspectConfiguration(env, run) {
 function printTargetReport(report, { json } = {}) {
   if (json) return; // JSON mode prints the whole object once at the end.
   console.log(`\n${report.displayName} — ${targetReadinessSummary(report)}`);
+  if (report.defaultModel) console.log(`  default model: ${report.defaultModel.model || 'inherit'} (${report.defaultModel.source})`);
   if (report.binary) console.log(`  binary: ${report.binary}${report.version ? ` (${report.version})` : ''}`);
   for (const b of report.blockers || []) console.log(`  ✗ ${b.message}`);
   for (const w of report.warnings || []) console.log(`  ! ${w.message}`);
@@ -141,6 +163,11 @@ function printTargetReport(report, { json } = {}) {
     console.log('  next steps:');
     for (const s of report.nextSteps) console.log(`    - ${s}`);
   }
+}
+
+function modelIntent(model) {
+  return model?.action === 'set' ? `model ${model.requested}`
+    : model?.action === 'clear' ? 'model inherit (clear saved default)' : 'model settings preserved';
 }
 
 // Opt-in smoke: one controller-owned execution, with a two-minute budget.
@@ -173,7 +200,7 @@ export async function runSmoke(id, env, controllerOptions = {}) {
 const HELP = `agent-companion onboarding
 
   node scripts/onboard.mjs --target opencode|copilot|codex|claude|antigravity|auto|none [--host claude|codex|both]
-                           [--set-default] [--yes] [--json] [--plan] [--smoke] [--no-target-check]
+                           [--model <id|inherit>] [--set-default] [--yes] [--json] [--plan] [--smoke] [--no-target-check]
   node scripts/onboard.mjs --list-targets [--json]
   node scripts/onboard.mjs --doctor [--json]
 
@@ -181,6 +208,8 @@ Attach your companion. Supported now: opencode, copilot, codex, claude, and anti
 asks for or stores provider secrets — authenticate with the vendor tools.
 With no --target, existing configuration is preserved. --target none also preserves it.
 --plan previews selection and readiness without writes or smoke tasks.
+--model requires an explicit companion target; inherit clears its saved default.
+Without --set-default, model changes are previewed only.
 Defaults are written only after readiness/smoke succeeds; --no-target-check explicitly
 allows an unready target, but never overrides a failed smoke.`;
 
@@ -195,6 +224,19 @@ async function main() {
     console.error('[FAIL] --plan cannot be combined with --smoke.'); process.exit(2);
   }
 
+  const run = memoizeProbe(probeCommand);
+  const targets = inspectTargets({ env, run });
+  for (const [id, report] of Object.entries(targets)) {
+    report.capabilities = getTargetById(id).capabilities;
+    report.defaultModel = readDefaultModel(id, env);
+  }
+  const configuration = inspectConfiguration(env, run);
+  let plan = planOnboard({ options, targets, configuration });
+  if (options.model !== undefined && plan.kind === 'error' && (!options.plan || options.listTargets || options.doctor)) {
+    console.error(`[FAIL] ${plan.code}: ${plan.message}`);
+    process.exit(2);
+  }
+
   // --doctor: full environment report.
   if (options.doctor) {
     const { buildDoctorReport, renderDoctorReport } = await import('../lib/doctor.mjs');
@@ -202,10 +244,6 @@ async function main() {
     console.log(options.json ? JSON.stringify(report, null, 2) : renderDoctorReport(report));
     process.exit(report.ok ? 0 : 1);
   }
-
-  const run = memoizeProbe(probeCommand);
-  const targets = inspectTargets({ env, run });
-  const configuration = inspectConfiguration(env, run);
 
   // --list-targets: readiness for every supported target.
   if (options.listTargets) {
@@ -219,14 +257,13 @@ async function main() {
     process.exit(0);
   }
 
-  let plan = planOnboard({ options, targets, configuration });
-
   if (options.plan) {
+    if (plan.kind === 'error') console.error(`[FAIL] ${plan.code}: ${plan.message}`);
     const ok = plan.kind !== 'error' && plan.kind !== 'ask' && (plan.kind !== 'chosen' || plan.ready || options.noTargetCheck);
-    if (options.json) console.log(JSON.stringify({ ok, plan, configuration, targets }, null, 2));
+    if (options.json) console.log(JSON.stringify({ ok, plan, model: plan.model ?? { requested: options.model ?? null, action: 'none', current: null, source: 'unset' }, configuration, targets }, null, 2));
     else {
       console.log(`Current companion: ${configuration.summary}`);
-      console.log(`Plan: ${plan.kind === 'chosen' ? `${plan.writeDefault ? 'set default to' : 'check'} ${plan.id}` : plan.message || 'preserve configuration'}`);
+      console.log(`Plan: ${plan.kind === 'chosen' ? `${plan.writeDefault ? 'set default to' : 'check'} ${plan.id}; ${modelIntent(plan.model)}` : plan.message || 'preserve configuration'}`);
       for (const report of Object.values(targets)) printTargetReport(report);
     }
     process.exit(ok ? 0 : plan.kind === 'chosen' ? 3 : 2);
@@ -242,20 +279,26 @@ async function main() {
     console.log('Select a target:');
     for (const r of Object.values(targets)) printTargetReport(r);
     const ans = (await rl.question(`\nTarget [${plan.candidates.join('/')}/none]: `)).trim().toLowerCase();
+    let model;
+    if (targets[ans]?.capabilities.modelSelection) {
+      const answer = (await rl.question(`Model for ${ans} [inherit]: `)).trim();
+      if (answer && answer !== 'inherit') model = answer;
+    }
     rl.close();
-    if (ans === 'none') plan = { kind: 'host-only' };
-    else if (TARGET_IDS.has(ans)) plan = planOnboard({ options: { ...options, target: ans, setDefault: true }, targets, configuration });
+    if (ans === 'none') plan = planOnboard({ options: { ...options, target: ans }, targets, configuration });
+    else if (TARGET_IDS.has(ans)) plan = planOnboard({ options: { ...options, target: ans, model, setDefault: true }, targets, configuration });
     else { console.error(`[FAIL] invalid selection: ${ans}`); process.exit(2); }
   }
 
   if (plan.kind === 'error') {
-    console.error(`[FAIL] ${plan.message}`);
+    console.error(`[FAIL] ${plan.code}: ${plan.message}`);
     process.exit(2);
   }
 
   if (plan.kind === 'host-only' || plan.kind === 'preserved') {
     const msg = `configuration preserved; companion: ${configuration.summary}.`;
-    if (options.json) console.log(JSON.stringify({ ok: true, host: options.host, target: null, wroteDefault: false, configuration, note: msg }, null, 2));
+    if (options.json) console.log(JSON.stringify({ ok: true, host: options.host, target: null, wroteDefault: false,
+      model: plan.model, configuration, note: msg }, null, 2));
     else console.log(`[OK] ${msg}`);
     process.exit(0);
   }
@@ -263,8 +306,9 @@ async function main() {
   // plan.kind === 'chosen'
   const { id, report } = plan;
   let wrote = false;
-  if (!options.json && plan.writeDefault) {
-    console.log(`Plan: default companion ${configuration.summary} → ${id}; model settings preserved.`);
+  let wroteModel = false;
+  if (!options.json) {
+    console.log(`Plan: ${plan.writeDefault ? 'set default to' : 'check'} ${id}; ${modelIntent(plan.model)}.`);
   }
 
   let smoke = null;
@@ -287,19 +331,24 @@ async function main() {
       writeDefaultTarget(id);
       wrote = true;
     }
-  }
-  if (plan.writeDefault && (report.ready || options.noTargetCheck) && smoke?.passed !== false) {
+    if (plan.model.action === 'set') writeDefaultModel(plan.model.requested, id);
+    if (plan.model.action === 'clear') clearDefaultModel(id);
+    wroteModel = plan.model.action !== 'none';
     writeTargetChecks(Object.fromEntries(Object.entries(targets).map(([id, check]) =>
       [id, { ...check, checkedAt: new Date().toISOString() }])));
   }
   const current = inspectConfiguration(env, run);
+  const defaultModel = readDefaultModel(id, env);
+  const model = { ...plan.model, current: defaultModel.model, source: defaultModel.source };
+  report.defaultModel = defaultModel;
   if (options.json) {
-    console.log(JSON.stringify({ ok: report.ready && smoke?.passed !== false, host: options.host, target: id, wroteDefault: wrote, autoSelected: !!plan.autoSelected, configuration: current, report, smoke }, null, 2));
+    console.log(JSON.stringify({ ok: report.ready && smoke?.passed !== false, host: options.host, target: id, wroteDefault: wrote, model, autoSelected: !!plan.autoSelected, configuration: current, report, smoke }, null, 2));
   } else {
     if (plan.autoSelected) console.log(`[OK] auto-selected the only ready target: ${id}`);
     printTargetReport(report);
     if (wrote) console.log(`\n[OK] wrote default target: ${id}`);
-    else console.log(`\n[INFO] configuration unchanged; companion: ${current.summary}.`);
+    if (wroteModel) console.log(plan.model.action === 'set' ? `[OK] wrote default model for ${id}: ${plan.model.requested}` : `[OK] cleared saved default model for ${id}`);
+    if (!wrote && !wroteModel) console.log(`\n[INFO] configuration unchanged; companion: ${current.summary}.`);
     if (!report.ready && options.noTargetCheck) console.log('[WARN] readiness deferred by --no-target-check; companion is not ready.');
     if (!smoke) console.log('[INFO] live companion response remains unverified (no smoke requested).');
     if (smoke) console.log(`\nsmoke: ${smoke.supported ? (smoke.passed === null ? 'skipped' : smoke.passed ? 'passed' : 'failed') : 'unsupported'} — ${smoke.detail}`);

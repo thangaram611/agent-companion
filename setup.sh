@@ -18,6 +18,7 @@ fail() { printf "${RED}[FAIL]${NC} %s\n" "$1"; }
 # An omitted host is detected; an omitted target preserves existing configuration.
 HOST=""
 TARGET=""
+MODEL=""
 NO_TARGET_CHECK=0
 SKIP_TESTS=0
 YES=0
@@ -28,6 +29,8 @@ while [ "$#" -gt 0 ]; do
     --host=*) HOST="${1#--host=}"; [ -n "$HOST" ] || { fail "--host requires a value"; exit 2; }; shift ;;
     --target) [ "$#" -ge 2 ] && [ -n "$2" ] || { fail "--target requires a value"; exit 2; }; TARGET="$2"; shift 2 ;;
     --target=*) TARGET="${1#--target=}"; [ -n "$TARGET" ] || { fail "--target requires a value"; exit 2; }; shift ;;
+    --model) [ "$#" -ge 2 ] && [ -n "$2" ] && [[ "$2" != -* ]] || { fail "--model requires a value"; exit 2; }; MODEL="$2"; shift 2 ;;
+    --model=*) MODEL="${1#--model=}"; [ -n "$MODEL" ] || { fail "--model requires a value"; exit 2; }; shift ;;
     --no-target-check) NO_TARGET_CHECK=1; shift ;;
     --skip-tests)      SKIP_TESTS=1; shift ;;
     --yes|-y) YES=1; shift ;;
@@ -35,13 +38,14 @@ while [ "$#" -gt 0 ]; do
     -h|--help)
       cat <<EOF
 Usage: $(basename "$0") [--host claude|codex|both] [--target opencode|copilot|codex|claude|antigravity|auto|none]
-                        [--no-target-check] [--skip-tests] [--yes] [--dry-run]
+                        [--model <id|inherit>] [--no-target-check] [--skip-tests] [--yes] [--dry-run]
 
   --host claude|codex|both   install that harness surface (default: detect installed CLIs)
   --target opencode|copilot|codex|claude|antigravity|auto|none
                              choose a default companion (default: preserve existing config,
                              otherwise select the only ready target). none preserves
                              config; auto explicitly selects the only ready target.
+  --model <id|inherit>       save a model for an explicit companion; inherit clears it
   --no-target-check          select the target without failing on not-ready
   --skip-tests               skip the unit-test step
   --yes                      apply without interactive confirmation
@@ -65,6 +69,12 @@ case "$TARGET" in
   ""|opencode|copilot|codex|claude|antigravity|auto|none) ;;
   *) fail "--target must be one of: opencode, copilot, codex, claude, antigravity, auto, none (got: $TARGET)"; exit 2 ;;
 esac
+
+if [ -n "$MODEL" ]; then
+  case "$TARGET" in
+    ""|auto|none) fail "--model requires an explicit --target <companion> (not auto or none)."; exit 2 ;;
+  esac
+fi
 
 # Host selection never assumes that both CLIs are installed.
 if [ -z "$HOST" ]; then
@@ -236,9 +246,12 @@ echo ""
 
 PLAN_DIR="$(mktemp -d)"
 SELECTED_TARGETS=()
+SELECTED_MODELS=()
 for h in "${HOSTS[@]}"; do
+  MODEL_CHOICE="$MODEL"
   ONBOARD_ARGS=(--host "$h" --plan --json --set-default --yes)
   [ -z "$TARGET" ] || ONBOARD_ARGS+=(--target "$TARGET")
+  [ -z "$MODEL_CHOICE" ] || ONBOARD_ARGS+=(--model "$MODEL_CHOICE")
   [ "$NO_TARGET_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-target-check)
   PLAN_CODE=0
   AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
@@ -252,6 +265,11 @@ for h in "${HOSTS[@]}"; do
   if [ "$PLAN_CODE" != 0 ] && [ -t 0 ] && [ "$YES" = 0 ] \
       && jq -e '.plan.code == "ambiguous_target" or .plan.code == "no_ready_target"' "$PLAN_DIR/$h.json" >/dev/null; then
     read -r -p "Companion for $h [opencode/copilot/codex/claude/antigravity/none]: " CHOICE
+    if jq -e --arg id "$CHOICE" '.targets[$id].capabilities.modelSelection == true' "$PLAN_DIR/$h.json" >/dev/null; then
+      read -r -p "Model for $CHOICE on $h [inherit]: " MODEL_CHOICE
+      [ "$MODEL_CHOICE" != inherit ] || MODEL_CHOICE=""
+      [ -z "$MODEL_CHOICE" ] || ONBOARD_ARGS+=(--model "$MODEL_CHOICE")
+    fi
     PLAN_CODE=0
     AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" --target "$CHOICE" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
   fi
@@ -261,10 +279,15 @@ for h in "${HOSTS[@]}"; do
   fi
   CHOICE="$(jq -r 'if .plan.kind == "chosen" then .plan.id else "none" end' "$PLAN_DIR/$h.json")"
   SELECTED_TARGETS+=("$CHOICE")
+  SELECTED_MODELS+=("$MODEL_CHOICE")
   if [ "$CHOICE" = none ]; then
     echo "Plan ($h): preserve companion configuration."
   else
-    echo "Plan ($h): set default companion to $CHOICE; preserve model settings."
+    if [ -n "$MODEL_CHOICE" ]; then
+      echo "Plan ($h): set default companion to $CHOICE; model $MODEL_CHOICE."
+    else
+      echo "Plan ($h): set default companion to $CHOICE; preserve model settings."
+    fi
     jq -r 'if .plan.ready then empty else "  Readiness deferred by --no-target-check; companion is not ready." end' "$PLAN_DIR/$h.json"
   fi
   if [ "$h" = codex ]; then
@@ -283,6 +306,14 @@ echo "  Install bridge-server dependencies in $SCRIPT_DIR/bridge-server."
 [ "$DO_CLAUDE" = 0 ] || echo "  Materialize the Claude agent; merge companion permissions into ~/.claude/settings.json."
 [ "$DO_CODEX" = 0 ] || echo "  Create ${CODEX_HOME:-$HOME/.codex} if needed; refresh the Codex plugin, verify MCP and agent, and remove legacy managed hooks."
 echo "  Write diagnostic install markers after each harness finishes."
+for i in "${!HOSTS[@]}"; do
+  MODEL_CHOICE="${SELECTED_MODELS[$i]}"
+  if [ "$MODEL_CHOICE" = inherit ]; then
+    echo "  Clear saved default model for ${SELECTED_TARGETS[$i]} on ${HOSTS[$i]}."
+  elif [ -n "$MODEL_CHOICE" ]; then
+    echo "  Save default model $MODEL_CHOICE for ${SELECTED_TARGETS[$i]} on ${HOSTS[$i]}."
+  fi
+done
 if [ "$TARGET" = copilot ] || command -v copilot >/dev/null 2>&1; then
   echo "  Install the Copilot reviewer agent if absent (preserve any existing file)."
 fi
@@ -575,6 +606,7 @@ for i in "${!HOSTS[@]}"; do
   CHOICE="${SELECTED_TARGETS[$i]}"
   [ "$CHOICE" != none ] || continue
   ONBOARD_ARGS=(--host "$h" --target "$CHOICE" --set-default --yes --json)
+  [ -z "${SELECTED_MODELS[$i]}" ] || ONBOARD_ARGS+=(--model "${SELECTED_MODELS[$i]}")
   [ "$NO_TARGET_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-target-check)
   if AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" > "$PLAN_DIR/$h-result.json"; then
     CURRENT="$(jq -r '.configuration.summary' "$PLAN_DIR/$h-result.json")"

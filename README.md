@@ -111,9 +111,14 @@ Configuration:
   catalog do not. Stop hooks write owner markers. Total execution has no
   40-minute cutoff; each wait is still bounded by the host's per-call timeout.
 - `AGENT_COMPANION_DEFAULT_TARGET` overrides the `default-target` file.
-  `AGENT_COMPANION_CODEX_MODEL` and `AGENT_COMPANION_OPENCODE_MODEL` set model
-  defaults. Per-companion default-model files are supported; an explicit request
-  overrides them. With neither set, the companion inherits its own configuration.
+- Save a per-companion model default with
+  `node scripts/onboard.mjs --target <companion> --model <id> --set-default`.
+  Select the host state with `AGENT_COMPANION_HOST=claude|codex`, or use
+  `bash setup.sh --host <host> --target <companion> --model <id>`.
+  `--model inherit` clears the saved default. `AGENT_COMPANION_CODEX_MODEL`,
+  `AGENT_COMPANION_OPENCODE_MODEL` and `AGENT_COMPANION_CLAUDE_MODEL` override
+  saved defaults where the host passes them (Claude host). An explicit request
+  overrides the default; with neither set, the companion inherits its own configuration.
 - OpenCode requires 2.x and uses server permissions from its configuration.
   Its private loopback password is kept in memory, never in durable records.
 - Codex defaults to `workspace-write` with network enabled. Use
@@ -133,8 +138,8 @@ Configuration:
   `AGENT_COMPANION_CLAUDE_MODEL` optionally sets a model default; without an
   explicit or saved default, Claude Code uses its own model configuration.
   Codex does not forward the shell environment to the bridge, so on the Codex
-  host this and the other model env knobs take no effect; a request's explicit
-  model still does.
+  host use a saved default to pin a model across conversations. These model env
+  knobs take no effect there; explicit per-request model choices still work.
 - Install and sign in to Antigravity with
   `node scripts/install-antigravity-acp.mjs --login`. It verifies Google's
   signature on macOS and installs under
@@ -233,6 +238,9 @@ bash setup.sh --host claude --target copilot
 # Codex host, Claude Code companion default.
 bash setup.sh --host codex --target claude
 
+# Pin Haiku for the Claude Code companion on the Codex host.
+bash setup.sh --host codex --target claude --model haiku
+
 # Claude Code host, separate Claude Code companion default.
 bash setup.sh --host claude --target claude
 
@@ -293,9 +301,10 @@ matching `ready`, not just a successful CLI exit.
 
 `AGENT_COMPANION_DEFAULT_TARGET` overrides the persisted `default-target`.
 If `agent_send` omits `target` and no default is configured, the bridge returns
-`TARGET_UNCONFIGURED`. Model defaults use `AGENT_COMPANION_CODEX_MODEL`,
-`AGENT_COMPANION_OPENCODE_MODEL`, `AGENT_COMPANION_CLAUDE_MODEL`, Copilot's
-`default-model` file and the Antigravity descriptor default. A request can supply an explicit model override;
+`TARGET_UNCONFIGURED`. Onboarding saves per-companion model defaults in
+`default-model` (Copilot) or `default-model-<companion>` files. The model env
+knobs listed under Configuration override these files where the host passes them.
+A request can supply an explicit model override;
 otherwise the companion uses its configuration. Legacy configuration migration
 is described in [Architecture — State](docs/ARCHITECTURE.md#state).
 

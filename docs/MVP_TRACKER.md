@@ -13,6 +13,9 @@ remains separate from implementation; see the release gates below.
 - The ownerless catalog reports enabled companions, the default, model
   configuration, capabilities, readiness and the last checked version. An open
   choice uses a ready companion; model omission preserves its configuration.
+- Onboarding and setup support `--target <companion> --model <id|inherit>` to
+  save or clear a per-companion model default, with previews and interactive prompts.
+  Saved defaults pin models on the Codex host, which does not forward model env knobs.
 - The bridge passes the child's message verbatim. The child relays the answer
   and questions, with its own focused checks kept separate. Refusals and failures
   do not authorize self-completion or a silent companion/model substitution.
@@ -129,9 +132,6 @@ remains separate from implementation; see the release gates below.
 
 ## Next Backlog
 
-- Add an onboarding option that persists a per-companion default model. Codex
-  does not forward the shell environment to the bridge, so on the Codex host the
-  `AGENT_COMPANION_*_MODEL` knobs are inert and only a saved default can pin a model.
 - Qualify Codex desktop as the third host and finish operator-only TUI rows.
 - Resolve Copilot account access, then qualify cold history loading before
   enabling follow-up; a capability advertisement is insufficient.

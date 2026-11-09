@@ -270,7 +270,7 @@ alone is never proof of exit.
 
 | Path | Meaning |
 | --- | --- |
-| `default-target`, `default-model`, `default-model-<companion>` | Companion/model defaults; environment defaults take precedence. |
+| `default-target`, `default-model`, `default-model-<companion>` | Companion/model defaults written by onboarding; reads resolve environment → file → unset. |
 | `target-checks.json` | Last explicit readiness evidence; catalog/status read it without probing. |
 | `conversations/<owner>.json` | Provider, canonical cwd, model override, native history, generation and current execution id. |
 | `executions/<id>.json` | Request, native references, process identities, progress, lifecycle and writer authority. |
@@ -282,6 +282,12 @@ alone is never proof of exit.
 | `runtime/completions.jsonl` | Hook delivery queue; terminal wait consumes the execution's entries. |
 | `runtime/digests/agent-digest-<id>.md` | Controller-published task and final/partial output, status and reported usage. |
 | `runtime/agent-bridge.log`, `daemon.log` | Bridge and structured event logs; the latter is a retained filename, not a running service. |
+
+`onboard.mjs --target <companion> --model <id|inherit> --set-default` saves or
+clears that companion's model default after the target passes readiness/smoke
+checks. `--plan` and omission of `--set-default` leave defaults untouched.
+`setup.sh --model` passes the choice through for each selected host. Codex does
+not forward shell model env knobs to the bridge; pin its model with a saved default.
 
 Record writes are atomic and private, with conversation-generation and writer
 fences. A native terminal outcome is persisted before cleanup; the final immutable
