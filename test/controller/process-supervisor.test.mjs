@@ -81,6 +81,28 @@ test('two-second census and reported escaped descendants retain birth identities
   assert.equal(clock.timers.size, 0);
 });
 
+test('a reported pid that names a process older than the root is a collision, not a descendant', async () => {
+  // Incident 2026-11-09: Codex reported process_id 1129; that pid was a system
+  // daemon born on Oct 29 under a root spawned on Nov 9.
+  const root = { pid: 54618, pgid: 54618, ppid: 1, birthTime: 'Mon Nov 9 09:36:57 2026' };
+  const daemon = { pid: 1129, pgid: 1129, ppid: 1, birthTime: 'Thu Oct 29 04:59:21 2026' };
+  const escaped = { pid: 55615, pgid: 55615, ppid: 1, birthTime: 'Mon Nov 9 09:37:46 2026' };
+  const sameSecond = { pid: 54650, pgid: 54650, ppid: 1, birthTime: root.birthTime };
+  const rows = new Map([root, daemon, escaped, sameSecond].map((row) => [row.pid, row]));
+  const signals = [];
+  const supervisor = new ProcessSupervisor({ clock: new ManualClock(), record: { ...root, processes: [root] }, processTable: async () => rows,
+    signal: (pid, sig) => { signals.push([pid, sig]); if (pid === daemon.pid) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); } });
+  assert.equal(await supervisor.recordDescendant(daemon.pid), false);
+  assert.equal(await supervisor.recordDescendant(escaped.pid), true);
+  assert.equal(await supervisor.recordDescendant(sameSecond.pid), true);
+  assert.deepEqual(supervisor.serialize().processes.map((p) => p.pid), [root.pid, escaped.pid, sameSecond.pid]);
+  rows.delete(root.pid); rows.delete(escaped.pid); rows.delete(sameSecond.pid);
+  const evidence = await supervisor.verifyGone();
+  assert.equal(evidence.gone, true); assert.deepEqual(evidence.survivors, []);
+  await supervisor._signal('SIGTERM');
+  assert.equal(signals.some(([pid]) => pid === daemon.pid), false);
+});
+
 test('real sibling process tree stays alive when the first owned tree closes', async (t) => {
   const pairs = [0, 1].map(() => {
     const clock = new ManualClock(); return { clock, supervisor: fixtureSupervisor({ clock }) };

@@ -457,7 +457,7 @@ test('startup recovery verifies process absence; status never recovers or adopts
   assert.deepEqual(wireDisk(h.dir), before); assert.equal(checks, 0);
   await h.mod.recoverController(h.active);
   assert.equal(checks, 1); assert.equal(h.records.readResult('old'), null);
-  assert.equal((await h.send()).code, 'execution_unknown');
+  assert.equal((await h.send()).code, 'previous_execution_unverified');
   absent = true; await h.mod.recoverController(h.active);
   const result = await h.call({ action: 'wait', thread: 'child', job_id: 'old' });
   assert.equal(result.status, 'cancelled'); assert.equal(result.meta.cause, 'bridge_loss'); assert.equal(result.content, 'saved');

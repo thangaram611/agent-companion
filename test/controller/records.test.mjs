@@ -14,6 +14,16 @@ export function snapshot(dir) {
     .map((p) => [p, statSync(join(dir, p)).mtimeMs, readFileSync(join(dir, p), 'utf8')]);
 }
 
+test('an unverified previous cleanup refuses a new execution with its own code', () => {
+  const records = make();
+  const first = records.begin(input(), 0);
+  records.writeResult({ ...first, outcome: 'completed', cause: 'native_complete', text: 'answer', stopEvidence: { gone: false, survivors: [{ pid: 1129 }] } });
+  records.writeExecution({ ...first, state: 'closed', cleanup: { gone: false, survivors: [{ pid: 1129 }] } });
+  assert.throws(() => records.begin(input('e2'), 1), { code: 'previous_execution_unverified' });
+  records.writeExecution({ ...first, state: 'closed', cleanup: { gone: true } });
+  assert.equal(records.begin(input('e2'), 1).generation, 2);
+});
+
 test('stale generation refused and logged; terminal results are immutable', () => {
   const records = make();
   const logs = [];

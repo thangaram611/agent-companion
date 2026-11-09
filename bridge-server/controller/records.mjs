@@ -103,7 +103,9 @@ export class Records {
       if (old) {
         const execution = this.readExecution(old.executionId);
         const result = this.readResult(old.executionId);
-        if (!(execution?.state === 'closed' && execution.cleanup?.gone) && !result?.stopEvidence?.gone) throw error('execution_unknown');
+        // The previous tree was never verified gone; a new provider process could
+        // overlap it. Running elsewhere or closed without verified cleanup: a distinct refusal, not an unknown execution.
+        if (!(execution?.state === 'closed' && execution.cleanup?.gone) && !result?.stopEvidence?.gone) throw error('previous_execution_unverified');
       }
       const generation = expectedGeneration + 1;
       if (this.readExecution(executionId)) throw error('execution_id_busy');

@@ -224,7 +224,10 @@ model/cost fields; absent usage is never invented as zero.
 
 Each execution gets its own supervisor: `spawn`, `recordDescendant`, `census`,
 `terminate` and `verifyGone`. It records pid/pgid, samples descendants every 2 s,
-and includes protocol-reported command pids. Closure attempts native interrupt
+and includes protocol-reported command pids, adopting one only when the process
+it names is not older than the root (a reported pid is evidence, not identity).
+A previous execution still running elsewhere or never verified gone refuses the next send
+with `previous_execution_unverified`. Closure attempts native interrupt
 and protocol close with bounded waits, then SIGTERM to the group and recorded
 pids, SIGKILL to survivors after 2 s, and absence verification by pid plus birth
 identity. The cleanup target is at most 5 s on an awake machine after the close
@@ -300,6 +303,17 @@ The `plan_path`, profile-selection, exec, broker and daemon measurements below
 are historical evidence for designs retired on 2026-11-05. They are not current
 components or survival guarantees. Implementation-specific entries are labelled;
 full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION.md).
+
+**Provider-reported pids (2026-11-09)**
+
+- A pid reported by the provider is not proof of a descendant. Codex's
+  `commandExecution` item carried `process_id` 1129 for a `node --test` command
+  right after the machine's pids wrapped past 99164; pid 1129 was a macOS
+  CryptoTokenKit daemon born eleven days earlier. The supervisor adopted it,
+  SIGTERM/SIGKILL returned EPERM, cleanup was `cleanup_unverified`, and the
+  conversation refused every follow-up as `unknown_job`. The guard is birth
+  order (nothing we spawned predates the root); the refusal now has its own
+  code, `previous_execution_unverified`.
 
 **Phase 2 host findings (2026-11-05)**
 

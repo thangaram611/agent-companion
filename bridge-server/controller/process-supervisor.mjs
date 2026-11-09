@@ -23,6 +23,8 @@ export function readProcessTable(clock = systemClock) {
 }
 const identity = ({ pid, pgid, birthTime }) => ({ pid, pgid, birthTime });
 const matches = (record, row) => Boolean(row && record.birthTime && record.birthTime === row.birthTime);
+// ps lstart has one-second resolution; unparseable fixture values never compare.
+const bornBefore = (a, b) => { const x = Date.parse(a), y = Date.parse(b); return Number.isFinite(x) && Number.isFinite(y) && x < y; };
 
 export class ProcessSupervisor {
   constructor({ record = null, clock = systemClock, onRecord = () => {}, processTable = () => readProcessTable(clock), signal = (pid, sig) => process.kill(pid, sig) } = {}) {
@@ -80,6 +82,12 @@ export class ProcessSupervisor {
     return this._track(async () => {
       const row = (await this.processTable()).get(pid);
       if (!row) return false;
+      // A provider-reported pid is evidence, not identity. Measured 2026-11-09:
+      // Codex reported process_id 1129 for a command and that pid belonged to a
+      // system daemon born eleven days before our root; adopting it made cleanup
+      // unverifiable (EPERM) and locked the conversation. Nothing we spawned can
+      // be older than the root, so such a row is a collision, not a descendant.
+      if (this.record.birthTime && bornBefore(row.birthTime, this.record.birthTime)) return false;
       this._remember(row); this._publish(); return true;
     });
   }

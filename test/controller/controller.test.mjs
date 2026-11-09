@@ -96,7 +96,7 @@ test('status-only second bridge writes nothing, renews nothing and refuses overl
     h.controller.status({ owner: 'child' });
   }
   assert.deepEqual(disk(h.dir), before);
-  await assert.rejects(observer.send({ owner: 'child', provider: 'fake', cwd: h.dir, text: 'new' }), { code: 'execution_unknown' });
+  await assert.rejects(observer.send({ owner: 'child', provider: 'fake', cwd: h.dir, text: 'new' }), { code: 'previous_execution_unverified' });
   assert.deepEqual(disk(h.dir), before);
   await h.clock.advance(120_000);
   assert.equal((await h.done(sent.executionId)).cause, 'owner_lease_expired');
@@ -258,7 +258,7 @@ test('unverified cleanup never claims stopped or permits overlapping execution',
   const h = setup({ gone: false }); const sent = await h.send();
   const result = await h.controller.cancel({ owner: 'child', executionId: sent.executionId });
   assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'cleanup_unverified');
-  await assert.rejects(h.send({ text: 'new' }), { code: 'execution_unknown' });
+  await assert.rejects(h.send({ text: 'new' }), { code: 'previous_execution_unverified' });
 });
 
 test('bridge loss serializes all live executions and fences late provider writes', async () => {
