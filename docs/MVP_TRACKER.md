@@ -1,6 +1,6 @@
 # MVP Tracker
 
-Last updated: 2026-11-05
+Last updated: 2026-11-09
 
 Current direction: active development of the approved conversational redesign.
 The shipped controller owns one cold provider runtime per execution. Qualification
@@ -16,9 +16,9 @@ remains separate from implementation; see the release gates below.
 - The bridge passes the child's message verbatim. The child relays the answer
   and questions, with its own focused checks kept separate. Refusals and failures
   do not authorize self-completion or a silent companion/model substitution.
-- Claude Code and Codex CLI support OpenCode, Copilot, Codex, and Google
-  Antigravity. The [companion matrix](ARCHITECTURE.md#companion-matrix) records
-  transport capabilities.
+- Claude Code and Codex CLI support OpenCode, Copilot, Codex, Google
+  Antigravity and Claude Code. The
+  [companion matrix](ARCHITECTURE.md#companion-matrix) records transport capabilities.
 - One `agent-companion` is one companion conversation. The host names its
   thread; an MCP send without one is refused. Continue the same agent for a
   follow-up, or start another for independent work. See
@@ -39,7 +39,9 @@ remains separate from implementation; see the release gates below.
 
 - Copilot cold follow-up is unsupported (`FOLLOWUP_UNSUPPORTED`) pending account
   resolution and qualification of cross-process history loading. It must not
-  silently open a new conversation. ACP and OpenCode in-flight steer are unsupported.
+  silently open a new conversation. ACP, OpenCode and Claude Code in-flight
+  steer are unsupported.
+  A running Claude job refuses replies with `reply_unavailable`; wait or cancel.
 - OpenCode 1.x is dropped; only the authenticated 2.x HTTP contract is shipped.
 - Codex desktop remains unqualified. TUI-only rows require operator actions:
   compaction, UI stop/restart, native close, suspend/wake and clock observation.
@@ -53,6 +55,11 @@ remains separate from implementation; see the release gates below.
 - Usage is present only when reported by the provider. Antigravity 1.1.1 reports
   none. New execution/result records have no one-hour expiry; delivery-queue TTLs
   and rotating logs do not make a complete adoption/cost history.
+- Claude reports cost only for fresh history; resumed native cost includes the
+  conversation total. Tokens are per turn. User hooks and plugins load in the
+  child; slow hooks can push startup past the 10 s protocol delivery bound.
+  Claude transcripts remain under `~/.claude/projects` (or the configured Claude
+  directory) without bridge cleanup, and follow-ups need those files.
 - Codex rollouts accumulate under `$CODEX_HOME/sessions` without automatic
   cleanup. Sandbox boundaries are in [Architecture](ARCHITECTURE.md#negative-results).
 
@@ -105,6 +112,15 @@ remains separate from implementation; see the release gates below.
 
 9. Additional companions or transports require recurring use and an adoption
    check; the available paired-review evidence is insufficient to justify expansion.
+   **Accepted scope, 2026-11-09:** the user approved Claude Code as the fifth
+   companion, with `bypassPermissions` by default and recursive Agent Companion
+   delegation denied. Steps 1–2 implement the adapter and integration with
+   hermetic tests; Step 3 adds role parity and documentation. This accepted
+   addition does not remove the adoption policy for further expansion.
+   Live smoke on both hosts, including a Claude-host nested run, remains Step 4
+   work. Claude Code 2.1.319 was measured; older versions are **UNVERIFIED**.
+   `--permission-prompts` needs at least 2.1.259; that flag minimum does not
+   qualify older versions of the complete integration.
 
 10. Both plugin manifests and the private bridge package declare `0.2.0`.
     Build release artifacts from the reviewed commit; version metadata alone
@@ -112,6 +128,8 @@ remains separate from implementation; see the release gates below.
 
 ## Next Backlog
 
+- Step 4: qualify Claude companion live smoke on both hosts, including the
+  Claude-host nested run, and publish the companion measurement report.
 - Qualify Codex desktop as the third host and finish operator-only TUI rows.
 - Resolve Copilot account access, then qualify cold history loading before
   enabling follow-up; a capability advertisement is insufficient.

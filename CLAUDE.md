@@ -4,12 +4,12 @@
 
 A delegation plugin: a **harness** (Claude Code or Codex CLI) spawns an isolated
 `agent-companion` subagent, which uses `agent-bridge` to run work on a **companion** runtime
-(OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity). The parent talks to the
-subagent in plain language (what to do, the absolute repo path, optionally which companion or
+(OpenCode, GitHub Copilot CLI, Codex CLI, Google Antigravity, or Claude Code).
+The parent talks to the subagent in plain language (what to do, the absolute repo path, optionally which companion or
 model); the subagent sends that text verbatim through the private `agent_*` tools and brings the
 companion's answer back. Both hosts register the bridge at plugin/session scope;
 execution calls require a native child owner. Claude attributes it through a hook;
-Codex supplies subagent metadata. The install matrix is two CLI hosts × four
+Codex supplies subagent metadata. The install matrix is two CLI hosts × five
 companions. Codex desktop remains unqualified.
 
 Read `README.md` for the user-facing contract and `docs/ARCHITECTURE.md` before any non-trivial
@@ -69,8 +69,9 @@ mismatches fail explicitly. Catalog and status are ownerless observers: they
 neither start work nor renew leases nor write execution state.
 
 **Capabilities are provider facts.** Codex uses app-server, OpenCode uses its
-2.x HTTP server, and Copilot/Antigravity use ACP. There are no transport-selection
-knobs. Only Codex supports in-flight steer. Copilot cold follow-up is refused
+2.x HTTP server, and Copilot/Antigravity use ACP. Claude Code uses its own `-p`
+stream-json protocol; cold follow-up via the saved session; no in-flight steer.
+There are no transport-selection knobs. Only Codex supports in-flight steer. Copilot cold follow-up is refused
 until qualified; Antigravity reloads saved sessions. Per-companion model defaults
 and one-shot legacy migration belong to `lib/state.mjs`.
 
@@ -82,7 +83,7 @@ and one-shot legacy migration belong to `lib/state.mjs`.
 | `bridge-server/controller/controller.mjs` | Execution lifecycle, owner requests, leases, stop observations and result decisions. |
 | `bridge-server/controller/records.mjs` | Atomic conversation/execution/lease/result records, generation and writer fencing, immutable results. |
 | `bridge-server/controller/process-supervisor.mjs` | Owned process groups, descendant census, termination and PID/birth-identity verification. |
-| `bridge-server/adapters/{codex,opencode,acp}.mjs` | Provider protocols, history loading, delivery acknowledgement, native progress, usage and model selection. |
+| `bridge-server/adapters/{codex,opencode,acp,claude}.mjs` | Provider protocols, history loading, delivery acknowledgement, native progress, usage and model selection. |
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
 | `lib/state.mjs` | Default target/model configuration and one-shot migration of legacy settings/history. |
 | `lib/host.mjs` | Host conventions and sandbox guard; `AGENT_COMPANION_HOST` is authoritative, `.host` is diagnostic. |
@@ -131,6 +132,17 @@ and one-shot legacy migration belong to `lib/state.mjs`.
   approval flag does not guarantee an agent will stop asking. The answer comes
   from the descriptor's `acp.permission(env)`; leaving a request unanswered hangs
   the turn. Do not send MCP's `notifications/initialized` on ACP.
+- **Claude companion startup and results need their native semantics.** The child
+  prints nothing until the first user line; the following `system/init` confirms
+  the session id and acknowledges delivery. Init can repeat every turn. A
+  `result` is terminal even if the process stays alive for background work;
+  the controller still closes and verifies the owned tree. `subtype: success`
+  with `is_error: true` is a failure (measured when not logged in). `--bare`
+  skips OAuth/keychain, so the adapter never uses it. `total_cost_usd` is
+  cumulative on resume, so cost is reported only for fresh history. The child
+  denies `Agent(agent-companion)` and both bridge namespaces to prevent recursive
+  delegation; user settings, hooks and plugins still load. These are protocol
+  measurements on 2.1.319, not installed-host qualification.
 - **Antigravity model selection is per session.** `session/load` forgets it,
   so the adapter applies the descriptor's `acp.setModel` after both new and loaded
   sessions. The server is Google's `agy_acp_server.par`, installed by

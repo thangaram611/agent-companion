@@ -11,10 +11,9 @@ A **harness** is the parent coding-agent surface you already work in. Supported
 now: **Claude Code** and **Codex CLI**.
 
 A **companion** is the downstream agent runtime that receives delegated work.
-Supported now: **OpenCode**, **GitHub Copilot CLI**, **Codex CLI** and **Google
-Antigravity** (Codex CLI can be both the harness and a downstream companion — the two roles are
-independent; running Codex as a companion does not require Codex as the harness,
-or vice versa).
+Supported now: **OpenCode**, **GitHub Copilot CLI**, **Codex CLI**, **Google
+Antigravity** and **Claude Code**. Both Codex CLI and Claude Code can be a harness
+or a companion; the two roles are independent.
 
 Talk to the `agent-companion` subagent in plain language. Give it the task, the
 absolute repo or worktree path, and any companion or model preference. Follow-ups
@@ -25,8 +24,8 @@ The product posture is deliberately companion-neutral:
 
 - **Bring your harness.** Install the Claude Code surface, the Codex CLI surface,
   or both.
-- **Attach your companion.** Name OpenCode, Copilot, Codex or Antigravity, or let
-  the subagent choose a ready companion from the catalog. Set a default if useful.
+- **Attach your companion.** Name OpenCode, Copilot, Codex, Antigravity or
+  Claude Code, or let the subagent choose a ready companion from the catalog. Set a default if useful.
 - **Keep the parent workflow clean.** Delegated work runs through the isolated
   subagent. Both hosts register the internal bridge at plugin/session scope;
   execution calls require the native child owner.
@@ -95,6 +94,7 @@ The table below is the current capability contract.
 | GitHub Copilot CLI | `copilot --acp` | Unsupported until qualified | Unsupported | Inherit or supported explicit model | Session id retained; cold load unqualified |
 | Codex CLI | `codex app-server` | `thread/resume` | `turn/steer` while running | Inherit or explicit override | Native thread and rollouts |
 | Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Unsupported | Session model after new/load | Native SQLite history |
+| Claude Code | `claude -p` | `--resume` saved session | Unsupported | Inherit or explicit override | Native transcripts |
 
 All support send, wait, status and cancel. Every answer runs in a new process;
 there is no shared provider runtime or adapter-selection setting. Copilot
@@ -126,6 +126,12 @@ Configuration:
 - Codex inherits configured MCP servers, whose startup can delay a turn.
   Rollouts persist under `$CODEX_HOME/sessions` (default `~/.codex/sessions`)
   without automatic cleanup. No model key is sent when inheriting its model.
+- `AGENT_COMPANION_CLAUDE_PERMISSION` accepts `default`, `acceptEdits`, `plan`,
+  `auto`, `dontAsk` or `bypassPermissions` (case-insensitive). Unset or unrecognized
+  values use `bypassPermissions`, which skips permission checks and is flagged
+  dangerous in diagnostics. Permission prompts are disabled for every mode.
+  `AGENT_COMPANION_CLAUDE_MODEL` optionally sets a model default; without an
+  explicit or saved default, Claude Code uses its own model configuration.
 - Install and sign in to Antigravity with
   `node scripts/install-antigravity-acp.mjs --login`. It verifies Google's
   signature on macOS and installs under
@@ -139,6 +145,27 @@ Configuration:
 
 See [Architecture](docs/ARCHITECTURE.md) for protocol and lifecycle details,
 and [Diagnostics](#diagnostics) for installation problems.
+
+### Claude Code as a companion
+
+Agent Companion runs the user's installed, unmodified Claude Code binary with
+that user's own credentials and does not use the Agent SDK; see the
+[vendor terms](https://code.claude.com/docs/en/legal-and-compliance).
+The binary handles login; the bridge does not implement login, extract credentials
+or proxy Anthropic requests. Billing follows the user's own plan or API setup.
+
+A Claude Code host can delegate to a separate Claude Code companion process.
+The child cannot delegate again through Agent Companion. User/project settings,
+hooks, plugins and CLAUDE.md still load; background tasks are disabled.
+Transcripts stay in `~/.claude/projects` (or `CLAUDE_CONFIG_DIR/projects` when
+configured), and follow-ups resume them in a new process. The bridge retains the
+session id and does not clean up those transcripts. There is no in-flight reply:
+`reply_unavailable` means wait or cancel. Usage reports per-turn tokens; cost is
+reported only for fresh history because Claude's resumed cost is cumulative.
+
+Claude Code 2.1.319 was measured; older versions and installed delegation on both
+hosts remain unverified. `--permission-prompts` requires at least 2.1.259.
+See the [release gates](docs/RELEASE_READINESS.md#release-gates).
 
 ## Requirements
 
@@ -154,13 +181,16 @@ and [Diagnostics](#diagnostics) for installation problems.
     with `--login`.
   - Codex CLI on `PATH`, or `CODEX_BIN=/absolute/path/to/codex`, authenticated
     via `codex login` (ChatGPT plan) or an API key.
+  - Claude Code `claude` on `PATH`, or `CLAUDE_BIN=/absolute/path/to/claude`,
+    signed in with the user's own Claude account or configured with
+    `ANTHROPIC_API_KEY`.
 - Claude Code CLI when installing the Claude surface.
 - Codex CLI when installing the Codex surface.
 
 OpenCode authentication and provider setup stays inside OpenCode. Copilot
 authentication stays inside Copilot CLI. Codex authentication stays inside
-Codex CLI. Antigravity authentication stays inside Google's ACP server and
-the login keychain. Agent Companion does not ask for or store provider secrets.
+Codex CLI. Claude authentication stays inside Claude Code. Antigravity
+authentication stays inside Google's ACP server and the login keychain. Agent Companion does not ask for or store provider secrets.
 
 ## Fast Path
 
@@ -194,6 +224,15 @@ bash setup.sh --host codex --target opencode
 
 # Claude only, Copilot default.
 bash setup.sh --host claude --target copilot
+
+# Codex host, Claude Code companion default.
+bash setup.sh --host codex --target claude
+
+# Claude Code host, separate Claude Code companion default.
+bash setup.sh --host claude --target claude
+
+# Persist Claude as the default companion for Codex state.
+AGENT_COMPANION_HOST=codex node scripts/onboard.mjs --target claude --set-default
 
 # Harness/plugin surface only. Keep any existing companion configuration.
 bash setup.sh --host both --target none
@@ -250,8 +289,8 @@ matching `ready`, not just a successful CLI exit.
 `AGENT_COMPANION_DEFAULT_TARGET` overrides the persisted `default-target`.
 If `agent_send` omits `target` and no default is configured, the bridge returns
 `TARGET_UNCONFIGURED`. Model defaults use `AGENT_COMPANION_CODEX_MODEL`,
-`AGENT_COMPANION_OPENCODE_MODEL`, Copilot's `default-model` file and the
-Antigravity descriptor default. A request can supply an explicit model override;
+`AGENT_COMPANION_OPENCODE_MODEL`, `AGENT_COMPANION_CLAUDE_MODEL`, Copilot's
+`default-model` file and the Antigravity descriptor default. A request can supply an explicit model override;
 otherwise the companion uses its configuration. Legacy configuration migration
 is described in [Architecture — State](docs/ARCHITECTURE.md#state).
 
@@ -288,8 +327,9 @@ For MCP timeout configuration and the host idle watchdog, see
 
 ### Claude Permissions
 
-The subagent needs permission to call the split MCP tools. Source checkout setup
-does this idempotently:
+These are host permissions for bridge tools, separate from the Claude companion
+permission modes described above. The subagent needs permission to call the
+split MCP tools. Source checkout setup does this idempotently:
 
 ```bash
 node scripts/install-permissions.mjs --host claude --yes
@@ -438,7 +478,9 @@ an in-flight turn. Missing native counters remain absent.
 Copilot uses native prompt counters when available and falls back to OTEL;
 `usage_update` measures context occupancy, not turn tokens. Antigravity's ACP
 surface reports no usage (measured on 1.1.1). OpenCode reports tokens and cost
-from its native events.
+from its native events. Claude Code uses per-turn `result.usage` counters;
+`modelUsage` and `total_cost_usd` include restored history. Cost is therefore
+reported only for fresh history, and a reported cost does not establish a bill.
 
 ## Runtime State And Digests
 

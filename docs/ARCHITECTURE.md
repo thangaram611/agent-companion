@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-11-05
+Last updated: 2026-11-09
 
 ## Goal
 
@@ -13,7 +13,8 @@ with the companion and is reported truthfully to the parent.
 Claude Code and Codex CLI are the current install surfaces. Both register the
 bridge at plugin/session scope so the child can inherit it. The six private
 `agent_*` tools connect that child to OpenCode,
-Copilot, Codex or Antigravity. The ownerless catalog provides read-only discovery.
+Copilot, Codex, Antigravity or Claude Code. The ownerless catalog provides
+read-only discovery.
 Each execution owns a cold provider process. CLI host measurements inform the
 controller contract; Codex desktop and operator-only TUI rows remain unqualified.
 
@@ -22,7 +23,7 @@ controller contract; Codex desktop and operator-only TUI rows remain unqualified
 | Product term | Current implementation term | Meaning |
 | --- | --- | --- |
 | Harness | host | Parent coding-agent surface, currently Claude Code or Codex CLI. |
-| Companion | target | Downstream agent runtime, currently OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity. |
+| Companion | target | Downstream agent runtime, currently OpenCode, GitHub Copilot CLI, Codex CLI, Google Antigravity, or Claude Code. |
 | Model preference | optional `agent_send` `model` | An explicit choice for this conversation; omission uses the companion's configuration. |
 | Catalog | `agent_catalog` | Read-only companion/model configuration, capabilities and readiness. |
 
@@ -136,7 +137,7 @@ and current live state. Catalog capabilities alone do not establish it: the cata
 
 ## Companion Matrix
 
-All four companions support send, bounded wait, observational status and cancel.
+All five companions support send, bounded wait, observational status and cancel.
 Each answer owns a new process, including the HTTP and ACP providers.
 
 | Companion | Per-answer runtime | Follow-up by cold resume | Reply / steer | Model selection | Native history |
@@ -145,6 +146,7 @@ Each answer owns a new process, including the HTTP and ACP providers.
 | OpenCode 2.x only | Private `opencode serve` on loopback | Saved session id | Unsupported | `provider/model`, optional variant; resolved model verified | Vendor-persisted session |
 | GitHub Copilot CLI | `copilot --acp` | `FOLLOWUP_UNSUPPORTED` until cold load is qualified | Unsupported | Inherited configuration or supported explicit model | Session id retained; cross-process load unqualified |
 | Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Unsupported | Session config option after both new and load | SQLite conversations under `~/.gemini/antigravity-acp/conversations/` |
+| Claude Code | `claude -p` stream-json over stdio | `--resume` saved session id | None; interrupt via stdin control request | Explicit override, otherwise inherited | Native session id and transcripts |
 
 OpenCode validates the 2.x authenticated `/api` contract and runtime pid. Its
 bootstrap password stays only in adapter memory. The OS cwd and `PWD` both match
@@ -169,6 +171,27 @@ reapplies an explicit model after each history load and verifies acknowledgement
 Copilot's advertised load capability alone is insufficient: cold follow-up remains
 refused pending account resolution and qualification. ACP does not simulate steer
 by cancelling and re-prompting. Usage is absent when the provider reports none.
+
+Claude Code pins a UUID with `--session-id` for fresh history and uses `--resume`
+for saved history. Each user message also has a UUID, returned as `nativeTurnId`
+once `system/init` confirms the expected session id after the write. The replayed
+user message is not the acknowledgement. Results are filtered by session id;
+`is_error: true` fails even with `subtype: success`. A result ends observation,
+not necessarily the process; the controller owns close and termination.
+Interruption sends a stdin `control_request` with subtype `interrupt`; after an
+adapter-requested interrupt, `aborted_streaming` and `aborted_tools` map to
+`interrupted`. There is no steer support.
+
+The child denies `Agent(agent-companion)`,
+`mcp__plugin_agent-companion_agent-bridge__*` and `mcp__agent-bridge__*` through
+`--disallowedTools`. User/project settings, hooks, plugins and CLAUDE.md remain
+loaded; `--bare` is never used. The adapter strips inherited `CLAUDECODE`,
+`CLAUDE_PID`, `CLAUDE_EFFORT` and `CLAUDE_CODE_*`, then sets
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and `PWD` to the requested cwd.
+`--permission-prompts none` disables prompts; the registry resolves
+`AGENT_COMPANION_CLAUDE_PERMISSION`, defaulting to `bypassPermissions`.
+Tokens come from per-turn `result.usage`; cumulative `modelUsage` is not used.
+`total_cost_usd` is included only for fresh history, never for resumed executions.
 
 ## Routing Contract
 
@@ -208,7 +231,7 @@ processes. The provider factories create an adapter with this interface:
 
 | Method / property | Contract |
 | --- | --- |
-| `start({ cwd, env, model, supervisor })` | Spawn via `supervisor.spawn(argv, opts)`; return `{ runtime }`. Startup failure becomes `failed: runtime_unavailable`. |
+| `start({ cwd, env, model, supervisor, historyId })` | Spawn via `supervisor.spawn(argv, opts)`; return `{ runtime }`. Startup failure becomes `failed: runtime_unavailable`. |
 | `openHistory({ historyId, model })` | Null id creates history; a saved id must load unchanged or throw `HistoryUnavailable`. Apply model rules and return `{ historyId, effectiveModel }`, plus effective effort where reported. |
 | `deliver({ text })` | Send verbatim once; return `{ nativeTurnId }` on native acknowledgement. Ambiguous failure throws `DeliveryUnknown`; never retry delivery. |
 | `observe({ onProgress })` | Resolve one native outcome (`completed`, `failed`, `interrupted`) with text, usage, native refs and cause. Progress carries last activity, active command, retry state and partial text. Transport loss throws `ProviderLost`. |
@@ -216,6 +239,11 @@ processes. The provider factories create an adapter with this interface:
 | `close()` | Close protocol channels; process termination belongs to the supervisor. |
 | `capabilities` | `{ followUp, steer, modelSelection, loadsHistory }`; unsupported history load refuses follow-up. |
 | `steer({ text })` | Optional when `steer` is true; Codex reports acceptance separately from observed confirmation. |
+
+The one startup exception is Claude: `start` receives the saved `historyId` so it
+can choose `--session-id` versus `--resume` at spawn. Other adapters ignore that
+argument. Claude's `openHistory` checks that a saved transcript exists; delivery
+then checks the session id from init. Init cannot be awaited before sending input.
 
 ACP's prompt response is terminal, so an earlier native session update or
 permission request supplies its delivery acknowledgement. Retryable provider
@@ -263,6 +291,10 @@ proven, state stays `unknown` and a new execution is refused. Status does not
 reconcile, publish a completion or refresh a digest. The watcher writes only its
 fenced result; controller startup or an owner wait can publish it later.
 
+Claude keeps its own transcripts under `~/.claude/projects` (or
+`CLAUDE_CONFIG_DIR/projects`). The bridge stores only the native session id as
+`historyId`, not a copy of the transcript; it does not remove native transcripts.
+
 Legacy `profiles.json`, `threads/` and `jobs/` are migration inputs only. The
 logged one-shot `phase1-migrated` conversion preserves source configuration,
 carries a default model only when none is set, consolidates uniquely mapped
@@ -303,6 +335,28 @@ The `plan_path`, profile-selection, exec, broker and daemon measurements below
 are historical evidence for designs retired on 2026-11-05. They are not current
 components or survival guarantees. Implementation-specific entries are labelled;
 full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION.md).
+
+**Claude companion findings (2026-11-09, Claude Code 2.1.319)**
+
+These operator-run protocol measurements do not qualify installed delegation
+on either host. Step 4 will publish the companion qualification report.
+
+- **Init-before-input does not exist.** A fresh process held silent for eight
+  seconds until the first user line. The following `system/init` confirms
+  identity and delivery; the replayed user message arrives with the first model
+  response and can be delayed by the API. Init may repeat each turn.
+- **`--bare` is not the right headless flag here.** It skips OAuth/keychain.
+  The adapter leaves it out to preserve the user's own login and configuration.
+- **An empty `permission_denials` does not prove the recursion guard missed.**
+  `Agent(agent-companion)` was refused in the tool result while that field stayed
+  empty; the agent also remained listed in init. Verify the tool result.
+- **Resumed `total_cost_usd` is not this turn's cost.** It includes the restored
+  conversation, as does `modelUsage`. Use per-turn `result.usage` tokens and
+  report cost only for fresh history.
+- **A terminal result is not process exit or necessarily success.** Background
+  work kept the measured process alive after a result, and a logged-out result
+  had `subtype: success` with `is_error: true`. Disable background tasks, honor
+  the error flag, and still close and verify the process tree.
 
 **Provider-reported pids (2026-11-09)**
 

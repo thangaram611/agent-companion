@@ -1,6 +1,6 @@
 # Release Readiness
 
-Last updated: 2026-11-05
+Last updated: 2026-11-09
 
 Release metadata is `0.2.0` in both plugin manifests and the private bridge
 package. Readiness requires the gates below on the reviewed candidate commit;
@@ -14,7 +14,9 @@ native owner attribution are the acceptance contract. The
 [Claude report](../probes/host-qualification/claude/REPORT-2026-11-05.md) (2.1.318)
 and [Codex report](../probes/host-qualification/codex/REPORT-2026-11-05.md) (0.166.0)
 are measured host inputs, not installed-form cleanup qualification. Codex desktop,
-operator-only TUI rows and Copilot cold load remain open release gates.
+operator-only TUI rows, Copilot cold load and Claude companion smoke on both
+hosts remain open release gates. Those older reports establish Claude as a host,
+not Claude as a companion.
 
 ## Source-Backed Compatibility Notes
 
@@ -92,6 +94,26 @@ Codex CLI companion:
   executable/helper pair after an upgrade. Transport and
   sandbox rationale belong in [Negative Results](ARCHITECTURE.md#negative-results).
 
+Claude Code companion:
+
+- Agent Companion runs the user's installed, unmodified Claude Code binary.
+  The binary handles the end user's own authentication; the bridge does not
+  implement login, extract credentials or proxy Anthropic requests. This uses
+  the CLI, not the Agent SDK. The [vendor terms](https://code.claude.com/docs/en/legal-and-compliance)
+  require an unmodified binary and end-user authentication/billing under the
+  applicable terms. This records the integration boundary, not individualized
+  vendor approval.
+- The [support article updated 2026-10-07](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+  says signed-in `claude -p` use draws subscription limits; a linked Console
+  API key can use included API credits. Billing follows native configuration;
+  a reported result cost does not establish a dollar charge.
+- Operator-run measurements on 2026-11-09 cover Claude Code 2.1.319. Older
+  versions are **UNVERIFIED**; `--permission-prompts` requires at least 2.1.259.
+  Cold resume, init-after-input delivery, interruption, recursion denial and
+  per-turn tokens are implemented and tested with fake processes. Installed
+  smoke, including Claude-host nesting with user hooks/plugins loaded, is
+  still required. See [Negative Results](ARCHITECTURE.md#negative-results).
+
 Antigravity companion:
 
 - The installer selects the live registry version, so a new install can differ
@@ -100,6 +122,16 @@ Antigravity companion:
   descriptor's policy. Usage is absent. Qualify those assumptions on the selected binary. Access and terms boundaries are [tracker item 8](MVP_TRACKER.md).
 
 ## Release Gates
+
+Claude companion implementation and qualification are tracked separately:
+
+| Gate | Status | Evidence / next check |
+| --- | --- | --- |
+| Hermetic adapter and integration suite | Done in Steps 1–2 | 499 tests on the Step 2 baseline including the supervisor fix; rerun the root suite and record any environment skips for this candidate. |
+| Role templates and documentation | Done in Step 3 | Both hosts name all five companions and agree on Claude cold resume and no in-flight reply; template/parity tests and root suite required. |
+| Live Claude companion smoke from Codex CLI | Pending, Step 4 | Installed send, cold follow-up, cancellation, usage and process cleanup. |
+| Live Claude companion smoke from Claude Code | Pending, Step 4 | Same checks plus a nested run with recursion denied and user hooks/plugins loaded. |
+| Older Claude Code versions | UNVERIFIED | 2.1.319 measured; the 2.1.259 flag minimum is not full compatibility proof. |
 
 CI runs on Ubuntu with Node 22. Install dependencies first, as
 `.github/workflows/ci.yml` does:

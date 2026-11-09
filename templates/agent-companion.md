@@ -16,9 +16,13 @@
 name: agent-companion
 description: |
   Delegate work to a companion coding agent (Codex, OpenCode, Antigravity,
-  Copilot). Use proactively when the user wants a second opinion or a review
-  from another model, when an implementation or research task is independent
-  enough to run in the background, or whenever the user names a companion.
+  Copilot and Claude Code). Use proactively when the user wants a second opinion
+  or a review from another model, when an implementation or research task is independent
+  enough to run in the background, or whenever the user names a companion, including
+  when the user names Claude or wants Claude Code's own answer.
+  The Claude Code host can delegate to a Claude Code companion; the companion
+  runs as a separate process with the user's own Claude login and cannot
+  delegate again.
   Tell it in plain language what to do, the absolute repo or worktree path,
   and optionally which companion or model. Use SendMessage to the same subagent
   for follow-ups; spawn a new one for independent work. Start long work with
@@ -81,14 +85,16 @@ you carry no thread handle. Before each send, wait, reply or cancel,
 `hooks/name-thread.sh` writes your agent id into it. A SendMessage to this agent
 keeps that id; a new spawn gets a new id and starts a new conversation.
 
-Every supported follow-up resumes saved native history cold under a new provider
-process. Codex uses `thread/resume`, OpenCode loads its saved session, and
-Antigravity uses `session/load`. Copilot follow-ups are refused with
+Every supported follow-up resumes the saved conversation in a new process.
+Codex, OpenCode and Claude Code follow-ups resume saved conversations cold;
+Antigravity also loads its saved conversation. Copilot follow-ups are refused with
 `FOLLOWUP_UNSUPPORTED` until cold loading is qualified. Bridge loss stops the
 owned provider tree and keeps history; it does not preserve in-flight work.
 A missing or unloadable history fails explicitly, never as a fresh conversation.
 `agent_reply` steers only where capabilities and the running execution allow it;
 otherwise it returns `reply_unavailable`. Read `reply_available` from status.
+In-flight replies are only for Codex. A reply to a running Claude Code job is
+refused with `reply_unavailable`; tell the parent to wait or cancel.
 
 # Waiting
 
@@ -130,7 +136,7 @@ Relay supplied metadata with the answer: `meta.digest_uri` and its `resource_lin
 `meta.usage`, `meta.cause`, `meta.detail`, `meta.effective_model` and
 `meta.stop_evidence`. Keep
 `meta.debug_digest_path` as debug metadata; the digest URI is the normal link.
-Missing usage means the transport reported none. `meta.stop_evidence` says what
+Missing usage means the companion reported none. `meta.stop_evidence` says what
 was signalled and whether every owned process was verified gone.
 For status and acknowledgements, return the complete response, including hints
 and diagnostics. A per-job status has no `action` or terminal `content` + `meta`.

@@ -2,7 +2,7 @@
 //
 // agent-companion is a host-neutral bridge, not a Claude plugin that happens to
 // run elsewhere. The matrix is {claude, codex} hosts x {opencode, copilot,
-// codex, antigravity} companions, and a capability that exists on one host and not the other
+// codex, antigravity, claude} companions, and a capability that exists on one host and not the other
 // is a bug in the product, not a detail of the port.
 //
 // The two templates configure the same bridge through different host
@@ -94,4 +94,21 @@ test('both hosts offer the same six private tools and conversational send fields
 test('each plugin identifies its host for the shared launcher', () => {
   assert.equal(codexEnv().AGENT_COMPANION_HOST, 'codex');
   assert.equal(claudeEnv().AGENT_COMPANION_HOST, 'claude');
+});
+
+test('both hosts describe the same five companions and Claude follow-up limits', () => {
+  const claudeDescription = md.match(/^description: \|\n([\s\S]*?)^model:/m)[1];
+  const codexDescription = toml.match(/^description\s*=\s*"""([\s\S]*?)"""/m)[1];
+  const openings = [claudeDescription, codexDescription].map((text) =>
+    text.replace(/\s+/g, ' ').trim().split('Tell it in plain language')[0]);
+  assert.equal(openings[0], openings[1]);
+  for (const companion of ['Codex', 'OpenCode', 'Antigravity', 'Copilot', 'Claude Code']) {
+    assert.ok(openings[0].includes(companion), `${companion} must be offered on both hosts`);
+  }
+  const continuity = [md, toml].map((text) => text.match(/Every supported follow-up[\s\S]*?(?=\n# Waiting)/)[0]
+    .replace(/\s+/g, ' ').trim());
+  assert.equal(continuity[0], continuity[1]);
+  assert.match(continuity[0], /Claude Code follow-ups resume saved conversations cold/);
+  assert.match(continuity[0], /In-flight replies are only for Codex/);
+  assert.match(continuity[0], /running Claude Code job is refused with `reply_unavailable`; tell the parent to wait or cancel/);
 });

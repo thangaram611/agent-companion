@@ -30,6 +30,20 @@ test('Claude role accepts plain language and keeps the seven instruction section
   assert.match(prose, /The companion does the work/);
 });
 
+test('Claude role names all five companions and explains Claude continuity', () => {
+  const parent = description.replace(/\s+/g, ' ');
+  for (const companion of ['Codex', 'OpenCode', 'Antigravity', 'Copilot', 'Claude Code']) {
+    assert.ok(parent.includes(companion), `${companion} must be discoverable`);
+  }
+  assert.match(parent, /when the user names Claude or wants Claude Code's own answer/);
+  assert.match(parent, /Claude Code host can delegate to a Claude Code companion/);
+  assert.match(parent, /separate process with the user's own Claude login and cannot delegate again/);
+  assert.match(prose, /Codex, OpenCode and Claude Code follow-ups resume saved conversations cold/);
+  assert.match(prose, /In-flight replies are only for Codex/);
+  assert.match(prose, /running Claude Code job is refused with `reply_unavailable`; tell the parent to wait or cancel/);
+  assert.doesNotMatch(description + body, /stream-json|stdio|--resume|thread\/resume|session\/load|\btransport\b/i);
+});
+
 test('Claude role uses the catalog for an open choice and sends only the new fields', () => {
   assert.match(prose, /Honour an explicit companion or model/);
   assert.match(prose, /read .*agent_catalog` once and choose a companion that is ready/);
@@ -112,7 +126,7 @@ test('Claude template leaves thread and session id to the host: a spawn starts a
   assert.match(prose, /hooks\/name-thread.sh.*agent id/);
   assert.match(prose, /SendMessage.*keeps that id/);
   assert.match(prose, /new spawn.*new id/);
-  assert.match(prose, /resumes saved native history cold under a new provider process/);
+  assert.match(prose, /resumes the saved conversation in a new process/);
   assert.match(prose, /Copilot follow-ups are refused with `FOLLOWUP_UNSUPPORTED`/);
   assert.match(prose, /Bridge loss stops the owned provider tree and keeps history/);
   assert.match(prose, /`agent_reply` steers only where capabilities.*`reply_unavailable`/);
