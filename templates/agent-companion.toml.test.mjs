@@ -30,6 +30,11 @@ test('Codex role accepts plain language and keeps the seven instruction sections
   assert.match(prose, /The companion does the work/);
 });
 
+test('Codex role pins low reasoning effort and inherits the parent model', () => {
+  assert.match(text, /^model_reasoning_effort = "low"$/m);
+  assert.doesNotMatch(text, /^model = /m, 'the relay inherits the parent model');
+});
+
 test('Codex role names all five companions and explains Claude continuity', () => {
   const parent = description.replace(/\s+/g, ' ');
   for (const companion of ['Codex', 'OpenCode', 'Antigravity', 'Copilot', 'Claude Code']) {
@@ -112,10 +117,10 @@ test('Codex role preserves bounded waits, per-job reply checks and cancel acknow
   assert.match(prose, /`cancelling`.*same `BUDGET` until terminal/);
 });
 
-test('Codex role uses only supported top-level fields and inherits the session model', () => {
+test('Codex role uses only supported top-level fields and inherits the session model with low effort', () => {
   const topLevel = text.replace(/"""[\s\S]*?"""/g, '""');
   assert.deepEqual([...topLevel.matchAll(/^(\w+)\s*=/gm)].map((m) => m[1]), [
-    'name', 'description', 'developer_instructions',
+    'name', 'model_reasoning_effort', 'description', 'developer_instructions',
   ]);
   assert.match(topLevel, /^name\s*=\s*"agent-companion"\s*$/m);
   assert.doesNotMatch(topLevel, /^\s*\[/m, 'role-local tables cannot add MCP authority');

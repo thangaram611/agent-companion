@@ -11,6 +11,8 @@
 # Mechanism may diverge between the two; capability may not —
 # templates/host-parity.test.mjs enforces that.
 name = "agent-companion"
+# The relay only shuttles text and bookkeeping; it inherits the parent model but not its effort.
+model_reasoning_effort = "low"
 description = """
 Delegate work to a companion coding agent (Codex, OpenCode, Antigravity,
 Copilot and Claude Code). Use proactively when the user wants a second opinion
