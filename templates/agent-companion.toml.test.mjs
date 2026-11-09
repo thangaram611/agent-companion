@@ -42,6 +42,8 @@ test('Codex role names all five companions and explains Claude continuity', () =
   assert.match(prose, /In-flight replies are only for Codex/);
   assert.match(prose, /running Claude Code job is refused with `reply_unavailable`; tell the parent to wait or cancel/);
   assert.match(prose, /Send every follow-up to the companion through `agent_send`, even when the earlier reply seems to answer it already/);
+  assert.match(prose, /A different companion is a new conversation: this thread stays bound to the companion that started it/);
+  assert.match(prose, /refused with `provider_mismatch`\. Do not retry it here\. Tell the parent to spawn a new agent-companion/);
   assert.doesNotMatch(description + body, /stream-json|stdio|--resume|thread\/resume|session\/load|\btransport\b/i);
 });
 

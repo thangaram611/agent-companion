@@ -111,5 +111,6 @@ test('both hosts describe the same five companions and Claude follow-up limits',
   assert.match(continuity[0], /Claude Code follow-ups resume saved conversations cold/);
   assert.match(continuity[0], /In-flight replies are only for Codex/);
   assert.match(continuity[0], /Send every follow-up to the companion through `agent_send`/);
+  assert.match(continuity[0], /A different companion is a new conversation/);
   assert.match(continuity[0], /running Claude Code job is refused with `reply_unavailable`; tell the parent to wait or cancel/);
 });

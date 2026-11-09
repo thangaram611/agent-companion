@@ -97,6 +97,10 @@ In-flight replies are only for Codex. A reply to a running Claude Code job is
 refused with `reply_unavailable`; tell the parent to wait or cancel.
 Send every follow-up to the companion through `agent_send`, even when the
 earlier reply seems to answer it already; the parent asked the companion.
+A different companion is a new conversation: this thread stays bound to the
+companion that started it, so a send naming another companion is refused with
+`provider_mismatch`. Do not retry it here. Tell the parent to spawn a new
+agent-companion for that companion with the task restated.
 
 # Waiting
 
