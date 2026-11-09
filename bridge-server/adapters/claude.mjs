@@ -119,11 +119,15 @@ export class ClaudeAdapter {
     this.closed = true;
     if (!this.runtime) { this._lost(new Error('adapter closed')); return Promise.resolve(); }
     if (this.closing) return this.closing;
-    this.closing = new Promise((resolve) => {
-      if (this.runtime.stdout.readableEnded || this.runtime.stdout.destroyed) resolve();
-      else { this.runtime.stdout.once('end', resolve); this.runtime.once('close', resolve); }
-    });
+    // Claude's close is stdin EOF, and it exits ~1 s later (measured 2026-11-09),
+    // longer than the controller's 500 ms close bound. The terminal result always
+    // precedes close in every measured path, so the flushed EOF is the
+    // acknowledgement; the supervisor still verifies the exit itself.
     const stdin = this.runtime.stdin;
+    this.closing = new Promise((resolve) => {
+      if (this.runtime.stdout.readableEnded || this.runtime.stdout.destroyed || stdin.writableEnded || stdin.destroyed) resolve();
+      else { this.runtime.stdout.once('end', resolve); this.runtime.once('close', resolve); stdin.once('finish', resolve); stdin.once('error', resolve); }
+    });
     if (!stdin.destroyed && !stdin.writableEnded) stdin.end();
     return this.closing;
   }

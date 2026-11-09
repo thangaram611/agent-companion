@@ -227,6 +227,10 @@ test('terminal result does not wait for background descendants; supervisor remov
   await adapter.openHistory({ historyId: null }); await adapter.deliver({ text: 'one' });
   assert.equal((await adapter.observe()).outcome, 'completed');
   assert.ok(supervisor.serialize().processes.length >= 4);
+  // Close is acknowledged by the flushed stdin EOF, not by the lingering tree's exit.
+  const clock = new ManualClock();
+  await bounded(clock, () => adapter.close(), 500, 'close_timeout');
+  assert.equal(adapter.runtime.exitCode, null);
   const closing = adapter.close();
   const cleanup = await supervisor.terminate({ graceMs: 0 }); await closing;
   assert.equal(cleanup.gone, true); assert.equal(cleanup.survivors.length, 0);
