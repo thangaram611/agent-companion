@@ -129,7 +129,7 @@ export class Controller {
     try {
       if (a.stopping) return;
       a.started = true;
-      await bounded(this.clock, () => a.adapter.start({ cwd: a.record.cwd, env: this.env, ...model, supervisor: a.supervisor }), PROTOCOL_MS, 'runtime_unavailable');
+      await bounded(this.clock, () => a.adapter.start({ cwd: a.record.cwd, env: this.env, ...model, supervisor: a.supervisor, historyId: this.records.readConversation(a.record.owner).historyId }), PROTOCOL_MS, 'runtime_unavailable');
       if (a.stopping) return;
       phase = 'history_unavailable';
       const conversation = this.records.readConversation(a.record.owner);

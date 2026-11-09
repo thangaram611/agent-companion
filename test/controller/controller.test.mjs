@@ -208,6 +208,18 @@ test('cold follow-up loads saved history, retains explicit model and omits inher
   await h.finish(third.executionId, undefined, h.adapters[2]);
 });
 
+test('start receives null for fresh history and the saved id before cold resume', async () => {
+  const h = setup();
+  const first = await h.send();
+  const fresh = calls(h.adapters[0], 'start')[0][1].historyId;
+  await h.finish(first.executionId);
+  const second = await h.send({ text: 'follow-up' });
+  const resumed = calls(h.adapters[1], 'start')[0][1].historyId;
+  await h.finish(second.executionId, undefined, h.adapters[1]);
+  assert.equal(fresh, null);
+  assert.equal(resumed, 'native-history');
+});
+
 test('unqualified follow-up and history failure never create replacement conversations', async () => {
   const h = setup({ capabilities: { loadsHistory: false } }); const first = await h.send(); await h.finish(first.executionId);
   await assert.rejects(h.send({ text: 'follow-up' }), { code: 'FOLLOWUP_UNSUPPORTED' });
