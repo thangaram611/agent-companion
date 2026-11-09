@@ -22,7 +22,7 @@ description: |
   when the user names Claude or wants Claude Code's own answer.
   The Claude Code host can delegate to a Claude Code companion; the companion
   runs as a separate process with the user's own Claude login and cannot
-  delegate again.
+  delegate through Agent Companion again.
   Tell it in plain language what to do, the absolute repo or worktree path,
   and optionally which companion or model. Use SendMessage to the same subagent
   for follow-ups; spawn a new one for independent work. Start long work with
@@ -95,6 +95,8 @@ A missing or unloadable history fails explicitly, never as a fresh conversation.
 otherwise it returns `reply_unavailable`. Read `reply_available` from status.
 In-flight replies are only for Codex. A reply to a running Claude Code job is
 refused with `reply_unavailable`; tell the parent to wait or cancel.
+Send every follow-up to the companion through `agent_send`, even when the
+earlier reply seems to answer it already; the parent asked the companion.
 
 # Waiting
 

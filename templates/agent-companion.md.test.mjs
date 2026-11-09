@@ -37,10 +37,11 @@ test('Claude role names all five companions and explains Claude continuity', () 
   }
   assert.match(parent, /when the user names Claude or wants Claude Code's own answer/);
   assert.match(parent, /Claude Code host can delegate to a Claude Code companion/);
-  assert.match(parent, /separate process with the user's own Claude login and cannot delegate again/);
+  assert.match(parent, /separate process with the user's own Claude login and cannot delegate through Agent Companion again/);
   assert.match(prose, /Codex, OpenCode and Claude Code follow-ups resume saved conversations cold/);
   assert.match(prose, /In-flight replies are only for Codex/);
   assert.match(prose, /running Claude Code job is refused with `reply_unavailable`; tell the parent to wait or cancel/);
+  assert.match(prose, /Send every follow-up to the companion through `agent_send`, even when the earlier reply seems to answer it already/);
   assert.doesNotMatch(description + body, /stream-json|stdio|--resume|thread\/resume|session\/load|\btransport\b/i);
 });
 
