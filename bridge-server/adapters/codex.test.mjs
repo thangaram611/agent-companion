@@ -37,8 +37,6 @@ process.stdout.write = (line) => {
   const frame = JSON.parse(String(line));
   if (current && frame.id === current.id && frame.result) {
     if (current.method.startsWith('thread/')) {
-      frame.result.model = current.params.model ?? 'configured-model';
-      frame.result.reasoningEffort = 'high';
       if (current.method === 'thread/start') writeFileSync(process.env.CODEX_TEST_HISTORY, frame.result.thread.id);
     }
     if (current.method === 'turn/start') {
@@ -77,6 +75,7 @@ if (process.argv[2] === 'app-server') {
   const env = { ...process.env, HOME: dir, CODEX_HOME: join(dir, 'home'), CODEX_BIN: bin,
     AGENT_COMPANION_CODEX_SANDBOX_MODE: 'workspace-write', AGENT_COMPANION_CODEX_NETWORK: 'on',
     AGENT_COMPANION_CODEX_STEER_CONFIRM_MS: '5000', CODEX_FAKE_INIT_DELAY_MS: '0',
+    CODEX_FAKE_HISTORY: join(dir, 'threads.json'),
     CODEX_FAKE_TRACE: join(dir, 'trace.jsonl'), CODEX_TEST_HISTORY: join(dir, 'history'),
     CODEX_TEST_FAULT: fault, CODEX_TEST_TREE: tree ? 'yes' : 'no', ...extraEnv };
   const records = new Records({ dir: join(dir, 'records'), log: () => {} });
@@ -157,9 +156,11 @@ test('new conversation and cold follow-up use new processes and exactly the save
     [['thread/start', undefined], ['thread/resume', 'T1']]);
   for (const m of h.trace().filter((m) => ['thread/start', 'thread/resume', 'turn/start'].includes(m.method))) {
     assert.equal(Object.hasOwn(m.params, 'model'), false);
+    assert.equal(Object.hasOwn(m.params, 'config'), false);
     for (const key of ['effort', 'reasoningEffort', 'reasoning_effort']) assert.equal(Object.hasOwn(m.params, key), false);
     assert.equal(m.params.approvalPolicy, 'never');
   }
+  assert.equal(h.trace().some((m) => m.method === 'model/list'), false);
   const sent = h.trace().filter((m) => m.method === 'turn/start');
   assert.equal(sent[0].params.input[0].text, 'exact text\n  with spaces ');
   assert.deepEqual(sent[0].params.sandboxPolicy, { type: 'workspaceWrite', networkAccess: true });
@@ -343,4 +344,137 @@ test('delivery metadata refreshes reported effort without inventing a selected o
   assert.equal(sent.selectedEffort, null);
   await h.emit(terminal());
   assert.equal((await h.wait(sent.executionId)).effectiveEffort, 'medium');
+});
+
+test('effort config is applied on start and cold resume, with paginated validation of the response model', async (t) => {
+  const h = setup(t);
+  const first = await h.send({ effort: 'low' });
+  assert.equal(first.acknowledged, true);
+  assert.equal(first.effectiveEffort, 'low');
+  await h.emit(terminal());
+  assert.equal((await h.wait(first.executionId)).effectiveEffort, 'low');
+  const next = await h.send({ text: 'follow-up', effort: 'medium' });
+  assert.equal(next.effectiveEffort, 'medium');
+  await h.emit(terminal());
+  assert.equal((await h.wait(next.executionId)).effectiveEffort, 'medium');
+  const frames = h.trace();
+  assert.deepEqual(frames.filter((m) => ['thread/start', 'thread/resume'].includes(m.method)).map((m) => [m.method, m.params.config]), [
+    ['thread/start', { model_reasoning_effort: 'low' }], ['thread/resume', { model_reasoning_effort: 'medium' }],
+  ]);
+  assert.deepEqual(frames.filter((m) => m.method === 'model/list').map((m) => m.params), [
+    { includeHidden: true }, { includeHidden: true, cursor: '1' },
+    { includeHidden: true }, { includeHidden: true, cursor: '1' },
+  ]);
+  assert.deepEqual(frames.slice(0, 6).map((m) => m.method), ['initialize', 'initialized', 'model/list', 'model/list', 'thread/start', 'turn/start']);
+  for (const frame of frames.filter((m) => m.method === 'turn/start')) {
+    assert.equal(Object.hasOwn(frame.params, 'effort'), false);
+    assert.equal(Object.hasOwn(frame.params, 'config'), false);
+  }
+});
+
+for (const [label, env, effort, code, message] of [
+  ['unknown level', {}, 'bogus', 'EFFORT_NOT_ALLOWED', /configured-model.*Use one of: low, medium, high, xhigh, max/],
+  ['model-specific level', {}, 'ultra', 'EFFORT_NOT_ALLOWED', /configured-model.*Use one of: low, medium, high, xhigh, max/],
+  ['missing model', { CODEX_FAKE_MODELS: '[]' }, 'low', 'EFFORT_NOT_ALLOWED', /no effort levels for model "configured-model".*[Oo]mit effort/],
+  ['ignored config', { CODEX_FAKE_IGNORE_EFFORT: '1' }, 'low', 'CAPABILITY_UNAVAILABLE', /did not apply effort "low".*"high"/],
+]) test(`effort refusal before delivery: ${label}`, async (t) => {
+  const h = setup(t, { env });
+  const refused = await h.send({ effort });
+  assert.equal(refused.outcome, 'failed');
+  assert.equal(refused.detail, code);
+  assert.match(refused.text, message);
+  assert.equal(h.trace().some((m) => m.method === 'turn/start'), false);
+  assert.equal(h.records.readConversation('child').historyId, null);
+  assert.equal(h.records.readConversation('child').effortOverride, undefined);
+  assert.equal(refused.stopEvidence.gone, true);
+});
+
+test('effort validation follows an explicitly selected response model, not the catalog default', async (t) => {
+  const h = setup(t);
+  const sent = await h.send({ model: 'catalog-model', effort: 'ultra' });
+  assert.equal(sent.acknowledged, true);
+  assert.equal(sent.effectiveModel, 'catalog-model');
+  assert.equal(sent.effectiveEffort, 'ultra');
+  await h.emit(terminal());
+  await h.wait(sent.executionId);
+});
+
+test('fake saves resume effort without a turn and thread/read observes it without loading', async (t) => {
+  const h = setup(t);
+  const start = async () => {
+    const adapter = h.controller.providers.codex.create();
+    await adapter.start({ cwd: h.dir, supervisor: h.controller.createSupervisor({ onRecord: () => {} }) });
+    return adapter;
+  };
+  const first = await start();
+  await h.rpc('thread/start', {});
+  await first.close();
+  const second = await start();
+  await h.rpc('thread/resume', { threadId: 'T1', config: { model_reasoning_effort: 'low' } });
+  await second.close();
+  const third = await start();
+  const saved = readFileSync(h.env.CODEX_FAKE_HISTORY, 'utf8');
+  await assert.rejects(h.rpc('thread/read', {}), /threadId/);
+  const read = await h.rpc('thread/read', { threadId: 'T1' });
+  assert.equal(read.thread.model, 'configured-model');
+  assert.equal(read.thread.reasoningEffort, 'low');
+  assert.equal(read.thread.status.type, 'notLoaded');
+  assert.deepEqual((await h.rpc('thread/loaded/list')).data, []);
+  assert.equal(readFileSync(h.env.CODEX_FAKE_HISTORY, 'utf8'), saved);
+  assert.equal((await h.rpc('thread/resume', { threadId: 'T1' })).reasoningEffort, 'low');
+  assert.equal(h.trace().some((frame) => frame.method === 'turn/start'), false);
+  await third.close();
+});
+
+for (const model of [undefined, 'configured-model', 'missing-model']) {
+  test(`refused resume preserves provider effort: ${model ?? 'saved thread model'}`, async (t) => {
+    const h = setup(t, { env: { CODEX_FAKE_MODEL: model ? 'catalog-model' : 'configured-model' } });
+    const first = await h.send();
+    assert.equal(first.effectiveEffort, 'high');
+    await h.emit(terminal()); await h.wait(first.executionId);
+    const saved = readFileSync(h.env.CODEX_FAKE_HISTORY, 'utf8');
+    // Config now differs from the saved thread; the read must use the latter.
+    h.env.CODEX_FAKE_MODEL = 'catalog-model';
+    const offset = h.trace().length;
+    const refused = await h.send({ effort: 'ultra', ...(model === undefined ? {} : { model }) });
+    assert.equal(refused.detail, 'EFFORT_NOT_ALLOWED');
+    assert.match(refused.text, new RegExp(model ?? 'configured-model'));
+    const frames = h.trace().slice(offset);
+    const nextOffset = h.trace().length;
+    const next = await h.send({ text: 'plain follow-up' });
+    assert.equal(next.effectiveEffort, 'high', 'refused level must not persist in the provider');
+    assert.equal(next.selectedEffort, null);
+    await h.emit(terminal()); await h.wait(next.executionId);
+    assert.deepEqual(frames.map((frame) => frame.method), [
+      'initialize', 'initialized', 'model/list', 'model/list', ...(model === undefined ? ['thread/read'] : []),
+    ]);
+    if (model === undefined) {
+      assert.deepEqual(frames.at(-1).params, { threadId: 'T1' });
+      assert.equal(readFileSync(h.env.CODEX_FAKE_HISTORY, 'utf8'), saved);
+    }
+    const plain = h.trace().slice(nextOffset).find((frame) => frame.method === 'thread/resume');
+    assert.equal(Object.hasOwn(plain.params, 'config'), false);
+    t.diagnostic('Refused resume frames (' + (model ?? 'saved thread model') + '): ' + frames.map((frame) => frame.method).join(' -> '));
+  });
+}
+
+test('resume validates an explicit model before config and still rejects ignored effort', async (t) => {
+  const h = setup(t);
+  const first = await h.send();
+  await h.emit(terminal()); await h.wait(first.executionId);
+  const offset = h.trace().length;
+  const accepted = await h.send({ model: 'catalog-model', effort: 'ultra' });
+  assert.equal(accepted.acknowledged, true);
+  assert.equal(accepted.effectiveModel, 'catalog-model');
+  assert.equal(accepted.effectiveEffort, 'ultra');
+  assert.equal(h.trace().slice(offset).some((frame) => frame.method === 'thread/read'), false);
+  await h.emit(terminal()); await h.wait(accepted.executionId);
+  const saved = readFileSync(h.env.CODEX_FAKE_HISTORY, 'utf8');
+  h.env.CODEX_FAKE_IGNORE_EFFORT = '1';
+  const refusalOffset = h.trace().length;
+  const ignored = await h.send({ effort: 'low' });
+  assert.equal(ignored.detail, 'CAPABILITY_UNAVAILABLE');
+  assert.match(ignored.text, /did not apply effort "low".*"ultra"/);
+  assert.equal(h.trace().slice(refusalOffset).some((frame) => frame.method === 'turn/start'), false);
+  assert.equal(readFileSync(h.env.CODEX_FAKE_HISTORY, 'utf8'), saved);
 });

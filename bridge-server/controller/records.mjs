@@ -111,7 +111,8 @@ export class Records {
       if (this.readExecution(executionId)) throw error('execution_id_busy');
       const execution = { owner, executionId, generation, provider, cwd, text, modelOverride, effortOverride, permissionMode, hostSessionId, state: 'starting', writer: 'controller', startedAt: now, processes: null };
       this._write('executions', executionId, execution);
-      this._write('conversations', owner, { owner, generation, executionId, provider, cwd, modelOverride, effortOverride, historyId });
+      // Effort becomes a conversation override only after openHistory accepts it.
+      this._write('conversations', owner, { owner, generation, executionId, provider, cwd, modelOverride, effortOverride: old?.effortOverride, historyId });
       return execution;
     });
   }

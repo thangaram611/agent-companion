@@ -40,6 +40,7 @@ const CONTRACT_MODULE_URL = pathToFileURL(
 
 export const FAKE_APP_SERVER = `
 import { appendFileSync, cpSync } from 'node:fs';
+import * as historyFs from 'node:fs';
 import {
   CODEX_PINNED_VERSION, JSONRPC_INVALID_REQUEST, contractViolation, serverFrameViolation, unhandledMethodError,
 } from ${JSON.stringify(CONTRACT_MODULE_URL)};
@@ -85,6 +86,26 @@ if (process.argv[2] !== 'app-server') {
 let loaded = [];
 let threadSeq = 0;
 let turnSeq = 0;
+// Different catalog/config defaults catch validation against the wrong model.
+const models = JSON.parse(process.env.CODEX_FAKE_MODELS || 'null') || [
+  { id: 'catalog-model', model: 'catalog-model', isDefault: true, defaultReasoningEffort: 'high',
+    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map((reasoningEffort) => ({ reasoningEffort, description: reasoningEffort })) },
+  { id: 'configured-model', model: 'configured-model', isDefault: false, defaultReasoningEffort: 'high',
+    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'].map((reasoningEffort) => ({ reasoningEffort, description: reasoningEffort })) },
+];
+const historyFile = process.env.CODEX_FAKE_HISTORY;
+const histories = historyFile && historyFs.existsSync(historyFile) ? JSON.parse(historyFs.readFileSync(historyFile, 'utf8')) : {};
+const metadata = (p) => ({
+  model: p.model ?? histories[p.threadId]?.model ?? process.env.CODEX_FAKE_MODEL ?? 'configured-model',
+  reasoningEffort: (process.env.CODEX_FAKE_IGNORE_EFFORT ? undefined : p.config?.model_reasoning_effort)
+    ?? histories[p.threadId]?.reasoningEffort ?? 'high',
+});
+const saveThread = (id, p) => {
+  const settings = histories[id] = metadata(p);
+  // Resume saves config immediately, even if no turn is ever started.
+  if (historyFile) historyFs.writeFileSync(historyFile, JSON.stringify(histories));
+  return settings;
+};
 const statuses = new Map();     // threadId -> ThreadStatus, set by fake/setStatus
 const transcripts = new Map();  // threadId -> items[], set by fake/setTranscript
 const turns = new Map();        // threadId -> Turn[], set by fake/setTurns
@@ -148,24 +169,30 @@ function handle(msg) {
     case 'fake/setTranscript': transcripts.set(p.threadId, p.items || []); reply({ ok: true }); return;
     case 'fake/setTurns': turns.set(p.threadId, p.turns || []); reply({ ok: true }); return;
     case 'fake/die': process.exit(p.code || 7); return;
+    case 'model/list': {
+      const offset = Number(p.cursor || 0);
+      reply({ data: models.slice(offset, offset + 1), nextCursor: offset + 1 < models.length ? String(offset + 1) : null });
+      return;
+    }
     case 'thread/loaded/list': reply({ data: loaded }); return;
     case 'thread/start': {
       const id = p.threadId || 'T' + (++threadSeq);
       loaded.push(id);
-      reply({ thread: { id, path: '/fake/rollout-' + id + '.jsonl', turns: [] } });
+      reply({ ...saveThread(id, p), thread: { id, path: '/fake/rollout-' + id + '.jsonl', turns: [] } });
       return;
     }
     case 'thread/resume': {
       const id = p.threadId;
       if (!loaded.includes(id)) loaded.push(id);
-      reply({ thread: { id, status: statuses.get(id) || { type: 'idle' }, turns: turns.get(id) || [] } });
+      reply({ ...saveThread(id, p), thread: { id, status: statuses.get(id) || { type: 'idle' }, turns: turns.get(id) || [] } });
       return;
     }
     // \`turns\` lives on the THREAD, as the real ThreadReadResponse declares.
     // A test that sets no turns still gets its transcript, in one turn.
     case 'thread/read':
       reply({ thread: {
-        id: p.threadId,
+        id: p.threadId, ...metadata(p),
+        status: loaded.includes(p.threadId) ? statuses.get(p.threadId) || { type: 'idle' } : { type: 'notLoaded' },
         turns: turns.get(p.threadId) || [{ id: 'TURN' + turnSeq, status: 'completed', items: transcripts.get(p.threadId) || [] }],
       } });
       return;

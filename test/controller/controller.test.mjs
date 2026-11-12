@@ -402,3 +402,35 @@ test('effort inherits on follow-up, participates in busy equality and reaches ad
   for (const method of ['start', 'openHistory']) assert.equal(Object.hasOwn(calls(h.adapters[3], method)[0][1], 'effort'), false);
   await h.finish(inherited.executionId, undefined, h.adapters[3]);
 });
+
+for (const prior of [undefined, 'low']) {
+  for (const code of ['EFFORT_NOT_ALLOWED', 'CAPABILITY_UNAVAILABLE']) {
+    test(`refused effort ${code} preserves ${prior ?? 'inherit'} for an omitted follow-up`, async () => {
+      const options = {};
+      const h = setup(options);
+      if (prior) await h.finish((await h.send({ effort: prior })).executionId);
+      options.historyError = code;
+      const refused = await h.send({ effort: 'invalid' });
+      assert.equal(refused.detail, code);
+      assert.equal(h.records.readConversation('child').effortOverride, prior);
+      assert.equal(h.records.readConversation('child').historyId, prior ? 'native-history' : null);
+      assert.equal(h.records.readExecution(refused.executionId).effortOverride, 'invalid');
+      assert.equal(calls(h.adapters.at(-1), 'deliver').length, 0);
+      delete options.historyError;
+      const next = await h.send({ text: 'follow-up' });
+      assert.equal(next.selectedEffort, prior ?? null);
+      assert.equal(calls(h.adapters.at(-1), 'openHistory')[0][1].effort, prior);
+      await h.finish(next.executionId, undefined, h.adapters.at(-1));
+    });
+  }
+}
+
+test('an omitted busy send reattaches while effort is still awaiting history validation', async () => {
+  const h = setup();
+  const first = h.send({ effort: 'low' });
+  const again = h.send();
+  const [one, two] = await Promise.all([first, again]);
+  assert.equal(one.executionId, two.executionId);
+  assert.equal(h.adapters.length, 1);
+  await h.finish(one.executionId);
+});

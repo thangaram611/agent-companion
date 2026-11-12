@@ -58,11 +58,12 @@ history and execution refusals are separate, including `NATIVE_OWNER_REQUIRED`
 and `FOLLOWUP_UNSUPPORTED`. Both role templates relay failures without changing
 the parent's choice. Omitted target uses the configured default; omitted model
 inherits configuration unless the conversation already has an override. Effort is
-a conversation override too: only Claude supports selection
-(`low`, `medium`, `high`, `xhigh`, `max`); omission inherits. No saved effort
-default exists. Codex effort selection remains unsupported because the saved
-schema omits optional request parameters; do not guess the wire name. Codex
-receives no model key when inheriting. Send acknowledgements expose target,
+a conversation override too: Claude accepts `low`, `medium`, `high`, `xhigh`, `max`;
+Codex levels depend on the model and are checked at send. Codex sends
+`config.model_reasoning_effort` on thread start/resume and verifies the reported
+effort before delivery. Refused effort is not saved on the conversation. Omission
+inherits; no saved effort default exists. Codex receives no model or effort config
+key when inheriting. Send acknowledgements expose target,
 selected/effective model and effort, and
 resolved permission mode; effective effort is null unless the provider reports it.
 Status adds activity (thinking, responding, running a command or retrying for Claude)

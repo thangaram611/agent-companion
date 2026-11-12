@@ -158,7 +158,7 @@ test('role passes named effort and relays launch metadata and running activity',
   assert.match(prose, /use Claude with low effort/);
   assert.match(prose, /Codex, high effort/);
   assert.match(prose, /Pass `model` and `effort` on `agent_send` only when named/);
-  assert.match(prose, /catalog lists each companion's effort levels/);
+  assert.match(prose, /catalog describes effort selection; Codex levels\s+depend on the model and are checked at send/);
   assert.match(prose, /unsupported effort is refused/);
   assert.match(prose, /When the job starts, relay `effective_model`, `selected_effort` and `permission_mode`/);
   assert.match(prose, /reporting a running job, relay `activity`/);

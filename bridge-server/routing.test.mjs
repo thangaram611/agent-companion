@@ -61,6 +61,9 @@ test('routing refusals retain the envelope without profiles or strengths', async
 });
 
 test('effort routing advertises Claude levels and refuses unsupported or invalid choices', () => {
+  assert.equal(getTarget('codex').capabilities.effortSelection, true);
+  assert.equal(getTarget('codex').capabilities.effortLevels, null);
+  assert.equal(resolveRouting({ target: 'codex', effort: 'low' }, {}).resolved.effort, 'low');
   const levels = ['low', 'medium', 'high', 'xhigh', 'max'];
   assert.equal(getTarget('claude').capabilities.effortSelection, true);
   assert.deepEqual(getTarget('claude').capabilities.effortLevels, levels);
@@ -69,7 +72,7 @@ test('effort routing advertises Claude levels and refuses unsupported or invalid
   assert.equal(invalid.code, 'EFFORT_NOT_ALLOWED');
   assert.equal(invalid.effort, 'minimal');
   for (const level of levels) assert.ok(invalid.hint.includes(level));
-  for (const target of ['codex', 'opencode', 'copilot', 'antigravity']) {
+  for (const target of ['opencode', 'copilot', 'antigravity']) {
     assert.equal(getTarget(target).capabilities.effortSelection, false);
     assert.equal(resolveRouting({ target, effort: 'low' }, {}).code, 'CAPABILITY_UNAVAILABLE');
     assert.equal(resolveRouting({ target }, {}).resolved.effort, null);

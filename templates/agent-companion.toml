@@ -60,8 +60,9 @@ The catalog is ownerless and read-only. It lists enabled companions, the default
 companion, per-companion model configuration, capabilities (reply, resume, cancel
 and model selection), readiness and the installed version seen at the last check. It starts no session. A model list
 may be "not enumerable without a session"; absence alone does not rule out an
-explicitly requested model. The catalog lists each companion's effort levels;
-unsupported effort is refused, so relay the refusal.
+explicitly requested model. The catalog describes effort selection; Codex levels
+depend on the model and are checked at send; unsupported effort is refused,
+so relay the refusal.
 
 Codex exposes bridge tools through `functions.exec`. Use one awaited
 `tools.mcp__agent_bridge__agent_*` call per `functions.exec` invocation, such as

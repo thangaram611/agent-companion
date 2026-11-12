@@ -46,11 +46,12 @@ remains separate from implementation; see the release gates below.
 
 ## MVP Limitations
 
-- Saved effort defaults are not implemented. Claude accepts conversation-level
-  effort; Codex effort selection remains unsupported because the saved schema
-  omits optional request parameters and cannot confirm the wire name. OpenCode,
-  Copilot and Antigravity also refuse explicit effort. Step 6 uses hermetic tests;
-  this does not establish live qualification of the new controls.
+- Saved effort defaults are not implemented. Claude and Codex accept conversation-level
+  effort. Codex levels depend on the response model and are checked at send,
+  along with the provider-reported effort, before delivery. OpenCode, Copilot and
+  Antigravity refuse explicit effort. Hermetic tests cover the bridge; the Codex
+  contract comes from 0.167.1 protocol measurements (2026-11-12), not installed-host
+  qualification of these controls.
 
 - Copilot cold follow-up is unsupported (`FOLLOWUP_UNSUPPORTED`) pending account
   resolution and qualification of cross-process history loading. It must not

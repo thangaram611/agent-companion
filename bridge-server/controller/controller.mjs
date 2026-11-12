@@ -95,8 +95,9 @@ export class Controller {
     if (conversation && conversation.provider !== provider) throw error('provider_mismatch');
     if (conversation && conversation.cwd !== cwd) throw error('cwd_mismatch');
     const modelOverride = model === undefined ? conversation?.modelOverride : model;
-    const effortOverride = effort === undefined ? conversation?.effortOverride : effort;
     const existing = conversation && this.live.get(conversation.executionId);
+    const effortOverride = effort === undefined
+      ? (existing && !existing.closed ? existing.record.effortOverride : conversation?.effortOverride) : effort;
     if (existing && !existing.closed) {
       if (existing.record.text !== text || existing.record.modelOverride !== modelOverride || existing.record.effortOverride !== effortOverride) throw error('thread_busy');
       return this._sendAttached(existing, { owner, requestId, signal });
@@ -146,7 +147,7 @@ export class Controller {
       a.record.historyId = history.historyId;
       a.record.effectiveModel = history.effectiveModel;
       a.record.effectiveEffort = history.effectiveEffort;
-      this.records.writeConversation({ ...conversation, historyId: history.historyId });
+      this.records.writeConversation({ ...conversation, historyId: history.historyId, effortOverride: a.record.effortOverride });
       a.record.state = 'delivering'; this._persist(a); this.onProgress(a.record);
       phase = 'delivery_unknown'; a.nativeActive = true;
       const ack = await bounded(this.clock, () => a.adapter.deliver({ text: a.record.text }), PROTOCOL_MS, 'DeliveryUnknown');
@@ -170,7 +171,8 @@ export class Controller {
       await this._close(a, a.record.terminal.cause);
     } catch (err) {
       if (a.stopping || a.handedOff || a.closed) return;
-      this._terminal(a, { outcome: phase === 'delivery_unknown' ? 'delivery_unknown' : 'failed', cause: 'provider_error', detail: typeof err.code === 'string' && !['RuntimeUnavailable', 'HistoryUnavailable', 'DeliveryUnknown', 'ProviderLost'].includes(err.code) ? err.code : phase, error: err.code || err.name });
+      this._terminal(a, { outcome: phase === 'delivery_unknown' ? 'delivery_unknown' : 'failed', cause: 'provider_error', detail: typeof err.code === 'string' && !['RuntimeUnavailable', 'HistoryUnavailable', 'DeliveryUnknown', 'ProviderLost'].includes(err.code) ? err.code : phase, error: err.code || err.name,
+        text: ['EFFORT_NOT_ALLOWED', 'CAPABILITY_UNAVAILABLE'].includes(err.code) ? err.message : undefined });
       await this._close(a, 'provider_error');
     }
   }

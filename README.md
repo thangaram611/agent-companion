@@ -466,12 +466,15 @@ subagent relays them and stops instead of changing the request to get around the
 
 Name effort naturally, for example "use Claude with low effort". The child passes
 `effort` only when named. Claude accepts `low`, `medium`, `high`, `xhigh`, `max`.
-Codex, OpenCode, Copilot and Antigravity currently refuse explicit effort with
-`CAPABILITY_UNAVAILABLE`; an invalid Claude level returns `EFFORT_NOT_ALLOWED`
-with the allowed levels. Codex's saved schema omits optional request parameters,
-so the bridge has not confirmed its effort parameter name. Effort is stored for
-the conversation: omitted follow-ups keep the override, and an explicit effort
-can change after completion. There is no saved effort default or new environment knob.
+Codex also accepts effort; its levels depend on the model that will run and are
+checked at send before any model turn. Invalid levels return `EFFORT_NOT_ALLOWED`
+with the model's allowed levels, or an omit-effort hint if the model is absent
+from Codex's list. If Codex does not report the requested effort, the send refuses
+with `CAPABILITY_UNAVAILABLE`. OpenCode, Copilot and Antigravity refuse explicit
+effort with `CAPABILITY_UNAVAILABLE`. Accepted effort is stored for the conversation:
+omitted follow-ups keep the override, and an explicit effort can change after
+completion. A refused effort leaves the previous override or inheritance intact.
+There is no saved effort default or new environment knob.
 
 `agent_send` returns `still_running` with a `job_id` after delivery acknowledgement.
 It includes `target`, `selected_model`, `selected_effort`, `effective_model`,

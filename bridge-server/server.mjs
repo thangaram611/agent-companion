@@ -389,6 +389,7 @@ async function handleSend(args, active, request) {
     ? (readDefaultModel(provider, active.env).model ?? undefined) : undefined;
   const sent = await active.send({ owner: args.thread, provider, cwd: args.cwd, text: args.task,
     model: args.model ?? configured, effort: args.effort ?? undefined, hostSessionId: getHostSessionId(), ...request });
+  if (sent.outcome) return asJson(terminalEnvelope(active.records.readExecution(sent.executionId), sent, 'send'));
   return asJson({ ok: true, status: 'still_running', job_id: sent.executionId, thread: args.thread,
     target: sent.target ?? provider, selected_model: sent.selectedModel ?? null, selected_effort: sent.selectedEffort ?? null,
     effective_model: sent.effectiveModel ?? null, effective_effort: sent.effectiveEffort ?? null, permission_mode: sent.permissionMode ?? null });
@@ -449,7 +450,9 @@ function handleCatalog(env) {
           ...(target.id === 'copilot' ? { allowed: [...ALLOWED_MODELS] } : {}),
         },
         effort: { selection: target.capabilities.effortSelection, levels: target.capabilities.effortLevels ?? null,
-          description: target.capabilities.effortSelection ? 'Omit to inherit the companion configuration; an explicit effort overrides this conversation.' : 'Effort selection is unsupported.' },
+          description: !target.capabilities.effortSelection ? 'Effort selection is unsupported.'
+            : target.capabilities.effortLevels ? 'Omit to inherit the companion configuration; an explicit effort overrides this conversation.'
+              : 'Levels depend on the model and are checked at send. Omit to inherit the companion configuration; an explicit effort overrides this conversation.' },
         permission: permission ? { mode: permission.mode, source: permission.source, risk: permission.risk } : null,
         capabilities: Object.fromEntries(['reply', 'resume', 'cancel', 'modelSelection', 'effortSelection']
           .map((key) => [key, target.capabilities[key]])),

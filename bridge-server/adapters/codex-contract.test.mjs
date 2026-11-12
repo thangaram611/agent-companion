@@ -38,7 +38,7 @@ if (process.argv.includes('generate-json-schema')) appendFileSync(${JSON.stringi
     await Promise.all(adapters.map((adapter) => adapter.start({ cwd: dir, supervisor })));
     assert.equal(await module.checkCodexContract(installation, env), verdict);
     assert.equal(module.getCodexContractStatus(), verdict);
-    assert.deepEqual(await adapters[0].openHistory({ historyId: null }), { historyId: 'T1', effectiveModel: undefined, effectiveEffort: undefined });
+    assert.deepEqual(await adapters[0].openHistory({ historyId: null }), { historyId: 'T1', effectiveModel: 'configured-model', effectiveEffort: 'high' });
     assert.equal(await module.checkCodexContract({ selected: { path: '/missing' } }, {}), verdict);
     assert.equal(readFileSync(count, 'utf8'), 'probe\n');
     if (verdict === 'match') {

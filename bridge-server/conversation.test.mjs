@@ -107,7 +107,9 @@ test('catalog reports effort levels and permissions from the execution environme
   const catalog = (await dispatch({ action: 'catalog' }, { controller: { env } })).structuredContent;
   assert.equal(catalog.default_target.target, 'claude');
   for (const target of catalog.targets) {
-    assert.equal(target.effort.selection, target.id === 'claude');
+    assert.equal(target.effort.selection, ['claude', 'codex'].includes(target.id));
+    if (target.id === 'codex') assert.match(target.effort.description, /[Ll]evels depend on the model and are checked at send/);
+    if (target.id === 'claude') assert.equal(target.effort.description, 'Omit to inherit the companion configuration; an explicit effort overrides this conversation.');
     assert.deepEqual(target.effort.levels, target.id === 'claude' ? ['low', 'medium', 'high', 'xhigh', 'max'] : null);
     assert.equal(typeof target.effort.description, 'string');
     const { mode, source, risk } = probePermission(getTarget(target.id), env);

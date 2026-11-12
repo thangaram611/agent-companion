@@ -736,7 +736,7 @@ test('dispatch wires the Claude provider through fake native send and cold resum
 
 test('effort refusals precede startup and acknowledgement/status/result retain launch selections', async (t) => {
   const h = await wireFixture(t);
-  for (const target of ['codex', 'opencode', 'copilot', 'antigravity']) {
+  for (const target of ['opencode', 'copilot', 'antigravity']) {
     const refusal = await h.send({ target, effort: 'low' });
     assert.equal(refusal.code, 'CAPABILITY_UNAVAILABLE');
     assert.match(refusal.error, /cannot select effort/);
@@ -791,4 +791,35 @@ test('status activity uses native state or command/text fallback and clears at t
   h.adapters[0].done.resolve({ outcome: 'completed', text: 'done' });
   await h.call({ action: 'wait', job_id: sent.job_id, thread: 'child', max_wait_sec: 5 });
   assert.equal((await status()).activity, null);
+});
+
+test('Codex accepts effort and exposes adapter refusals through send, status and saved results', async (t) => {
+  const h = codexDispatchFixture(t);
+  const send = (effort, thread) => h.call({ action: 'send', target: 'codex', cwd: h.dir, task: 'original', effort, thread });
+  const accepted = await send('low', 'accepted');
+  assert.equal(accepted.status, 'still_running');
+  assert.equal(accepted.selected_effort, 'low');
+  assert.equal(accepted.effective_effort, 'low');
+  await h.complete(accepted.job_id);
+  for (const [effort, thread, code, message] of [
+    ['ultra', 'not-allowed', 'EFFORT_NOT_ALLOWED', /configured-model.*Use one of: low, medium, high, xhigh, max/],
+    ['low', 'ignored', 'CAPABILITY_UNAVAILABLE', /did not apply effort "low"/],
+  ]) {
+    if (thread === 'ignored') h.env.CODEX_FAKE_IGNORE_EFFORT = '1';
+    const refused = await send(effort, thread);
+    assert.equal(refused.status, 'failed');
+    assert.equal(refused.action, 'send');
+    assert.equal(refused.meta.detail, code);
+    assert.match(refused.content, message);
+    assert.equal(refused.meta.selected_effort, effort);
+    assert.equal(refused.meta.native_refs.historyId, undefined);
+    const status = await h.call({ action: 'status', job_id: refused.job_id });
+    assert.equal(status.detail, code);
+    assert.equal(status.partial_text, refused.content);
+    const waited = await h.call({ action: 'wait', job_id: refused.job_id, thread });
+    assert.deepEqual(waited, { ...refused, action: 'wait' });
+    assert.equal(new Records({ dir: h.records.dir }).readResult(refused.job_id).text, refused.content);
+    if (code === 'EFFORT_NOT_ALLOWED') t.diagnostic('EFFORT_NOT_ALLOWED send result: ' + JSON.stringify(refused));
+  }
+  assert.equal(h.frames().filter((frame) => frame.method === 'turn/start').length, 1);
 });

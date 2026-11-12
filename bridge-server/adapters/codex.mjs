@@ -56,6 +56,12 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
+const validateEffort = (models, model, effort) => {
+  const advertised = models.find((entry) => entry.model === model);
+  if (!advertised) throw Object.assign(new Error(`Codex advertises no effort levels for model "${model}". Omit effort to inherit configuration.`), { code: 'EFFORT_NOT_ALLOWED' });
+  const levels = advertised.supportedReasoningEfforts.map((entry) => entry.reasoningEffort);
+  if (!levels.includes(effort)) throw Object.assign(new Error(`effort "${effort}" is not valid for Codex model "${model}". Use one of: ${levels.join(', ')}, or omit it to inherit configuration.`), { code: 'EFFORT_NOT_ALLOWED' });
+};
 
 // One execution, one stdio connection. The controller alone owns process
 // lifetime, durable state, resends (there are none) and cleanup verification.
@@ -113,21 +119,43 @@ export class CodexAdapter {
     } catch (err) { throw failure('RuntimeUnavailable', err); }
   }
 
-  async openHistory({ historyId, model }) {
+  async openHistory({ historyId, model, effort }) {
     try {
       const params = { cwd: this.cwd, sandbox: this.sandbox.mode, approvalPolicy: 'never' };
       if (model !== undefined) params.model = model;
       if (historyId != null) params.threadId = historyId;
+      const models = [];
+      if (effort !== undefined) {
+        let cursor;
+        do {
+          const page = await this._call('model/list', { includeHidden: true, ...(cursor == null ? {} : { cursor }) });
+          models.push(...page.data);
+          cursor = page.nextCursor;
+        } while (cursor != null);
+        // Resume persists config without a turn, so refuse before sending it.
+        if (historyId != null) {
+          const selectedModel = model ?? (await this._call('thread/read', { threadId: historyId })).thread.model;
+          validateEffort(models, selectedModel, effort);
+        }
+        params.config = { model_reasoning_effort: effort };
+      }
       const result = await this._call(historyId == null ? 'thread/start' : 'thread/resume', params);
       const id = result?.thread?.id;
       if (typeof id !== 'string' || !id || (historyId != null && id !== historyId)) throw new Error('thread identity not confirmed');
       // A busy resume must not turn into a second turn/start (measured to be
       // accepted by Codex). The controller only cold-resumes closed executions.
       if (result.thread.status?.type === 'active' || result.thread.turns?.some((turn) => turn.status === 'inProgress')) throw new Error('thread already active');
+      if (effort !== undefined) {
+        if (historyId == null) validateEffort(models, result.model, effort);
+        if (result.reasoningEffort !== effort) throw Object.assign(new Error(`Codex did not apply effort "${effort}" for model "${result.model}" (reported ${JSON.stringify(result.reasoningEffort)}). Omit effort to inherit configuration.`), { code: 'CAPABILITY_UNAVAILABLE' });
+      }
       this.threadId = id; this.model = model;
       this._metadata(result);
       return { historyId: id, effectiveModel: this.effectiveModel, effectiveEffort: this.effectiveEffort };
-    } catch (err) { throw failure('HistoryUnavailable', err); }
+    } catch (err) {
+      if (['EFFORT_NOT_ALLOWED', 'CAPABILITY_UNAVAILABLE'].includes(err.code)) throw err;
+      throw failure('HistoryUnavailable', err);
+    }
   }
 
   async deliver({ text }) {

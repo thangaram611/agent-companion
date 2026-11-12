@@ -86,12 +86,18 @@ test('separate writer processes cannot both acquire a generation or replace a te
   assert.equal(records.readResult('e1').text, 'one answer');
 });
 
-test('effort override persists in both existing record kinds without an effort default file', () => {
+test('effort is recorded on execution and deferred on conversation until accepted', () => {
   const records = make();
   const record = records.begin({ ...input(), effortOverride: 'low' }, 0);
   assert.equal(record.effortOverride, 'low');
   const fresh = new Records({ dir: records.dir });
   assert.equal(fresh.readExecution('e1').effortOverride, 'low');
+  assert.equal(fresh.readConversation('child').effortOverride, undefined);
+  records.writeConversation({ ...fresh.readConversation('child'), effortOverride: 'low' });
   assert.equal(fresh.readConversation('child').effortOverride, 'low');
+  records.writeExecution({ ...record, state: 'closed', cleanup: { gone: true } });
+  records.begin({ ...input('e2'), effortOverride: 'invalid' }, 1);
+  assert.equal(fresh.readConversation('child').effortOverride, 'low');
+  assert.equal(fresh.readExecution('e2').effortOverride, 'invalid');
   assert.deepEqual(readdirSync(records.dir).sort(), ['conversations', 'executions', 'locks']);
 });

@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-11-09
+Last updated: 2026-11-12
 
 ## Goal
 
@@ -134,12 +134,29 @@ configuration is inherited. Codex receives no model key in that case.
 conversation and execution records, with no saved default or environment knob.
 Omission retains a conversation's override, otherwise inherits native configuration;
 start/openHistory omit the key when inherited. Registry `capabilities.effortSelection`
-is true only for Claude, with `capabilities.effortLevels` of `low`, `medium`, `high`,
-`xhigh`, `max`; its adapter passes `--effort`. Other companions refuse effort with
-`CAPABILITY_UNAVAILABLE`. Invalid levels return `EFFORT_NOT_ALLOWED` with a level hint.
-Codex remains unsupported: the pinned contract and `test/codex-schema-dump.mjs`
-retain only required request fields, so neither confirms an optional effort
-parameter on thread/start or turn/start. No guessed parameter is sent.
+is true for Claude and Codex. Claude has `capabilities.effortLevels` of `low`,
+`medium`, `high`, `xhigh`, `max`; its adapter passes `--effort`. Codex has null
+static levels: its adapter calls `model/list` with `includeHidden: true`, following
+`nextCursor` on the execution's connection only when an effort override exists.
+Before `thread/resume`, it validates levels against the explicit model override,
+or the saved `thread.model` from a non-loading `thread/read`. Resume persists
+config even without a turn, so a refused level must never reach it. Fresh
+`thread/start` validates levels against the response model; refused new threads
+are never saved on the conversation. Both paths send `config.model_reasoning_effort`
+and check the response's reported `reasoningEffort`.
+Invalid levels or a missing model refuse `EFFORT_NOT_ALLOWED` with a level or
+omit-effort hint; a reported effort mismatch refuses `CAPABILITY_UNAVAILABLE`.
+These checks precede `turn/start` and saving the new history id. Other companions
+refuse effort with `CAPABILITY_UNAVAILABLE`.
+
+`records.begin` records the attempted effort on the execution and retains the
+conversation's previous effort. The controller saves the new override only after
+`openHistory` succeeds. A refused send therefore leaves omitted follow-ups on the
+previous override or inheritance. While validation is pending, duplicate sends
+compare against the active execution's effort. Refusals use the existing terminal
+result: the code is `detail`, the explanation is `text`, projected as send/wait
+`meta.detail` and `content`, or status `detail` and `partial_text`. A send that fails
+before acknowledgement returns that terminal envelope immediately.
 
 The send acknowledgement adds `target`, `selected_model`, `selected_effort`,
 `effective_model`, `effective_effort` and `permission_mode`. The controller resolves
@@ -373,6 +390,27 @@ The `plan_path`, profile-selection, exec, broker and daemon measurements below
 are historical evidence for designs retired on 2026-11-05. They are not current
 components or survival guarantees. Implementation-specific entries are labelled;
 full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION.md).
+
+**Codex effort selection (2026-11-12, codex-cli 0.167.1)**
+
+- **Accepted effort does not mean valid effort.** Codex accepted both `bogus` and
+  a level unsupported by the selected model. The bridge checks the model that
+  will run against the paginated `model/list`; `isDefault` is the catalog default,
+  not the user's configured or remembered model.
+- **Resume config persists without a turn.** On 0.167.1, `thread/resume` with
+  `config.model_reasoning_effort: 'high'`, followed by close without a turn, made
+  a new app-server's plain resume report `high`. Deferring the bridge's stored
+  override cannot undo that provider write. Before sending resume config, the
+  bridge validates effort for the explicit model override, or reads the saved
+  model with `thread/read { threadId }`. That read returns `thread.model` and
+  `thread.reasoningEffort` with status `notLoaded` without loading or changing
+  the thread. Unsupported effort is refused before `thread/resume`.
+- **`turn/start effort` has no response confirmation.** It changes the turn and
+  subsequent turns, but the earlier thread response still reports its old value.
+  `config.model_reasoning_effort` on `thread/start` and `thread/resume` both applies
+  the override and reports it as `reasoningEffort`. The bridge uses that path and
+  checks the reported value before delivery. This catches an ignored or renamed
+  key that the free-form config schema cannot pin. Inheritance sends no config key.
 
 **Claude companion findings (2026-11-09, Claude Code 2.1.319)**
 
