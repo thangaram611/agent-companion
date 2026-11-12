@@ -357,16 +357,28 @@ function runDrainRaw({ queuePath, payload, env = {} }) {
 }
 
 /** Start a drain, wait for it to reach the post-rename delay, then signal it. */
-function killMidDrain(queuePath, signal) {
-  return new Promise((resolve) => {
-    const p = spawn('bash', [SCRIPT], {
-      env: { ...process.env, AGENT_QUEUE_PATH: queuePath, DEBUG_DRAIN_DELAY: '5' },
-      stdio: ['pipe', 'ignore', 'ignore'],
-    });
-    p.stdin.end(JSON.stringify({ session_id: 'sid-A', tool_response: {} }));
-    setTimeout(() => p.kill(signal), 1200);
-    p.on('close', () => resolve());
+async function killMidDrain(queuePath, signal) {
+  const p = spawn('bash', [SCRIPT], {
+    env: { ...process.env, AGENT_QUEUE_PATH: queuePath, DEBUG_DRAIN_DELAY: '5' },
+    stdio: ['pipe', 'ignore', 'ignore'],
   });
+  const closed = new Promise((resolve) => p.on('close', resolve));
+  p.stdin.end(JSON.stringify({ session_id: 'sid-A', tool_response: {} }));
+
+  const renamed = () => !existsSync(queuePath) && existsSync(`${queuePath}.drain.${p.pid}`);
+  const renameDeadline = Date.now() + 3_000;
+  try {
+    while (!renamed() && Date.now() < renameDeadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(renamed(), `drain should rename $QUEUE to its .drain. snapshot within 3 seconds before ${signal}`);
+  } catch (err) {
+    p.kill('SIGKILL');
+    await closed;
+    throw err;
+  }
+  p.kill(signal);
+  await closed;
 }
 
 test('a malformed queue line cannot strand the whole queue', () => {
