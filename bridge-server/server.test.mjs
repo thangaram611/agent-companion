@@ -736,15 +736,16 @@ test('dispatch wires the Claude provider through fake native send and cold resum
 
 test('effort refusals precede startup and acknowledgement/status/result retain launch selections', async (t) => {
   const h = await wireFixture(t);
-  for (const target of ['opencode', 'copilot', 'antigravity']) {
-    const refusal = await h.send({ target, effort: 'low' });
-    assert.equal(refusal.code, 'CAPABILITY_UNAVAILABLE');
-    assert.match(refusal.error, /cannot select effort/);
+  for (const [target, levels] of [
+    ['claude', 'low, medium, high, xhigh, max'],
+    ['copilot', 'none, minimal, low, medium, high, xhigh, max'],
+  ]) {
+    const invalid = await h.send({ target, effort: 'invalid' });
+    assert.equal(invalid.code, 'EFFORT_NOT_ALLOWED');
+    assert.equal(invalid.effort, 'invalid');
+    assert.ok(invalid.hint.includes(levels));
+    t.diagnostic('EFFORT_ENVELOPE ' + target + ' ' + JSON.stringify(invalid));
   }
-  const invalid = await h.send({ target: 'claude', effort: 'invalid' });
-  assert.equal(invalid.code, 'EFFORT_NOT_ALLOWED');
-  assert.equal(invalid.effort, 'invalid');
-  assert.match(invalid.hint, /low, medium, high, xhigh, max/);
   assert.equal(h.adapters.length, 0);
   const sent = await h.send({ target: 'claude', model: 'haiku', effort: 'low' });
   assert.equal(sent.selected_model, 'haiku'); assert.equal(sent.selected_effort, 'low');
@@ -819,7 +820,7 @@ test('Codex accepts effort and exposes adapter refusals through send, status and
     const waited = await h.call({ action: 'wait', job_id: refused.job_id, thread });
     assert.deepEqual(waited, { ...refused, action: 'wait' });
     assert.equal(new Records({ dir: h.records.dir }).readResult(refused.job_id).text, refused.content);
-    if (code === 'EFFORT_NOT_ALLOWED') t.diagnostic('EFFORT_NOT_ALLOWED send result: ' + JSON.stringify(refused));
+    if (code === 'EFFORT_NOT_ALLOWED') t.diagnostic('EFFORT_ENVELOPE codex ' + JSON.stringify(refused));
   }
   assert.equal(h.frames().filter((frame) => frame.method === 'turn/start').length, 1);
 });

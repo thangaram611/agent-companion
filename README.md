@@ -464,23 +464,34 @@ companion's configuration. Refusals are `TARGET_UNCONFIGURED`,
 `TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`; the
 subagent relays them and stops instead of changing the request to get around them.
 
-Name effort naturally, for example "use Claude with low effort". The child passes
-`effort` only when named. Claude accepts `low`, `medium`, `high`, `xhigh`, `max`.
-Codex also accepts effort; its levels depend on the model that will run and are
-checked at send before any model turn. Invalid levels return `EFFORT_NOT_ALLOWED`
-with the model's allowed levels, or an omit-effort hint if the model is absent
-from Codex's list. If Codex does not report the requested effort, the send refuses
-with `CAPABILITY_UNAVAILABLE`. OpenCode, Copilot and Antigravity refuse explicit
-effort with `CAPABILITY_UNAVAILABLE`. Accepted effort is stored for the conversation:
-omitted follow-ups keep the override, and an explicit effort can change after
-completion. A refused effort leaves the previous override or inheritance intact.
-There is no saved effort default or new environment knob.
+Name effort naturally, for example "use Claude with low effort". All five
+companions accept `effort`. Claude accepts `low`, `medium`, `high`, `xhigh`, `max`;
+Copilot accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+Codex, OpenCode and Antigravity levels depend on the model that will run and are
+checked before delivery. Codex uses thread config, OpenCode uses an advertised
+model variant, and Antigravity uses an advertised model id with a level suffix.
+For OpenCode and Antigravity, effort chooses the level even if the model string
+names a different variant or suffix; selected and effective models show the result.
+Invalid levels return `EFFORT_NOT_ALLOWED` with the offered levels or an
+omit-effort hint. A selection confirmation mismatch returns
+`CAPABILITY_UNAVAILABLE`; transport and history failures remain separate. Validation precedes writes to existing native selections.
+
+Omission inherits native configuration; Copilot no longer receives a hardcoded
+`xhigh` flag. Copilot's per-model effort support is not validated, and effort is
+not live-qualified on this machine (`session/new` returns 403). Accepted effort
+is stored for the conversation: omitted follow-ups keep the override where cold
+follow-up is supported, and explicit effort can change after completion. Refused
+effort leaves the previous effort override or inheritance intact. There is no
+saved effort default or new environment knob.
 
 `agent_send` returns `still_running` with a `job_id` after delivery acknowledgement.
 It includes `target`, `selected_model`, `selected_effort`, `effective_model`,
 `effective_effort` and `permission_mode`. Selected fields are overrides; effective
 fields reflect provider reports and are null when unknown. Claude reports its
-model at init but does not report effective effort. Catalog permissions use the
+model at init but does not report effective effort. Copilot effective effort is
+also unknown. OpenCode queries variants only for an effort override, then derives
+effective effort from the reported variant settings; inheritance leaves it null.
+Antigravity derives effort from the reported model’s advertised level suffix. Catalog permissions use the
 same resolver as launch and onboarding diagnostics. Per-job status also includes
 `selected_effort`, `permission_mode` and `activity`: Claude can report `thinking`,
 `responding`, `running <command>` or `retrying`; other companions fall back to

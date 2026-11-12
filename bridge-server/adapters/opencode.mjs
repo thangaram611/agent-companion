@@ -114,7 +114,7 @@ class OpenCodeAdapter {
   get sessionPath() { return '/session/' + encodeURIComponent(this.sessionId); }
   get locationQuery() { return '?location[directory]=' + encodeURIComponent(this.cwd); }
 
-  async openHistory({ historyId, model = this.model }) {
+  async openHistory({ historyId, model = this.model, effort }) {
     try {
       const response = historyId == null
         ? await this._request('/session', { method: 'POST', body: { location: { directory: this.cwd } } })
@@ -124,21 +124,43 @@ class OpenCodeAdapter {
       this.sessionId = session.id;
       const choice = model === undefined ? String(this.env.AGENT_COMPANION_OPENCODE_MODEL || '').trim() || undefined : model;
       this.effectiveModel = { source: choice === undefined ? 'inherited' : 'selected' };
+      let resolved;
       if (choice !== undefined) {
         const parsed = parseOpenCodeModel(choice);
         if (!parsed) throw failure('ModelNotAllowed');
         const [id, variant] = parsed.modelID.split('#');
-        this.selection = { providerID: parsed.providerID, id, ...(variant ? { variant } : {}) };
+        resolved = { providerID: parsed.providerID, id, ...(variant ? { variant } : {}) };
+      } else resolved = session.model || (await this._request('/model/default' + this.locationQuery)).data?.data;
+      if (effort !== undefined) {
+        this.models = (await this._request('/model?directory=' + encodeURIComponent(this.cwd))).data?.data;
+        const name = `${resolved?.providerID}/${resolved?.id}`;
+        const variants = this.models.find(m => m.providerID === resolved?.providerID && m.id === resolved?.id)?.variants || [];
+        const matches = v => v.settings?.reasoningEffort === effort || v.id === effort;
+        const variant = variants.find(v => v.id === resolved.variant && matches(v)) || variants.find(matches);
+        const levels = [...new Set(variants.map(v => v.settings?.reasoningEffort ?? v.id))];
+        if (!variant) throw Object.assign(new Error(levels.length
+          ? `effort "${effort}" is not valid for OpenCode model "${name}". Use one of: ${levels.join(', ')}, or omit it to inherit configuration.`
+          : `OpenCode advertises no effort levels for model "${name}". Omit effort to inherit configuration.`), { code: 'EFFORT_NOT_ALLOWED' });
+        resolved = { ...resolved, variant: variant.id };
+      }
+      // Treat session model writes as persistent even without a prompt.
+      // Validate first so a refused level cannot alter existing history.
+      if (choice !== undefined || effort !== undefined) {
+        this.selection = resolved;
         const ack = await this._request(this.sessionPath + '/model', { method: 'POST', body: { model: this.selection } });
         if (ack.status !== 204) throw failure('ModelSelectionUnacknowledged');
         session = (await this._request(this.sessionPath)).data?.data;
-        this._model(session?.model);
-      } else {
-        const resolved = session.model || (await this._request('/model/default' + this.locationQuery)).data?.data;
-        this._model(resolved);
+        resolved = session?.model;
       }
-      return { historyId: this.sessionId, effectiveModel: this.effectiveModel };
-    } catch (cause) { throw failure('HistoryUnavailable', cause); }
+      this._model(resolved);
+      return { historyId: this.sessionId, effectiveModel: this.effectiveModel, effectiveEffort: this.effectiveEffort };
+    } catch (cause) {
+      if (cause.code === 'EFFORT_NOT_ALLOWED') throw cause;
+      if (effort !== undefined && ['ModelSelectionUnacknowledged', 'ModelSelectionMismatch'].includes(cause.code)) {
+        throw Object.assign(new Error(`OpenCode did not confirm effort "${effort}" (${cause.code ?? cause.message}). Omit effort to inherit configuration.`), { code: 'CAPABILITY_UNAVAILABLE' });
+      }
+      throw failure('HistoryUnavailable', cause);
+    }
   }
 
   _model(model) {
@@ -146,6 +168,8 @@ class OpenCodeAdapter {
     // The controller retains this object from openHistory. Update it with the
     // actual assistant metadata before its next progress/terminal snapshot.
     Object.assign(this.effectiveModel, { providerID: model.providerID, id: model.id, variant: model.variant ?? null });
+    this.effectiveEffort = this.models?.find(m => m.providerID === model.providerID && m.id === model.id)
+      ?.variants?.find(v => v.id === model.variant)?.settings?.reasoningEffort ?? null;
     if (this.selection && (model.providerID !== this.selection.providerID || model.id !== this.selection.id ||
         (this.selection.variant !== undefined && model.variant !== this.selection.variant))) throw failure('ModelSelectionMismatch');
   }
@@ -196,7 +220,7 @@ class OpenCodeAdapter {
             if (Number.isInteger(shell?.pid) && shell.pid > 1) await this.supervisor.recordDescendant(shell.pid);
           }
           if (['session.tool.success', 'session.tool.failed', 'session.shell.ended'].includes(event.type)) progress.activeCommand = null;
-          onProgress?.({ ...progress, lastActivityAt: this.clock.now(), partialText: this.acc.snapshot().message });
+          onProgress?.({ ...progress, lastActivityAt: this.clock.now(), partialText: this.acc.snapshot().message, effectiveEffort: this.effectiveEffort });
           if (this.acc.terminal || event.type === 'session.idle') return await this._terminal();
         }
       }
@@ -237,7 +261,7 @@ class OpenCodeAdapter {
     if (outcome === 'completed' && !assistants.length) throw failure('ModelSelectionUnverified');
     for (const assistant of assistants.toReversed()) this._model(assistant.model);
     return {
-      outcome, text: (assistants[0]?.content || []).filter(p => p.type === 'text').map(p => p.text).join(''),
+      outcome, effectiveEffort: this.effectiveEffort, text: (assistants[0]?.content || []).filter(p => p.type === 'text').map(p => p.text).join(''),
       usage: sumUsage(assistants.map(m => usageFromOpenCodeInfo({ ...m, modelID: m.model?.id }, 'opencode-server'))),
       nativeRefs: { sessionId: this.sessionId, messageId: assistants[0]?.id || this.messageId || this.nativeTurnId },
       cause: outcome === 'completed' ? 'native_complete' : 'provider_error',

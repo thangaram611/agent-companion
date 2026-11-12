@@ -95,7 +95,7 @@ export function fakeAcpDescriptor({ id = 'fake-acp', loadSession = true, updates
 }
 
 export const FAKE_ACP_AGENT = `
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 
 const env = process.env;
 const TRACE = env.ACP_FAKE_TRACE || '';
@@ -123,6 +123,10 @@ const text = (t) => ({ type: 'text', text: t });
 const update = (sessionId, u) => ({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: u } });
 const modes = () => ({ availableModes: [{ id: 'default', name: 'Default' }, { id: 'yolo', name: 'YOLO' }], currentModeId: env.ACP_FAKE_MODE || 'default' });
 
+const modelValues = JSON.parse(env.ACP_FAKE_MODELS || '[]');
+const defaultModel = env.ACP_FAKE_DEFAULT_MODEL || modelValues[0];
+const modelConfig = (model) => modelValues.length ? { configOptions: [{ id: 'model', type: 'select',
+  currentValue: model, options: modelValues.map(value => ({ value, name: value })) }] } : {};
 let sessionSeq = 0;
 const sessions = new Map();   // sessionId -> { cwd, prompts, loaded }
 let outSeq = 0;
@@ -175,20 +179,20 @@ function handle(msg) {
       return;
     case 'session/new': {
       const sessionId = 'fake-sess-' + (++sessionSeq);
-      sessions.set(sessionId, { cwd: p.cwd, prompts: 0, loaded: false });
-      reply({ sessionId, modes: modes() });
+      sessions.set(sessionId, { cwd: p.cwd, prompts: 0, loaded: false, model: defaultModel });
+      reply({ sessionId, modes: modes(), ...modelConfig(defaultModel) });
       return;
     }
     case 'session/load': {
       if (!LOAD_SESSION) { fail(-32601, '"Method not found": session/load'); return; }
       if (env.ACP_FAKE_LOAD_FAIL === '1' || !p.sessionId) { fail(-32602, 'Session not found: ' + p.sessionId); return; }
       // A loaded session comes back on the default model (Antigravity, measured).
-      sessions.set(p.sessionId, { cwd: p.cwd, prompts: 0, loaded: true, model: null });
+      sessions.set(p.sessionId, { cwd: p.cwd, prompts: 0, loaded: true, model: defaultModel });
       // History replay, as the spec requires BEFORE the response: the client
       // must not mistake it for a live turn.
       out(update(p.sessionId, { sessionUpdate: 'user_message_chunk', content: text('earlier question') }));
       out(update(p.sessionId, { sessionUpdate: 'agent_message_chunk', content: text('earlier answer') }));
-      reply({ modes: modes() });
+      reply({ modes: modes(), ...modelConfig(defaultModel) });
       return;
     }
     case 'session/prompt':
@@ -207,6 +211,7 @@ function handle(msg) {
     // echoes the option with its new current value; an id the agent does not
     // have is -32602 naming the ones it does.
     case 'session/set_config_option': {
+      if (env.ACP_FAKE_MODEL_DISCONNECT === '1') process.exit(9);
       if (p.configId !== 'model') { fail(-32602, 'Unknown config option: ' + p.configId); return; }
       const session = sessions.get(p.sessionId);
       if (!session) { fail(-32602, 'Session not found: ' + p.sessionId); return; }
@@ -214,7 +219,12 @@ function handle(msg) {
         out({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: "Model '" + p.value + "' is not available for the current authentication method.", data: { modelId: p.value, availableModels: ['fake-model-a', 'fake-model-b'] } } });
         return;
       }
-      session.model = p.value;
+      if (env.ACP_FAKE_IGNORE_MODEL !== '1') {
+        session.model = p.value;
+        // Selection is saved before any prompt; invalid writes would stick too.
+        if (env.ACP_FAKE_MODEL_STATE) writeFileSync(env.ACP_FAKE_MODEL_STATE, session.model);
+      }
+      if (modelValues.length) { reply(modelConfig(session.model)); return; }
       reply({ configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: p.value, options: [{ value: p.value, name: p.value }] }] });
       return;
     }

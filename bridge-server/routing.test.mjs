@@ -60,7 +60,7 @@ test('routing refusals retain the envelope without profiles or strengths', async
   }
 });
 
-test('effort routing advertises Claude levels and refuses unsupported or invalid choices', () => {
+test('effort routing advertises static CLI levels and defers model-specific levels to adapters', () => {
   assert.equal(getTarget('codex').capabilities.effortSelection, true);
   assert.equal(getTarget('codex').capabilities.effortLevels, null);
   assert.equal(resolveRouting({ target: 'codex', effort: 'low' }, {}).resolved.effort, 'low');
@@ -73,8 +73,12 @@ test('effort routing advertises Claude levels and refuses unsupported or invalid
   assert.equal(invalid.effort, 'minimal');
   for (const level of levels) assert.ok(invalid.hint.includes(level));
   for (const target of ['opencode', 'copilot', 'antigravity']) {
-    assert.equal(getTarget(target).capabilities.effortSelection, false);
-    assert.equal(resolveRouting({ target, effort: 'low' }, {}).code, 'CAPABILITY_UNAVAILABLE');
+    assert.equal(getTarget(target).capabilities.effortSelection, true);
+    assert.equal(resolveRouting({ target, effort: 'low' }, {}).resolved.effort, 'low');
     assert.equal(resolveRouting({ target }, {}).resolved.effort, null);
   }
+  const copilotLevels = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  assert.deepEqual(getTarget('copilot').capabilities.effortLevels, copilotLevels);
+  for (const effort of copilotLevels) assert.equal(resolveRouting({ target: 'copilot', effort }, {}).resolved.effort, effort);
+  assert.equal(resolveRouting({ target: 'copilot', effort: 'ultra' }, {}).code, 'EFFORT_NOT_ALLOWED');
 });

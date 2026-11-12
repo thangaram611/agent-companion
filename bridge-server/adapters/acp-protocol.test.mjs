@@ -7,17 +7,31 @@ import { AcpConnection, ACP_PROTOCOL_VERSION } from './acp-protocol.mjs';
 const FAKE = fakeAcpDescriptor();
 const COPILOT = getTargetById('copilot');
 const ANTIGRAVITY = getTargetById('antigravity');
+test('Antigravity effort requires an advertised family and never strips a non-level suffix', () => {
+  const configOptions = [{ id: 'model', options: ['gemini-flash-low', 'gemini-flash-high', 'gemini-flash-agent']
+    .map(value => ({ value })) }];
+  const select = model => ANTIGRAVITY.acp.selectEffort({ model, effort: 'low', configOptions });
+  assert.equal(select('gemini-flash-high'), 'gemini-flash-low');
+  assert.equal(select('gemini-flash'), 'gemini-flash-low');
+  assert.throws(() => select('gemini-flash-agent'), { code: 'EFFORT_NOT_ALLOWED' });
+  assert.equal(ANTIGRAVITY.acp.reportedEffort({ model: 'gemini-flash-agent', configOptions }), null);
+});
+
 test('the descriptors drive the argv: Copilot permission flags and optional model, the fake as a bare `--acp`', () => {
   assert.deepEqual(COPILOT.acp.args({ model: 'claude-sonnet-4.6', env: {} }), [
     '--acp',
     '--model', 'claude-sonnet-4.6',
-    '--reasoning-effort', 'xhigh',
     '--no-ask-user',
     '--allow-all-tools',
     '--allow-all-paths',
     '--allow-all-urls',
   ]);
   assert.equal(COPILOT.acp.args({}).includes('--model'), false);
+  assert.equal(COPILOT.acp.args({}).includes('--reasoning-effort'), false);
+  for (const effort of COPILOT.capabilities.effortLevels) {
+    const argv = COPILOT.acp.args({ effort });
+    assert.equal(argv[argv.indexOf('--reasoning-effort') + 1], effort);
+  }
   assert.equal(COPILOT.acp.clientName, 'copilot-acp-daemon');
   assert.deepEqual(COPILOT.acp.env({ env: {}, paths: { otelTraces: '/x/traces.jsonl' } }), {
     COPILOT_OTEL_ENABLED: 'true',

@@ -46,12 +46,15 @@ remains separate from implementation; see the release gates below.
 
 ## MVP Limitations
 
-- Saved effort defaults are not implemented. Claude and Codex accept conversation-level
-  effort. Codex levels depend on the response model and are checked at send,
-  along with the provider-reported effort, before delivery. OpenCode, Copilot and
-  Antigravity refuse explicit effort. Hermetic tests cover the bridge; the Codex
-  contract comes from 0.167.1 protocol measurements (2026-11-12), not installed-host
-  qualification of these controls.
+- Saved effort defaults are not implemented. All five companions accept
+  conversation-level effort. Codex, OpenCode and Antigravity validate the model's
+  advertised levels before delivery and verify the reported selection; validation
+  precedes selection writes to existing history. Claude and Copilot validate their
+  CLI enums before spawn. Copilot per-model support and effective effort remain
+  unknown (`session/new` 403), and Copilot effort is not live-qualified on this
+  machine. Its former unconditional `xhigh` flag is removed. Hermetic coverage and
+  2026-11-12 zero-token measurements establish these contracts, not installed-host
+  qualification. The shared effort smoke probe is added but has not been run.
 
 - Copilot cold follow-up is unsupported (`FOLLOWUP_UNSUPPORTED`) pending account
   resolution and qualification of cross-process history loading. It must not

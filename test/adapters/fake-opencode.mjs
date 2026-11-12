@@ -34,7 +34,7 @@ if (process.argv[2] === 'tool') {
   const auth = 'Basic ' + Buffer.from('opencode:' + password).toString('base64');
   const streams = new Set();
   const defaults = { providerID: 'fixture', id: process.env.FAKE_OPENCODE_DEFAULT || 'first', variant: 'default' };
-  let active, tool;
+  let active, tool, selectionWritten = false;
   const emit = (type, data) => {
     const frame = `data: ${JSON.stringify({ type, data })}\r\n\r\n`;
     for (const stream of streams) stream.write(frame);
@@ -59,8 +59,16 @@ if (process.argv[2] === 'tool') {
     for await (const chunk of req) raw += chunk;
     const body = raw ? JSON.parse(raw) : undefined;
     const path = url.pathname;
-    log({ path, method: req.method, body });
+    log({ path, query: url.search, method: req.method, body });
     if (path === '/api/info') return reply(200, { version: '2.2.5', pid: process.pid });
+    if (path === '/api/model' && (req.method !== 'GET' || url.searchParams.get('directory') !== process.cwd())) return reply(400, { error: 'model enumeration requires GET and directory' });
+    if (path === '/api/model' && mode === 'models-unavailable') return reply(503, {});
+    if (path === '/api/model') return reply(200, { data: JSON.parse(process.env.FAKE_OPENCODE_MODELS || 'null') ||
+      ['first', 'second', 'chosen', 'bare'].map(id => ({ providerID: 'fixture', id, variants: id === 'bare' ? [] : [
+        { id: id === 'chosen' ? 'fast' : 'soft', settings: { reasoningEffort: 'low' } },
+        { id: 'default', settings: { reasoningEffort: 'medium' } },
+        { id: 'high', settings: { reasoningEffort: 'high' } },
+      ] })) });
     if (path === '/api/model/default') return reply(200, { data: defaults });
     if (path === '/api/event') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -78,8 +86,14 @@ if (process.argv[2] === 'tool') {
     const [, id, operation] = path.match(/^\/api\/session\/([^/]+)(?:\/(.+))?$/) || [];
     const session = sessions[id];
     if (!session) return reply(404, {});
+    if (!operation && selectionWritten) {
+      if (mode === 'model-read-lost') { req.socket.destroy(); return; }
+      if (mode === 'session-lost-after-model') return reply(404, {});
+    }
     if (!operation) return reply(200, { data: session });
     if (operation === 'model') {
+      if (mode === 'model-write-lost') { req.socket.destroy(); return; }
+      selectionWritten = true;
       if (mode === 'model-rejected') return reply(400, {});
       if (mode !== 'model-ignored') session.model = { ...body.model, variant: body.model.variant || 'default' };
       save(); return reply(mode === 'bad-model-ack' ? 200 : 204);

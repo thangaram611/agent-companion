@@ -48,6 +48,7 @@ a live provider run.
 | `orphan.mjs` | Bridge EOF hands work to the cleanup watcher; verified stopped result survives restart, and status preserves the digest and result. Spends one Codex turn. Does not test uncatchable SIGKILL. |
 | `acp-antigravity.mjs` | Completion without invented usage, cold history reuse in a new process, explicit unsupported-steer refusal, cancellation, acknowledged model selection and bridge-loss cleanup. Requires login and an available model id; spends five turns. |
 | `claude.mjs` | Catalog/readiness, invalid-model refusal, fresh usage/cost, cold history reuse in a new process without cost, unsupported reply then cancel, and read-only transcript presence. Requires `claude` installed and signed in; budget four Haiku turns. Writes native transcripts into the operator's `~/.claude/projects` for the temporary cwd. |
+| `effort.mjs <target> [model]` | Invalid effort refused before delivery, lowest advertised level with selected/effective metadata, then cold follow-up omitting effort in a new process. Two trivial turns; Copilot skips unsupported cold follow-up and spends at most one. Refreshes target readiness; not run as part of implementation. |
 | `bridge-client.mjs` | Shared stdio MCP client, owner attribution, bounded waits and durable-record reader; no standalone probe. |
 
 The probes use the selected host's state home, or `AGENT_COMPANION_HOME` when
@@ -65,4 +66,21 @@ AGENT_COMPANION_HOST=claude node probes/smoke/smoke.mjs
 AGENT_COMPANION_HOST=claude node probes/smoke/orphan.mjs
 AGENT_COMPANION_HOST=claude node probes/smoke/acp-antigravity.mjs <available-model-id>
 AGENT_COMPANION_HOST=claude node probes/smoke/claude.mjs
+```
+
+The effort probe obtains dynamic offered levels from the bridge's refusal hint;
+static CLI enums come from the catalog. It fails before the valid send when no
+levels are advertised. Effective effort is required for Codex, OpenCode and
+Antigravity; Claude and Copilot remain unknown unless reported. Copilot's enum
+check can pass while its send fails with this machine's account 403. A skipped
+Copilot cold follow-up is not a pass. To select a model, append its available id
+(OpenCode accepts `provider/model#variant`; effort overrides the variant). These commands
+are hand-run and spend tokens; they have not been executed for this change:
+
+```sh
+AGENT_COMPANION_HOST=claude node probes/smoke/effort.mjs claude
+AGENT_COMPANION_HOST=claude node probes/smoke/effort.mjs codex
+AGENT_COMPANION_HOST=claude node probes/smoke/effort.mjs opencode
+AGENT_COMPANION_HOST=claude node probes/smoke/effort.mjs antigravity
+AGENT_COMPANION_HOST=claude node probes/smoke/effort.mjs copilot
 ```

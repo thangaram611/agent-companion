@@ -13,6 +13,7 @@ import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs'
 import { getTargetById } from '../../lib/target-registry.mjs';
 import { writeTargetChecks, isModelAllowedFor } from '../../lib/state.mjs';
 import { AcpAdapter, acpProvider } from './acp.mjs';
+import { dispatch } from '../server.mjs';
 
 const lines = (path) => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
 
@@ -230,4 +231,73 @@ test('provider factories use cached readiness without spawning and expose qualif
     assert.deepEqual(provider.create().capabilities, { followUp: loadsHistory, steer: false, modelSelection: true, loadsHistory });
   }
   assert.throws(() => acpProvider('codex'), /ACP/);
+});
+
+const agyModels = ['gemini-3.8-flash-high', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-low', 'gemini-pro-agent'];
+const agySetup = t => {
+  const h = setup(t, { descriptor: getTargetById('antigravity'), env: { ACP_FAKE_MODELS: JSON.stringify(agyModels) } });
+  h.childEnv.ACP_FAKE_MODEL_STATE = join(h.dir, 'model-state');
+  h.controller.providers.antigravity = h.controller.providers.fake;
+  h.send = (args = {}) => h.controller.send({ owner: 'child', provider: 'antigravity', cwd: h.dir, text: 'test', ...args });
+  return h;
+};
+
+test('Antigravity inherits reported effort and reapplies selected effort as a model on cold load', async t => {
+  const h = agySetup(t);
+  assert.equal((await h.finish(await h.send())).effectiveEffort, 'high');
+  assert.equal(h.frames('session/set_config_option').length, 0);
+  const first = await h.send({ model: 'gemini-3.8-flash-high', effort: 'low' });
+  assert.equal(first.effectiveModel, 'gemini-3.8-flash-low'); assert.equal(first.effectiveEffort, 'low');
+  await h.finish(first);
+  const next = await h.finish(await h.send({ text: 'again' }));
+  assert.equal(next.selectedEffort, 'low'); assert.equal(next.effectiveEffort, 'low');
+  assert.ok(h.frames('session/set_config_option').every(f => f.params.value === 'gemini-3.8-flash-low'));
+});
+
+for (const model of [undefined, 'gemini-3.8-flash-medium', 'gemini-pro-agent']) {
+  test(`Antigravity refuses effort before session config writes: ${model ?? 'current model'}`, async t => {
+    const h = agySetup(t);
+    await h.finish(await h.send({ model: 'gemini-3.8-flash-high' }));
+    const before = readFileSync(h.childEnv.ACP_FAKE_MODEL_STATE, 'utf8');
+    const writes = h.frames('session/set_config_option').length;
+    const refused = (await dispatch({ action: 'send', target: 'antigravity', thread: 'child', cwd: h.dir, task: 'refuse',
+      effort: 'ultra', ...(model ? { model } : {}) }, { controller: h.controller })).structuredContent;
+    assert.equal(refused.status, 'failed'); assert.equal(refused.meta.detail, 'EFFORT_NOT_ALLOWED');
+    assert.match(refused.content, model === 'gemini-pro-agent' ? /[Oo]mit effort/ : /high, medium, low/);
+    assert.equal(h.frames('session/set_config_option').length, writes);
+    assert.equal(h.frames('session/prompt').length, 1);
+    assert.equal(readFileSync(h.childEnv.ACP_FAKE_MODEL_STATE, 'utf8'), before);
+    if (!model) t.diagnostic('EFFORT_ENVELOPE antigravity ' + JSON.stringify(refused));
+  });
+}
+
+test('Antigravity rejects ignored effort, does not infer effort from an unrelated model suffix', async t => {
+  const h = agySetup(t);
+  assert.equal((await h.finish(await h.send({ model: 'gemini-pro-agent' }))).effectiveEffort ?? null, null);
+  h.childEnv.ACP_FAKE_IGNORE_MODEL = '1';
+  const refused = await h.send({ model: 'gemini-3.8-flash', effort: 'low' });
+  assert.equal(refused.detail, 'CAPABILITY_UNAVAILABLE');
+  assert.match(refused.text, /did not apply/);
+  assert.equal(h.frames('session/prompt').length, 1);
+});
+
+for (const effort of [undefined, 'none', 'low', 'max']) test(`Copilot launch effort ${effort ?? 'inherits'}`, async t => {
+  const h = setup(t, { descriptor: getTargetById('copilot') });
+  const result = await h.finish(await h.send({ effort }));
+  const argv = lines(h.trace)[0].argv;
+  if (effort === undefined) assert.equal(argv.includes('--reasoning-effort'), false);
+  else assert.equal(argv[argv.indexOf('--reasoning-effort') + 1], effort);
+  assert.equal(result.effectiveEffort ?? null, null);
+});
+
+
+for (const effort of [undefined, 'low']) test(`Antigravity config connection loss with ${effort ?? 'no'} effort remains HistoryUnavailable`, async t => {
+  const h = agySetup(t);
+  h.childEnv.ACP_FAKE_MODEL_DISCONNECT = '1';
+  const failed = await h.send({ model: 'gemini-3.8-flash-high', effort });
+  assert.equal(failed.detail, 'history_unavailable');
+  assert.equal(h.records.readExecution(failed.executionId).terminal.error, 'HistoryUnavailable');
+  assert.equal(h.frames('session/set_config_option').length, 1);
+  assert.equal(h.frames('session/prompt').length, 0);
+  assert.equal(h.records.readConversation('child').effortOverride, undefined);
 });

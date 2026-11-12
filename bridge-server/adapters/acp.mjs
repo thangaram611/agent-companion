@@ -42,7 +42,11 @@ class ProtocolConnection extends AcpConnection {
     const id = ++this.requestId;
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(id, { reject, resolve: (result) => {
-        if (['session/new', 'session/load'].includes(method)) this.effectiveModel = reportedModel(result);
+        if (['session/new', 'session/load'].includes(method)) {
+          this.configOptions = result?.configOptions;
+          this.effectiveModel = reportedModel(result);
+          this.effectiveEffort = this.descriptor.acp.reportedEffort?.({ model: this.effectiveModel, configOptions: this.configOptions });
+        }
         resolve(result);
       } });
       const fail = (err) => { if (err) { this.pendingRequests.delete(id); reject(err); } };
@@ -59,13 +63,23 @@ class ProtocolConnection extends AcpConnection {
     if (msg.method === 'session/request_permission') this.activity(msg.params);
   }
   async _applySessionModel(sessionId) {
-    if (!this.model || !this.descriptor.acp.setModel) return;
+    const model = this.effort !== undefined && this.descriptor.acp.selectEffort
+      ? this.descriptor.acp.selectEffort({ model: this.model ?? this.effectiveModel, effort: this.effort, configOptions: this.configOptions })
+      : this.model;
+    // Validate against the session's advertised options before any selection write.
+    if (!model || !this.descriptor.acp.setModel) return;
     try {
-      const [method, params] = this.descriptor.acp.setModel({ sessionId, model: this.model });
+      const [method, params] = this.descriptor.acp.setModel({ sessionId, model });
       const result = await this._sendRequest(method, params);
-      if (reportedModel(result) !== this.model) throw new Error('model selection was not acknowledged');
+      if (reportedModel(result) !== model) throw failure('ModelSelectionMismatch');
       this.effectiveModel = reportedModel(result);
-    } catch (err) { throw failure('MODEL_NOT_ALLOWED', err); }
+      this.configOptions = result.configOptions ?? this.configOptions;
+      this.effectiveEffort = this.descriptor.acp.reportedEffort?.({ model: this.effectiveModel, configOptions: this.configOptions });
+    } catch (err) {
+      if (this.effort !== undefined && err.code === 'ModelSelectionMismatch') throw Object.assign(new Error(`Companion did not apply effort "${this.effort}" with model "${model}": ${err.message}`), { code: 'CAPABILITY_UNAVAILABLE' });
+      if (err.code === 'ModelSelectionMismatch' || typeof err.code === 'number') throw failure('MODEL_NOT_ALLOWED', err);
+      throw err; // Transport errors become HistoryUnavailable in openHistory.
+    }
   }
   // initialize() calls kill() on version mismatch. Fail protocol requests;
   // only ProcessSupervisor may signal the owned process.
@@ -84,12 +98,13 @@ export class AcpAdapter {
     const loadsHistory = descriptor.acp.loadSession === true;
     this.capabilities = { followUp: loadsHistory, steer: false, modelSelection: descriptor.capabilities.modelSelection === true, loadsHistory };
   }
-  async start({ cwd, env = this.env, model, supervisor }) {
+  async start({ cwd, env = this.env, model, effort, supervisor }) {
     this.cwd = cwd;
     const acp = this.descriptor.acp;
     this.connection = new ProtocolConnection(this.descriptor, env, this.log, (params) => this._activity(params));
     const conn = this.connection;
     conn.model = model ?? acp.defaultModel(env);
+    conn.effort = effort;
     this.paths = {};
     try {
       // Copilot's legacy usage fallback gets an execution-private exporter;
@@ -98,7 +113,7 @@ export class AcpAdapter {
         this.telemetryDir = mkdtempSync(join(tmpdir(), 'acp-usage-'));
         this.paths.otelTraces = join(this.telemetryDir, 'traces.jsonl');
       }
-      const child = conn.child = await supervisor.spawn([binaryFor(this.descriptor, env), ...acp.args({ model: conn.model, env })], {
+      const child = conn.child = await supervisor.spawn([binaryFor(this.descriptor, env), ...acp.args({ model: conn.model, effort, env })], {
         cwd, env: { ...env, ...acp.env({ env, paths: this.paths }) }, stdio: ['pipe', 'pipe', 'pipe'],
       });
       const lost = () => conn.kill();
@@ -120,9 +135,10 @@ export class AcpAdapter {
       throw failure(err.code === 'ACP_PROTOCOL_MISMATCH' ? err.code : 'runtime_unavailable', err);
     }
   }
-  async openHistory({ historyId, model }) {
+  async openHistory({ historyId, model, effort }) {
     const conn = this.connection;
     if (model !== undefined) conn.model = model;
+    conn.effort = effort;
     try {
       if (historyId != null) {
         if (!this.capabilities.loadsHistory || !conn.agentCapabilities?.loadSession) throw failure('HistoryUnavailable');
@@ -132,9 +148,9 @@ export class AcpAdapter {
         this.sessionId = await conn.createSession(this.cwd);
         if (!this.sessionId) throw failure('HistoryUnavailable');
       }
-      return { historyId: this.sessionId, effectiveModel: conn.effectiveModel };
+      return { historyId: this.sessionId, effectiveModel: conn.effectiveModel, effectiveEffort: conn.effectiveEffort };
     } catch (err) {
-      throw err.code === 'MODEL_NOT_ALLOWED' ? err : failure('HistoryUnavailable', err);
+      throw ['MODEL_NOT_ALLOWED', 'EFFORT_NOT_ALLOWED', 'CAPABILITY_UNAVAILABLE'].includes(err.code) ? err : failure('HistoryUnavailable', err);
     }
   }
   deliver({ text }) {

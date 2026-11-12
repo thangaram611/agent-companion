@@ -12,6 +12,7 @@ import { Records } from '../controller/records.mjs';
 import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
 import { writeTargetChecks } from '../../lib/state.mjs';
 import { opencodeProvider } from './opencode.mjs';
+import { dispatch } from '../server.mjs';
 
 const fake = fileURLToPath(new URL('../../test/adapters/fake-opencode.mjs', import.meta.url));
 
@@ -112,7 +113,7 @@ test('new session and cold follow-up keep history, change PID, and record changi
   assert.ok(one.nativeRefs.nativeTurnId);
   assert.equal(h.requests().filter(r => r.path === '/api/session' && r.method === 'POST').length, 1);
   assert.deepEqual(h.requests().filter(r => r.path?.endsWith('/prompt')).map(r => r.body), [{ text }, { text: 'recall' }]);
-  assert.equal(h.requests().filter(r => r.path?.endsWith('/model')).length, 0);
+  assert.equal(h.requests().filter(r => r.path?.endsWith('/model') && r.method === 'POST').length, 0);
   for (const launch of h.requests().filter(r => r.argv)) {
     assert.deepEqual(launch.argv, ['serve', '--hostname', '127.0.0.1', '--port', '0']);
     assert.equal(launch.cwd, h.dir); assert.equal(launch.pwd, h.dir);
@@ -132,8 +133,8 @@ for (const [label, extra, args] of [
   assert.equal(result.outcome, 'completed');
   assert.deepEqual(result.effectiveModel, { providerID: 'fixture', id: 'chosen', variant: 'fast', source: 'selected' });
   const calls = h.requests();
-  assert.ok(calls.findIndex(r => r.path?.endsWith('/model')) < calls.findIndex(r => r.path?.endsWith('/prompt')));
-  assert.deepEqual(calls.find(r => r.path?.endsWith('/model')).body, { model: { providerID: 'fixture', id: 'chosen', variant: 'fast' } });
+  assert.ok(calls.findIndex(r => r.path?.endsWith('/model') && r.method === 'POST') < calls.findIndex(r => r.path?.endsWith('/prompt')));
+  assert.deepEqual(calls.find(r => r.path?.endsWith('/model') && r.method === 'POST').body, { model: { providerID: 'fixture', id: 'chosen', variant: 'fast' } });
 });
 
 for (const mode of ['model-rejected', 'model-ignored', 'bad-model-ack']) test(`${mode} refuses delivery`, async t => {
@@ -240,4 +241,112 @@ test('provider failure yields failed and close only closes HTTP channels', async
   // close has no process-signalling authority; cleanup belongs to controller.
   assert.equal(pidAlive(h.supervisors[1].record.pid), true);
   await h.finish(sent);
+});
+
+test('OpenCode effort uses advertised variants and reports only selected effort through cold follow-up', async t => {
+  const h = setup(t);
+  const inherited = await h.finish(await h.send());
+  assert.equal(inherited.effectiveEffort, null);
+  assert.equal(h.requests().some(r => r.path?.endsWith('/model') && r.method === 'POST'), false);
+  const selected = await h.send({ effort: 'low' });
+  assert.equal(selected.effectiveEffort, 'low');
+  assert.equal((await h.finish(selected)).effectiveEffort, 'low');
+  assert.deepEqual(h.requests().find(r => r.path?.endsWith('/model') && r.method === 'POST').body,
+    { model: { providerID: 'fixture', id: 'first', variant: 'soft' } });
+  h.env.FAKE_OPENCODE_DEFAULT = 'bare';
+  const next = await h.finish(await h.send({ text: 'follow-up' }));
+  assert.equal(next.selectedEffort, 'low'); assert.equal(next.effectiveEffort, 'low');
+  assert.equal(next.effectiveModel.id, 'first');
+});
+
+for (const [model, effort, message] of [
+  [undefined, 'ultra', /fixture\/first.*low, medium, high/],
+  ['fixture/bare', 'low', /no effort levels.*[Oo]mit effort/],
+]) test(`OpenCode refuses effort before a persistent model write: ${model ?? 'saved model'}`, async t => {
+  const h = setup(t);
+  await h.finish(await h.send({ model: 'fixture/first#high' }));
+  const saved = readFileSync(join(h.dir, 'history.json'), 'utf8');
+  const offset = h.requests().length;
+  const refused = (await h.settle(dispatch({ action: 'send', target: 'opencode', thread: 'child', cwd: h.dir,
+    task: 'refuse', effort, ...(model ? { model } : {}) }, { controller: h.controller }))).structuredContent;
+  assert.equal(refused.status, 'failed'); assert.equal(refused.meta.detail, 'EFFORT_NOT_ALLOWED');
+  assert.match(refused.content, message);
+  assert.equal(h.requests().slice(offset).some(r => r.method === 'POST' && /\/(model|prompt)$/.test(r.path)), false);
+  assert.equal(readFileSync(join(h.dir, 'history.json'), 'utf8'), saved);
+  if (!model) {
+    t.diagnostic('EFFORT_ENVELOPE opencode ' + JSON.stringify(refused));
+    const next = await h.finish(await h.send());
+    assert.equal(next.effectiveEffort, null); assert.equal(next.selectedEffort, undefined);
+    assert.equal(next.effectiveModel.variant, 'high');
+  }
+});
+
+test('OpenCode effort overrides an older variant, accepts matching aliases, and detects ignored selection', async t => {
+  const h = setup(t);
+  await h.finish(await h.send({ model: 'fixture/chosen#fast', effort: 'low' }));
+  const changed = await h.finish(await h.send({ effort: 'high' }));
+  assert.equal(changed.effectiveEffort, 'high');
+  h.env.FAKE_OPENCODE_MODE = 'model-ignored';
+  const offset = h.requests().length;
+  const refused = await h.send({ effort: 'low' });
+  assert.equal(refused.detail, 'CAPABILITY_UNAVAILABLE');
+  assert.equal(h.requests().slice(offset).some(r => r.path?.endsWith('/prompt')), false);
+  assert.equal(h.records.readConversation('child').effortOverride, 'high');
+});
+
+test('OpenCode effort selects a variant on its configured model', async t => {
+  const h = setup(t, { AGENT_COMPANION_OPENCODE_MODEL: 'fixture/chosen#fast' });
+  const sent = (await h.settle(dispatch({ action: 'send', target: 'opencode', thread: 'child', cwd: h.dir,
+    task: 'select high', effort: 'high' }, { controller: h.controller }))).structuredContent;
+  assert.equal(sent.status, 'still_running');
+  assert.equal(sent.effective_effort, 'high');
+  await h.finish({ executionId: sent.job_id });
+});
+
+for (const [mode, code] of [
+  ['bad-model-ack', 'CAPABILITY_UNAVAILABLE'],
+  ...['model-rejected', 'model-write-lost', 'model-read-lost', 'session-lost-after-model'].map(mode => [mode, 'history_unavailable']),
+]) test(`OpenCode ${mode} effort selection is ${code} before prompting`, async t => {
+  const h = setup(t, { FAKE_OPENCODE_MODE: mode });
+  const refused = await h.send({ effort: 'low' });
+  assert.equal(refused.detail, code);
+  assert.equal(h.requests().some(r => r.path?.endsWith('/prompt')), false);
+  assert.equal(h.records.readConversation('child').effortOverride, undefined);
+});
+
+
+test('OpenCode effort overrides the variant named on the same send', async t => {
+  const h = setup(t);
+  const sent = (await h.settle(dispatch({ action: 'send', target: 'opencode', thread: 'child', cwd: h.dir,
+    task: 'select low', model: 'fixture/first#high', effort: 'low' }, { controller: h.controller }))).structuredContent;
+  assert.equal(sent.status, 'still_running');
+  assert.equal(sent.selected_model, 'fixture/first#high');
+  assert.equal(sent.effective_model.variant, 'soft');
+  assert.equal(sent.effective_effort, 'low');
+  const result = await h.finish({ executionId: sent.job_id });
+  assert.equal(result.selectedModel, 'fixture/first#high');
+  assert.equal(result.effectiveModel.variant, 'soft');
+  assert.equal(result.effectiveEffort, 'low');
+});
+
+for (const effort of [undefined, 'low']) test(`OpenCode reapplies its environment model on resume with ${effort ?? 'inherited'} effort`, async t => {
+  const h = setup(t, { AGENT_COMPANION_OPENCODE_MODEL: 'fixture/first#high' });
+  await h.finish(await h.send({ effort }));
+  h.env.AGENT_COMPANION_OPENCODE_MODEL = 'fixture/second#high';
+  const resumed = await h.finish(await h.send({ text: 'resume' }));
+  assert.equal(resumed.effectiveModel.id, 'second');
+  assert.equal(resumed.effectiveModel.variant, effort ? 'soft' : 'high');
+  assert.equal(resumed.effectiveEffort, effort ?? null);
+});
+
+for (const model of [undefined, 'fixture/chosen#fast']) test(`OpenCode without effort avoids unavailable model enumeration: ${model ?? 'inherited model'}`, async t => {
+  const h = setup(t, { FAKE_OPENCODE_MODE: 'models-unavailable' });
+  for (const text of ['fresh', 'resume']) {
+    const sent = await h.send({ model, text });
+    const result = await h.finish(sent);
+    assert.equal(result.outcome, 'completed');
+    assert.equal(sent.effectiveEffort, null);
+    assert.equal(result.effectiveEffort, null);
+  }
+  assert.equal(h.requests().some(r => r.path === '/api/model'), false);
 });

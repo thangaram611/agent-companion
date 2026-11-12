@@ -134,7 +134,7 @@ configuration is inherited. Codex receives no model key in that case.
 conversation and execution records, with no saved default or environment knob.
 Omission retains a conversation's override, otherwise inherits native configuration;
 start/openHistory omit the key when inherited. Registry `capabilities.effortSelection`
-is true for Claude and Codex. Claude has `capabilities.effortLevels` of `low`,
+is true for all five companions. Claude has `capabilities.effortLevels` of `low`,
 `medium`, `high`, `xhigh`, `max`; its adapter passes `--effort`. Codex has null
 static levels: its adapter calls `model/list` with `includeHidden: true`, following
 `nextCursor` on the execution's connection only when an effort override exists.
@@ -146,8 +146,42 @@ are never saved on the conversation. Both paths send `config.model_reasoning_eff
 and check the response's reported `reasoningEffort`.
 Invalid levels or a missing model refuse `EFFORT_NOT_ALLOWED` with a level or
 omit-effort hint; a reported effort mismatch refuses `CAPABILITY_UNAVAILABLE`.
-These checks precede `turn/start` and saving the new history id. Other companions
-refuse effort with `CAPABILITY_UNAVAILABLE`.
+These checks precede `turn/start` and saving the new history id.
+
+OpenCode has null static levels. It resolves the explicit or environment model,
+otherwise the saved session model or native default. The environment model is
+reapplied on resume. With an effort override, it reads
+`/api/model?directory=<cwd>` and validates the level against that model's variants
+**before** POSTing `/api/session/{id}/model`. Effort chooses the variant even when
+the model string carries a different `#variant`; selected and effective model
+fields make the result visible. The reported variant confirms the selection and
+its advertised `settings.reasoningEffort` supplies effective effort. Without an
+effort override, `/model` is not queried and effective effort stays null.
+Only `ModelSelectionUnacknowledged` and `ModelSelectionMismatch` become
+`CAPABILITY_UNAVAILABLE` for effort selection; HTTP, transport and session errors
+remain `HistoryUnavailable`.
+
+Antigravity also has null static levels. Its descriptor derives the family and
+levels from the session's advertised model options. It validates **before**
+`session/set_config_option`, after new/load has returned the current options.
+Effort chooses the level regardless of the suffix in the requested model id.
+The reported `currentValue` confirms the selected model and its advertised level
+suffix supplies effective effort. Selection is reapplied after load, which forgets
+the model. The shared ACP adapter calls descriptor hooks without companion-id
+branches. ACP preserves JSON-RPC error codes to distinguish provider refusals
+(`MODEL_NOT_ALLOWED`) from transport failures (`HistoryUnavailable`); only a
+model confirmation mismatch maps to `CAPABILITY_UNAVAILABLE` when selecting effort.
+SPEC-2 does not measure pre-turn write durability for OpenCode or
+Antigravity; both paths treat selection writes as persistent, so refusal is safe
+either way. Their fakes persist writes before any prompt to test this ordering.
+
+Copilot uses the static CLI enum `none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max`. Off-enum values are refused before spawn. Only a selected effort
+adds `--reasoning-effort`; omission inherits configuration. Per-model support,
+effective effort reporting and selection persistence are unmeasured because
+`session/new` returns 403 on this machine. No session effort shape is guessed.
+Claude likewise rejects off-enum effort before spawn; its CLI selection persistence
+is not measured here. Neither static refusal reaches a native selection write.
 
 `records.begin` records the attempted effort on the execution and retains the
 conversation's previous effort. The controller saves the new override only after
@@ -162,7 +196,7 @@ The send acknowledgement adds `target`, `selected_model`, `selected_effort`,
 `effective_model`, `effective_effort` and `permission_mode`. The controller resolves
 these from records and history/delivery metadata, including Claude's init model;
 the server does not inspect adapters. Overrides are distinct from provider reports:
-Claude's effective effort stays null. Results publish `selected_effort` alongside
+Claude's and Copilot's effective effort stay null. Results publish `selected_effort` alongside
 `effective_effort`; status also carries `selected_effort` and `permission_mode`.
 The pure exported `probePermission(descriptor, env)` is shared with diagnostics,
 catalog and the execution's permission snapshot; changing env later cannot change
@@ -411,6 +445,24 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
   the override and reports it as `reasoningEffort`. The bridge uses that path and
   checks the reported value before delivery. This catches an ignored or renamed
   key that the free-form config schema cannot pin. Inheritance sends no config key.
+
+**Other companion effort findings (2026-11-12, zero-token measurements)**
+
+- **OpenCode 2.2.7 effort is a model variant.** `/api/model?directory=<cwd>`
+  advertised variants for 23 of 38 models; their level sets differ. Variant ids
+  equalled `settings.reasoningEffort` in this measurement, but the bridge also
+  handles aliases. Select the advertised variant and verify the session's report.
+  Pre-turn persistence was not measured; validate before the session model POST.
+- **Antigravity 1.1.1 effort lives in the model id.** The model option advertises
+  `gemini-3.8-flash-high`, `-medium` and `-low`, with no separate effort option.
+  `session/load` forgets the selected model. Reapply after load, validating the
+  family and level before any config-option write. Pre-turn durability was not
+  measured; the ordering protects native history if the write persists.
+- **Copilot 1.0.109's xhigh pin had no measurement behind it.** The bridge removed
+  that unconditional launch flag so omission inherits configuration. The CLI
+  enum is measured, but per-model support and session effort reports remain
+  unknown: this account returns `403 unauthorized: not authorized to use this
+  Copilot feature` on `session/new`. Effort is not live-qualified here.
 
 **Claude companion findings (2026-11-09, Claude Code 2.1.319)**
 
