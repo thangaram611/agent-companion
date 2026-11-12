@@ -20,6 +20,12 @@ process.stdout.write = (chunk, ...args) => {
   const update = frame.method === 'session/update';
   const terminal = frame.result?.stopReason;
   const fault = env.ACP_FIXTURE_FAULT;
+  const privateData = { category: 'permission_denied', status: 403, headers: ['Authorization: Bearer SECRET_HEADER'], response: 'SECRET_RESPONSE_BODY' };
+  if (frame.result?.sessionId && fault?.startsWith('session-new-')) {
+    const message = fault === 'session-new-error' ? '403 "unauthorized: not authorized to use this Copilot feature\\n"'
+      : fault === 'session-new-object-error' ? privateData : '';
+    frame = { jsonrpc: '2.0', id: frame.id, error: { code: -32603, message, data: privateData } };
+  }
   // Keep the fixture command active until cancel, independent of pipe chunking.
   if (update && env.ACP_FIXTURE_TREE === '1') {
     if (frame.params.update.sessionUpdate === 'tool_call_update') return true;
@@ -33,7 +39,8 @@ process.stdout.write = (chunk, ...args) => {
   }
   if ((update || terminal) && fault === 'silent') return true;
   if (update && ['terminal-only', 'prompt-error'].includes(fault)) return true;
-  if (terminal && fault === 'prompt-error') frame = { jsonrpc: '2.0', id: frame.id, error: { code: -32000, message: 'prompt refused' } };
+  if (terminal && ['prompt-error', 'prompt-error-after-ack'].includes(fault)) frame = { jsonrpc: '2.0', id: frame.id,
+    error: { code: -32000, message: 'prompt refused', data: privateData } };
   if (frame.result?.configOptions && fault === 'wrong-model') frame.result.configOptions[0].currentValue = 'wrong-model';
   if (frame.result?.configOptions && fault === 'missing-model') frame.result = {};
   if (terminal && env.ACP_FIXTURE_STOP) frame.result.stopReason = env.ACP_FIXTURE_STOP;

@@ -44,7 +44,16 @@ if (process.argv[2] === 'tool') {
     const { session, assistant, user } = active;
     assistant.tokens = { input: 11, output: 3, cache: { read: 2, write: 0 }, reasoning: 0 };
     assistant.cost = 0.01;
-    session.messages.push({ id: randomUUID(), type: 'idle', outcome });
+    const idle = { id: randomUUID(), time: { created: Date.now() }, type: 'idle', outcome };
+    if (mode === 'quota') {
+      const error = { type: 'provider.quota', message: 'Add usage credits or subscribe and save up to 66%: https://ollama.com/plans (ref: quota-fixture)',
+        status: 402, response: { body: 'SECRET_RESPONSE_BODY', headers: { authorization: 'Bearer SECRET_HEADER' } } };
+      Object.assign(assistant, { agent: 'build', time: { created: Date.now(), completed: Date.now() }, finish: 'error' });
+      if (process.env.FAKE_OPENCODE_QUOTA_SOURCE !== 'idle') assistant.error = error;
+      if (process.env.FAKE_OPENCODE_QUOTA_SOURCE !== 'assistant') idle.error = error;
+      if (process.env.FAKE_OPENCODE_EMPTY_FINAL === '1') session.messages.push({ ...assistant, id: randomUUID(), content: [] });
+    }
+    session.messages.push(idle);
     session.outcome = outcome;
     save();
     emit('session.step.ended', { sessionID: session.id, assistantMessageID: assistant.id, ...assistant, finish: 'stop' });
@@ -124,8 +133,10 @@ if (process.argv[2] === 'tool') {
     emit('session.text.delta', { sessionID: 'foreign', assistantMessageID: 'foreign', ordinal: 0, delta: 'WRONG' });
     emit('session.step.started', { sessionID: id, assistantMessageID: assistant.id, model: assistant.model });
     const answer = body.text === 'recall' ? session.messages.find(m => m.type === 'user').text : 'answer: ' + body.text;
-    assistant.content.push({ type: 'text', text: answer });
-    emit('session.text.delta', { sessionID: id, assistantMessageID: assistant.id, ordinal: 0, delta: answer });
+    if (mode !== 'quota' || process.env.FAKE_OPENCODE_PARTIAL === '1') {
+      assistant.content.push({ type: 'text', text: answer });
+      emit('session.text.delta', { sessionID: id, assistantMessageID: assistant.id, ordinal: 0, delta: answer });
+    }
     if (['tool', 'retry'].includes(mode)) {
       tool = fork(import.meta.filename, ['tool'], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
       const [toolRow] = await once(tool, 'message');
@@ -133,7 +144,7 @@ if (process.argv[2] === 'tool') {
       emit('session.tool.progress', { sessionID: id, assistantMessageID: assistant.id, id: 'tool', metadata: { shellID: 'sh_fixture' } });
       if (mode === 'retry') emit('session.retry.scheduled', { sessionID: id, assistantMessageID: assistant.id, attempt: 2, at: Date.now(), error: { type: 'rate_limit', message: 'retrying' } });
     } else if (mode !== 'drop-stream' && mode !== 'die') {
-      finish(mode === 'provider-error' ? 'failed' : 'succeeded');
+      finish(['provider-error', 'quota'].includes(mode) ? 'failed' : 'succeeded');
     }
     reply(200, mode === 'bad-ack' ? {} : { data: { ...user, sessionID: id } });
     if (mode === 'drop-stream') for (const stream of streams) stream.end();

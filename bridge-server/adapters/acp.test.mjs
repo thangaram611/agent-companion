@@ -17,6 +17,34 @@ import { dispatch } from '../server.mjs';
 
 const lines = (path) => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
 
+for (const fault of ['session-new-error', 'session-new-empty-error', 'session-new-object-error']) {
+  test(`ACP session/new relays only a string message: ${fault}`, async t => {
+    const h = setup(t, { descriptor: getTargetById('copilot'), env: { ACP_FIXTURE_FAULT: fault } });
+    h.controller.providers.copilot = h.controller.providers.fake;
+    const sent = (await dispatch({ action: 'send', target: 'copilot', thread: 'child', cwd: h.dir, task: 'hello' }, { controller: h.controller })).structuredContent;
+    assert.equal(sent.status, 'failed'); assert.equal(sent.meta.detail, 'history_unavailable');
+    const message = '403 "unauthorized: not authorized to use this Copilot feature\\n"';
+    if (fault === 'session-new-error') assert.equal(sent.content, message);
+    else assert.doesNotMatch(sent.content, /data|headers|\[object Object\]/);
+    const waited = (await dispatch({ action: 'wait', job_id: sent.job_id, thread: 'child' }, { controller: h.controller })).structuredContent;
+    const status = (await dispatch({ action: 'status', job_id: sent.job_id }, { controller: h.controller })).structuredContent;
+    assert.equal(waited.content, sent.content); assert.equal(status.partial_text, sent.content);
+    assert.doesNotMatch(JSON.stringify([sent, waited, status]), /SECRET_|headers|response|permission_denied/);
+    assert.equal(h.frames('session/prompt').length, 0);
+    if (fault === 'session-new-error') t.diagnostic('PROVIDER_ERROR_ENVELOPE copilot ' + JSON.stringify({ status: sent.status,
+      cause: sent.meta.cause, detail: sent.meta.detail, content: sent.content }));
+  });
+}
+
+for (const fault of ['prompt-error', 'prompt-error-after-ack']) test(`ACP prompt error keeps the explanation and partial answer: ${fault}`, async t => {
+  const h = setup(t, { env: { ACP_FIXTURE_FAULT: fault } });
+  const result = await h.finish(await h.send());
+  assert.equal(result.outcome, fault === 'prompt-error' ? 'delivery_unknown' : 'failed');
+  assert.equal(result.detail, fault === 'prompt-error' ? 'delivery_unknown' : 'prompt refused');
+  assert.equal(result.text, fault === 'prompt-error' ? 'prompt refused' : 'ready\n\nprompt refused');
+  assert.doesNotMatch(JSON.stringify(result), /SECRET_/);
+});
+
 function setup(t, { descriptor = fakeAcpDescriptor(), env = {} } = {}) {
   const dir = mkdtempSync(join(SANDBOX_HOME, 'owned-acp-'));
   const bin = join(dir, 'agent.mjs');
@@ -187,7 +215,7 @@ test('transport death after acceptance rejects ProviderLost and preserves partia
   const result = await h.finish(await h.send());
   assert.equal(result.outcome, 'failed');
   assert.equal(h.records.readExecution(result.executionId).terminal.error, 'ProviderLost');
-  assert.equal(result.text, 'partial answer');
+  assert.equal(result.text, 'partial answer\n\nACP transport closed');
   assert.equal(h.frames('session/prompt').length, 1); assert.ok(result.stopEvidence.gone);
 });
 

@@ -192,6 +192,18 @@ result: the code is `detail`, the explanation is `text`, projected as send/wait
 `meta.detail` and `content`, or status `detail` and `partial_text`. A send that fails
 before acknowledgement returns that terminal envelope immediately.
 
+Provider failures use the same text path. The controller appends the provider's
+explanation after a blank line when partial assistant text exists; an identical
+explanation is not repeated. Wrapped runtime/history/delivery errors contribute
+their innermost nonempty `message` string. Explanations collapse whitespace to one
+line and are capped at 500 characters, including a trailing ellipsis when truncated.
+Only message strings are copied, never error data, headers or response bodies.
+OpenCode supplies the failed turn's idle error, falling back to its assistant
+error, and retains that turn's latest nonempty assistant text. Codex supplies
+turn/error notification messages; ACP supplies prompt errors.
+Claude supplies `result.result` and `errors[]`, including failures before init.
+Codes in `detail` and cancellation/owner-stop/bridge-loss behavior are unchanged.
+
 The send acknowledgement adds `target`, `selected_model`, `selected_effort`,
 `effective_model`, `effective_effort` and `permission_mode`. The controller resolves
 these from records and history/delivery metadata, including Claude's init model;

@@ -78,7 +78,7 @@ export class ClaudeAdapter {
       if (this.resume && (historyId !== this.historyId || !await this.transcriptExists(historyId, this.env))) throw new Error('history not found');
       if (this.lost || this.earlyError || this.runtime.exitCode !== null || this.runtime.signalCode !== null) throw new Error('history unavailable');
       return { historyId: this.historyId };
-    } catch (err) { throw failure('HistoryUnavailable', err); }
+    } catch (err) { throw failure('HistoryUnavailable', this.earlyError ? new Error(claudeTerminal(this.earlyError).text) : this.lost || err); }
   }
 
   async deliver({ text }) {
@@ -93,8 +93,9 @@ export class ClaudeAdapter {
       if (this.closed) throw failure('DeliveryUnknown');
       return { nativeTurnId: this.nativeTurnId, effectiveModel: this.progress.effectiveModel };
     } catch (err) {
-      if (this.earlyError?.errors?.some((text) => typeof text === 'string' && text.includes('No conversation found'))) throw failure('history_not_found', err);
-      throw failure(this.identityError ? 'history_mismatch' : 'DeliveryUnknown', err);
+      const cause = this.earlyError ? new Error(claudeTerminal(this.earlyError).text) : err;
+      if (this.earlyError?.errors?.some((text) => typeof text === 'string' && text.includes('No conversation found'))) throw failure('history_not_found', cause);
+      throw failure(this.identityError ? 'history_mismatch' : 'DeliveryUnknown', cause);
     }
   }
 

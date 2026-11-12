@@ -45,7 +45,9 @@ test('result mapping prioritizes requested interruption, then errors, then succe
   assert.deepEqual(claudeTerminal(success, options), { outcome: 'completed', text: 'answer', usage: null,
     nativeRefs: { historyId: 's' }, effectiveModel: 'resolved' });
   const auth = claudeTerminal({ ...success, is_error: true, terminal_reason: 'api_error', result: 'Not logged in' }, options);
-  assert.equal(auth.outcome, 'failed'); assert.equal(auth.detail, 'api_error'); assert.equal(auth.text, 'Not logged in');
+  assert.equal(auth.outcome, 'failed'); assert.equal(auth.detail, 'api_error'); assert.equal(auth.text, 'partial\n\nNot logged in');
+  assert.equal(claudeTerminal({ ...success, is_error: true, result: 'Not logged in' }).text, 'Not logged in');
+  assert.equal(claudeTerminal({ ...success, is_error: true, result: 'Not logged in' }, { partialText: 'Not logged in' }).text, 'Not logged in');
   for (const reason of ['aborted_streaming', 'aborted_tools']) {
     const frame = { ...success, subtype: 'error_during_execution', is_error: true, terminal_reason: reason, result: '' };
     assert.equal(claudeTerminal(frame, options).outcome, 'failed');

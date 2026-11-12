@@ -260,8 +260,10 @@ class OpenCodeAdapter {
     const assistants = messages.filter(m => m.type === 'assistant');
     if (outcome === 'completed' && !assistants.length) throw failure('ModelSelectionUnverified');
     for (const assistant of assistants.toReversed()) this._model(assistant.model);
+    const texts = assistants.map(m => (m.content || []).filter(p => p.type === 'text').map(p => p.text).join(''));
     return {
-      outcome, effectiveEffort: this.effectiveEffort, text: (assistants[0]?.content || []).filter(p => p.type === 'text').map(p => p.text).join(''),
+      outcome, effectiveEffort: this.effectiveEffort, text: (outcome === 'failed' ? texts.find(Boolean) : texts[0]) || '',
+      error: outcome === 'failed' ? [idle, ...assistants].map(m => m?.error?.message).find(m => typeof m === 'string' && m.trim()) : undefined,
       usage: sumUsage(assistants.map(m => usageFromOpenCodeInfo({ ...m, modelID: m.model?.id }, 'opencode-server'))),
       nativeRefs: { sessionId: this.sessionId, messageId: assistants[0]?.id || this.messageId || this.nativeTurnId },
       cause: outcome === 'completed' ? 'native_complete' : 'provider_error',

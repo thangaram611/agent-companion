@@ -14,6 +14,18 @@ import { Records } from '../controller/records.mjs';
 import { bounded } from '../controller/clock.mjs';
 import { ClaudeAdapter, claudeTranscriptExists } from './claude.mjs';
 
+for (const scenario of ['errors-only', 'early-error']) test(`Claude failure explanation survives ${scenario}`, async t => {
+  const h = setup(t, { scenario });
+  const controller = new Controller({ env: h.env, records: new Records({ dir: join(h.dir, 'records') }), createSupervisor: h.createSupervisor,
+    providers: { claude: { enabled: true, ready: true, create: () => h.create() } } });
+  t.after(() => { for (const a of controller.live.values()) clearTimeout(a.timer); });
+  const sent = await controller.send({ owner: 'child', provider: 'claude', cwd: h.dir, text: 'hello' });
+  const result = sent.outcome ? sent : await controller.wait({ owner: 'child', executionId: sent.executionId });
+  assert.equal(result.outcome, scenario === 'early-error' ? 'delivery_unknown' : 'failed');
+  assert.equal(result.text, scenario === 'early-error' ? 'Provider unavailable before init' : 'alpha\n\nProvider overloaded Try again later');
+  assert.doesNotMatch(JSON.stringify(result), /SECRET_/);
+});
+
 function setup(t, { scenario = 'success', env: extraEnv = {} } = {}) {
   const dir = mkdtempSync(join(SANDBOX_HOME, 'claude-adapter-'));
   const env = { ...process.env, HOME: dir, CLAUDE_CONFIG_DIR: join(dir, 'config'), CLAUDE_BIN: fakeClaudeBin(dir),
@@ -125,7 +137,7 @@ for (const scenario of ['success', 'bash', 'retry', 'malformed', 'stderr-flood',
     await adapter.deliver({ text: 'one task' });
     const terminal = await observed;
     assert.equal(terminal.outcome, scenario === 'auth-error' ? 'failed' : 'completed');
-    assert.equal(terminal.text, scenario === 'auth-error' ? 'Not logged in · Please run /login' : 'alpha');
+    assert.equal(terminal.text, scenario === 'auth-error' ? 'alpha\n\nNot logged in · Please run /login' : 'alpha');
     assert.equal(terminal.effectiveModel, 'claude-haiku-5-5');
     assert.ok(snapshots.some((progress) => progress.partialText === 'al' && progress.activity === 'responding'));
     assert.ok(snapshots.some((progress) => progress.activity === 'thinking'));
@@ -227,8 +239,8 @@ test('early bogus-resume result refuses history and reports history_not_found on
   const h = setup(t, { scenario: 'bogus-resume' }), id = randomUUID(); h.transcript(id);
   const { adapter } = await h.launch({ historyId: id });
   await until(() => adapter.earlyError, 'early error result');
-  await assert.rejects(adapter.openHistory({ historyId: id }), { code: 'HistoryUnavailable' });
-  await assert.rejects(adapter.deliver({ text: 'must not send' }), { code: 'history_not_found' });
+  await assert.rejects(adapter.openHistory({ historyId: id }), { code: 'HistoryUnavailable', cause: new Error(`No conversation found with session ID: ${id}`) });
+  await assert.rejects(adapter.deliver({ text: 'must not send' }), { code: 'history_not_found', cause: new Error(`No conversation found with session ID: ${id}`) });
   assert.equal(h.trace().some((frame) => frame.type === 'user'), false);
 });
 

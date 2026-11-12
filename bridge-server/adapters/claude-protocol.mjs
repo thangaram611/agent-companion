@@ -1,5 +1,6 @@
 import { resolveClaudePermission } from '../../lib/target-registry.mjs';
 import { usageFromClaudeResult } from '../../lib/usage.mjs';
+import { appendProviderError } from '../provider-error.mjs';
 
 export function claudeArgs({ historyId, resume, model, effort, env }) {
   return ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
@@ -30,7 +31,7 @@ export function claudeTerminal(result, { interruptRequested = false, partialText
     outcome = 'interrupted'; text = partialText;
   } else if (result.is_error === true || result.subtype !== 'success') {
     outcome = 'failed'; detail = result.terminal_reason || result.subtype;
-    text = typeof result.result === 'string' && result.result ? result.result : partialText;
+    text = appendProviderError(partialText, [result.result, ...(result.errors || [])].filter(value => typeof value === 'string').join('\n'));
   } else {
     outcome = 'completed'; text = result.result;
   }

@@ -250,8 +250,13 @@ test('willRetry stays progress; deltas, completed items and per-turn usage survi
 for (const method of ['error', 'turn/failed', 'turn/completed']) test(`${method} without retry is terminal failure`, async (t) => {
   const h = setup(t); const sent = await h.send();
   const params = { threadId: 'T1', turnId: 'TURN1', error: { message: 'fatal' }, willRetry: false };
-  await h.emit(method === 'turn/completed' ? terminal('failed', 'partial') : method === 'error' ? note(method, params) : driftNote(method, params));
-  assert.equal((await h.wait(sent.executionId)).outcome, 'failed');
+  const completed = terminal('failed', 'partial');
+  completed.params.turn.error = { message: 'fatal', codexErrorInfo: null, additionalDetails: 'SECRET_RESPONSE_BODY' };
+  await h.emit(method === 'turn/completed' ? completed : method === 'error' ? note(method, params) : driftNote(method, params));
+  const result = await h.wait(sent.executionId);
+  assert.equal(result.outcome, 'failed');
+  assert.equal(result.text, method === 'turn/completed' ? 'partial\n\nfatal' : 'fatal');
+  assert.doesNotMatch(JSON.stringify(result), /SECRET_/);
 });
 
 test('interrupt uses the active turn, reports interrupted and removes the real process tree', async (t) => {
@@ -303,7 +308,7 @@ test('transport death before terminal rejects ProviderLost and preserves partial
   await h.emit(note('item/agentMessage/delta', { threadId: 'T1', turnId: 'TURN1', itemId: 'answer', delta: 'partial' }));
   h.supervisors[0].child.stdin.write(JSON.stringify({ method: 'fake/die' }) + '\n');
   const result = await h.wait(sent.executionId);
-  assert.equal(result.outcome, 'failed'); assert.equal(result.text, 'partial');
+  assert.equal(result.outcome, 'failed'); assert.match(result.text, /^partial\n\napp-server (stdout ended|exited:)/);
   assert.equal(h.records.readExecution(sent.executionId).terminal.error, 'ProviderLost');
   assert.equal(result.stopEvidence.gone, true);
 });

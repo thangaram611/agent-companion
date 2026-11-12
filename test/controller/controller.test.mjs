@@ -47,6 +47,23 @@ function setup(options = {}) {
 const calls = (adapter, method) => adapter.calls.filter(([name]) => name === method);
 const disk = (dir) => readdirSync(dir, { recursive: true }).sort().filter((file) => statSync(join(dir, file)).isFile()).map((file) => [file, statSync(join(dir, file)).mtimeMs, readFileSync(join(dir, file), 'utf8')]);
 
+for (const [method, detail] of [['start', 'runtime_unavailable'], ['openHistory', 'history_unavailable'], ['deliver', 'delivery_unknown']]) {
+  test(`wrapped ${method} failure relays the innermost message only, on one bounded line`, async () => {
+    const h = setup(), create = h.controller.providers.fake.create;
+    const message = '  provider refused\n\t' + 'x'.repeat(600);
+    const inner = Object.assign(new Error(message), { data: { headers: 'SECRET_HEADER' }, response: 'SECRET_BODY' });
+    const wrapped = Object.assign(new Error('wrapper', { cause: new Error('middle', { cause: inner }) }), { code: 'HistoryUnavailable' });
+    h.controller.providers.fake.create = () => {
+      const adapter = create(); adapter[method] = async () => { throw wrapped; }; return adapter;
+    };
+    const result = await h.send();
+    assert.equal(result.detail, detail);
+    assert.match(result.text, /^provider refused x+…$/);
+    assert.equal(result.text.length, 500);
+    assert.doesNotMatch(JSON.stringify(result), /SECRET_|wrapper|middle/);
+  });
+}
+
 test('duplicate send reattaches once; different text or model on a busy conversation is refused', async () => {
   const h = setup();
   const [one, two] = await Promise.all([h.send({ model: 'a' }), h.send({ model: 'a' })]);

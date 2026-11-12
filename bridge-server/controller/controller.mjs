@@ -7,6 +7,7 @@ import { probePermission } from '../../lib/target-diagnostics.mjs';
 import { ProcessSupervisor } from './process-supervisor.mjs';
 import { systemClock, bounded } from './clock.mjs';
 import { cleanupExecution, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';
+import { appendProviderError } from '../provider-error.mjs';
 
 const TICK_MS = 1000;
 const PROTOCOL_MS = 10_000;
@@ -171,15 +172,19 @@ export class Controller {
       await this._close(a, a.record.terminal.cause);
     } catch (err) {
       if (a.stopping || a.handedOff || a.closed) return;
-      this._terminal(a, { outcome: phase === 'delivery_unknown' ? 'delivery_unknown' : 'failed', cause: 'provider_error', detail: typeof err.code === 'string' && !['RuntimeUnavailable', 'HistoryUnavailable', 'DeliveryUnknown', 'ProviderLost'].includes(err.code) ? err.code : phase, error: err.code || err.name,
-        text: ['EFFORT_NOT_ALLOWED', 'CAPABILITY_UNAVAILABLE'].includes(err.code) ? err.message : undefined });
+      this._terminal(a, { outcome: phase === 'delivery_unknown' ? 'delivery_unknown' : 'failed', cause: 'provider_error', detail: typeof err.code === 'string' && !['RuntimeUnavailable', 'HistoryUnavailable', 'DeliveryUnknown', 'ProviderLost'].includes(err.code) ? err.code : phase, error: err.code || err.name }, err);
       await this._close(a, 'provider_error');
     }
   }
-  _terminal(a, terminal) {
+  _terminal(a, terminal, explanation = terminal.error) {
     // Persist the native outcome before any close operation. Final result
     // publication waits for cleanup evidence; once published it is immutable.
-    if (!a.record.terminal) { a.record.terminal = { ...terminal, at: this.clock.now() }; this._persist(a); }
+    if (!a.record.terminal) {
+      if (terminal.cause === 'provider_error' && ['failed', 'delivery_unknown'].includes(terminal.outcome)) {
+        terminal = { ...terminal, text: appendProviderError(terminal.text ?? a.record.progress?.partialText, explanation) };
+      }
+      a.record.terminal = { ...terminal, at: this.clock.now() }; this._persist(a);
+    }
   }
   _schedule(a) {
     a.timer = this.clock.setTimeout(() => {

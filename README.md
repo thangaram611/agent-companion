@@ -510,6 +510,10 @@ parent messages are visible between waits.
 Terminal envelope statuses are `completed`, `failed` and `cancelled`; durable
 results distinguish `completed`, `failed`, `interrupted`, `stopped` and
 `delivery_unknown`. Metadata includes cause, native references and stop evidence.
+Failures carry the provider's explanation in `content` (status: `partial_text`),
+after any partial answer and a blank line. The explanation is one line, capped at
+500 characters; error data, headers and response bodies are excluded. Failure
+codes in `detail` are unchanged, including failures before delivery acknowledgement.
 A missing delivery acknowledgement is never retried automatically. Read the
 actual result; protocol completion alone does not prove a requested test ran.
 

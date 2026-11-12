@@ -16,6 +16,24 @@ import { dispatch } from '../server.mjs';
 
 const fake = fileURLToPath(new URL('../../test/adapters/fake-opencode.mjs', import.meta.url));
 
+for (const source of ['both', 'idle', 'assistant', 'empty-final']) test(`OpenCode quota explanation reaches wait and status from ${source}`, async t => {
+  const partial = ['assistant', 'empty-final'].includes(source);
+  const h = setup(t, { FAKE_OPENCODE_MODE: 'quota', FAKE_OPENCODE_QUOTA_SOURCE: source === 'empty-final' ? 'assistant' : source,
+    FAKE_OPENCODE_PARTIAL: partial ? '1' : '0', FAKE_OPENCODE_EMPTY_FINAL: source === 'empty-final' ? '1' : '0' });
+  const sent = await h.send();
+  await h.finish(sent);
+  const call = async action => (await dispatch({ action, job_id: sent.executionId, thread: 'child' }, { controller: h.controller })).structuredContent;
+  const waited = await call('wait'), status = await call('status');
+  const message = 'Add usage credits or subscribe and save up to 66%: https://ollama.com/plans (ref: quota-fixture)';
+  assert.equal(waited.status, 'failed'); assert.equal(waited.meta.cause, 'provider_error'); assert.equal(waited.meta.detail, null);
+  assert.equal(waited.content, (partial ? 'answer: hello\n\n' : '') + message);
+  assert.equal(status.partial_text, waited.content);
+  assert.equal(h.records.readResult(sent.executionId).text, waited.content);
+  assert.doesNotMatch(JSON.stringify([waited, status]), /SECRET_|response|authorization/i);
+  if (source === 'both') t.diagnostic('PROVIDER_ERROR_ENVELOPE opencode ' + JSON.stringify({ status: waited.status,
+    cause: waited.meta.cause, detail: waited.meta.detail, content: waited.content }));
+});
+
 function setup(t, extra = {}) {
   const dir = realpathSync(mkdtempSync(join(SANDBOX_HOME, 'opencode-adapter-')));
   const bin = join(dir, 'opencode');

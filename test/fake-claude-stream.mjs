@@ -84,6 +84,10 @@ export function runFakeClaude() {
         frame.parent_tool_use_id !== null || frame.message?.role !== 'user' || typeof frame.message.content !== 'string') return fail('invalid user request');
     delivered = true;
     if (scenario === 'no-init') return;
+    if (scenario === 'early-error') {
+      result({ subtype: 'error_during_execution', is_error: true, result: '', errors: ['Provider unavailable before init'] });
+      return;
+    }
     if (scenario === 'malformed') process.stdout.write('not JSON\nnull\n');
     scoped({ type: 'command_lifecycle' });
     const init = { type: 'system', subtype: 'init', session_id: scenario === 'mismatch' ? 'wrong-session' : session_id,
@@ -115,6 +119,8 @@ export function runFakeClaude() {
       if (scenario === 'auth-error') result({ is_error: true, terminal_reason: 'api_error', result: 'Not logged in · Please run /login',
         duration_api_ms: 0, total_cost_usd: 0, modelUsage: {},
         usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } });
+      else if (scenario === 'errors-only') result({ subtype: 'error_during_execution', is_error: true, result: '',
+        terminal_reason: 'api_error', errors: ['Provider overloaded\nTry again later'], data: { headers: ['SECRET_HEADER'] } });
       else result();
       out(init); // A: repeated init must not reset the completed answer.
     };

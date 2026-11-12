@@ -173,7 +173,7 @@ export class AcpAdapter {
     }, (err) => {
       accepted.reject(failure('DeliveryUnknown', err));
       if (conn.dead || !conn.isAlive()) throw failure('ProviderLost', err);
-      return { outcome: 'failed', text: events.messageChunks.join(''), cause: 'provider_error', detail: err.message,
+      return { outcome: 'failed', text: events.messageChunks.join(''), cause: 'provider_error', detail: err.message, error: err.message,
         nativeRefs: { sessionId: this.sessionId, promptId: turn.promptId } };
     }).finally(() => { turn.finished = true; conn.sessionCollectors.delete(this.sessionId); });
     // Observation attaches after acceptance; transport loss can race that gap.

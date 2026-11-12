@@ -90,7 +90,7 @@ export class AcpConnection {
       if (pending) {
         clearTimeout(pending.timer);
         this.pendingRequests.delete(msg.id);
-        if (msg.error) pending.reject(Object.assign(new Error(msg.error.message || JSON.stringify(msg.error)), { code: msg.error.code }));
+        if (msg.error) pending.reject(Object.assign(new Error(typeof msg.error.message === 'string' ? msg.error.message : ''), { code: msg.error.code }));
         else pending.resolve(msg.result);
       }
       return;
