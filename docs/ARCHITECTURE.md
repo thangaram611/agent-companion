@@ -144,9 +144,15 @@ config even without a turn, so a refused level must never reach it. Fresh
 `thread/start` validates levels against the response model; refused new threads
 are never saved on the conversation. Both paths send `config.model_reasoning_effort`
 and check the response's reported `reasoningEffort`.
-Invalid levels or a missing model refuse `EFFORT_NOT_ALLOWED` with a level or
-omit-effort hint; a reported effort mismatch refuses `CAPABILITY_UNAVAILABLE`.
+Invalid levels for listed models refuse `EFFORT_NOT_ALLOWED` with a level hint;
+a reported effort mismatch refuses `CAPABILITY_UNAVAILABLE`.
 These checks precede `turn/start` and saving the new history id.
+Levels are unverified for models outside Codex's catalog. For an unlisted model,
+start/resume passes the effort and still requires matching `reasoningEffort`.
+Resume without an explicit model override still reads the saved model first;
+an explicit override is checked directly. With no catalog entry, there is no
+pre-write vocabulary check: resume can persist the selection before a backend
+rejects it during `turn/start`/observation. That failure carries the backend message.
 
 OpenCode has null static levels. It resolves the explicit or environment model,
 otherwise the saved session model or native default. The environment model is
@@ -175,13 +181,16 @@ SPEC-2 does not measure pre-turn write durability for OpenCode or
 Antigravity; both paths treat selection writes as persistent, so refusal is safe
 either way. Their fakes persist writes before any prompt to test this ordering.
 
-Copilot uses the static CLI enum `none`, `minimal`, `low`, `medium`, `high`,
-`xhigh`, `max`. Off-enum values are refused before spawn. Only a selected effort
-adds `--reasoning-effort`; omission inherits configuration. Per-model support,
-effective effort reporting and selection persistence are unmeasured because
-`session/new` returns 403 on this machine. No session effort shape is guessed.
-Claude likewise rejects off-enum effort before spawn; its CLI selection persistence
-is not measured here. Neither static refusal reaches a native selection write.
+ACP sessions advertising a config option with category `thought_level` use its
+offered values and id. Effort is validated before a config write, applied through
+`session/set_config_option`, and the returned `currentValue` must match or the
+adapter refuses `CAPABILITY_UNAVAILABLE`. Inheritance also reports `currentValue`.
+Copilot uses this generic path, has null static `effortLevels`, and receives no
+spawn effort flag. An explicit effort without an advertised option or descriptor
+selection path refuses capability rather than silently inheriting. Antigravity
+continues using its model-suffix descriptor because it advertises no thought-level
+option. Copilot cold follow-up remains unsupported. Claude rejects off-enum effort
+before spawn; its CLI selection persistence is not measured here.
 
 `records.begin` records the attempted effort on the execution and retains the
 conversation's previous effort. The controller saves the new override only after
@@ -208,7 +217,7 @@ The send acknowledgement adds `target`, `selected_model`, `selected_effort`,
 `effective_model`, `effective_effort` and `permission_mode`. The controller resolves
 these from records and history/delivery metadata, including Claude's init model;
 the server does not inspect adapters. Overrides are distinct from provider reports:
-Claude's and Copilot's effective effort stay null. Results publish `selected_effort` alongside
+Claude's effective effort stays null; Copilot reports its session thought level. Results publish `selected_effort` alongside
 `effective_effort`; status also carries `selected_effort` and `permission_mode`.
 The pure exported `probePermission(descriptor, env)` is shared with diagnostics,
 catalog and the execution's permission snapshot; changing env later cannot change
@@ -439,6 +448,13 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
 
 **Codex effort selection (2026-11-12, codex-cli 0.167.1)**
 
+- **`model/list` is not the custom provider's catalog.** With local Ollama 0.40.16
+  and `gpt-oss:20b`, app-server reported `modelProvider: ollama-proxy` and confirmed
+  requested effort, but `model/list` contained only OpenAI models. Rejecting every
+  unlisted model blocks valid custom providers. The bridge retains catalog checks
+  where available; levels are unverified for models outside Codex's catalog.
+  A recording proxy measured `reasoning.effort: low` on `/v1/responses`.
+
 - **Accepted effort does not mean valid effort.** Codex accepted both `bogus` and
   a level unsupported by the selected model. The bridge checks the model that
   will run against the paginated `model/list`; `isDefault` is the catalog default,
@@ -450,7 +466,8 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
   bridge validates effort for the explicit model override, or reads the saved
   model with `thread/read { threadId }`. That read returns `thread.model` and
   `thread.reasoningEffort` with status `notLoaded` without loading or changing
-  the thread. Unsupported effort is refused before `thread/resume`.
+  the thread. Unsupported effort on listed models is refused before `thread/resume`;
+  unlisted models rely on confirmation and later backend validation.
 - **`turn/start effort` has no response confirmation.** It changes the turn and
   subsequent turns, but the earlier thread response still reports its old value.
   `config.model_reasoning_effort` on `thread/start` and `thread/resume` both applies
@@ -470,11 +487,14 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
   `session/load` forgets the selected model. Reapply after load, validating the
   family and level before any config-option write. Pre-turn durability was not
   measured; the ordering protects native history if the write persists.
-- **Copilot 1.0.109's xhigh pin had no measurement behind it.** The bridge removed
-  that unconditional launch flag so omission inherits configuration. The CLI
-  enum is measured, but per-model support and session effort reports remain
-  unknown: this account returns `403 unauthorized: not authorized to use this
-  Copilot feature` on `session/new`. Effort is not live-qualified here.
+- **Copilot's CLI enum is not its model's effort support (1.0.109, 2026-11-12).**
+  Local Ollama BYOK bypassed the account's GitHub-hosted `session/new` 403. The
+  session advertised thought levels `low|medium|high|xhigh|max`. Both spawn
+  `--reasoning-effort none` and `session/set_config_option` with `none` silently
+  reported `medium`; neither returned an error. The bridge now validates offered
+  values before writing and confirms `currentValue`. The proxy measured
+  `reasoning_effort: low` on `/v1/chat/completions`. GitHub-hosted qualification
+  remains blocked by 403; BYOK evidence does not qualify that backend.
 
 **Claude companion findings (2026-11-09, Claude Code 2.1.319)**
 

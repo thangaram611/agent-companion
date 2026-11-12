@@ -4,35 +4,59 @@ import { pathToFileURL } from 'node:url';
 
 const order = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const targets = ['claude', 'codex', 'opencode', 'antigravity', 'copilot'];
-const reportedEffort = new Set(['codex', 'opencode', 'antigravity']);
+const reportedEffort = new Set(['codex', 'opencode', 'antigravity', 'copilot']);
 const invalidEffort = '__unsupported_effort_probe__';
 
-export async function runEffortProbe({ bridge, target, model, cwd, owner, record, report = console.log }) {
-  let step = 'a: unsupported effort refuses before delivery';
+export async function runEffortProbe({ bridge, target, model, cwd, owner, record, report = console.log, readWire, backendEffort }) {
+  let step = backendEffort ? 'a: backend rejects unsupported effort' : 'a: unsupported effort refuses before delivery';
   try {
     assert.ok(targets.includes(target), `Unknown target: ${target}`);
+    assert.ok(!backendEffort || target === 'codex', 'backend-validated effort mode is only for unlisted Codex models');
+    const wire = { codex: ['/v1/responses', row => row.reasoning?.effort], claude: ['/v1/messages', row => row.output_config?.effort],
+      copilot: ['/v1/chat/completions', row => row.reasoning_effort] }[target];
+    const checkpoint = () => readWire?.().length ?? 0;
+    const checkWire = (offset, effort) => {
+      if (!readWire) return;
+      assert.ok(wire, 'wire verification is available for Codex, Claude and Copilot');
+      const requests = readWire().slice(offset).filter(row => row.path === wire[0]);
+      if (effort === undefined) { assert.equal(requests.length, 0, 'refusal must send no model request'); return; }
+      assert.ok(requests.length, 'turn must have a fresh proxy request');
+      for (const row of requests) assert.equal(wire[1](row), effort, 'wire effort must match this turn');
+    };
     const catalog = await bridge.tool('agent_catalog', {});
     const entry = catalog.targets?.find(t => t.id === target);
     assert.equal(entry?.effort.selection, true, 'catalog must advertise effort selection');
     const selection = { target, cwd, ...(model ? { model } : {}) };
-    const refusal = await bridge.tool('agent_send', { ...selection, effort: invalidEffort, task: 'Reply with exactly: OK' }, `${owner}-refusal`);
-    if (refusal.status === 'still_running') await bridge.tool('agent_cancel', { job_id: refusal.job_id }, `${owner}-refusal`);
-    assert.equal(refusal.code ?? refusal.meta?.detail, 'EFFORT_NOT_ALLOWED', JSON.stringify(refusal));
-    assert.notEqual(refusal.status, 'still_running');
-    assert.ok(!refusal.meta?.native_refs?.nativeTurnId, 'refusal must have no native turn');
-    if (refusal.job_id) {
-      const execution = record('executions', refusal.job_id);
-      assert.ok(execution, 'refused execution must be recorded');
-      assert.ok(!execution.nativeTurnId, 'refusal must precede delivery');
+    const offset = checkpoint();
+    let refusal = await bridge.tool('agent_send', { ...selection, effort: invalidEffort, task: 'Reply with exactly: OK' }, `${owner}-refusal`);
+    if (backendEffort) {
+      if (refusal.status === 'still_running') refusal = await bridge.wait(refusal.job_id, `${owner}-refusal`);
+      assert.equal(refusal.status, 'failed');
+      assert.equal(refusal.meta?.cause, 'provider_error');
+      assert.match(refusal.content, /invalid reasoning value/i);
+      assert.equal(refusal.meta.stop_evidence?.gone, true);
+      checkWire(offset, invalidEffort);
+    } else {
+      if (refusal.status === 'still_running') await bridge.tool('agent_cancel', { job_id: refusal.job_id }, `${owner}-refusal`);
+      assert.equal(refusal.code ?? refusal.meta?.detail, 'EFFORT_NOT_ALLOWED', JSON.stringify(refusal));
+      assert.notEqual(refusal.status, 'still_running');
+      assert.ok(!refusal.meta?.native_refs?.nativeTurnId, 'refusal must have no native turn');
+      if (refusal.job_id) {
+        const execution = record('executions', refusal.job_id);
+        assert.ok(execution, 'refused execution must be recorded');
+        assert.ok(!execution.nativeTurnId, 'refusal must precede delivery');
+      }
+      checkWire(offset);
     }
     const listed = (refusal.hint ?? refusal.content ?? '').match(/Use one of: (.*?), or omit/i)?.[1];
-    const levels = entry.effort.levels ?? listed?.split(',').map(v => v.trim());
+    const levels = backendEffort ? [backendEffort] : entry.effort.levels ?? listed?.split(',').map(v => v.trim());
     assert.ok(levels?.length && !levels.includes(invalidEffort), 'refusal must name the offered levels');
     assert.ok(levels.every(level => order.includes(level)), 'unknown level ordering; update the probe before spending tokens');
     const effort = order.find(level => levels.includes(level));
-    report(`PASS ${step}; offered: ${levels.join(', ')}`);
+    report(`PASS ${step}; ${backendEffort ? 'levels unverified for models outside Codex\'s catalog; probe effort' : 'offered'}: ${levels.join(', ')}`);
 
     const send = async (args) => {
+      const offset = checkpoint();
       const sent = await bridge.tool('agent_send', args, owner);
       assert.equal(sent.ok, true, JSON.stringify(sent));
       const result = sent.status === 'still_running' ? await bridge.wait(sent.job_id, owner) : sent;
@@ -58,9 +82,10 @@ export async function runEffortProbe({ bridge, target, model, cwd, owner, record
       const execution = record('executions', sent.job_id);
       assert.ok(execution?.historyId && execution.processes?.pid > 0, 'native history and process identity required');
       assert.equal(result.meta.stop_evidence?.gone, true, 'runtime must exit before cold follow-up');
+      checkWire(offset, effort);
       return { result, execution };
     };
-    step = `b: lowest offered effort (${effort}) reaches the provider`;
+    step = `b: ${backendEffort ? 'selected' : 'lowest offered'} effort (${effort}) reaches the provider`;
     const first = await send({ ...selection, effort, task: 'Reply with exactly: OK' });
     report(`PASS ${step}; effective effort: ${first.result.meta.effective_effort ?? 'not reported'}`);
     step = 'c: cold follow-up omits effort and retains the selection';

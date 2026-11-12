@@ -58,7 +58,7 @@ const deferred = () => {
 };
 const validateEffort = (models, model, effort) => {
   const advertised = models.find((entry) => entry.model === model);
-  if (!advertised) throw Object.assign(new Error(`Codex advertises no effort levels for model "${model}". Omit effort to inherit configuration.`), { code: 'EFFORT_NOT_ALLOWED' });
+  if (!advertised) return; // Custom providers are absent from Codex's catalog; the backend validates levels.
   const levels = advertised.supportedReasoningEfforts.map((entry) => entry.reasoningEffort);
   if (!levels.includes(effort)) throw Object.assign(new Error(`effort "${effort}" is not valid for Codex model "${model}". Use one of: ${levels.join(', ')}, or omit it to inherit configuration.`), { code: 'EFFORT_NOT_ALLOWED' });
 };

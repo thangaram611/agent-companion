@@ -738,7 +738,6 @@ test('effort refusals precede startup and acknowledgement/status/result retain l
   const h = await wireFixture(t);
   for (const [target, levels] of [
     ['claude', 'low, medium, high, xhigh, max'],
-    ['copilot', 'none, minimal, low, medium, high, xhigh, max'],
   ]) {
     const invalid = await h.send({ target, effort: 'invalid' });
     assert.equal(invalid.code, 'EFFORT_NOT_ALLOWED');

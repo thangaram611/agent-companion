@@ -7,7 +7,68 @@ fakes cannot establish. Measurement evidence lives in
 [`docs/RELIABILITY_REMEDIATION.md`](../docs/RELIABILITY_REMEDIATION.md).
 
 Smoke jobs use temporary workspaces but write live execution records and runtime state and Codex
-rollouts. These are not read-only checks.
+rollouts. These are not read-only checks. The `free-backends/` runner below keeps
+all companion homes, workspaces and bridge state in its own temporary directory.
+
+## `free-backends/` — isolated free-backend effort checks
+
+| script | asserts |
+|---|---|
+| `free-backends/run.mjs [codex\|claude\|copilot\|opencode ...]` | Runs the shared effort probe against local Ollama for Codex, Claude and Copilot, checking each turn's proxy wire effort; OpenCode uses `opencode/flint-40b-free` and provider-reported effort. Defaults to these four companions. Antigravity and its existing probe are untouched. |
+| `free-backends/proxy.mjs` | Runner-owned loopback proxy to local Ollama. Logs only canonical endpoint path and model/effort leaves, without headers, query strings or message content. Importing it opens no listener. |
+
+Install the selected companion CLIs and Ollama using Homebrew. Prepare Ollama
+manually (the measured `gpt-oss:20b` download is about 13 GB on a 24 GB RAM machine):
+
+```sh
+brew install ollama
+OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+```
+
+Leave that server running; in another terminal:
+
+```sh
+ollama pull gpt-oss:20b
+node probes/free-backends/run.mjs
+```
+
+Run the last command from the worktree root. The runner only checks Ollama's
+reachability and pulled model via `/api/tags`; it never starts or stops Ollama.
+Agent system prompts need context **at least 32768**. The active context setting
+is not detectable by this harness; the operator must start Ollama with that setting.
+The live harness has not been run during implementation.
+
+Each companion gets a fresh temporary `HOME`, empty working directory,
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, all four XDG roots, and
+`AGENT_COMPANION_HOME`. The bridge always starts from this worktree, independent
+of `AGENT_COMPANION_REPO`. Environment construction allowlists only `PATH` and
+the selected companion's binary override (`CODEX_BIN`, etc.); it does not import
+global instructions, credentials, plugins or config overrides. Codex receives
+a custom Responses provider config, Claude receives `ANTHROPIC_BASE_URL` and
+the dummy `ANTHROPIC_AUTH_TOKEN=ollama`, and Copilot receives offline OpenAI BYOK
+settings. Copilot inherits `COPILOT_MODEL=gpt-oss:20b` without a bridge model override.
+These env vars survive the adapters, including Claude's env scrubber.
+
+OpenCode uses its documented [XDG config location](https://opencode.ai/docs/cli/config/)
+and explicit [`OPENCODE_DB` override](https://opencode.ai/docs/troubleshooting/),
+both inside the temporary home, with isolated XDG data/state/cache paths. Its
+free model needs no copied credentials; this isolation choice has hermetic coverage
+and awaits live verification. Antigravity needs its existing login and has no
+custom backend, so this runner does not start it or read its home.
+
+Every acquired bridge is stopped before advancing, and the proxy closes on success,
+failure or handled signals (`SIGINT`, `SIGTERM`, `SIGHUP`). Bridge startup failure
+also closes the child; unresponsive exit escalates from EOF to TERM/KILL. The printed
+artifact directory is retained for review, including filtered `wire.jsonl`, native
+history and isolated bridge records. No global setup is changed.
+
+Codex's custom model is absent from its catalog: this probe checks a backend
+vocabulary rejection, then `low` on a fresh and a cold resumed turn. Claude and
+OpenCode run two valid turns after a pre-delivery refusal; Copilot runs one and
+skips unsupported cold follow-up. BYOK does not qualify GitHub-hosted Copilot
+models, still blocked by the measured account 403. The proxy currently accepts
+only local Ollama; its upstream could point elsewhere in a future extension.
+Cloud API backends are outside this harness's scope.
 
 ## `host-qualification/claude/` — Phase 2 host measurements
 
@@ -70,9 +131,10 @@ AGENT_COMPANION_HOST=claude node probes/smoke/claude.mjs
 
 The effort probe obtains dynamic offered levels from the bridge's refusal hint;
 static CLI enums come from the catalog. It fails before the valid send when no
-levels are advertised. Effective effort is required for Codex, OpenCode and
-Antigravity; Claude and Copilot remain unknown unless reported. Copilot's enum
-check can pass while its send fails with this machine's account 403. A skipped
+levels are advertised. Effective effort is required for Codex, OpenCode,
+Antigravity and Copilot; Claude remains unknown unless reported. Copilot's levels
+come from the session model's `thought_level` option; GitHub-hosted session creation
+can fail with this machine's account 403. A skipped
 Copilot cold follow-up is not a pass. To select a model, append its available id
 (OpenCode accepts `provider/model#variant`; effort overrides the variant). These commands
 are hand-run and spend tokens; they have not been executed for this change:

@@ -28,9 +28,10 @@ test('the descriptors drive the argv: Copilot permission flags and optional mode
   ]);
   assert.equal(COPILOT.acp.args({}).includes('--model'), false);
   assert.equal(COPILOT.acp.args({}).includes('--reasoning-effort'), false);
-  for (const effort of COPILOT.capabilities.effortLevels) {
+  assert.equal(COPILOT.capabilities.effortLevels, null);
+  for (const effort of ['low', 'none', 'new-provider-level']) {
     const argv = COPILOT.acp.args({ effort });
-    assert.equal(argv[argv.indexOf('--reasoning-effort') + 1], effort);
+    assert.equal(argv.includes('--reasoning-effort'), false);
   }
   assert.equal(COPILOT.acp.clientName, 'copilot-acp-daemon');
   assert.deepEqual(COPILOT.acp.env({ env: {}, paths: { otelTraces: '/x/traces.jsonl' } }), {

@@ -380,7 +380,6 @@ test('effort config is applied on start and cold resume, with paginated validati
 for (const [label, env, effort, code, message] of [
   ['unknown level', {}, 'bogus', 'EFFORT_NOT_ALLOWED', /configured-model.*Use one of: low, medium, high, xhigh, max/],
   ['model-specific level', {}, 'ultra', 'EFFORT_NOT_ALLOWED', /configured-model.*Use one of: low, medium, high, xhigh, max/],
-  ['missing model', { CODEX_FAKE_MODELS: '[]' }, 'low', 'EFFORT_NOT_ALLOWED', /no effort levels for model "configured-model".*[Oo]mit effort/],
   ['ignored config', { CODEX_FAKE_IGNORE_EFFORT: '1' }, 'low', 'CAPABILITY_UNAVAILABLE', /did not apply effort "low".*"high"/],
 ]) test(`effort refusal before delivery: ${label}`, async (t) => {
   const h = setup(t, { env });
@@ -431,7 +430,7 @@ test('fake saves resume effort without a turn and thread/read observes it withou
   await third.close();
 });
 
-for (const model of [undefined, 'configured-model', 'missing-model']) {
+for (const model of [undefined, 'configured-model']) {
   test(`refused resume preserves provider effort: ${model ?? 'saved thread model'}`, async (t) => {
     const h = setup(t, { env: { CODEX_FAKE_MODEL: model ? 'catalog-model' : 'configured-model' } });
     const first = await h.send();
@@ -482,4 +481,29 @@ test('resume validates an explicit model before config and still rejects ignored
   assert.match(ignored.text, /did not apply effort "low".*"ultra"/);
   assert.equal(h.trace().slice(refusalOffset).some((frame) => frame.method === 'turn/start'), false);
   assert.equal(readFileSync(h.env.CODEX_FAKE_HISTORY, 'utf8'), saved);
+});
+
+test('unlisted Codex model confirms effort on start and reads saved model before resume', async t => {
+  const h = setup(t, { env: { CODEX_FAKE_MODELS: '[]', CODEX_FAKE_MODEL: 'gpt-oss:20b' } });
+  const first = await h.send({ effort: 'low' });
+  assert.equal(first.acknowledged, true); assert.equal(first.effectiveEffort, 'low');
+  await h.emit(terminal()); await h.wait(first.executionId);
+  const offset = h.trace().length;
+  const second = await h.send({ text: 'follow-up', effort: 'high' });
+  assert.equal(second.acknowledged, true); assert.equal(second.effectiveEffort, 'high');
+  const methods = h.trace().slice(offset).map(f => f.method);
+  assert.ok(methods.indexOf('thread/read') < methods.indexOf('thread/resume'));
+  await h.emit(terminal()); await h.wait(second.executionId);
+  h.env.CODEX_FAKE_IGNORE_EFFORT = '1';
+  const refused = await h.send({ effort: 'low' });
+  assert.equal(refused.detail, 'CAPABILITY_UNAVAILABLE');
+});
+
+test('unlisted Codex model lets backend reject vocabulary and relays its message', async t => {
+  const h = setup(t, { env: { CODEX_FAKE_MODELS: '[]', CODEX_FAKE_MODEL: 'gpt-oss:20b' } });
+  const sent = await h.send({ effort: 'bogus' });
+  assert.equal(sent.acknowledged, true);
+  await h.emit(note('error', { threadId: 'T1', turnId: 'TURN1', willRetry: false, error: { message: 'invalid reasoning value: bogus' } }));
+  const result = await h.wait(sent.executionId);
+  assert.equal(result.outcome, 'failed'); assert.equal(result.text, 'invalid reasoning value: bogus');
 });

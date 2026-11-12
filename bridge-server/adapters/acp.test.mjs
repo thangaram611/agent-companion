@@ -309,13 +309,43 @@ test('Antigravity rejects ignored effort, does not infer effort from an unrelate
   assert.equal(h.frames('session/prompt').length, 1);
 });
 
-for (const effort of [undefined, 'none', 'low', 'max']) test(`Copilot launch effort ${effort ?? 'inherits'}`, async t => {
-  const h = setup(t, { descriptor: getTargetById('copilot') });
+for (const effort of [undefined, 'low', 'max']) test(`Copilot session effort ${effort ?? 'inherits'}`, async t => {
+  const h = setup(t, { descriptor: getTargetById('copilot'), env: { ACP_FAKE_THOUGHT_LEVELS: '["low","medium","high","xhigh","max"]' } });
   const result = await h.finish(await h.send({ effort }));
   const argv = lines(h.trace)[0].argv;
-  if (effort === undefined) assert.equal(argv.includes('--reasoning-effort'), false);
-  else assert.equal(argv[argv.indexOf('--reasoning-effort') + 1], effort);
-  assert.equal(result.effectiveEffort ?? null, null);
+  assert.equal(argv.includes('--reasoning-effort'), false);
+  assert.equal(result.effectiveEffort, effort ?? 'medium');
+  assert.deepEqual(h.frames('session/set_config_option').map(f => f.params), effort === undefined ? [] :
+    [{ sessionId: 'fake-sess-1', configId: 'reasoning_effort', value: effort }]);
+});
+
+for (const fault of ['refused', 'ignored', 'missing', 'confirmed']) test(`Copilot thought_level envelope: ${fault}`, async t => {
+  const h = setup(t, { descriptor: getTargetById('copilot'), env: { ACP_FAKE_THOUGHT_LEVELS: '["low","medium","high","xhigh","max"]',
+    ACP_FAKE_IGNORE_EFFORT: fault === 'ignored' ? '1' : '', ACP_FAKE_MISSING_EFFORT: fault === 'missing' ? '1' : '' } });
+  h.controller.providers.copilot = h.controller.providers.fake;
+  const sent = (await dispatch({ action: 'send', target: 'copilot', thread: 'child', cwd: h.dir, task: 'hello',
+    effort: fault === 'refused' ? 'none' : 'low' }, { controller: h.controller })).structuredContent;
+  if (fault === 'confirmed') {
+    assert.equal(sent.status, 'still_running'); assert.equal(sent.effective_effort, 'low');
+    const result = await h.finish({ executionId: sent.job_id }); assert.equal(result.effectiveEffort, 'low');
+  } else {
+    assert.equal(sent.status, 'failed');
+    assert.equal(sent.meta.detail, fault === 'refused' ? 'EFFORT_NOT_ALLOWED' : 'CAPABILITY_UNAVAILABLE');
+    assert.match(sent.content, fault === 'refused' ? /Use one of: low, medium, high, xhigh, max/ : /did not confirm effort/);
+    assert.equal(h.frames('session/prompt').length, 0);
+    assert.equal(h.frames('session/set_config_option').length, fault === 'refused' ? 0 : 1);
+    assert.equal(h.records.readConversation('child').effortOverride, undefined);
+  }
+  t.diagnostic('COPILOT_EFFORT_ENVELOPE ' + fault + ' ' + JSON.stringify(sent));
+});
+
+test('generic ACP thought_level uses the advertised id on new and load', async t => {
+  const h = setup(t, { env: { ACP_FAKE_THOUGHT_LEVELS: '["low","medium"]', ACP_FAKE_THOUGHT_ID: 'thinking' } });
+  await h.finish(await h.send({ effort: 'low' }));
+  const second = await h.finish(await h.send({ text: 'follow-up' }));
+  assert.equal(second.effectiveEffort, 'low');
+  assert.equal(h.frames('session/load').length, 1);
+  assert.deepEqual(h.frames('session/set_config_option').map(f => f.params.configId), ['thinking', 'thinking']);
 });
 
 

@@ -47,14 +47,18 @@ remains separate from implementation; see the release gates below.
 ## MVP Limitations
 
 - Saved effort defaults are not implemented. All five companions accept
-  conversation-level effort. Codex, OpenCode and Antigravity validate the model's
-  advertised levels before delivery and verify the reported selection; validation
-  precedes selection writes to existing history. Claude and Copilot validate their
-  CLI enums before spawn. Copilot per-model support and effective effort remain
-  unknown (`session/new` 403), and Copilot effort is not live-qualified on this
-  machine. Its former unconditional `xhigh` flag is removed. Hermetic coverage and
-  2026-11-12 zero-token measurements establish these contracts, not installed-host
-  qualification. The shared effort smoke probe is added but has not been run.
+  conversation-level effort. Codex catalog models, OpenCode and Antigravity validate
+  advertised levels before delivery and verify the reported selection. Levels are
+  unverified for models outside Codex's catalog: start/resume confirms the reported
+  effort, with vocabulary checked by the backend during the turn. Resume can persist
+  an unlisted model's selection before that check. Claude validates its CLI enum.
+  Copilot validates the session model's ACP `thought_level` before writing, confirms
+  the value, and reports inherited effort. It is now testable via local Ollama BYOK;
+  qualification against GitHub-hosted models remains blocked by this account's 403.
+  The 2026-11-12 measurements establish backend behavior, not installed-host
+  qualification. `probes/free-backends/run.mjs` provides isolated homes and optional
+  wire-effort assertions; implementation validation is hermetic, with live execution
+  left to the reviewer.
 
 - Copilot cold follow-up is unsupported (`FOLLOWUP_UNSUPPORTED`) pending account
   resolution and qualification of cross-process history loading. It must not

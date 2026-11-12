@@ -59,16 +59,21 @@ and `FOLLOWUP_UNSUPPORTED`. Both role templates relay failures without changing
 the parent's choice. Omitted target uses the configured default; omitted model
 inherits configuration unless the conversation already has an override. Effort is
 a conversation override too, supported by all five companions. Claude has static
-levels `low`, `medium`, `high`, `xhigh`, `max`; Copilot adds `none` and `minimal`. Codex, OpenCode and
-Antigravity validate model-specific levels before delivery. Before writing any
+levels `low`, `medium`, `high`, `xhigh`, `max`; Copilot validates and confirms the
+session model's ACP `thought_level` option, including reporting inherited effort.
+Codex catalog models, OpenCode and Antigravity validate model-specific levels before delivery.
+Codex levels are unverified for models outside Codex's catalog: it confirms the
+reported effort and lets the backend validate vocabulary during the turn. Before writing any
 selection on existing history, Codex reads its model, OpenCode reads its variants,
 and Antigravity checks the loaded session's advertised model family. OpenCode
 selects a variant; Antigravity selects a model id suffix and reapplies it after
 load. In both, effort overrides any level embedded in the model string. OpenCode
 queries variants only for an effort override; inherited effort stays null. Refused effort is not saved on the conversation or written to native
 selection state. Omission inherits; no saved effort default exists. Copilot's
-hardcoded `xhigh` flag is removed; its per-model support and effective effort are
-unmeasured (`session/new` 403), so it is not live-qualified here.
+spawn effort flag is removed; the option is validated before a config write.
+Local Ollama BYOK makes Copilot testable; GitHub-hosted model qualification still
+hits this account's `session/new` 403. The isolated free-backend harness is in
+`probes/free-backends/`; never use the operator's live homes for it.
 Send acknowledgements expose target,
 selected/effective model and effort, and
 resolved permission mode; effective effort is null unless the provider reports it.

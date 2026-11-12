@@ -78,7 +78,7 @@ test('effort routing advertises static CLI levels and defers model-specific leve
     assert.equal(resolveRouting({ target }, {}).resolved.effort, null);
   }
   const copilotLevels = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-  assert.deepEqual(getTarget('copilot').capabilities.effortLevels, copilotLevels);
+  assert.equal(getTarget('copilot').capabilities.effortLevels, null);
   for (const effort of copilotLevels) assert.equal(resolveRouting({ target: 'copilot', effort }, {}).resolved.effort, effort);
-  assert.equal(resolveRouting({ target: 'copilot', effort: 'ultra' }, {}).code, 'EFFORT_NOT_ALLOWED');
+  assert.equal(resolveRouting({ target: 'copilot', effort: 'ultra' }, {}).resolved.effort, 'ultra');
 });

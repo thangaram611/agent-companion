@@ -125,8 +125,13 @@ const modes = () => ({ availableModes: [{ id: 'default', name: 'Default' }, { id
 
 const modelValues = JSON.parse(env.ACP_FAKE_MODELS || '[]');
 const defaultModel = env.ACP_FAKE_DEFAULT_MODEL || modelValues[0];
-const modelConfig = (model) => modelValues.length ? { configOptions: [{ id: 'model', type: 'select',
-  currentValue: model, options: modelValues.map(value => ({ value, name: value })) }] } : {};
+const thoughtValues = JSON.parse(env.ACP_FAKE_THOUGHT_LEVELS || 'null');
+let thought = 'medium';
+const modelConfig = (model) => modelValues.length || thoughtValues ? ({ configOptions: [
+  ...(modelValues.length ? [{ id: 'model', type: 'select', currentValue: model, options: modelValues.map(value => ({ value, name: value })) }] : []),
+  ...(thoughtValues ? [{ id: env.ACP_FAKE_THOUGHT_ID || 'reasoning_effort', category: 'thought_level', type: 'select',
+    currentValue: thought, options: thoughtValues.map(value => ({ value, name: value })) }] : []),
+] }) : {};
 let sessionSeq = 0;
 const sessions = new Map();   // sessionId -> { cwd, prompts, loaded }
 let outSeq = 0;
@@ -212,6 +217,11 @@ function handle(msg) {
     // have is -32602 naming the ones it does.
     case 'session/set_config_option': {
       if (env.ACP_FAKE_MODEL_DISCONNECT === '1') process.exit(9);
+      if (thoughtValues && p.configId === (env.ACP_FAKE_THOUGHT_ID || 'reasoning_effort')) {
+        thought = thoughtValues.includes(p.value) && env.ACP_FAKE_IGNORE_EFFORT !== '1' ? p.value : 'medium';
+        reply(env.ACP_FAKE_MISSING_EFFORT === '1' ? { configOptions: [] } : modelConfig(defaultModel));
+        return;
+      }
       if (p.configId !== 'model') { fail(-32602, 'Unknown config option: ' + p.configId); return; }
       const session = sessions.get(p.sessionId);
       if (!session) { fail(-32602, 'Session not found: ' + p.sessionId); return; }

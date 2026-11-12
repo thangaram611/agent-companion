@@ -14,6 +14,7 @@ const deferred = () => {
 };
 const reportedModel = (result) => result?.configOptions?.find((option) => option.id === 'model')?.currentValue
   ?? result?.models?.currentModelId;
+const thoughtLevel = (options) => options?.find(option => option.category === 'thought_level');
 const readFile = (path) => { try { return readFileSync(path, 'utf8'); } catch { return ''; } };
 const logWarning = (level, ...args) => { if (['WARN', 'ERROR', 'FATAL'].includes(level)) console.error('[acp]', ...args); };
 
@@ -45,7 +46,8 @@ class ProtocolConnection extends AcpConnection {
         if (['session/new', 'session/load'].includes(method)) {
           this.configOptions = result?.configOptions;
           this.effectiveModel = reportedModel(result);
-          this.effectiveEffort = this.descriptor.acp.reportedEffort?.({ model: this.effectiveModel, configOptions: this.configOptions });
+          this.effectiveEffort = thoughtLevel(this.configOptions)?.currentValue
+            ?? this.descriptor.acp.reportedEffort?.({ model: this.effectiveModel, configOptions: this.configOptions });
         }
         resolve(result);
       } });
@@ -63,23 +65,44 @@ class ProtocolConnection extends AcpConnection {
     if (msg.method === 'session/request_permission') this.activity(msg.params);
   }
   async _applySessionModel(sessionId) {
-    const model = this.effort !== undefined && this.descriptor.acp.selectEffort
+    const thought = this._validateThoughtLevel();
+    const model = !thought && this.effort !== undefined && this.descriptor.acp.selectEffort
       ? this.descriptor.acp.selectEffort({ model: this.model ?? this.effectiveModel, effort: this.effort, configOptions: this.configOptions })
       : this.model;
     // Validate against the session's advertised options before any selection write.
-    if (!model || !this.descriptor.acp.setModel) return;
-    try {
+    if (model && this.descriptor.acp.setModel) try {
       const [method, params] = this.descriptor.acp.setModel({ sessionId, model });
       const result = await this._sendRequest(method, params);
       if (reportedModel(result) !== model) throw failure('ModelSelectionMismatch');
       this.effectiveModel = reportedModel(result);
       this.configOptions = result.configOptions ?? this.configOptions;
-      this.effectiveEffort = this.descriptor.acp.reportedEffort?.({ model: this.effectiveModel, configOptions: this.configOptions });
+      this.effectiveEffort = thoughtLevel(this.configOptions)?.currentValue
+        ?? this.descriptor.acp.reportedEffort?.({ model: this.effectiveModel, configOptions: this.configOptions });
     } catch (err) {
       if (this.effort !== undefined && err.code === 'ModelSelectionMismatch') throw Object.assign(new Error(`Companion did not apply effort "${this.effort}" with model "${model}": ${err.message}`), { code: 'CAPABILITY_UNAVAILABLE' });
       if (err.code === 'ModelSelectionMismatch' || typeof err.code === 'number') throw failure('MODEL_NOT_ALLOWED', err);
       throw err; // Transport errors become HistoryUnavailable in openHistory.
     }
+    const option = this._validateThoughtLevel();
+    if (option && this.effort !== undefined) {
+      const result = await this._sendRequest('session/set_config_option', { sessionId, configId: option.id, value: this.effort });
+      const confirmed = result?.configOptions?.find(entry => entry.id === option.id)?.currentValue;
+      if (confirmed !== this.effort) throw Object.assign(new Error(`Companion did not confirm effort "${this.effort}" (reported ${JSON.stringify(confirmed) ?? 'nothing'}). Omit effort to inherit configuration.`), { code: 'CAPABILITY_UNAVAILABLE' });
+      this.configOptions = result.configOptions;
+      this.effectiveEffort = confirmed;
+    }
+  }
+  _validateThoughtLevel() {
+    const option = thoughtLevel(this.configOptions);
+    if (this.effort !== undefined) {
+      if (option) {
+        const levels = (option.options || []).flatMap(entry => entry.options || [entry]).map(entry => entry.value);
+        if (!levels.includes(this.effort)) throw Object.assign(new Error(`effort "${this.effort}" is not valid for this session's model. Use one of: ${levels.join(', ')}, or omit it to inherit configuration.`), { code: 'EFFORT_NOT_ALLOWED' });
+      } else if (!this.descriptor.acp.selectEffort) {
+        throw Object.assign(new Error('Companion advertises no thought_level option. Omit effort to inherit configuration.'), { code: 'CAPABILITY_UNAVAILABLE' });
+      }
+    }
+    return option;
   }
   // initialize() calls kill() on version mismatch. Fail protocol requests;
   // only ProcessSupervisor may signal the owned process.
