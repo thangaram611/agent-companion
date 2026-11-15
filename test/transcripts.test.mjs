@@ -420,3 +420,30 @@ test('Codex interrupted terminal upserts by native turn; Copilot failed task sta
   assert.equal(failed.items.length, 1); assert.equal(failed.items[0].kind, 'turn_end');
   assert.equal(failed.items[0].status, 'failed'); assert.equal(failed.items[0].text, 'Fixture task failed');
 });
+
+// Live login runs, 2026-11-15 (scrubbed: steps and trajectory_meta only, the
+// operator's home path replaced byte-for-byte): a command refused by
+// AGENT_COMPANION_ANTIGRAVITY_PERMISSION=none, and one cancelled mid-run.
+function antigravityRun(t, name, sessionId) {
+  const path = join(temp(t), 'transcript');
+  const db = new DatabaseSync(path);
+  db.exec(readFileSync(new URL(`antigravity/${name}.sql`, root), 'utf8'));
+  db.close();
+  return { companion: 'antigravity', kind: 'sqlite', path, sessionId };
+}
+test('antigravity: a refused tool call is a failed command with the native reason', async t => {
+  const { readTranscript } = await api();
+  const result = readTranscript(antigravityRun(t, 'fixture-denied', 'cd0abe1c-3503-4c78-98c2-5483de4a8bd6'));
+  assert.equal(result.counts.unrecognized, 0, result.format.detail);
+  const command = result.items.find(i => i.kind === 'command');
+  assert.equal(command.command, 'echo SHOULD-NOT-RUN');
+  assert.equal(command.status, 'failed'); assert.equal(command.exitCode, null);
+  assert.equal(command.denied, 'Denied by user (*).');
+});
+test('antigravity: a cancelled command keeps its native running status', async t => {
+  const { readTranscript } = await api();
+  const result = readTranscript(antigravityRun(t, 'fixture-cancelled', '6ed710c6-e92b-4fa1-bbf6-70ab9bbc7935'));
+  assert.equal(result.counts.unrecognized, 0, result.format.detail);
+  const command = result.items.find(i => i.kind === 'command');
+  assert.equal(command.command, 'sleep 30 && echo LATE'); assert.equal(command.status, 'running');
+});

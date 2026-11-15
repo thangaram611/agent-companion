@@ -262,7 +262,7 @@ export class Controller {
     const items = selectTurnItems(transcript?.items ?? [], { companion: a.record.provider,
       nativeTurnId: a.record.nativeTurnId, startedAt: a.record.startedAt });
     const worktree = await diffWorktrees(a.record.cwd, a.record.startSnapshot, a.record.endSnapshot, { env: this.env });
-    return { summary: summarizeWork({ locator: a.record.transcript, transcript, items, worktree }),
+    return { summary: summarizeWork({ locator: a.record.transcript, transcript, items, worktree, ended: true }),
       nativeError: items.find(item => item.kind === 'error')?.error };
   }
   async _finish(a, cause) {
