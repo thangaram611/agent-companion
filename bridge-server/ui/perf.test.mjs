@@ -1,7 +1,8 @@
-// The live view's performance gate (docs/LIVE_VIEW_PLAN.md, Step 2): 10,000
-// transcript items appended to a running job's JSONL, then scrolling, resizing
-// and expand/collapse, each timed from the action to the frame Ink writes.
-// Ink renders to a fake TTY in interactive mode; keys go through Ink's stdin.
+// The live view's performance gate (docs/LIVE_VIEW_PLAN.md, Steps 2 and 3):
+// 10,000 transcript items appended to a running job's JSONL, then scrolling,
+// typing in its message box, resizing and expand/collapse, each timed from the
+// action to the frame Ink writes. Ink renders to a fake TTY in interactive
+// mode; keys go through Ink's stdin.
 import '../../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,8 +15,9 @@ import { run } from './app.mjs';
 // resize (every item rewrapped) max 57–63; expand all max 37–51. The budget is
 // about three times that for slower CI runners. Re-reading the whole 17 MB file
 // on every append instead of following it measured append p95 27.1 ms: a failure.
+// Typing in the message box (one key per frame) has the key budget.
 export const BUDGET = {
-  append: { p95: 25, max: 60 }, key: { p95: 25, max: 60 }, resize: { p95: 200, max: 200 }, expand: { p95: 120, max: 200 },
+  append: { p95: 25, max: 60 }, key: { p95: 25, max: 60 }, type: { p95: 25, max: 60 }, resize: { p95: 200, max: 200 }, expand: { p95: 120, max: 200 },
 };
 const ITEMS = 10_000, BATCH = 50;
 
@@ -42,7 +44,7 @@ const stats = times => {
   return { frames: times.length, p50: +at(0.5).toFixed(1), p95: +at(0.95).toFixed(1), max: +sorted.at(-1).toFixed(1) };
 };
 
-test(`performance gate: ${ITEMS} appended items, scroll, resize, expand and collapse`, { timeout: 300_000 }, async t => {
+test(`performance gate: ${ITEMS} appended items, scroll, typing, resize, expand and collapse`, { timeout: 300_000 }, async t => {
   const f = uiFixture(t);
   const model = f.model({ size: { columns: 150, rows: 40 } });
   const stdout = new Terminal(150, 40);
@@ -60,8 +62,9 @@ test(`performance gate: ${ITEMS} appended items, scroll, resize, expand and coll
   }
   const key = sequence => frame(() => stdin.write(sequence));
   while (model.selected !== 'claude:run-1') await key('\x1b[B');
+  // Focusing the running job focuses its message box.
   await key('\t');
-  const measured = { append: [], key: [], resize: [], expand: [] };
+  const measured = { append: [], key: [], type: [], resize: [], expand: [] };
 
   for (let i = 0; i < ITEMS; i += BATCH) {
     f.append(items(i, BATCH));
@@ -78,11 +81,21 @@ test(`performance gate: ${ITEMS} appended items, scroll, resize, expand and coll
   for (let i = 0; i < 100; i++) measured.key.push(await key('\x1b[A'));
   for (let i = 0; i < 40; i++) measured.key.push(await key('\x1b[5~'));
   for (let i = 0; i < 40; i++) measured.key.push(await key('\x1b[6~'));
-  measured.key.push(await key('g'), await key('G'));
+
+  // Typing as a person does: characters, ctrl+j lines, backspaces and mode changes.
+  const words = 'Keep the fake server; add an idle event after the step instead. ';
+  for (let i = 0; i < 200; i++) measured.type.push(await key(words[i % words.length]));
+  for (let i = 0; i < 10; i++) measured.type.push(await key('\n'), await key(words[i]));
+  for (let i = 0; i < 20; i++) measured.type.push(await key('\x7f'));
+  for (let i = 0; i < 3; i++) measured.type.push(await key('\x1b[Z'));
+  assert.equal(model.boxes.get('claude:run-1').draft.length, 200, 'every key reached the draft');
 
   for (const [columns, rows] of [[100, 30], [200, 60], [150, 40], [90, 50], [150, 40]].flatMap(size => [size, size])) {
     measured.resize.push(await frame(() => stdout.resize(columns, rows)));
   }
+  for (let i = 0; i < 4; i++) measured.expand.push(await key('\x0f'));
+  // Back to the list, where e and E work on the selected job.
+  await key('\x1b');
   for (let i = 0; i < 20; i++) measured.expand.push(await key(i % 4 === 3 ? 'E' : 'e'));
   for (let i = 0; i < 4; i++) measured.expand.push(await key('E'));
 

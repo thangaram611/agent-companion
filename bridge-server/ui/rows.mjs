@@ -159,9 +159,10 @@ const CHANGE = { add: 'added', update: 'updated', delete: 'deleted' };
 
 // Logical lines for one transcript item. Kinds the view does not list
 // (usage, turn_end) are filtered by the caller.
-export function itemLines(item, { expanded = false, ended = false, cwd = null, answer = null } = {}) {
+// A user item's label says who wrote it: task, lead, you, or user when unknown.
+export function itemLines(item, { expanded = false, ended = false, cwd = null, answer = null, label = 'user' } = {}) {
   switch (item.kind) {
-    case 'user': return textLines('you', 'dim', linesOf(item, 'text', item.text ?? (item.image ? '[image]' : '')), 'dim', expanded);
+    case 'user': return textLines(label, 'dim', linesOf(item, 'text', item.text ?? (item.image ? '[image]' : '')), 'dim', expanded);
     case 'reasoning': return textLines('think', 'dim', linesOf(item, 'text'), 'dim', expanded);
     case 'preamble': return textLines('pre', 'faint', linesOf(item, 'text'), 'dim', expanded);
     case 'assistant':
@@ -251,6 +252,12 @@ export function liveLines(job, { now, lastText = null, activeAt = null }) {
   if (activeAt != null) segs.push([` · ${clock(now - activeAt)}`, 'ok']);
   out.push({ segs, hang: 2 });
   return out;
+}
+
+// A faint border `w` cells wide around rows already laid out to `w - 4`.
+export function boxRows(content, w) {
+  const line = '─'.repeat(Math.max(0, w - 2));
+  return [[[`╭${line}╮`, 'faint']], ...content.map(row => [['│ ', 'faint'], ...fitSegs(row, Math.max(0, w - 4)), [' │', 'faint']]), [[`╰${line}╯`, 'faint']]];
 }
 
 // Wrapped rows per block, cached on the block's identity, flags and width; a

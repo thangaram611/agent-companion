@@ -580,8 +580,8 @@ and result resource link remain the pointer to the full transcript view.
 
 ## Live View
 
-`agent-companion ui` opens a read-only terminal view of companion jobs from
-both hosts' state directories: running jobs first, then the last 24 hours.
+`agent-companion ui` opens a terminal view of companion jobs from both hosts'
+state directories: running jobs first, then the last 24 hours.
 `setup.sh` installs the `agent-companion` launcher in `~/.local/bin`; it runs
 this checkout's `hooks/launch-ui.sh` with the Node 26 the hooks resolve. When
 `~/.local/bin` is not on `PATH`, setup prints the line to add; until then run
@@ -597,14 +597,31 @@ the companion's own native transcript, followed as it grows, with the
 in-flight activity from the execution record as the last line. A finished job
 opens on its outcome: result, git change list, errors and answer. Command and
 tool output is folded to its first and last lines; the preamble is hidden.
-Under 110 columns one pane shows at a time.
+In the transcript, `task` is the lead's request, `lead` its later messages and
+`you` yours. Under 110 columns one pane shows at a time.
 
-The view writes nothing, renews no lease and starts no work.
+A running job's pane ends in a message box, as in the companion's own app, and
+opening the job focuses it. `Enter` sends the draft in the mode shown under the
+box, which starts on the companion's own default: `steer` joins the running
+turn, `queue` runs after it, and `interrupt` stops the turn, then sends. Only
+the modes that job's companion supports are offered; Copilot offers cancel
+only. A sent message waits between the live line and the box with its state
+(waiting for the bridge, queued, joined) until the companion's transcript shows
+it. A refusal shows once in red with its reason, and the text returns to an
+empty box. The lead learns of each message or cancel at once. Ended jobs have
+no box; a running job started by an older bridge shows a one-line hint instead.
+
+The view's only writes are those messages and cancels: one 0600 request file
+per send in the owning host's state directory, under
+`inbox/<executionId>/`, and the deletion of each outcome file it has read. It
+renews no lease and starts no work. Drafts stay in memory.
+
+On the job list and on ended jobs:
 
 | Key | Action |
 | --- | --- |
 | `↑` `↓`, `j` `k` | Select a job; in the transcript, move between items |
-| `Enter`, `Tab`, `Esc` | Open or focus the job's transcript; back to the list |
+| `Enter`, `Tab`, `Esc` | Open or focus the job (a running job's message box); back to the list |
 | `PgUp` `PgDn`, `Space` | Scroll the transcript a page |
 | `g`, `G` | Transcript top; bottom, following new items |
 | `e`, `E` | Expand the current item; all items |
@@ -612,7 +629,20 @@ The view writes nothing, renews no lease and starts no work.
 | `f` | Follow new items on or off |
 | `/` | Filter jobs (`Enter` keeps, `Esc` clears) |
 | `o` | Show jobs older than 24 hours |
-| `?`, `q` | Keys; quit |
+| `?`, `q`, `Ctrl+C` | Keys; quit |
+
+In a running job's message box:
+
+| Key | Action |
+| --- | --- |
+| Typing, `Enter` | Write; send in the shown mode |
+| `Shift+Tab` | Next mode the companion supports |
+| `Ctrl+J` | New line (also `Shift+Enter` or `Alt+Enter` where the terminal tells them apart) |
+| `↑` `↓`, `PgUp` `PgDn` | Scroll the transcript; scrolling back to the end follows again |
+| `Ctrl+O` | Expand or fold all outputs |
+| `Ctrl+X` | Cancel the job, after one `y`/`n` confirmation |
+| `Esc` | Back to the list; the draft is kept |
+| `Ctrl+C` | Clear the draft; on an empty box, quit |
 
 ## Diagnostics
 
@@ -665,8 +695,8 @@ omitting `test/` skips cross-cutting checks such as the sync-exec timeout guard
 and the runtime sandbox guard.
 
 The live view's performance gate, `bridge-server/ui/perf.test.mjs`, runs with
-the suite: 10,000 appended transcript items, scrolling, resizing and
-expand/collapse under a per-frame budget recorded in
+the suite: 10,000 appended transcript items, scrolling, typing in the message
+box, resizing and expand/collapse under a per-frame budget recorded in
 [docs/LIVE_VIEW_PLAN.md](docs/LIVE_VIEW_PLAN.md#step-2-read-only-terminal-ui).
 Its headless snapshots are `bridge-server/ui/ui.test.mjs.snapshot`; after an
 intended change, regenerate them with `node --test --test-update-snapshots

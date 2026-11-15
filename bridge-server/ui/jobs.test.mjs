@@ -33,6 +33,7 @@ test('jobs from both hosts: running first, then by finish time; an active record
   const jobs = source.list();
   assert.deepEqual(jobs.map(j => [j.key, j.status]), [['claude:b', 'running'], ['codex:c', 'failed'], ['claude:a', 'completed'], ['codex:d', 'unknown']]);
   assert.equal(jobs[0].project, 'app');
+  assert.deepEqual(jobs.map(j => j.dir), [claude, codex, claude, codex], 'each job names its host state dir, where its inbox lives');
   // A result appearing later is picked up; the cached execution is reused.
   write(join(claude, 'results/b.json'), { outcome: 'stopped', finishedAt: 1000 });
   assert.equal(source.list().find(j => j.key === 'claude:b').status, 'stopped');

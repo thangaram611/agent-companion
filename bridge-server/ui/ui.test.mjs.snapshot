@@ -1,3 +1,32 @@
+exports[`cancel confirmation at 80 columns 1`] = `
+ agent-companion  2 running · 2 done in 24h
+
+  Claude Code › Live view plan · gpt-6-astra high · main
+
+    lib/file-1.mjs:2  const DIGEST_1 = …
+    +19 lines
+    lib/file-21.mjs:22  const DIGEST_21 = …
+    lib/file-22.mjs:23  const DIGEST_22 = …
+
+  ✎ lib/digest.mjs  added
+  ✎ bridge-server/server.mjs  updated
+
+  $ node --test lib/digest.test.mjs                                       exit 1
+    ✖ on-demand digest renders the running native turn
+      at frame 0
+    +7 lines
+      at frame 8
+    tests 1 failed
+
+  One test fails on the running case; fixing the renderer now.
+
+  ● running $ node --test lib/digest.test.mjs
+  ╭────────────────────────────────────────────────────────────────────────────╮
+  │ Cancel this job? The lead is told you cancelled it.            y yes  n no │
+  ╰────────────────────────────────────────────────────────────────────────────╯
+  steer                     ⏎ send · shift+⇥ mode · ctrl+x cancel job · esc jobs
+`;
+
 exports[`failed job at 150 columns 1`] = `
  agent-companion  2 running · 2 done in 24h
 
@@ -13,7 +42,7 @@ exports[`failed job at 150 columns 1`] = `
  ✗ rate limit probe                   1h │
    copilot · scratch                     │  preamble · 2 items · p shows
                                          │
-                                         │  you    Reply with the word FAILURE.
+                                         │  task   Reply with the word FAILURE.
                                          │
                                          │  ✗ rate_limit, shown above
                                          │
@@ -42,7 +71,7 @@ exports[`failed job at 80 columns 1`] = `
 
   preamble · 2 items · p shows
 
-  you    Reply with the word FAILURE.
+  task   Reply with the word FAILURE.
 
   ✗ rate_limit, shown above
 
@@ -66,7 +95,7 @@ exports[`finished job at 150 columns 1`] = `
                                          │
                                          │  transcript ↓ (6 items)
                                          │
-                                         │  you    Review the auth middleware for CSRF gaps and fix what you find.
+                                         │  task   Review the auth middleware for CSRF gaps and fix what you find.
                                          │  think  Reading the middleware first.
                                          │
                                          │  $ rg -n csrf src                                                                                        ok
@@ -95,7 +124,7 @@ exports[`finished job at 80 columns 1`] = `
 
 ▎ transcript ↓ (6 items)
 
-  you    Review the auth middleware for CSRF gaps and fix what you find.
+  task   Review the auth middleware for CSRF gaps and fix what you find.
   think  Reading the middleware first.
 
   $ rg -n csrf src                                                            ok
@@ -141,26 +170,26 @@ exports[`running job at 150 columns 1`] = `
 
  ● Restore spec triage              0:41 │  Claude Code › Live view plan · gpt-6-astra high · main
    opencode · hermes                     │
-                                         │  $ rg -n "digest" bridge-server lib                                                                      ok
- ● Step 1b-2: digest on demand      4:12 │    lib/file-0.mjs:1  const DIGEST_0 = …
-   codex · agent-companion               │    lib/file-1.mjs:2  const DIGEST_1 = …
-                                         │    +19 lines
- ✓ Review auth middleware            12m │    lib/file-21.mjs:22  const DIGEST_21 = …
-   claude · oikos-web                    │    lib/file-22.mjs:23  const DIGEST_22 = …
-                                         │
- ✗ rate limit probe                   1h │  ✎ lib/digest.mjs  added
-   copilot · scratch                     │  ✎ bridge-server/server.mjs  updated
-                                         │
+                                         │    lib/file-21.mjs:22  const DIGEST_21 = …
+ ● Step 1b-2: digest on demand      4:12 │    lib/file-22.mjs:23  const DIGEST_22 = …
+   codex · agent-companion               │
+                                         │  ✎ lib/digest.mjs  added
+ ✓ Review auth middleware            12m │  ✎ bridge-server/server.mjs  updated
+   claude · oikos-web                    │
                                          │  $ node --test lib/digest.test.mjs                                                                   exit 1
-                                         │    ✖ on-demand digest renders the running native turn
-                                         │      at frame 0
+ ✗ rate limit probe                   1h │    ✖ on-demand digest renders the running native turn
+   copilot · scratch                     │      at frame 0
                                          │    +7 lines
                                          │      at frame 8
                                          │    tests 1 failed
                                          │
                                          │  One test fails on the running case; fixing the renderer now.
                                          │
- 1 older                                 │  ● running $ node --test lib/digest.test.mjs
+                                         │  ● running $ node --test lib/digest.test.mjs
+                                         │  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+                                         │  │ › Message Codex…                                                                                       │
+                                         │  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ 1 older                                 │  steer · joins the running turn now
 
  ↑↓ jobs   ⇥ focus   e expand   f follow   / filter   ? keys
 `;
@@ -170,8 +199,6 @@ exports[`running job at 80 columns 1`] = `
 
   Claude Code › Live view plan · gpt-6-astra high · main
 
-  $ rg -n "digest" bridge-server lib                                          ok
-    lib/file-0.mjs:1  const DIGEST_0 = …
     lib/file-1.mjs:2  const DIGEST_1 = …
     +19 lines
     lib/file-21.mjs:22  const DIGEST_21 = …
@@ -187,9 +214,40 @@ exports[`running job at 80 columns 1`] = `
       at frame 8
     tests 1 failed
 
-▎ One test fails on the running case; fixing the renderer now.
+  One test fails on the running case; fixing the renderer now.
 
   ● running $ node --test lib/digest.test.mjs
+  ╭────────────────────────────────────────────────────────────────────────────╮
+  │ › Message Codex…                                                           │
+  ╰────────────────────────────────────────────────────────────────────────────╯
+  steer                     ⏎ send · shift+⇥ mode · ctrl+x cancel job · esc jobs
+`;
 
- ↑↓ items   esc back   e expand   f follow   ? keys
+exports[`running job focused with a queued message and a draft at 150 columns 1`] = `
+ agent-companion  2 running · 2 done in 24h
+
+ ● Restore spec triage              0:41 │  Claude Code › Live view plan · gpt-6-astra high · main
+   opencode · hermes                     │
+                                         │    +19 lines
+ ● Step 1b-2: digest on demand      4:12 │    lib/file-21.mjs:22  const DIGEST_21 = …
+   codex · agent-companion               │    lib/file-22.mjs:23  const DIGEST_22 = …
+                                         │
+ ✓ Review auth middleware            12m │  ✎ lib/digest.mjs  added
+   claude · oikos-web                    │  ✎ bridge-server/server.mjs  updated
+                                         │
+ ✗ rate limit probe                   1h │  $ node --test lib/digest.test.mjs                                                                   exit 1
+   copilot · scratch                     │    ✖ on-demand digest renders the running native turn
+                                         │      at frame 0
+                                         │    +7 lines
+                                         │      at frame 8
+                                         │    tests 1 failed
+                                         │
+                                         │  One test fails on the running case; fixing the renderer now.
+                                         │
+                                         │  ● running $ node --test lib/digest.test.mjs
+                                         │  ◌ lead · queued  Also check the logout route.  runs after this turn
+                                         │  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+                                         │  │ › Keep the fake server; add an idle event after the step instead.▌                                     │
+                                         │  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ 1 older                                 │  steer · joins the running turn now                    ⏎ send · shift+⇥ mode · ctrl+x cancel job · esc jobs
 `;

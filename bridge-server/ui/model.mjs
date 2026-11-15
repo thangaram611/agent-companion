@@ -1,12 +1,15 @@
 // The live view's state: which jobs are listed, which is selected, its followed
-// transcript, scroll and fold state, and the key map. render() composes the
-// whole screen as rows of styled segments, exactly `columns` cells wide, so the
-// Ink layer only prints them. Read-only: nothing here writes outside memory.
+// transcript, scroll and fold state, each running job's message box, and the
+// key map. render() composes the whole screen as rows of styled segments,
+// exactly `columns` cells wide, so the Ink layer only prints them. The only
+// writes are the box's inbox requests, through inbox.mjs; drafts stay in memory.
+import { randomUUID } from 'node:crypto';
 import { followTranscript, locateTranscript } from '../../lib/transcripts.mjs';
 import { selectTurnItems } from '../../lib/work-summary.mjs';
 import { modelName } from '../../lib/digest.mjs';
+import { takeOutcome, writeRequest } from './inbox.mjs';
 import { branchOf, createJobSource } from './jobs.mjs';
-import { Pane, age, clean, clock, commandText, cut, fitSegs, itemLines, liveLines, outcomeLines, width } from './rows.mjs';
+import { Pane, age, boxRows, clean, clock, commandText, cut, fitSegs, itemLines, layoutLine, liveLines, outcomeLines, segsWidth, width } from './rows.mjs';
 
 const DAY = 86_400_000;
 export const WIDE = 110;
@@ -23,7 +26,34 @@ const one = text => clean(text).replace(/\s*\n\s*/g, ' ');
 const tokens = n => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
 const HELP = [['↑↓ j k', 'jobs, or transcript items when the transcript has focus'], ['⏎ ⇥ esc', 'open or focus the job; back to the list'],
   ['PgUp PgDn', 'scroll the transcript a page'], ['g G', 'transcript top; bottom and follow'], ['e E', 'expand the item; expand all'],
-  ['p', 'show the preamble'], ['f', 'follow new transcript items'], ['/', 'filter jobs'], ['o', 'show jobs older than 24 hours'], ['q', 'quit']];
+  ['p', 'show the preamble'], ['f', 'follow new transcript items'], ['/', 'filter jobs'], ['o', 'show jobs older than 24 hours'], ['q', 'quit'],
+  ['', 'In a running job, the message box has the keys:'], ['typing ⏎', 'write; send in the shown mode'], ['shift+⇥ ctrl+j', 'next mode; new line'],
+  ['↑↓ PgUp PgDn', 'scroll the transcript'], ['ctrl+o', 'expand or fold all outputs'], ['ctrl+x', 'cancel the job, after one confirmation'],
+  ['esc', 'back to the list, keeping the draft'], ['ctrl+c', 'clear the draft; on an empty box, quit']];
+const NAMES = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', antigravity: 'Antigravity', copilot: 'Copilot' };
+const MODES = { steer: 'joins the running turn now', queue: 'runs after the current turn', interrupt: 'stops this turn, then sends' };
+const supported = job => ['steer', 'queue', 'interrupt'].filter(mode => job.execution.interventionModes?.[mode]);
+const REFUSED = { state: 'the job takes no more messages', capability: 'not supported by this companion', text_too_long: 'too long', request_too_large: 'too long' };
+// A recorded message the companion has not shown yet: [state, hint].
+function pendingState({ state, mode }) {
+  if (state === 'joined') return ['joined', 'in the running turn'];
+  if (state === 'not_delivered') return ['not delivered', ''];
+  // Held by the bridge (accepted) or by the companion's own queue (delivered).
+  if (mode === 'queue') return ['queued', 'runs after this turn'];
+  if (state === 'accepted') return mode === 'steer' ? ['sending', ''] : ['interrupting', 'runs once this turn stops'];
+  return [clean(state), ''];
+}
+// Typed or pasted text: a carriage return inside it is a new line; other control keys are not text.
+const draftText = text => text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+// Claude records a message that joined the running turn as a queued_command
+// attachment (measured on 2.1.325): a message, not preamble.
+const joinedMessages = new WeakMap();
+function joined(item) {
+  if (item.kind !== 'preamble' || item.attachment?.type !== 'queued_command') return item;
+  let message = joinedMessages.get(item);
+  if (!message) joinedMessages.set(item, message = { ...item, kind: 'user', text: item.attachment.prompt });
+  return message;
+}
 
 export class Model {
   constructor({ env = process.env, source = createJobSource({ env }), now = Date.now, size = { columns: 120, rows: 40 }, exit = () => {} } = {}) {
@@ -35,6 +65,8 @@ export class Model {
     this.showOlder = false; this.filter = ''; this.editing = false; this.help = false;
     this.selected = null; this.inJob = false; this.listTop = 0;
     this.detail = null; this.second = null;
+    // Per job key: { draft, mode, confirm, sent: [request + dir + outcome] }.
+    this.boxes = new Map();
     this.refresh();
   }
   subscribe = listener => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
@@ -49,15 +81,36 @@ export class Model {
   // Poll: records, caller titles and the selected transcript. Re-render on a
   // change, and once a second while a job is running for its clock.
   tick() {
-    const before = this.jobs, detailChanged = this.refresh();
+    // Outcomes first, so a request the record now holds is not shown twice.
+    const before = this.jobs, outcomes = this.takeOutcomes(), detailChanged = this.refresh();
     const second = Math.floor(this.now() / 1000);
     const clockMoved = second !== this.second && this.jobs.some(job => job.status === 'running');
     this.second = second;
-    if (detailChanged || clockMoved || before.length !== this.jobs.length || before.some((job, i) => job !== this.jobs[i])) this.changed();
+    if (outcomes || detailChanged || clockMoved || before.length !== this.jobs.length || before.some((job, i) => job !== this.jobs[i])) this.changed();
+  }
+  // Each outcome is read once, then deleted; a refused message returns to an empty box.
+  takeOutcomes() {
+    let moved = false;
+    for (const box of this.boxes.values()) for (const sent of box.sent) {
+      if (sent.outcome) continue;
+      sent.outcome = takeOutcome(sent.dir, sent.executionId, sent.requestId);
+      if (!sent.outcome) continue;
+      moved = true;
+      if (!sent.outcome.ok && sent.text && !box.draft) box.draft = sent.text;
+    }
+    return moved;
   }
   refresh() {
     const now = this.now();
     const all = this.source.list();
+    // A request the record holds shows from the record; an ended job's requests are moot.
+    for (const job of all) {
+      const box = this.boxes.get(job.key);
+      if (!box) continue;
+      if (job.status !== 'running') { box.sent = []; box.confirm = false; continue; }
+      const recorded = new Set((job.execution.interventions ?? []).map(input => input.id));
+      box.sent = box.sent.filter(sent => !(sent.outcome?.ok && recorded.has(sent.outcome.interventionId)));
+    }
     const recent = job => job.status === 'running' || (job.finishedAt ?? job.startedAt) >= now - DAY;
     let listed = all.filter(job => this.showOlder || recent(job));
     this.counts = { running: all.filter(job => job.status === 'running').length,
@@ -89,7 +142,8 @@ export class Model {
     if (d?.key !== job.key) {
       d = this.detail = { key: job.key, job, locator: null, follower: null, located: 0, polled: 0, final: false, items: new Map(),
         list: [], preamble: [], format: null, top: 0, follow: job.status === 'running', cursor: null,
-        toggled: new Set(), expandAll: false, showPreamble: false, branch: branchOf(job.execution.cwd), pane: new Pane() };
+        toggled: new Set(), expandAll: false, showPreamble: false, branch: branchOf(job.execution.cwd), pane: new Pane(),
+        labels: new Map(), taken: new Set() };
       this.poll(true);
       return true;
     }
@@ -132,8 +186,26 @@ export class Model {
       nativeTurnIds: execution.nativeTurnIds, interventions: execution.interventions, startedAt: execution.startedAt });
     const inTurn = new Set(turn);
     // Session-wide instructions carry no turn id; another turn's preamble is not this job's.
-    d.preamble = all.filter(item => item.kind === 'preamble' && (item.turnId == null || inTurn.has(item)));
-    d.list = turn.filter(item => !HIDDEN.has(item.kind));
+    d.preamble = all.filter(item => item.kind === 'preamble' && joined(item) === item && (item.turnId == null || inTurn.has(item)));
+    d.list = turn.map(joined).filter(item => !HIDDEN.has(item.kind));
+    this.label();
+  }
+  // Who wrote each user message. The first is the task; a later one takes the
+  // first unclaimed recorded message with exactly its text, whose sender names
+  // it (lead or you); anything else stays `user`.
+  label() {
+    const d = this.detail, inputs = d.job.execution.interventions ?? [];
+    d.labels = new Map(); d.taken = new Set();
+    let first = true;
+    for (const item of d.list) {
+      if (item.kind !== 'user') continue;
+      if (first) { d.labels.set(item.id, 'task'); first = false; continue; }
+      const text = clean(item.text ?? '').trim();
+      const input = inputs.find(input => !d.taken.has(input.id) && clean(input.text ?? '').trim() === text);
+      if (!input) continue;
+      d.taken.add(input.id);
+      d.labels.set(item.id, input.from === 'user' ? 'you' : 'lead');
+    }
   }
 
   expanded(id) { const d = this.detail; return d.expandAll !== d.toggled.has(id); }
@@ -157,11 +229,11 @@ export class Model {
     }
     let previous = null;
     for (const item of [...(d.showPreamble ? d.preamble : []), ...d.list]) {
-      const expanded = this.expanded(item.id);
+      const expanded = this.expanded(item.id), label = d.labels.get(item.id);
       const compact = COMPACT.has(item.kind) && !expanded;
       const gap = previous !== null && !(previous && compact);
-      blocks.push({ key: item.id, focus: item.id, source: item, flags: `${expanded}|${gap}|${ended}|${answer !== null}`,
-        lines: () => [...(gap ? [{ segs: [] }] : []), ...itemLines(item, { expanded, ended, cwd, answer })] });
+      blocks.push({ key: item.id, focus: item.id, source: item, flags: `${expanded}|${gap}|${ended}|${answer !== null}|${label}`,
+        lines: () => [...(gap ? [{ segs: [] }] : []), ...itemLines(item, { expanded, ended, cwd, answer, label })] });
       previous = compact;
     }
     if (!ended) {
@@ -217,7 +289,13 @@ export class Model {
     if (inside != null) d.cursor = pane.blocks[inside].focus;
   }
 
+  // Ink 8 reports ctrl+letter as the letter with key.ctrl (ctrl+c too, with
+  // exitOnCtrlC off), shift+tab as key.tab with key.shift, and ctrl+j as input
+  // '\n' (or 'j' with key.ctrl under the kitty protocol). Measured 2026-11-15.
   key(input, key = {}) {
+    const typing = this.typing;
+    if (typing) return this.boxKey(typing, input, key);
+    if (key.ctrl && input === 'c') return this.exit();
     if (this.editing) {
       if (key.escape) { this.filter = ''; this.editing = false; }
       else if (key.return) this.editing = false;
@@ -226,6 +304,12 @@ export class Model {
       this.refresh(); this.listTop = 0; return this.changed();
     }
     if (this.help) { if (input === '?' || input === 'q' || key.escape) this.help = false; return this.changed(); }
+    // A ctrl+letter is not the letter's key.
+    if (key.ctrl) {
+      if (input !== 'o' || !this.detail) return;
+      this.toggleAll();
+      return this.changed();
+    }
     if (input === 'q') return this.exit();
     if (input === '?') this.help = true;
     else if (input === '/') this.editing = true;
@@ -254,29 +338,97 @@ export class Model {
     const d = this.detail;
     if (!d) return false;
     if (input === 'e' && d.cursor) { d.toggled.has(d.cursor) ? d.toggled.delete(d.cursor) : d.toggled.add(d.cursor); d.follow = false; d.reveal = true; }
-    else if (input === 'E') { d.expandAll = !d.expandAll; d.toggled.clear(); }
+    else if (input === 'E') this.toggleAll();
     else if (input === 'p') d.showPreamble = !d.showPreamble;
     else if (input === 'f') d.follow = !d.follow;
     else return false;
     return true;
   }
+  toggleAll() { const d = this.detail; d.expandAll = !d.expandAll; d.toggled.clear(); }
 
-  // The screen: title, blank, body, blank, key hints. Each row is exactly `columns` wide.
+  // The open running job whose box has the keys; a record without
+  // interventionModes comes from an older bridge, which reads no inbox.
+  get typing() {
+    const job = this.inJob && !this.help && !this.editing ? this.detail?.job : null;
+    return job?.status === 'running' && job.execution.interventionModes ? job : null;
+  }
+  box(job) {
+    let box = this.boxes.get(job.key);
+    if (!box) {
+      const modes = supported(job), preferred = job.execution.interventionModes?.default;
+      this.boxes.set(job.key, box = { draft: '', mode: modes.includes(preferred) ? preferred : modes[0] ?? null, confirm: false, sent: [] });
+    }
+    return box;
+  }
+  boxKey(job, input, key) {
+    const box = this.box(job), d = this.detail, modes = supported(job);
+    if (box.confirm) {
+      if (input === 'y' || input === 'Y') { box.confirm = false; this.send(job, 'cancel'); }
+      else if (input === 'n' || input === 'N' || key.escape || (key.ctrl && input === 'c')) box.confirm = false;
+      else return;
+    } else if (key.ctrl) {
+      if (input === 'c') { if (!box.draft) return this.exit(); box.draft = ''; }
+      else if (input === 'x') box.confirm = true;
+      else if (input === 'o') this.toggleAll();
+      else if (input === 'j' && box.mode) box.draft += '\n';
+      else return;
+    } else if (key.return) {
+      // Terminals that tell shift+⏎ or alt+⏎ apart get a new line, never a send.
+      if (key.shift || key.meta) { if (box.mode) box.draft += '\n'; } else this.send(job, box.mode);
+    } else if (key.tab) {
+      if (!key.shift || modes.length < 2) return;
+      box.mode = modes[(modes.indexOf(box.mode) + 1) % modes.length];
+    } else if (key.escape) this.inJob = false;
+    else if (key.upArrow || key.downArrow) this.scrollBox(key.upArrow ? -1 : 1);
+    else if (key.pageUp || key.pageDown) this.scrollBox((key.pageUp ? -1 : 1) * (d.height ?? 10));
+    else if (key.backspace || key.delete) box.draft = box.draft.slice(0, /[\udc00-\udfff]$/.test(box.draft) ? -2 : -1);
+    else if (input && !key.meta && box.mode) box.draft += draftText(input);
+    else return;
+    this.changed();
+  }
+  // Bracketed paste arrives whole, newlines included.
+  paste(text) {
+    const job = this.typing;
+    if (!job || !this.box(job).mode || this.box(job).confirm) return;
+    this.box(job).draft += draftText(text);
+    this.changed();
+  }
+  send(job, mode) {
+    const box = this.box(job), cancel = mode === 'cancel';
+    if (!cancel && (!mode || !box.draft.trim())) return;
+    const request = { requestId: randomUUID(), executionId: job.execution.executionId, mode, ...(cancel ? {} : { text: box.draft }), at: this.now() };
+    // A refusal shows until the next send.
+    box.sent = box.sent.filter(sent => sent.outcome?.ok !== false);
+    let outcome = null;
+    try { writeRequest(job.dir, request); } catch (err) { outcome = { ok: false, status: 'not_written', reason: err.code ?? err.message }; }
+    box.sent.push({ ...request, dir: job.dir, outcome });
+    if (!cancel && !outcome) box.draft = '';
+  }
+  // Scrolling back down to the end follows new items again.
+  scrollBox(rows) {
+    const d = this.detail;
+    this.scroll(rows);
+    if (rows > 0 && d.top >= d.pane.total - d.height) d.follow = true;
+  }
+
+  // The screen: title, blank, body, blank, key hints; a focused message box
+  // carries its own key hints as the body's last row. Each row is exactly `columns` wide.
   render() {
     if (this.frame) return this.frame;
     // Below this the layout cannot fit; Ink cuts what a tinier terminal cannot show.
     const W = Math.max(30, this.size.columns), H = Math.max(8, this.size.rows);
-    const bodyH = Math.max(1, H - 4);
+    const boxed = Boolean(this.typing);
+    const bodyH = Math.max(1, H - (boxed ? 2 : 4));
     const title = [[' ', 'normal'], ['agent-companion', 'title'], [`  ${this.counts.running} running · ${this.counts.done} done in 24h`, 'dim']];
     if (this.filter && !this.editing) title.push([`  /${this.filter}`, 'dim']);
     let body;
-    if (this.help) body = HELP.map(([keys, text]) => [[' ' + keys.padEnd(12), 'title'], [text, 'dim']]);
+    if (this.help) body = HELP.map(([keys, text]) => [[' ' + keys.padEnd(16), 'title'], [text, 'dim']]);
     else if (!this.wide) body = this.inJob && this.detail ? this.paneRows(W, bodyH) : this.listRows(W, bodyH);
     else {
       const list = this.listRows(LIST, bodyH), pane = this.paneRows(W - LIST - 1, bodyH);
       body = Array.from({ length: bodyH }, (_, i) => [...fitSegs(list[i] ?? [], LIST), ['│', 'faint'], ...(pane[i] ?? [])]);
     }
-    const rows = [title, [], ...body.slice(0, bodyH), [], this.hints()];
+    const rows = [title, [], ...body.slice(0, bodyH), ...(boxed ? [] : [[], this.hints()])];
     return this.frame = rows.map(row => fitSegs(row, W));
   }
   hints() {
@@ -325,14 +477,72 @@ export class Model {
       [model, effort].filter(Boolean).map(String).map(one).join(' '), used != null ? `${tokens(used)} tokens` : '', d.branch ? one(d.branch) : ''];
     const pad = ' '.repeat(margin);
     const header = [[pad + parts.filter(Boolean).join(' · '), 'dim']];
-    const height = Math.max(1, h - 2);
+    const boxed = Boolean(this.typing);
+    const footer = this.footer(job, w - margin, h, boxed);
+    const height = Math.max(1, h - 2 - footer.length);
     this.layoutPane(w - margin, height);
-    const focused = this.inJob;
+    const focused = this.inJob && !boxed;
     const rows = [header, []];
     for (const { block, row } of d.pane.slice(d.top, height)) {
       const mark = focused && block === d.index && row.length ? ['▎', 'edit'] : [' ', 'normal'];
       rows.push([mark, [' ', 'normal'], ...row]);
     }
+    // The box is pinned to the bottom, under the live line and pending messages.
+    if (footer.length) while (rows.length < 2 + height) rows.push([]);
+    for (const row of footer) rows.push([[pad, 'normal'], ...row]);
     return rows;
+  }
+
+  // A running job's footer, `w` cells wide within `h` pane rows: messages not
+  // yet in the transcript, the box, then the mode with the box's keys when focused.
+  footer(job, w, h, focused) {
+    if (job.status !== 'running') return [];
+    if (!job.execution.interventionModes) return [[['messages need the updated bridge; this job started on an older one', 'dim']]];
+    const box = this.box(job), room = Math.max(1, h - 3);
+    const pending = this.pending(job).map(({ label, style, text, hint }) => layoutLine({ segs: [[label, style],
+      ...(text ? [['  ' + one(text), 'normal']] : []), ...(hint ? [['  ' + hint, 'faint']] : [])], wrap: false }, w)[0]);
+    let content;
+    if (box.confirm) {
+      content = layoutLine({ segs: [['Cancel this job?', 'bad'], [' The lead is told you cancelled it.', 'normal']],
+        right: [['y', 'title'], [' yes  ', 'dim'], ['n', 'title'], [' no', 'dim']], wrap: false }, w - 4);
+    } else if (!box.draft) {
+      const name = NAMES[job.provider] ?? clean(job.provider);
+      content = [[['› ', 'title'], [box.mode ? `Message ${name}…` : `${name} takes no messages while it works`, 'faint']]];
+    } else content = layoutLine({ segs: [['› ', 'title'], [clean(box.draft), 'normal'], ...(focused ? [['▌', 'normal']] : [])], hang: 2 }, w - 4);
+    const shown = pending.slice(-Math.max(0, Math.min(pending.length, room - 4)));
+    // A tall draft shows its last rows, where the cursor is.
+    content = content.slice(-Math.max(1, room - 3 - shown.length));
+    return [...shown, ...boxRows(content, w), this.modeLine(job, w, focused)];
+  }
+  // Messages waiting between the live line and the box: recorded ones the
+  // transcript does not show yet, and this view's requests the record does not hold yet.
+  pending(job) {
+    const out = [], taken = this.detail.taken;
+    for (const input of job.execution.interventions ?? []) {
+      if (taken.has(input.id) || input.state === 'answered') continue;
+      const [state, hint] = pendingState(input);
+      out.push({ at: input.at, label: `${input.state === 'not_delivered' ? '✗' : '◌'} ${input.from === 'user' ? 'you' : 'lead'} · ${state}`, style: 'warn', text: input.text, hint });
+    }
+    for (const { at, mode, text, outcome } of this.box(job).sent) {
+      const [glyph, state, style] = !outcome ? ['◌', 'waiting for the bridge', 'warn']
+        : outcome.status === 'not_written' ? ['✗', `not sent: ${clean(outcome.reason)}`, 'bad']
+        : !outcome.ok ? ['✗', `refused: ${REFUSED[outcome.reason] ?? clean(outcome.reason ?? outcome.status)}`, 'bad']
+        : mode === 'cancel' ? ['■', 'stopping the job', 'warn'] : ['◌', 'accepted', 'warn'];
+      out.push({ at, label: `${glyph} you · ${mode === 'cancel' ? 'cancel · ' : ''}${state}`, style, text, hint: '' });
+    }
+    return out.sort((a, b) => a.at - b.at);
+  }
+  // The mode, then the box's keys right-aligned when it has focus; what does not fit goes first.
+  modeLine(job, w, focused) {
+    const box = this.box(job), many = supported(job).length > 1;
+    const short = box.mode ? [[box.mode, 'ok']] : [['cancel only', 'dim']];
+    const full = box.mode ? [...short, [` · ${MODES[box.mode]}`, 'dim']] : short;
+    const keys = [box.mode && '⏎ send', many && 'shift+⇥ mode', 'ctrl+x cancel job', 'esc jobs'].filter(Boolean);
+    const all = keys.join(' · '), fewer = keys.filter(key => !key.startsWith('ctrl+x')).join(' · ');
+    const tries = focused ? [[full, all], [short, all], [short, fewer]] : [[full, null]];
+    for (const [segs, hint] of tries) {
+      if (segsWidth(segs) + (hint ? width(hint) + 2 : 0) <= w) return layoutLine({ segs, right: hint ? [[hint, 'faint']] : null, wrap: false }, w)[0];
+    }
+    return fitSegs(short, w);
   }
 }
