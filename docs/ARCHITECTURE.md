@@ -118,7 +118,7 @@ per-companion model configuration, `effort: { selection, levels, description }`,
 reply/resume/cancel/model/effort-selection capabilities, readiness and the installed version seen at the last check. An
 unset model default is labelled as inheriting the companion's configuration.
 The call is ownerless and observational: no hydration, ownership change, lease
-renewal, ledger/digest write or session creation. If model enumeration needs a
+renewal, record write or session creation. If model enumeration needs a
 session, it reports "not enumerable without a session". A missing catalog entry
 alone does not prove an explicitly requested model invalid.
 
@@ -385,7 +385,6 @@ alone is never proof of exit.
 | `stops/<owner>.json` | Advisory TaskStop/SubagentStop marker. Its snapshot at dispatch prevents an old stop from cancelling new work. |
 | `completions/<id>.json` | Publication receipt keyed by execution id. |
 | `runtime/completions.jsonl` | Hook delivery queue; terminal wait consumes the execution's entries. |
-| `runtime/digests/agent-digest-<id>.md` | Controller-published task and final/partial output, status and reported usage. |
 | `runtime/agent-bridge.log`, `daemon.log` | Bridge and structured event logs; the latter is a retained filename, not a running service. |
 
 `onboard.mjs --target <companion> --model <id|inherit> --set-default` saves or
@@ -399,8 +398,19 @@ fences. A native terminal outcome is persisted before cleanup; the final immutab
 result includes cleanup evidence. Startup reconciliation reads watcher results
 or verifies process absence. It never adopts old live work; until absence is
 proven, state stays `unknown` and a new execution is refused. Status does not
-reconcile, publish a completion or refresh a digest. The watcher writes only its
+reconcile or publish a completion. The watcher writes only its
 fenced result; controller startup or an owner wait can publish it later.
+
+`agent-digest://<executionId>` is rendered on demand by `lib/digest.mjs` from
+execution/result records and the companion's own transcript. Resource listing
+uses execution records; no digest file is written. The renderer uses the same
+turn selection as the work summary, collapses preamble to a count, and caps each
+item's output at about 2 KB with a truncation marker and the native path for more.
+It presents task and execution metadata, final/partial answer, work summary and
+ordered transcript items; running reads add the in-flight progress line. Missing
+or unrecognized transcripts are explicit. URI fields, the resource template and
+result resource links remain unchanged. Both host roles relay the non-empty
+`meta.work_summary` after the answer and keep `meta.digest_uri` as the full view.
 
 The controller starts a bounded, asynchronous worktree snapshot alongside runtime
 startup and awaits it before delivery. Each snapshot copies the worktree index to

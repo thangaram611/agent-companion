@@ -368,7 +368,7 @@ test('wait progress, read-only status, digest resources and immutable terminal q
     const id = sent.job_id;
     const progress = { lastActivityAt: Date.now(), activeCommand: 'build', retry: { attempt: 2 }, partialText: 'partial answer' };
     h.adapters[0].progress(progress);
-    assert.match(h.mod.readDigestResource(`agent-digest://${id}`).contents[0].text, /partial answer/);
+    assert.match(h.mod.readDigestResource(`agent-digest://${id}`, h.active).contents[0].text, /partial answer/);
     const snapshot = [wireDisk(h.dir), wireDisk(RUNTIME_SANDBOX)];
     for (let i = 0; i < 3; i++) {
       const status = await h.call({ action: 'status', job_id: id, verbose: true, diagnostics: true });
@@ -395,15 +395,19 @@ test('wait progress, read-only status, digest resources and immutable terminal q
     assert.equal(terminal.meta.native_refs.historyId, 'native-history');
     assert.equal(terminal.meta.digest_uri, `agent-digest://${id}`);
     const bytes = readFileSync(h.records.path('results', id), 'utf8');
-    assert.deepEqual(await h.call({ action: 'wait', job_id: id, thread: 'child' }), terminal);
+    const repeated = await h.mod.dispatch({ action: 'wait', job_id: id, thread: 'child' }, { controller: h.active });
+    assert.deepEqual(repeated.structuredContent, terminal);
+    assert.deepEqual(repeated.content[1], { type: 'resource_link', uri: terminal.meta.digest_uri,
+      name: `agent-digest-${id}`, mimeType: 'text/markdown' });
+    assert.deepEqual(terminal.meta.work_summary, h.records.readResult(id).workSummary);
     await h.mod.recoverController(h.active);
     assert.equal(readFileSync(h.records.path('results', id), 'utf8'), bytes);
     const rows = readQueue(queue).filter((row) => row.jobId === id);
     assert.equal(rows.length, 1); assert.equal(rows[0].kind, 'terminal'); assert.equal(rows[0].consumed, true);
     assert.equal(rows[0].claudeSessionId, 'wire-session'); assert.equal(rows[0].content, terminal.content);
     assert.deepEqual(rows[0].meta, JSON.parse(JSON.stringify(terminal.meta)));
-    assert.match(h.mod.readDigestResource(`agent-digest://${id}`).contents[0].text, /final answer/);
-    assert.ok(h.mod.listDigestResources().some((r) => r.uri === terminal.meta.digest_uri));
+    assert.match(h.mod.readDigestResource(`agent-digest://${id}`, h.active).contents[0].text, /final answer/);
+    assert.ok(h.mod.listDigestResources(h.active).some((r) => r.uri === terminal.meta.digest_uri));
     assert.equal(h.mod.listDigestResourceTemplates()[0].uriTemplate, 'agent-digest://{job_id}');
     assert.throws(() => h.mod.readDigestResource('file:///tmp/invalid'), /unknown digest/);
     assert.equal(statSync(queue).mode & 0o777, 0o600);
@@ -822,4 +826,94 @@ test('Codex accepts effort and exposes adapter refusals through send, status and
     if (code === 'EFFORT_NOT_ALLOWED') t.diagnostic('EFFORT_ENVELOPE codex ' + JSON.stringify(refused));
   }
   assert.equal(h.frames().filter((frame) => frame.method === 'turn/start').length, 1);
+});
+
+function nativeDigestFixture(h, id) {
+  const path = join(h.dir, 'native.jsonl');
+  const event = (type, fields = {}) => ({ type: 'event_msg', payload: { type, turn_id: 'native-turn', ...fields } });
+  const item = (type, fields = {}) => event('item_completed', { item: { type, id: type, ...fields } });
+  const rows = [
+    { type: 'session_meta', payload: { id: 'native-history', cli_version: 'fixture', base_instructions: { text: 'hidden system instructions' } } },
+    { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'previous-turn', item: { type: 'AgentMessage', id: 'old', content: 'previous answer excluded' } } },
+    event('task_started'),
+    { type: 'response_item', payload: { type: 'message', role: 'developer', content: 'hidden developer instructions' } },
+    item('UserMessage', { content: 'Run checks' }),
+    item('Reasoning', { summary_text: 'Check the tests first' }),
+    item('CommandExecution', { command: 'npm test', exit_code: 2, aggregated_output: 'failure output ' + 'x'.repeat(4000) + 'OUTPUT_END' }),
+    item('FileChange', { changes: { 'src/fix.mjs': { type: 'update', diff: '+fixed' } } }),
+    item('McpToolCall', { tool: 'inspect', arguments: { path: 'src/fix.mjs' }, result: { content: 'tool output' } }),
+    event('task_complete', { error: { message: 'native failure', codex_error_info: 'fixture_error' } }),
+    item('AgentMessage', { content: 'native answer' }),
+  ];
+  writeFileSync(path, rows.map(JSON.stringify).join('\n') + '\n');
+  const execution = h.records.readExecution(id);
+  h.records._write('executions', id, { ...execution, nativeRefs: { ...execution.nativeRefs, transcriptPath: path } });
+  return path;
+}
+
+for (const terminal of [false, true]) {
+  test(`on-demand digest renders the ${terminal ? 'terminal' : 'running'} native turn with summary and bounded items`, async t => {
+    const h = await wireFixture(t);
+    const { job_id: id } = await h.send({ model: 'selected', effort: 'high', task: 'Run checks' });
+    h.adapters[0].progress({ partialText: 'partial answer', activeCommand: 'npm test' });
+    if (terminal) {
+      h.adapters[0].done.resolve({ outcome: 'completed', text: 'final answer', effectiveModel: 'resolved' });
+      await h.call({ action: 'wait', job_id: id, thread: 'child' });
+      const result = h.records.readResult(id);
+      h.records._write('results', id, { ...result, workSummary: { ...result.workSummary,
+        commands: [{ command: 'npm test', exitCode: 2 }],
+        edits: [{ path: 'src/fix.mjs', change: 'update' }],
+        worktree: { available: true, files: [{ path: 'src/fix.mjs', added: 1, deleted: 1 }], note: 'Includes changes by any writer between turn start and end; excludes ignored files.' } } });
+    }
+    const path = nativeDigestFixture(h, id);
+    const before = [wireDisk(h.dir), wireDisk(RUNTIME_SANDBOX)];
+    const read = () => h.mod.readDigestResource(`agent-digest://${id}`, h.active).contents[0].text;
+    const rendered = read();
+    for (const pattern of [/codex/i, /selected/, /high/, /Run checks/, /native answer/, /## Work summary/, /Commands: 1/, /npm test.*exit 2/, /Preamble: 2 items collapsed/, /\[truncated/, /src\/fix.mjs/, /inspect/, /native failure/]) assert.match(rendered, pattern);
+    assert.match(rendered, terminal ? /final answer/ : /partial answer/);
+    assert.match(rendered, terminal ? /any writer/ : /In flight: running npm test/);
+    assert.ok(rendered.includes(path));
+    assert.doesNotMatch(rendered, /hidden system|hidden developer|previous answer excluded|OUTPUT_END/);
+    const transcript = rendered.split('## Transcript')[1];
+    assert.ok(transcript.indexOf('user') < transcript.indexOf('reasoning'));
+    assert.ok(transcript.indexOf('reasoning') < transcript.indexOf('command'));
+    assert.ok(transcript.indexOf('command') < transcript.indexOf('edit'));
+    assert.ok(transcript.indexOf('edit') < transcript.indexOf('tool'));
+    assert.ok(transcript.indexOf('tool') < transcript.indexOf('error'));
+    const command = transcript.split('### command:')[1].split('### edit')[0];
+    assert.ok(Buffer.byteLength(command) < 2300, 'command output is bounded near 2 KB');
+    if (terminal) t.diagnostic('Rendered excerpt:\n' + rendered.slice(rendered.indexOf('## Final answer'), rendered.indexOf('Worktree diff-stat')) +
+      '…\n' + transcript.match(/Preamble:.*\n/)[0] + transcript.match(/### command:.*\n/)[0]);
+    assert.deepEqual([wireDisk(h.dir), wireDisk(RUNTIME_SANDBOX)], before);
+    appendFileSync(path, JSON.stringify({ type: 'event_msg', payload: { type: 'item_completed', turn_id: 'native-turn', item: { type: 'AgentMessage', id: 'later', content: 'appended since last read' } } }) + '\n');
+    assert.match(read(), /appended since last read/);
+  });
+}
+
+test('digest lists execution records without a digest directory and explains missing or unrecognized transcripts', async t => {
+  const h = await wireFixture(t);
+  const e = h.records.begin({ owner: 'child', provider: 'codex', cwd: h.dir, text: 'task', executionId: 'record-only', now: Date.now() }, 0);
+  assert.equal(existsSync(join(RUNTIME_SANDBOX, 'digests')), false);
+  assert.deepEqual(h.mod.listDigestResources(h.active).map(r => r.uri), ['agent-digest://record-only']);
+  const read = () => h.mod.readDigestResource('agent-digest://record-only', h.active).contents[0].text;
+  assert.match(read(), /Transcript unavailable: transcript_not_found/);
+  const path = nativeDigestFixture(h, e.executionId);
+  appendFileSync(path, '{"type":"future.record"}\n');
+  assert.match(read(), /Transcript format unrecognized/);
+  rmSync(path);
+  assert.match(read(), /Transcript unavailable/);
+  assert.equal(existsSync(join(RUNTIME_SANDBOX, 'digests')), false);
+});
+
+test('send, progress and result never write runtime digests', async t => {
+  const h = await wireFixture(t);
+  const absent = () => assert.equal(existsSync(join(RUNTIME_SANDBOX, 'digests')), false);
+  absent();
+  const { job_id } = await h.send();
+  absent();
+  h.adapters[0].progress({ partialText: 'working' });
+  absent();
+  h.adapters[0].done.resolve({ outcome: 'completed', text: 'done' });
+  await h.call({ action: 'wait', job_id, thread: 'child' });
+  absent();
 });

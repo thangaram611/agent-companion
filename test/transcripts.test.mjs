@@ -244,6 +244,15 @@ test('protobuf decoder preserves repeated fields and rejects truncated wire data
   for (const bytes of [[8, 128], [18, 3, 1], [0], [11]]) assert.throws(() => decode(Buffer.from(bytes)));
 });
 
+test('every item timestamp is an ISO string or null, whatever the native clock format', async t => {
+  const { readTranscript } = await api();
+  for (const loc of companions.map(companion => fixture(t, companion))) {
+    for (const item of readTranscript(loc).items) {
+      assert.ok(item.at === null || (typeof item.at === 'string' && !Number.isNaN(Date.parse(item.at)) && item.at.endsWith('Z')), `${loc.companion} ${item.nativeType}: ${item.at}`);
+    }
+  }
+});
+
 // Placeholder-only records modeled on real-shapes/shapes.json. Never open the
 // operator's native stores: the reviewed shapes are the entire evidence here.
 function shapeFixture(t, companion, file = 'additional-shapes.jsonl') {

@@ -160,6 +160,14 @@ under a separate `Observations` heading if you have any. If the companion asked
 a question, relay it to the parent. Send a follow-up the same way on this conversation.
 Report success only after the bridge reports `completed`.
 
+When `meta.work_summary` is present, relay it compactly after the answer,
+including only non-empty parts: failed commands with exit codes (and the count
+of all commands, including omitted commands), files changed from edits, the
+worktree diff-stat labelled as including any writer, native errors, and a note
+when the transcript was unavailable or had unrecognized records. State any
+omitted counts; an unavailable diff-stat is not evidence of no changes.
+Keep relaying `meta.digest_uri` as the pointer to the full transcript.
+
 Relay supplied metadata with the answer: `meta.digest_uri` and its `resource_link`,
 `meta.usage`, `meta.cause`, `meta.detail`, `meta.effective_model`,
 `meta.selected_effort`, `meta.effective_effort` and `meta.stop_evidence`. Keep

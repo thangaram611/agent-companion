@@ -39,7 +39,6 @@ import {
 import {
   readFileSync,
   renameSync, existsSync, realpathSync, unlinkSync,
-  readdirSync, statSync,
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Controller } from './controller/controller.mjs';
@@ -53,9 +52,9 @@ import { acpProvider } from './adapters/acp.mjs';
 import { log, validateAgentArgs } from './validation.mjs';
 import { BASE_DIR, readDefaultModel, migrateLegacyState, isModelAllowedFor, readDefaultTarget, ALLOWED_MODELS } from '../lib/state.mjs';
 import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
-import { queuePath, runtimeDir, digestDir, appendPrivateFile, writePrivateFileAtomic } from '../lib/runtime-paths.mjs';
+import { queuePath, runtimeDir, appendPrivateFile } from '../lib/runtime-paths.mjs';
 import { logEvent } from '../lib/log.mjs';
-import { digestPath, renderDigest } from '../lib/prompt-digest.mjs';
+import { renderDigest } from '../lib/digest.mjs';
 import { defaultTargetInfo, defaultTargetId, getTarget, listTargets, listTargetIds } from '../lib/target-registry.mjs';
 
 function getQueuePath() {
@@ -198,13 +197,8 @@ export function resolveRouting({ target = null, model = null, effort = null } = 
   return effortRefusal(descriptor, effort) || { ok: true, resolved: { companion, model: selectedModel, effort, capabilities: descriptor.capabilities } };
 }
 
-function targetLabel(id) {
-  return getTarget(id)?.displayName || id || 'unknown target';
-}
-
 const DIGEST_RESOURCE_SCHEME = 'agent-digest';
 const DIGEST_RESOURCE_MIME_TYPE = 'text/markdown';
-const DIGEST_RESOURCE_FILE_RE = /^agent-digest-([a-zA-Z0-9._-]+)\.md$/;
 const DIGEST_RESOURCE_URI_RE = /^agent-digest:\/\/([a-zA-Z0-9._-]+)$/;
 
 export function digestResourceUri(jobId) {
@@ -217,38 +211,22 @@ export function digestJobIdFromResourceUri(uri) {
   return match ? match[1] : null;
 }
 
-function digestJobIdsFromDisk() {
-  const ids = new Set();
-  try {
-    for (const name of readdirSync(digestDir())) {
-      const match = DIGEST_RESOURCE_FILE_RE.exec(name);
-      if (match) ids.add(match[1]);
-    }
-  } catch {}
-  return [...ids].sort();
-}
-
-export function digestResourceForJobId(jobId) {
-  const path = digestPath(jobId);
+export function digestResourceForJobId(jobId, active = controller) {
   const uri = digestResourceUri(jobId);
-  if (!path || !uri || !existsSync(path)) return null;
-  let stat;
-  try { stat = statSync(path); }
-  catch { return null; }
-  if (!stat.isFile()) return null;
+  if (!uri || !active.records.readExecution(jobId)) return null;
   // Keep the descriptor minimal. Codex 0.139 accepts this shape for
   // list_mcp_resources; richer MCP metadata is still not portable across hosts.
   return {
     uri,
     name: `agent-digest-${jobId}`,
-    description: `Smart transcript digest for agent job ${jobId}.`,
+    description: `Native transcript digest for agent job ${jobId}.`,
     mimeType: DIGEST_RESOURCE_MIME_TYPE,
   };
 }
 
-export function listDigestResources() {
-  return digestJobIdsFromDisk()
-    .map((jobId) => digestResourceForJobId(jobId))
+export function listDigestResources(active = controller) {
+  return active.records.listExecutions()
+    .map((execution) => digestResourceForJobId(execution.executionId, active))
     .filter(Boolean);
 }
 
@@ -257,22 +235,21 @@ export function listDigestResourceTemplates() {
     uriTemplate: `${DIGEST_RESOURCE_SCHEME}://{job_id}`,
     name: 'agent-digest',
     title: 'Agent job digest',
-    description: 'Read a smart transcript digest for an agent companion job by job_id.',
+    description: 'Read a native transcript digest for an agent companion job by job_id.',
     mimeType: DIGEST_RESOURCE_MIME_TYPE,
   }];
 }
 
-export function readDigestResource(uri) {
+export function readDigestResource(uri, active = controller) {
   const jobId = digestJobIdFromResourceUri(uri);
   if (!jobId) throw new Error(`unknown digest resource uri: ${uri}`);
-  const resource = digestResourceForJobId(jobId);
+  const resource = digestResourceForJobId(jobId, active);
   if (!resource) throw new Error(`digest not found for job_id: ${jobId}`);
-  const path = digestPath(jobId);
   return {
     contents: [{
       uri: resource.uri,
       mimeType: DIGEST_RESOURCE_MIME_TYPE,
-      text: readFileSync(path, 'utf8'),
+      text: renderDigest(active.records.readExecution(jobId), active.records.readResult(jobId), active.env),
     }],
   };
 }
@@ -329,22 +306,12 @@ function terminalEnvelope(execution, result, action = 'wait') {
     content: result.text ?? '', meta };
 }
 
-function writeExecutionDigest(execution, result) {
-  const text = result?.text ?? execution.progress?.partialText ?? '';
-  writePrivateFileAtomic(digestPath(execution.executionId), renderDigest([{ type: 'message', text }], execution.nativeTurnId, {
-    jobId: execution.executionId, targetLabel: targetLabel(execution.provider), thread: execution.owner,
-    task: execution.text, sessionId: execution.historyId, startedAt: execution.startedAt,
-    terminalAt: result?.finishedAt, status: result ? executionStatus(result) : execution.state, usage: result?.usage,
-  }));
-}
-
 function publishResult(records, execution, result) {
   // The immutable per-execution receipt survives queue draining and bridge
   // restarts. Publication is serialized with the same conversation lock as
   // controller writes; status never invokes this writer.
   records._locked(execution.owner, () => {
     if (records.read('completions', execution.executionId)) return;
-    writeExecutionDigest(execution, result);
     const envelope = terminalEnvelope(execution, result);
     appendPrivateFile(getQueuePath(), JSON.stringify({ ts: result.finishedAt, consumed: false,
       claudeSessionId: execution.hostSessionId ?? null, kind: 'terminal', jobId: execution.executionId,
@@ -358,7 +325,7 @@ export function createBridgeController({ env = process.env, records = new Record
   return new Controller({ env, records, clock: systemClock,
     providers: { codex: codexProvider({ env }), claude: claudeProvider({ env }), opencode: opencodeProvider({ env }),
       copilot: acpProvider('copilot', { env }), antigravity: acpProvider('antigravity', { env }) },
-    ...options, onProgress: safely(writeExecutionDigest), onResult: safely((execution, result) => publishResult(records, execution, result)),
+    ...options, onResult: safely((execution, result) => publishResult(records, execution, result)),
   });
 }
 export const controller = createBridgeController();
@@ -516,7 +483,7 @@ const mcp = new Server(
       'agent_send for kickoff then loops on agent_wait until terminal. ' +
       `Default target is ${defaultTargetId() || 'unset (pass target or run onboarding)'}; ` +
       `supported targets: ${listTargets().map((t) => t.id).join(', ')}. ` +
-      'Read agent_catalog for companions and models. Runtime IPC, logs, prompt streams, digests, and completion ' +
+      'Read agent_catalog for companions and models. Runtime IPC, logs, and completion ' +
       `queue live under the private directory ${runtimeDir()}.`,
   },
 );

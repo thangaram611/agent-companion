@@ -164,3 +164,15 @@ test('role passes named effort and relays launch metadata and running activity',
   assert.match(prose, /reporting a running job, relay `activity`/);
   assert.match(prose, /still thinking.*running <cmd>/);
 });
+
+
+test('role relays non-empty work summary after the answer with provenance and transcript gaps', () => {
+  assert.match(prose, /When `meta.work_summary` is present, relay it compactly after the answer/);
+  assert.match(prose, /only non-empty parts/);
+  assert.match(prose, /failed commands with exit codes.*count of all commands/);
+  assert.match(prose, /files changed from edits/);
+  assert.match(prose, /worktree diff-stat.*including any writer/);
+  assert.match(prose, /native errors/);
+  assert.match(prose, /transcript was unavailable or had unrecognized records/);
+  assert.match(prose, /`meta.digest_uri`.*pointer to the full transcript/);
+});

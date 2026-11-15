@@ -124,3 +124,11 @@ test('both roles offer the same invoker effort and launch transparency instructi
     assert.match(prose, /EFFORT_NOT_ALLOWED/);
   }
 });
+
+
+test('both roles relay the same work summary and full transcript pointer', () => {
+  const rule = source => source.match(/When `meta.work_summary`[\s\S]*?(?=\n\n)/)?.[0];
+  assert.ok(rule(md), 'Claude work summary relay rule');
+  assert.ok(rule(toml), 'Codex work summary relay rule');
+  assert.equal(rule(md), rule(toml));
+});

@@ -99,7 +99,7 @@ and one-shot legacy migration belong to `lib/state.mjs`.
 
 | Module | Owns |
 | --- | --- |
-| `bridge-server/server.mjs` | MCP attribution, envelopes, digest/completion publication and bridge-loss handoff. |
+| `bridge-server/server.mjs` | MCP attribution, envelopes, resource routing, completion publication and bridge-loss handoff. |
 | `bridge-server/controller/controller.mjs` | Execution lifecycle, owner requests, leases, stop observations and result decisions. |
 | `bridge-server/controller/records.mjs` | Atomic conversation/execution/lease/result records, generation and writer fencing, immutable results. |
 | `bridge-server/controller/process-supervisor.mjs` | Owned process groups, descendant census, termination and PID/birth-identity verification. |
@@ -108,6 +108,9 @@ and one-shot legacy migration belong to `lib/state.mjs`.
 | `lib/state.mjs` | Default target/model configuration and one-shot migration of legacy settings/history. |
 | `lib/host.mjs` | Host conventions and sandbox guard; `AGENT_COMPANION_HOST` is authoritative, `.host` is diagnostic. |
 | `lib/transcripts.mjs` and `lib/transcripts/` | Read-only native transcript location, format fingerprints and normalized in-memory items. |
+| `lib/work-summary.mjs` | Native turn selection and bounded commands, edits, errors and worktree summary projection. |
+| `lib/worktree-snapshot.mjs` | Bounded snapshots through a throwaway index and the diff-stat including any writer. |
+| `lib/digest.mjs` | Read-only, on-demand execution digest from native transcript and result records. |
 | `lib/target-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
 

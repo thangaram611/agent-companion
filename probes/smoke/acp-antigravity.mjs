@@ -1,10 +1,9 @@
 // Real Antigravity ACP through per-execution runtimes. Requires a signed-in
 // server and a currently available model id as argv[2]. Spends five turns.
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { digestPath } from '../../lib/prompt-digest.mjs';
 import { startBridge, record, eventually } from './bridge-client.mjs';
 
 const model = process.argv[2];
@@ -27,7 +26,7 @@ try {
   assert.match(first.content, /BANANA/i);
   assert.equal(first.meta.usage ?? null, null); // No fabricated usage counters.
   assert.equal(first.meta.stop_evidence.gone, true);
-  assert.match(readFileSync(digestPath(firstId), 'utf8'), /BANANA/i);
+  assert.match(await bridge.readResource(first.meta.digest_uri), /BANANA/i);
 
   const secondId = await send('What magic word did you just report? Reply from memory; do not read any file.');
   const secondExecution = record('executions', secondId);

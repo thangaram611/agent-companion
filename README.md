@@ -74,7 +74,7 @@ configuration, reply/resume/cancel/model-selection capabilities, readiness and
 the installed version seen at the last check. An unset model default is reported
 as inheriting the companion's own configuration. A list that needs a session is
 reported as "not enumerable without a session". Reading the catalog starts no
-work and changes no job, ownership, lease, ledger or digest state.
+work and changes no job, ownership, lease or result state.
 
 ![Agent Companion architecture](assets/readme/architecture.png)
 
@@ -527,7 +527,7 @@ actual result; protocol completion alone does not prove a requested test ran.
 ## Usage
 
 Metered jobs carry `usage` on terminal metadata, wait/status responses, the
-ledger and digests. Missing counters are `null`; a job with no reported usage
+result records and digests. Missing counters are `null`; a job with no reported usage
 has no `usage` key. Transport readers and the shared shape are defined in
 `lib/usage.mjs`.
 
@@ -557,15 +557,26 @@ advisory owner-stop markers; `completions/` holds per-execution publication
 receipts. The hook queue is `runtime/completions.jsonl`. Legacy history/configuration
 is migrated once, preserving native ids and refusing ambiguous mappings.
 
-Logs and digests live under `runtime/`; the structured event log retains the
+Logs live under `runtime/`; the structured event log retains the
 historical filename `daemon.log` at the state root. It does not imply a running
 service. See [State](docs/ARCHITECTURE.md#state) for record and recovery rules.
 
-The bridge surfaces progress as `agent-digest://<executionId>`. Digests contain
-the request, status, final or partial assistant output and reported usage. They
-are projections of controller records, not a complete workspace-change ledger.
-The MCP resource is the normal link for inspecting progress. Status reads never
-refresh a digest or renew the owner's lease.
+The bridge renders `agent-digest://<executionId>` on demand from the execution
+and result records plus the companion's own native transcript. It includes the
+request, models, effort, status, timestamps, final or partial answer, work summary
+and that turn's transcript items in order. Preamble is collapsed to a count;
+each item's output is capped at about 2 KB, with the native transcript path for
+the rest. Running reads include the in-flight progress line. Missing or
+unrecognized transcripts are explicitly labelled. Resources are listed from
+execution records. Reads write nothing and never renew the owner's lease.
+Existing files under `runtime/digests/` are left alone and are no longer written.
+
+Results carry `workSummary`, exposed as `meta.work_summary` on terminal envelopes.
+Both host roles relay its non-empty parts after the answer: failed commands with
+exit codes and the total command count, transcript-reported edits, native errors,
+transcript gaps, and the worktree diff-stat labelled as including any writer
+between turn start and end. Omitted counts stay explicit. The `meta.digest_uri`
+and result resource link remain the pointer to the full transcript view.
 
 ## Diagnostics
 

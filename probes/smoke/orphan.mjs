@@ -2,10 +2,9 @@
 // reads the stopped result; it never adopts and continues the old native turn.
 // Spends one Codex turn. This does not qualify uncatchable bridge SIGKILL.
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { digestPath } from '../../lib/prompt-digest.mjs';
 import { startBridge, record, eventually } from './bridge-client.mjs';
 
 const session = `orphan-${Date.now().toString(36)}`, owner = `${session}-child`;
@@ -30,10 +29,10 @@ try {
   assert.equal(final.meta.cause, 'bridge_loss');
   assert.equal(final.meta.native_refs.historyId, execution.historyId);
   assert.equal(final.content, result.text);
-  const path = digestPath(sent.job_id), before = [readFileSync(path, 'utf8'), statSync(path).mtimeMs];
+  const before = await second.readResource(final.meta.digest_uri);
   const status = await second.tool('agent_status', { job_id: sent.job_id });
   assert.equal(status.reply_available, false);
-  assert.deepEqual([readFileSync(path, 'utf8'), statSync(path).mtimeMs], before);
+  assert.equal(await second.readResource(final.meta.digest_uri), before);
   assert.deepEqual(record('results', sent.job_id), result);
   console.log('PASS: bridge-loss cleanup, verified exit, durable result and read-only replacement status');
 } finally { await first?.stop(); await second?.stop(); }

@@ -80,6 +80,10 @@ export async function startBridge(session, { env = process.env, repo: root = rep
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }) + '\n');
   } catch (err) { await stop(); throw err; }
   return { rpc, tool, stop,
+    async readResource(uri) {
+      const response = await rpc('resources/read', { uri });
+      return response.contents.map(content => content.text).join('\n');
+    },
     async wait(job_id, owner) {
       for (let i = 0; i < 12; i++) {
         const result = await tool('agent_wait', { job_id, max_wait_sec: 60 }, owner);

@@ -1,6 +1,6 @@
 # MVP Tracker
 
-Last updated: 2026-11-09
+Last updated: 2026-11-15
 
 Current direction: active development of the approved conversational redesign.
 The shipped controller owns one cold provider runtime per execution. Qualification
@@ -43,6 +43,14 @@ remains separate from implementation; see the release gates below.
   mismatch remedies. Both host roles pass named effort and relay launch/activity
   fields. Selected effort survives cold follow-up and bridge-loss results;
   provider-reported effective effort remains separate. No new state files.
+
+- Done — Live-view Step 1 (2026-11-15): native transcript readers for all five
+  companions, work summary on terminal results, and on-demand `agent-digest://`
+  rendering without a second transcript copy. Both roles relay the summary and
+  transcript pointer. Copilot in-turn native failures override an apparent ACP
+  success; ACP acknowledgements no longer mistake protocol request ids for native
+  turn ids.
+  Fixture and local suite checks are separate from installed-host qualification.
 
 ## MVP Limitations
 
