@@ -1,0 +1,7 @@
+{"type":"session.start","id":"session","data":{"sessionId":"shapes","version":1,"producer":"fixture","copilotVersion":"fixture"}}
+{"type":"abort","data":{"reason":"user_abort"},"id":"abort-0","timestamp":"2026-01-01T00:00:00.000Z","parentId":"fixture"}
+{"type":"abort","data":{"reason":"user_abort"},"id":"abort-1","timestamp":"2026-01-01T00:00:00.000Z","parentId":"fixture"}
+{"type":"abort","data":{"reason":"user_initiated"},"id":"abort-2","timestamp":"2026-01-01T00:00:00.000Z","parentId":"fixture"}
+{"type":"session.permissions_changed","data":{"previousAllowAllPermissions":false,"allowAllPermissions":true,"previousAllowAllPermissionMode":"fixture","allowAllPermissionMode":"fixture"},"id":"session.permissions_changed-0","timestamp":"2026-01-01T00:00:00.000Z","parentId":"fixture"}
+{"type":"session.auto_mode_resolved","data":{"chosenModel":"fixture","reasoningBucket":"fixture","categoryScores":{"tool_use":1,"code_gen":1,"debugging":1,"reasoning":1},"predictedLabel":"fixture","confidence":1,"candidateModels":["fixture","fixture"]},"id":"session.auto_mode_resolved-0","timestamp":"2026-01-01T00:00:00.000Z","parentId":"fixture"}
+{"type":"session.task_complete","data":{"summary":"Fixture task summary","success":true},"id":"session.task_complete-0","timestamp":"2026-01-01T00:00:00.000Z","parentId":"fixture"}

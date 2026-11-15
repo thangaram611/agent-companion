@@ -1,10 +1,11 @@
+import { claudeTranscriptExists } from '../../lib/transcripts.mjs';
+export { claudeTranscriptExists } from '../../lib/transcripts.mjs';
 import { getTargetById } from '../../lib/target-registry.mjs';
 import { companionReady } from '../../lib/target-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 import { randomUUID } from 'node:crypto';
-import { accessSync, constants, readdirSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { delimiter, join, resolve } from 'node:path';
+import { accessSync, constants, statSync } from 'node:fs';
+import { delimiter, resolve } from 'node:path';
 import { LineReader } from './codex-protocol.mjs';
 import { claudeArgs, claudeEnv, parseClaudeFrame, claudeTerminal } from './claude-protocol.mjs';
 import { systemClock } from '../controller/clock.mjs';
@@ -24,16 +25,6 @@ function binaryFor(env, cwd) {
     try { accessSync(file, constants.X_OK); if (statSync(file).isFile()) return file; } catch {}
   }
   throw failure('RuntimeUnavailable');
-}
-
-export function claudeTranscriptExists(historyId, env) {
-  const projects = join(env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), '.claude'), 'projects');
-  try {
-    return readdirSync(projects, { withFileTypes: true }).some((entry) => {
-      if (!entry.isDirectory()) return false;
-      try { return statSync(join(projects, entry.name, `${historyId}.jsonl`)).isFile(); } catch { return false; }
-    });
-  } catch { return false; }
 }
 
 // One cold process, one user write. Controller deadlines and supervisor cleanup

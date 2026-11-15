@@ -107,6 +107,7 @@ and one-shot legacy migration belong to `lib/state.mjs`.
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
 | `lib/state.mjs` | Default target/model configuration and one-shot migration of legacy settings/history. |
 | `lib/host.mjs` | Host conventions and sandbox guard; `AGENT_COMPANION_HOST` is authoritative, `.host` is diagnostic. |
+| `lib/transcripts.mjs` and `lib/transcripts/` | Read-only native transcript location, format fingerprints and normalized in-memory items. |
 | `lib/target-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
 

@@ -1,0 +1,7 @@
+{"type":"permission-mode","permissionMode":"fixture","sessionId":"shapes","timestamp":"2026-01-01T00:00:00.000Z"}
+{"type":"session-owner","accountUuid":"fixture","organizationUuid":"fixture","sessionId":"shapes","timestamp":"2026-01-01T00:00:00.000Z"}
+{"type":"file-history-snapshot","messageId":"fixture","snapshot":{"messageId":"fixture","trackedFileBackups":{},"timestamp":"fixture"},"isSnapshotUpdate":false,"timestamp":"2026-01-01T00:00:00.000Z"}
+{"type":"ai-title","aiTitle":"fixture","sessionId":"shapes","timestamp":"2026-01-01T00:00:00.000Z"}
+{"parentUuid":"fixture","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":1,"messageCount":1,"pendingBackgroundAgentCount":1,"timestamp":"2026-01-01T00:00:00.000Z","uuid":"system-0","isMeta":false,"userType":"fixture","entrypoint":"fixture","cwd":"fixture","sessionId":"shapes","version":"fixture","gitBranch":"fixture"}
+{"type":"file-history-delta","messageId":"fixture","snapshotMessageId":"fixture","trackingPath":"fixture","backup":{"backupFileName":"fixture","version":1,"backupTime":"fixture","realParentDir":"fixture"},"timestamp":"2026-01-01T00:00:00.000Z"}
+{"parentUuid":"fixture","isSidechain":false,"type":"system","subtype":"away_summary","content":"fixture recap shown to the person","timestamp":"2026-01-01T00:00:00.000Z","uuid":"system-away","isMeta":false,"userType":"fixture","entrypoint":"fixture","cwd":"fixture","sessionId":"shapes","version":"2.1.325","gitBranch":"fixture"}
