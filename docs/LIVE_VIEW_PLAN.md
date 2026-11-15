@@ -322,7 +322,11 @@ Design (decided 2026-11-15, after the measurements above):
   `from: 'user'`, then writes `<requestId>.outcome.json`
   (`{ requestId, ok, status, reason?, interventionId? }`, same atomic write) and
   removes the request. A request for an execution that is not live in that
-  bridge is answered with reason `state`. At start the controller records the
+  bridge is answered with reason `state`. The view deletes an outcome after
+  reading it; the controller removes the execution's inbox directory when the
+  execution closes, so a request left there is moot (the job has ended). Only
+  regular files are read, with the text capped; a user cancel stops the job
+  with cause `user_cancel`. At start the controller records the
   adapter's `interventions` capability on the execution as `interventionModes`,
   so the view offers only the modes that job supports, plus cancel.
 - `agent_wait` returns early with `user_intervened` (sender, mode, text, time,
