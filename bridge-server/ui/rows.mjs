@@ -207,7 +207,7 @@ export function outcomeLines(job, { expanded = false, items = 0 } = {}) {
   const first = [[`${label} ${clock(result.finishedAt - execution.startedAt)}`, style]];
   if (summary) {
     const commands = summary.commands ?? [];
-    const failed = commands.filter(c => c.exitCode != null && c.exitCode !== 0 || c.status === 'failed').length;
+    const failed = commands.filter(c => !c.denied && (c.exitCode != null && c.exitCode !== 0 || c.status === 'failed')).length;
     const refused = commands.filter(c => c.denied).length;
     const total = commands.length + (summary.commandsOmitted ?? 0);
     if (total) first.push(['  ' + plural(total, 'command'), 'normal']);

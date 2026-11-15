@@ -53,3 +53,11 @@ test('the pane rebuilds only changed blocks and slices visible rows across block
   pane.layout([block('a', a, 3)], 12);
   assert.equal(built, 4, 'a new width rebuilds');
 });
+
+test('a refused command counts as refused, not also as failed', async () => {
+  const { outcomeLines } = await import('./rows.mjs');
+  const job = { execution: { startedAt: 0, cwd: '/w' }, result: { outcome: 'completed', finishedAt: 5000, text: 'done',
+    workSummary: { commands: [{ command: 'rm -rf x', status: 'failed', exitCode: null, denied: 'Denied by user (*)' }, { command: 'false', exitCode: 1 }] } } };
+  const first = outcomeLines(job)[0].segs.map(([t]) => t).join('');
+  assert.equal(first, '✓ done in 0:05  2 commands, 1 failed, 1 refused');
+});
