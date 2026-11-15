@@ -237,11 +237,13 @@ async function wireFixture(t, options = {}) {
   const create = () => {
     const done = deferred();
     const adapter = {
-      capabilities: { followUp: true, loadsHistory: true, modelSelection: true }, done, calls: [],
+      capabilities: { followUp: true, loadsHistory: true, modelSelection: true, interventions: options.interventions }, done, calls: [],
       async start(args) { this.calls.push(['start', args]); if (options.start) await options.start; },
       async openHistory(args) { this.calls.push(['history', args]); return { historyId: args.historyId || 'native-history', effectiveModel: 'configured' }; },
       async deliver(args) { this.calls.push(['deliver', args]); return { nativeTurnId: 'native-turn' }; },
       observe({ onProgress }) { this.progress = onProgress; return done.promise; },
+      async steer(args) { this.calls.push(['steer', args]); return { accepted: true }; },
+      async intervene(args) { this.calls.push(['intervene', args]); return { accepted: true }; },
       async interrupt() {}, async close() {},
     };
     adapters.push(adapter); return adapter;
@@ -268,6 +270,7 @@ test('controller dispatch preserves the conversational tools and named refusals'
   const tools = (await h.mod.mcp._requestHandlers.get('tools/list')({ method: 'tools/list', params: {} })).tools;
   assert.deepEqual(tools.map((x) => x.name), ['agent_catalog', 'agent_send', 'agent_wait', 'agent_status', 'agent_reply', 'agent_cancel']);
   assert.match(tools.find((x) => x.name === 'agent_reply').inputSchema.properties.message.description, /reply_unavailable/);
+  assert.deepEqual(tools.find((x) => x.name === 'agent_reply').inputSchema.properties.mode.enum, ['steer', 'queue', 'interrupt']);
   assert.deepEqual(Object.keys(tools[1].inputSchema.properties).sort(), ['cwd', 'effort', 'max_wait_sec', 'model', 'target', 'task']);
   assert.equal((await h.send({ thread: null })).code, 'NATIVE_OWNER_REQUIRED');
   assert.equal((await h.send({ cwd: 'relative' })).code, 'INVALID_CWD');
@@ -389,6 +392,7 @@ test('wait progress, read-only status, digest resources and immutable terminal q
     assert.equal(readQueue(queue).find((row) => row.jobId === id).consumed, false);
     const terminal = await h.call({ action: 'wait', job_id: id, thread: 'child', max_wait_sec: 1 });
     assert.equal(terminal.content, 'final answer'); assert.equal(terminal.status, 'completed');
+    assert.equal(Object.hasOwn(terminal.meta, 'interventions'), false);
     assert.deepEqual(terminal.meta.usage, usage); assert.equal(terminal.meta.selected_model, 'selected');
     assert.equal(terminal.meta.effective_model, 'resolved'); assert.equal(terminal.meta.effective_effort, 'high');
     assert.equal(terminal.meta.cause, 'native_complete'); assert.equal(terminal.meta.stop_evidence.gone, true);
@@ -569,7 +573,7 @@ import { codexDispatchFixture } from '../test/controller/codex-dispatch-fixture.
 test('controller reply steers the acknowledged native turn and confirms injection while holding the owner lease', async (t) => {
   const h = codexDispatchFixture(t);
   const { job_id } = await h.send();
-  assert.equal((await h.call({ action: 'status', job_id })).reply_available, true);
+  assert.equal((await h.call({ action: 'status', job_id })).interventions.steer, true);
   const reply = h.call({ action: 'reply', thread: 'child', job_id, message: 'use ripgrep' }, { requestId: 'steer-request' });
   await until(() => h.frames().some((f) => f.method === 'turn/steer'), 'native steer');
   assert.deepEqual(h.records.readLease(job_id).requestIds, ['steer-request']);
@@ -602,7 +606,7 @@ test('controller reply reports acknowledgement without claiming unobserved injec
   assert.equal(response.ok, true);
   assert.equal(response.accepted, true);
   assert.equal(response.confirmed, false);
-  assert.equal((await h.call({ action: 'status', job_id })).reply_available, true);
+  assert.equal((await h.call({ action: 'status', job_id })).interventions.steer, true);
   assert.equal(h.records.readLease(job_id).attached, false);
 });
 
@@ -618,26 +622,70 @@ test('controller reply refuses completed, foreign, missing and unowned execution
   assert.equal(response.ok, false);
   assert.equal(response.status, 'reply_unavailable');
   assert.equal(response.reason, 'state');
-  assert.equal((await h.call({ action: 'status', job_id })).reply_available, false);
+  assert.equal((await h.call({ action: 'status', job_id })).interventions.steer, false);
   assert.deepEqual(wireDisk(h.records.dir), before);
   assert.equal(h.frames().filter((f) => f.method === 'turn/start').length, 1);
 });
 
-test('controller reply refuses providers without steer capability without invoking their protocol', async (t) => {
+test('controller reply refuses adapters without intervention capability without invoking their protocol', async (t) => {
   const h = await wireFixture(t);
   for (const target of ['opencode', 'copilot', 'antigravity', 'claude']) {
     const { job_id } = await h.send({ target, thread: target });
     const adapter = h.adapters.at(-1);
-    adapter.capabilities.steer = false;
     adapter.steer = () => assert.fail('unsupported steer must not run');
     const before = wireDisk(h.dir);
     const response = await h.call({ action: 'reply', thread: target, job_id, message: 'revise' });
     assert.equal(response.ok, false);
     assert.equal(response.status, 'reply_unavailable');
     assert.equal(response.reason, 'capability');
-    assert.equal((await h.call({ action: 'status', job_id })).reply_available, false);
+    assert.equal((await h.call({ action: 'status', job_id })).interventions.steer, false);
     assert.deepEqual(wireDisk(h.dir), before);
   }
+});
+
+for (const [defaultMode, queue] of [['steer', 'bridge'], ['queue', 'bridge'], ['queue', 'native']]) test(`reply defaults to the execution's ${defaultMode} mode (${queue} queue); explicit refusals preserve their reason`, async t => {
+  const interventions = { default: defaultMode, steer: defaultMode === 'steer', queue, interrupt: true };
+  const h = await wireFixture(t, { interventions }), { job_id } = await h.send();
+  const call = args => h.call({ action: 'reply', thread: 'child', job_id, message: 'follow-up', ...args });
+  const status = await h.call({ action: 'status', job_id });
+  assert.equal(Object.hasOwn(status, 'reply_available'), false);
+  assert.deepEqual(status.interventions, { default: defaultMode, steer: interventions.steer, queue: true, interrupt: true });
+  assert.equal((await call({})).ok, true);
+  assert.equal((await call({ mode: 'queue' })).ok, true);
+  assert.deepEqual(h.records.readExecution(job_id).interventions.map(i => [i.from, i.mode]), [['caller', defaultMode], ['caller', 'queue']]);
+  if (defaultMode === 'queue') {
+    const refused = await call({ mode: 'steer' });
+    assert.equal(refused.status, 'reply_unavailable'); assert.equal(refused.reason, 'capability');
+    assert.equal(h.records.readExecution(job_id).interventions.length, 2);
+  }
+  assert.equal((await call({ mode: 'interrupt' })).ok, true);
+  assert.equal(h.records.readExecution(job_id).interventions.at(-1).mode, 'interrupt');
+  if (queue === 'native') assert.deepEqual(h.adapters[0].calls.filter(([name]) => name === 'intervene').map(([, input]) => input.mode), ['queue', 'queue', 'interrupt']);
+  const cancelled = await h.call({ action: 'cancel', job_id, thread: 'child' });
+  assert.equal(cancelled.status, 'cancelled');
+  assert.deepEqual(cancelled.meta.interventions, [defaultMode, 'queue', 'interrupt'].map(mode => ({ from: 'caller', mode, state: 'not_delivered', first_line: 'follow-up' })));
+  const refused = await call({ mode: 'interrupt' });
+  assert.equal(refused.status, 'reply_unavailable'); assert.equal(refused.reason, 'state');
+  assert.deepEqual((await h.call({ action: 'status', job_id })).interventions,
+    { default: defaultMode, steer: false, queue: false, interrupt: false });
+});
+
+test('wait relays user_intervened without answer or terminal metadata, then relays compact undelivered messages', async t => {
+  const h = await wireFixture(t, { interventions: { default: 'queue', steer: false, queue: 'bridge', interrupt: true } });
+  const { job_id } = await h.send();
+  const waiting = h.call({ action: 'wait', job_id, thread: 'child' });
+  const text = 'x'.repeat(120) + '\nprivate second line';
+  await h.active.intervene({ executionId: job_id, from: 'user', mode: 'queue', text });
+  const notice = await waiting;
+  assert.equal(notice.status, 'user_intervened'); assert.equal(notice.action, 'wait');
+  assert.equal(notice.job_id, job_id); assert.equal(notice.intervention.from, 'user');
+  assert.equal(notice.intervention.text, text); assert.equal(typeof notice.intervention.at, 'number');
+  assert.equal(Object.hasOwn(notice, 'content'), false); assert.equal(Object.hasOwn(notice, 'meta'), false);
+  h.adapters[0].done.resolve({ outcome: 'failed', text: 'native failure' });
+  const result = await h.call({ action: 'wait', job_id, thread: 'child' });
+  assert.equal(result.status, 'failed'); assert.equal(result.content, 'native failure');
+  assert.deepEqual(result.meta.interventions, [{ from: 'user', mode: 'queue', state: 'not_delivered', first_line: 'x'.repeat(79) + '…' }]);
+  assert.deepEqual(await h.call({ action: 'wait', job_id, thread: 'child' }), result);
 });
 
 test('cancelled controller reply stops its execution and releases its owner request', async (t) => {
@@ -654,7 +702,7 @@ test('cancelled controller reply stops its execution and releases its owner requ
   assert.equal(h.records.readResult(job_id).cause, 'owner_stop');
   assert.equal(h.records.readResult(job_id).stopEvidence.gone, true);
   assert.equal(h.active.requests.size, 0);
-  assert.equal((await h.call({ action: 'status', job_id })).reply_available, false);
+  assert.equal((await h.call({ action: 'status', job_id })).interventions.steer, false);
 });
 
 test('owner-attached execution survives forty minutes and retired timeout knobs; status advertises no cutoff', async (t) => {

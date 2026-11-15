@@ -49,8 +49,8 @@ export function checkCodexContract(installation, env) {
 }
 
 const PROTOCOL_MS = 10_000;
-const capabilities = Object.freeze({ followUp: true, steer: true, modelSelection: true, loadsHistory: true,
-  interventions: Object.freeze({ default: 'steer', steer: true, queue: 'bridge', interrupt: true }) });
+const capabilities = Object.freeze({ followUp: true, modelSelection: true, loadsHistory: true,
+  interventions: getTargetById('codex').capabilities.interventions });
 const failure = (code, cause) => Object.assign(new Error(code, { cause }), { code, name: code });
 const deferred = () => {
   let resolve, reject;

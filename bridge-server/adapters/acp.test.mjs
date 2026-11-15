@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { SANDBOX_HOME } from '../../test/sandbox-home.mjs';
 import { FAKE_ACP_AGENT, fakeAcpDescriptor } from '../../test/fake-acp-agent.mjs';
-import { until } from '../../test/controller/helpers.mjs';
+import { waitForResult, until } from '../../test/controller/helpers.mjs';
 import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
 import { ProcessSupervisor } from '../controller/process-supervisor.mjs';
@@ -78,7 +78,7 @@ function setup(t, { descriptor = fakeAcpDescriptor(), env = {} } = {}) {
     for (const active of controller.live.values()) clearTimeout(active.timer);
   });
   const send = (args = {}) => controller.send({ owner: 'child', provider: 'fake', cwd: dir, text: 'exact text\n  with spacing', ...args });
-  const finish = async (sent) => sent.outcome ? sent : controller.wait({ owner: 'child', executionId: sent.executionId });
+  const finish = async (sent) => sent.outcome ? sent : waitForResult(controller, { owner: 'child', executionId: sent.executionId });
   const frames = (method) => lines(trace).filter((frame) => frame.method === method);
   return { dir, bin, childEnv, records, controller, adapters, supervisors, progress, logs, send, finish, frames, trace };
 }
@@ -256,9 +256,10 @@ test('provider factories use cached readiness without spawning and expose qualif
     const provider = acpProvider(id, { env: { PATH: '', COPILOT_BIN: '/missing', ANTIGRAVITY_ACP_BIN: '/missing' } });
     assert.equal(provider.enabled, true); assert.equal(provider.ready, loadsHistory);
     assert.equal(provider.modelAllowed('test-model'), isModelAllowedFor(id, 'test-model'));
-    assert.deepEqual(provider.create().capabilities, { followUp: loadsHistory, steer: false, modelSelection: true, loadsHistory,
-      interventions: id === 'antigravity' ? { default: 'queue', steer: false, queue: 'bridge', interrupt: true }
-        : { default: null, steer: false, queue: false, interrupt: false } });
+    const { capabilities } = provider.create();
+    assert.deepEqual(capabilities, { followUp: loadsHistory, modelSelection: true, loadsHistory,
+      interventions: getTargetById(id).capabilities.interventions });
+    assert.equal(capabilities.interventions, getTargetById(id).capabilities.interventions);
   }
   assert.throws(() => acpProvider('codex'), /ACP/);
 });
@@ -442,8 +443,8 @@ test('Copilot refuses every intervention mode without writes, while cancel still
 
 test('ACP resets the usage window and collectors for each descriptor-enabled bridge turn', async t => {
   const descriptor = fakeAcpDescriptor(), usage = descriptor.acp.usage, windows = [];
-  descriptor.acp = { ...descriptor.acp, interventions: getTargetById('antigravity').acp.interventions,
-    usage: args => { windows.push(args.sinceMs); return usage(args); } };
+  descriptor.capabilities.interventions = getTargetById('antigravity').capabilities.interventions;
+  descriptor.acp.usage = args => { windows.push(args.sinceMs); return usage(args); };
   const h = setup(t, { descriptor });
   h.childEnv.ACP_FIXTURE_GATE = join(h.dir, 'release');
   const sent = await h.send();

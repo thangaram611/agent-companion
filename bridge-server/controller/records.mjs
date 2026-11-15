@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, statSync } from 'node:fs';
+import { readFileSync, readSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, statSync, lstatSync, fstatSync, rmSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { BASE_DIR } from '../../lib/state.mjs';
 import { refuseRealHomeUnderTest } from '../../lib/host.mjs';
@@ -11,7 +11,7 @@ const segment = (id) => {
 };
 const error = (code) => Object.assign(new Error(code), { code });
 
-const firstLine = text => { const line = text.split(/\r?\n/)[0]; return line.length > 80 ? `${line.slice(0, 79)}…` : line; };
+export const firstLine = text => { const line = text.split(/\r?\n/)[0]; return line.length > 80 ? `${line.slice(0, 79)}…` : line; };
 // The same projections are used by normal close, recovery and the cleanup watcher.
 // One turn needs no labels; several list each answer once, labelled for the
 // caller, who reads the result: its own messages and the user's.
@@ -54,6 +54,68 @@ export class Records {
   readExecution(id) { return this.read('executions', id); }
   readLease(id) { return this.read('leases', id); }
   readResult(id) { return this.read('results', id); }
+  inboxPath(executionId) { return join(this.dir, 'inbox', segment(executionId)); }
+  readInbox(executionId) {
+    const dir = this.inboxPath(executionId);
+    let files;
+    try {
+      if (!lstatSync(dir).isDirectory()) return [];
+      files = readdirSync(dir).sort();
+    } catch (err) { if (err.code === 'ENOENT') return []; throw err; }
+    return files.filter(name => /^[a-zA-Z0-9_-][a-zA-Z0-9._-]*\.json$/.test(name) && !name.endsWith('.outcome.json')).map(name => {
+      const requestId = name.slice(0, -5);
+      let fd;
+      try {
+        // Do not follow links or block on FIFOs. Both the metadata and read
+        // are for this descriptor, and growth after stat still has a byte cap.
+        fd = openSync(join(dir, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        const stat = fstatSync(fd);
+        if (!stat.isFile()) throw error('invalid_file');
+        const limit = 64 * 1024;
+        if (stat.size > limit) throw error('request_too_large');
+        const buffer = Buffer.alloc(limit + 1);
+        let size = 0, count;
+        while (size < buffer.length && (count = readSync(fd, buffer, size, buffer.length - size, null))) size += count;
+        if (size > limit) throw error('request_too_large');
+        const request = JSON.parse(buffer.toString('utf8', 0, size));
+        if (!request || request.requestId !== requestId || typeof request.executionId !== 'string'
+          || !['steer', 'queue', 'interrupt', 'cancel'].includes(request.mode) || !Number.isFinite(request.at)
+          || (request.mode === 'cancel' ? request.text !== undefined : typeof request.text !== 'string' || !request.text.length)) throw error('invalid_request');
+        if (request.text?.length > 8000) throw error('text_too_long');
+        return { requestId, request };
+      } catch (err) {
+        const reason = ['request_too_large', 'text_too_long', 'invalid_request'].includes(err.code) ? err.code
+          : err instanceof SyntaxError ? 'invalid_request' : 'invalid_file';
+        return { requestId, reason };
+      } finally { if (fd !== undefined) closeSync(fd); }
+    });
+  }
+  finishInbox(executionId, requestId, outcome) {
+    const dir = this.inboxPath(executionId);
+    // Close owns directory removal. A late native acknowledgement must not
+    // recreate an inbox after its terminal result (including watcher close).
+    if (this.readResult(executionId)) return;
+    try {
+      if (!lstatSync(dir).isDirectory()) return;
+      writePrivateFileAtomic(join(dir, `${segment(requestId)}.outcome.json`), JSON.stringify({ requestId, ...outcome }) + '\n');
+      rmSync(join(dir, `${segment(requestId)}.json`), { recursive: true, force: true });
+    } catch (err) { if (err.code !== 'ENOENT') throw err; }
+  }
+  removeInbox(executionId) { rmSync(this.inboxPath(executionId), { recursive: true, force: true }); }
+  takeUserIntervention(executionId, owner) {
+    // Notice receipts have a separate lifetime from runtime writer fencing:
+    // a wait can acknowledge an old execution after close or bridge handoff.
+    return this._locked(owner, () => {
+      const execution = this.readExecution(executionId);
+      if (!execution || execution.owner !== owner) throw error('execution_unknown');
+      const reported = this.read('intervention-notices', executionId)?.reported ?? [];
+      const input = execution.interventions?.find(input => input.from === 'user' && !reported.includes(input.id));
+      if (!input) return null;
+      this._write('intervention-notices', executionId, { reported: [...reported, input.id] });
+      const { from, mode, text, at } = input;
+      return { from, mode, text, at };
+    });
+  }
   listExecutions() {
     let files;
     try { files = readdirSync(join(this.dir, 'executions')); }
@@ -119,7 +181,7 @@ export class Records {
     }
     return true;
   }
-  begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, historyId = null, executionId, text, hostSessionId, now }, expectedGeneration) {
+  begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes, historyId = null, executionId, text, hostSessionId, now }, expectedGeneration) {
     return this._locked(owner, () => {
       const old = this.readConversation(owner);
       if ((old?.generation ?? 0) !== expectedGeneration) {
@@ -136,6 +198,7 @@ export class Records {
       const generation = expectedGeneration + 1;
       if (this.readExecution(executionId)) throw error('execution_id_busy');
       const execution = { owner, executionId, generation, provider, cwd, text, modelOverride, effortOverride, permissionMode, hostSessionId, state: 'starting', writer: 'controller', startedAt: now, processes: null,
+        interventionModes: { default: null, steer: false, queue: false, interrupt: false, ...interventionModes },
         interventions: [], turns: [], nativeTurnIds: [] };
       this._write('executions', executionId, execution);
       // Effort becomes a conversation override only after openHistory accepts it.
@@ -166,7 +229,9 @@ export class Records {
       if (!this._fenced(record, writer) || this.readResult(record.executionId)) return false;
       if (!['completed', 'failed', 'interrupted', 'stopped', 'delivery_unknown'].includes(record.outcome)) throw error('invalid_outcome');
       if (record.outcome === 'stopped' && !record.stopEvidence?.gone) throw error('exit_unverified');
-      this._write('results', record.executionId, record); return true;
+      this._write('results', record.executionId, record);
+      this.removeInbox(record.executionId);
+      return true;
     });
   }
   handoff(record) {

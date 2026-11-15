@@ -40,8 +40,8 @@ try {
   const cancelId = await send('Run `sleep 60`, wait for it to finish, then reply FINISHED.', cancelOwner);
   const status = await bridge.tool('agent_status', { job_id: cancelId });
   assert.equal(status.status, 'running');
-  assert.equal(status.reply_available, false);
-  const reply = await bridge.tool('agent_reply', { job_id: cancelId, message: 'Reply PIVOT instead.' }, cancelOwner);
+  assert.deepEqual(status.interventions, { default: 'queue', steer: false, queue: true, interrupt: true });
+  const reply = await bridge.tool('agent_reply', { job_id: cancelId, message: 'Reply PIVOT instead.', mode: 'steer' }, cancelOwner);
   assert.equal(reply.ok, false);
   assert.equal(reply.status, 'reply_unavailable');
   assert.equal(reply.reason, 'capability');

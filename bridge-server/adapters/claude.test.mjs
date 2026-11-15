@@ -8,11 +8,12 @@ import { spawnSync } from 'node:child_process';
 import { SANDBOX_HOME } from '../../test/sandbox-home.mjs';
 import { fakeClaudeBin } from '../../test/fake-claude-stream.mjs';
 import { fixtureSupervisor } from '../../test/controller/fixture-table.mjs';
-import { ManualClock, until } from '../../test/controller/helpers.mjs';
+import { waitForResult, ManualClock, until } from '../../test/controller/helpers.mjs';
 import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
 import { bounded } from '../controller/clock.mjs';
 import { ClaudeAdapter, claudeTranscriptExists } from './claude.mjs';
+import { getTargetById } from '../../lib/target-registry.mjs';
 
 for (const scenario of ['errors-only', 'early-error']) test(`Claude failure explanation survives ${scenario}`, async t => {
   const h = setup(t, { scenario });
@@ -124,8 +125,9 @@ test('a terminal before observe is retained; close is idempotent and steer is ab
   const snapshots = [], terminal = await adapter.observe({ onProgress: (progress) => snapshots.push(progress) });
   assert.equal(terminal.text, 'alpha'); assert.equal(snapshots.at(-1).partialText, 'alpha');
   assert.equal(adapter.steer, undefined);
-  assert.deepEqual(adapter.capabilities, { followUp: true, steer: false, modelSelection: true, loadsHistory: true,
-    interventions: { default: 'queue', steer: false, queue: 'native', interrupt: true } });
+  assert.deepEqual(adapter.capabilities, { followUp: true, modelSelection: true, loadsHistory: true,
+    interventions: getTargetById('claude').capabilities.interventions });
+  assert.equal(adapter.capabilities.interventions, getTargetById('claude').capabilities.interventions);
   const closing = adapter.close(); assert.equal(adapter.close(), closing); await closing;
   await adapter.close(); await adapter.interrupt();
 });
@@ -381,7 +383,7 @@ for (const scenario of ['tool', 'stream', 'now', 'now-tool']) test(`controller w
   for (const frame of measured[scenario]) adapter._message({ ...frame, ...(frame.type === 'result' ? usage[results++] : {}),
     ...(frame.command_uuid ? { command_uuid: id(frame.command_uuid) } : {}),
     ...(frame.user_message_uuids ? { user_message_uuids: frame.user_message_uuids.map(id) } : {}) });
-  const result = await controller.wait({ owner: 'child', executionId });
+  const result = await waitForResult(controller, { owner: 'child', executionId });
   assert.equal(result.outcome, 'completed'); assert.equal(result.turns.length, scenario === 'tool' ? 1 : 2);
   assert.deepEqual(result.nativeTurnIds, scenario === 'tool' ? [executionId] : [executionId, input.id]);
   assert.equal(result.interventions[0].state, 'answered');

@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SANDBOX_HOME } from '../sandbox-home.mjs';
@@ -23,7 +23,7 @@ test('bridge loss: detached watcher kills grouped grandchild and SIGTERM-ignorin
   const records = makeRecords(); const clock = new ManualClock(); const supervisors = [];
   let watcher, watcherMessage;
   const provider = { enabled: true, ready: true, create: () => ({
-    capabilities: { followUp: true, loadsHistory: true, modelSelection: false, steer: false },
+    capabilities: { followUp: true, loadsHistory: true, modelSelection: false },
     async start({ supervisor }) { return { runtime: await supervisor.spawn([process.execPath, treePath, 'root', 'ignore'], { stdio: ['pipe', 'ignore', 'ignore', 'ipc'] }) }; },
     async openHistory() { return { historyId: 'saved-history' }; },
     async deliver() { return { nativeTurnId: 'native-turn' }; },
@@ -84,6 +84,8 @@ test('watcher records failed cleanup honestly without claiming stopped', async (
 
 test('watcher preserves turn attribution and intervention delivery states after bridge loss', async () => {
   const records = makeRecords(), execution = records.begin(input('intervened'), 0);
+  const inbox = join(records.dir, 'inbox', execution.executionId);
+  mkdirSync(inbox, { recursive: true }); writeFileSync(join(inbox, 'pending.json'), '{}');
   execution.nativeTurnIds = ['one'];
   execution.interventions = [{ id: 'queued', from: 'user', mode: 'queue', text: 'later', at: 2, state: 'accepted' }];
   execution.turns = [{ nativeTurnId: 'one', messages: ['intervened'], outcome: 'completed', text: 'first answer' }];
@@ -92,6 +94,7 @@ test('watcher preserves turn attribution and intervention delivery states after 
   assert.equal(result.text, 'first answer');
   assert.equal(result.interventions[0].state, 'not_delivered');
   assert.deepEqual(result.nativeTurnIds, ['one']); assert.deepEqual(result.turns, execution.turns);
+  assert.equal(existsSync(inbox), false, 'watcher terminal result removes the abandoned inbox');
 });
 
 test('production watcher CLI writes a durable result and exits without provider protocol', async () => {

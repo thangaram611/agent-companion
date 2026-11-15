@@ -64,7 +64,7 @@ const ALLOWED_FIELDS = {
   send:   new Set(['action', 'task', 'cwd', 'thread', 'target', 'model', 'effort', 'max_wait_sec']),
   wait:   new Set(['action', 'job_id', 'max_wait_sec']),
   status: new Set(['action', 'job_id', 'verbose', 'diagnostics']),
-  reply:  new Set(['action', 'job_id', 'message']),
+  reply:  new Set(['action', 'job_id', 'message', 'mode']),
   cancel: new Set(['action', 'job_id']),
 };
 
@@ -133,14 +133,15 @@ export function validateAgentArgs(rawArgs) {
 }
 
 function validateReply(args) {
-  // v6.1 D4: peer-steering. Both fields strictly required — there is no
-  // sensible default for either.
   assertString('job_id', args.job_id);
   assertString('message', args.message);
   if (args.message.length > 8000) {
     throw new Error(`agent: reply.message too long (${args.message.length} > 8000 chars)`);
   }
-  return { action: 'reply', job_id: args.job_id, message: args.message };
+  if (args.mode !== undefined && !['steer', 'queue', 'interrupt'].includes(args.mode)) {
+    throw new Error('agent: reply.mode must be steer, queue or interrupt');
+  }
+  return { action: 'reply', job_id: args.job_id, message: args.message, ...(args.mode === undefined ? {} : { mode: args.mode }) };
 }
 
 function validateCancel(args) {

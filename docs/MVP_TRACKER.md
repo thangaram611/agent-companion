@@ -28,7 +28,7 @@ remains separate from implementation; see the release gates below.
   [conversation ownership](../README.md#one-agent-companion-one-companion-conversation).
 - Within the same route and cwd, a retry of the in-flight request reattaches;
   a different request returns `thread_busy`. Wait, cancel, or use `agent_reply`
-  when the job reports `reply_available`.
+  when the job's `interventions` reports the requested mode available.
 
 - One controller owns each answer's process group, lease and immutable result.
   Stop hooks and attributed cancellation close owned work; bridge loss hands its
@@ -70,9 +70,9 @@ remains separate from implementation; see the release gates below.
 
 - Copilot cold follow-up is unsupported (`FOLLOWUP_UNSUPPORTED`) pending account
   resolution and qualification of cross-process history loading. It must not
-  silently open a new conversation. ACP, OpenCode and Claude Code in-flight
-  steer are unsupported.
-  A running Claude job refuses replies with `reply_unavailable`; wait or cancel.
+  silently open a new conversation. Copilot accepts no interventions;
+  Antigravity and Claude Code support queue and interrupt. Codex and OpenCode
+  also support in-flight steer. Unsupported modes return `reply_unavailable`.
 - OpenCode 1.x is dropped; only the authenticated 2.x HTTP contract is shipped.
 - Codex desktop remains unqualified. TUI-only rows require operator actions:
   compaction, UI stop/restart, native close, suspend/wake and clock observation.
@@ -106,7 +106,7 @@ remains separate from implementation; see the release gates below.
 
 3. **Historical, superseded 2026-11-05:** OpenCode used a shared HTTP server
    for reply/resume/streaming beside a CLI transport. It now starts a private
-   2.x server per answer, cold-loads history, and refuses in-flight steer.
+   2.x server per execution, cold-loads history, and supports steer, queue and interrupt.
 
 4. **Historical, superseded 2026-11-05:** Codex used a detached app-server
    broker for survival and an exec transport for single-shot work. It now uses

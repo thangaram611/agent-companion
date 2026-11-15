@@ -85,7 +85,7 @@ test('both hosts offer the same six private tools and conversational send fields
     const names = [...new Set([...body.matchAll(/mcp__agent[-_]bridge__agent_([a-z]+)/g)].map((m) => m[1]))].sort();
     assert.deepEqual(names, ['cancel', 'catalog', 'reply', 'send', 'status', 'wait']);
     assert.match(body.replace(/\s+/g, ' '), /`task` and `cwd`, plus optional `target`, `model`, `effort` and `max_wait_sec`/);
-    assert.doesNotMatch(body, /\b(?:templates?|modes?|strengths?|profiles?|verdicts?|fleet|parallel)\b/i);
+    assert.doesNotMatch(body, /\b(?:templates?|strengths?|profiles?|verdicts?|fleet|parallel)\b/i);
   }
   assert.deepEqual([...claude.matchAll(/^# (.+)$/gm)].map((m) => m[1]),
     [...codex.matchAll(/^# (.+)$/gm)].map((m) => m[1]));
@@ -109,10 +109,10 @@ test('both hosts describe the same five companions and Claude follow-up limits',
     .replace(/\s+/g, ' ').trim());
   assert.equal(continuity[0], continuity[1]);
   assert.match(continuity[0], /Claude Code follow-ups resume saved conversations cold/);
-  assert.match(continuity[0], /In-flight replies are only for Codex/);
+  assert.match(continuity[0], /Codex and OpenCode default to steer; Claude Code and Antigravity default to queue/);
   assert.match(continuity[0], /Send every follow-up to the companion through `agent_send`/);
   assert.match(continuity[0], /A different companion is a new conversation/);
-  assert.match(continuity[0], /running Claude Code job is refused with `reply_unavailable`; tell the parent to wait or cancel/);
+  assert.match(continuity[0], /Copilot supports cancel only/);
 });
 
 test('both roles offer the same invoker effort and launch transparency instructions', () => {
@@ -131,4 +131,21 @@ test('both roles relay the same work summary and full transcript pointer', () =>
   assert.ok(rule(md), 'Claude work summary relay rule');
   assert.ok(rule(toml), 'Codex work summary relay rule');
   assert.equal(rule(md), rule(toml));
+});
+
+test('both roles relay user notices, use the requested or default mode, and report undelivered input identically', () => {
+  for (const start of ['When a wait returns `user_intervened`', 'For a reply, call', 'When `meta.interventions` is present']) {
+    const rule = source => source.slice(source.indexOf(start)).split('\n\n')[0].replaceAll('mcp__agent-bridge__', 'mcp__agent_bridge__');
+    assert.ok(md.includes(start)); assert.ok(toml.includes(start));
+    assert.equal(rule(md), rule(toml));
+  }
+  for (const source of [md, toml]) {
+    const prose = source.replace(/\s+/g, ' ');
+    assert.match(prose, /`user_intervened`.*sender, mode, text and time.*one line, then keep waiting.*same `BUDGET`/);
+    assert.match(prose, /notice of accepted input, never the companion's answer/);
+    assert.match(prose, /use the parent's requested `mode`, or omit `mode` for the companion's default/);
+    assert.match(prose, /`reply_unavailable` and its reason \(`state` or `capability`\); never substitute another mode/);
+    assert.match(prose, /`meta.interventions`.*every `not_delivered` message with its sender, mode and first line/);
+    assert.doesNotMatch(prose, /reply_available|In-flight replies are only/);
+  }
 });

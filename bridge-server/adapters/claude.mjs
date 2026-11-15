@@ -30,8 +30,8 @@ function binaryFor(env, cwd) {
 // One cold process per execution, potentially several native turns. Input UUID
 // lifecycles, not elapsed time, determine whether another turn is pending.
 export class ClaudeAdapter {
-  capabilities = Object.freeze({ followUp: true, steer: false, modelSelection: true, loadsHistory: true,
-    interventions: Object.freeze({ default: 'queue', steer: false, queue: 'native', interrupt: true }) });
+  capabilities = Object.freeze({ followUp: true, modelSelection: true, loadsHistory: true,
+    interventions: getTargetById('claude').capabilities.interventions });
 
   constructor({ env = process.env, clock = systemClock, transcriptExists = claudeTranscriptExists } = {}) {
     this.env = env; this.clock = clock; this.transcriptExists = transcriptExists;

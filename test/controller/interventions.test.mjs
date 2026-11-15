@@ -1,12 +1,12 @@
 import '../sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, readdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { SANDBOX_HOME } from '../sandbox-home.mjs';
 import { Controller } from '../../bridge-server/controller/controller.mjs';
 import { Records, resultText, resultUsage } from '../../bridge-server/controller/records.mjs';
-import { ManualClock, deferred } from './helpers.mjs';
+import { ManualClock, deferred, waitForResult } from './helpers.mjs';
 
 function setup(t, interventions = { default: 'steer', steer: true, queue: 'bridge', interrupt: true }) {
   const clock = new ManualClock(), dir = mkdtempSync(join(SANDBOX_HOME, 'interventions-'));
@@ -44,7 +44,7 @@ function setup(t, interventions = { default: 'steer', steer: true, queue: 'bridg
     old.resolve({ outcome, text, ...(messages ? { messages, nativeTurnId: `turn-${++serial}` } : {}) });
     await clock.flush();
   };
-  const result = executionId => controller.wait({ owner: 'child', executionId });
+  const result = executionId => waitForResult(controller, { owner: 'child', executionId });
   return { controller, records, clock, calls, adapter, send, input, finish, result };
 }
 
@@ -78,6 +78,180 @@ for (const mode of ['steer', 'queue', 'interrupt']) test(`${mode} refuses unavai
   await h.finish(); await h.result(executionId);
   assert.deepEqual(await h.input(executionId, mode), { ok: false, status: 'intervention_unavailable', reason: 'state' });
   assert.deepEqual(await h.input('missing', mode), { ok: false, status: 'intervention_unavailable', reason: 'state' });
+});
+
+function inbox(h, executionId, requestId, fields = {}) {
+  const dir = join(h.records.dir, 'inbox', executionId);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${requestId}.json`);
+  writeFileSync(path, JSON.stringify({ requestId, executionId, mode: 'queue', text: 'user text\nnext line', at: h.clock.now(), ...fields }), { mode: 0o600 });
+  const outcomePath = join(dir, `${requestId}.outcome.json`);
+  return { dir, path, outcomePath, outcome: () => JSON.parse(readFileSync(outcomePath, 'utf8')) };
+}
+
+for (const mode of ['steer', 'queue', 'interrupt']) test(`inbox ${mode}: tick accepts, records, acknowledges privately and removes request`, async t => {
+  const h = setup(t), { executionId } = await h.send();
+  const lease = h.records.readLease(executionId);
+  const request = inbox(h, executionId, 'request', { mode });
+  await h.clock.advance(1000);
+  const [input] = h.records.readExecution(executionId).interventions;
+  assert.deepEqual(h.records.readExecution(executionId).interventionModes, h.adapter.capabilities.interventions);
+  assert.equal(input.from, 'user'); assert.equal(input.mode, mode);
+  assert.equal(input.text, 'user text\nnext line');
+  assert.deepEqual(request.outcome(), { requestId: 'request', ok: true, status: 'accepted', interventionId: input.id });
+  assert.equal(statSync(request.outcomePath).mode & 0o777, 0o600);
+  assert.equal(existsSync(request.path), false);
+  assert.deepEqual(readdirSync(request.dir), ['request.outcome.json']);
+  assert.deepEqual(h.records.readLease(executionId), lease, 'inbox input does not renew attachment');
+  await h.clock.advance(1000);
+  assert.equal(h.records.readExecution(executionId).interventions.length, 1, 'outcomes are never replayed');
+  await h.controller.cancel({ owner: 'child', executionId });
+  assert.equal(existsSync(request.dir), false);
+});
+
+for (const kind of ['ended', 'unsupported', 'json', 'symlink', 'large file', 'long text', 'identity', 'timestamp']) {
+  test(`inbox refuses ${kind} with a visible reason`, async t => {
+    const h = setup(t, { default: 'queue', steer: false, queue: 'bridge', interrupt: true });
+    let ended;
+    if (kind === 'ended') { ended = (await h.send()).executionId; await h.controller.cancel({ owner: 'child', executionId: ended }); }
+    const { executionId } = await h.send();
+    const request = inbox(h, executionId, 'bad', kind === 'ended' ? { executionId: ended }
+      : kind === 'unsupported' ? { mode: 'steer' } : kind === 'long text' ? { text: 'x'.repeat(8001) }
+      : kind === 'identity' ? { requestId: '../wrong' } : kind === 'timestamp' ? { at: 'yesterday' } : {});
+    if (kind === 'json') writeFileSync(request.path, '{');
+    if (kind === 'large file') writeFileSync(request.path, ' '.repeat(65537));
+    if (kind === 'symlink') {
+      const target = join(h.records.dir, 'private-text'); writeFileSync(target, 'must not be read');
+      const { unlinkSync } = await import('node:fs'); unlinkSync(request.path); symlinkSync(target, request.path);
+    }
+    await h.clock.advance(1000);
+    const outcome = request.outcome();
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reason, ({ ended: 'state', unsupported: 'capability', json: 'invalid_request', symlink: 'invalid_file',
+      'large file': 'request_too_large', 'long text': 'text_too_long', identity: 'invalid_request', timestamp: 'invalid_request' })[kind]);
+    assert.equal(existsSync(request.path), false);
+    assert.deepEqual(h.records.readExecution(executionId).interventions, []);
+    await h.controller.cancel({ owner: 'child', executionId });
+  });
+}
+
+test('stop markers and lease expiry take precedence over inbox delivery; close removes outstanding requests and outcomes', async t => {
+  for (const stop of ['marker', 'lease', 'completed']) {
+    const h = setup(t), { executionId } = await h.send();
+    const request = inbox(h, executionId, 'pending');
+    writeFileSync(join(request.dir, 'old.outcome.json'), '{}');
+    if (stop === 'marker') h.records._write('stops', 'child', { t: h.clock.now(), source: 'SubagentStop' });
+    if (stop === 'lease') h.controller.live.get(executionId).remainingMs = 1;
+    if (stop === 'completed') await h.finish();
+    else await h.clock.advance(1000);
+    const result = await h.result(executionId);
+    assert.equal(result.cause, { marker: 'owner_stop', lease: 'owner_lease_expired', completed: 'native_complete' }[stop]);
+    assert.equal(result.interventions.length, 0);
+    assert.equal(existsSync(request.dir), false);
+  }
+});
+
+test('inbox cancel is a normal terminal result with user_cancel, even on a cancel-only companion', async t => {
+  const h = setup(t, { default: null, steer: false, queue: false, interrupt: false }), { executionId } = await h.send();
+  const close = deferred(); h.adapter.close = () => close.promise;
+  const request = inbox(h, executionId, 'cancel', { mode: 'cancel', text: undefined });
+  const waiting = h.controller.wait({ owner: 'child', executionId });
+  await h.clock.advance(1000);
+  assert.deepEqual(request.outcome(), { requestId: 'cancel', ok: true, status: 'cancelling' });
+  assert.equal(statSync(request.outcomePath).mode & 0o777, 0o600);
+  assert.equal(existsSync(request.path), false);
+  close.resolve(); await h.clock.flush();
+  const result = await waiting;
+  assert.equal(result.cause, 'user_cancel'); assert.equal(result.outcome, 'interrupted');
+  assert.deepEqual(result.interventions, []);
+  assert.equal(existsSync(request.dir), false);
+});
+
+test('a completion during user cancel keeps the native answer and the user_cancel cause', async t => {
+  const h = setup(t), { executionId } = await h.send();
+  h.adapter.interrupt = async () => { void h.finish('completed', 'racing answer'); };
+  inbox(h, executionId, 'cancel', { mode: 'cancel', text: undefined });
+  const waiting = h.controller.wait({ owner: 'child', executionId });
+  await h.clock.advance(1000);
+  const result = await waiting;
+  assert.equal(result.outcome, 'completed'); assert.equal(result.text, 'racing answer');
+  assert.equal(result.cause, 'user_cancel');
+});
+
+test('user notice wakes an attached wait before native acknowledgement and reports exactly once', async t => {
+  const h = setup(t), { executionId } = await h.send(), gate = deferred();
+  h.adapter.steer = () => gate.promise;
+  const waiting = h.controller.wait({ owner: 'child', executionId });
+  const pending = h.input(executionId, 'steer');
+  await h.clock.flush();
+  assert.equal(h.controller.requests.size, 0, 'early notice releases the wait');
+  const notice = await waiting;
+  assert.deepEqual(notice, { status: 'user_intervened', executionId,
+    intervention: { from: 'user', mode: 'steer', text: 'new text\nsecond line', at: h.clock.now() } });
+  gate.resolve({ accepted: true }); await pending;
+  const again = h.controller.wait({ owner: 'child', executionId, timeoutMs: 1000 });
+  await h.clock.advance(1000);
+  assert.equal((await again).state, 'running');
+  await h.controller.cancel({ owner: 'child', executionId });
+});
+
+test('user notices accepted before a wait are ordered, persisted, owner-bound and precede a terminal answer', async t => {
+  const h = setup(t), { executionId } = await h.send();
+  await h.input(executionId, 'queue', { text: 'first' });
+  await h.input(executionId, 'queue', { text: 'second' });
+  await h.controller.cancel({ owner: 'child', executionId });
+  const next = await h.send();
+  const fresh = new Controller({ records: new Records({ dir: h.records.dir, log() {} }), clock: h.clock });
+  await assert.rejects(fresh.wait({ owner: 'other', executionId }), { code: 'execution_unknown' });
+  assert.equal((await fresh.wait({ owner: 'child', executionId })).intervention.text, 'first');
+  assert.equal((await h.controller.wait({ owner: 'child', executionId })).intervention.text, 'second');
+  assert.equal((await fresh.wait({ owner: 'child', executionId })).outcome, 'interrupted');
+  assert.equal((await h.controller.wait({ owner: 'child', executionId })).outcome, 'interrupted');
+  await h.controller.cancel({ owner: 'child', executionId: next.executionId });
+});
+
+test('collecting an earlier notice is an owner wait; an aborted wait still cancels the job', async t => {
+  const h = setup(t), { executionId } = await h.send();
+  await h.clock.advance(2000);
+  await h.input(executionId, 'queue');
+  assert.equal(h.controller.live.get(executionId).remainingMs, 1000);
+  assert.equal((await h.controller.wait({ owner: 'child', executionId })).status, 'user_intervened');
+  assert.equal(h.controller.live.get(executionId).remainingMs, 3000);
+  await h.input(executionId, 'queue');
+  const abort = new AbortController(); abort.abort();
+  const result = await h.controller.wait({ owner: 'child', executionId, signal: abort.signal });
+  assert.equal(result.cause, 'owner_stop');
+});
+
+test('concurrent waits and a timeout boundary never duplicate or lose a user notice', async t => {
+  const h = setup(t), { executionId } = await h.send();
+  const first = h.controller.wait({ owner: 'child', executionId, timeoutMs: 1000 });
+  const second = h.controller.wait({ owner: 'child', executionId, timeoutMs: 2000 });
+  h.clock.setTimeout(() => { void h.input(executionId, 'queue'); }, 1000);
+  await h.clock.advance(1000);
+  assert.equal((await first).state, 'running');
+  assert.equal((await second).status, 'user_intervened');
+  await h.controller.cancel({ owner: 'child', executionId });
+  assert.equal((await h.controller.wait({ owner: 'child', executionId })).outcome, 'interrupted');
+});
+
+test('slow inbox acknowledgement is not replayed on later ticks and cannot recreate an inbox after cancel', async t => {
+  const h = setup(t), { executionId } = await h.send(), gate = deferred();
+  let writes = 0;
+  h.adapter.steer = () => { writes++; return gate.promise; };
+  const request = inbox(h, executionId, 'slow', { mode: 'steer' });
+  const waiting = h.controller.wait({ owner: 'child', executionId });
+  await h.clock.advance(1000);
+  assert.equal((await waiting).status, 'user_intervened');
+  await h.clock.advance(1000);
+  assert.equal(writes, 1); assert.equal(existsSync(request.path), true);
+  const terminal = h.controller.wait({ owner: 'child', executionId });
+  inbox(h, executionId, 'cancel', { mode: 'cancel', text: undefined });
+  await h.clock.advance(1000);
+  assert.equal((await terminal).cause, 'user_cancel');
+  gate.resolve({ accepted: true }); await h.clock.flush();
+  assert.equal(existsSync(request.dir), false);
+  assert.equal(h.records.readResult(executionId).interventions.length, 1);
 });
 
 test('bridge queue stays held until a successful boundary; answers and ids are ordered once', async t => {

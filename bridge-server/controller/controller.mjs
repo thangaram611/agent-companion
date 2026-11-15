@@ -16,7 +16,7 @@ const TICK_MS = 1000;
 const PROTOCOL_MS = 10_000;
 const error = (code) => Object.assign(new Error(code), { code });
 const interventionUnavailable = (a, mode) => !a || a.record.state !== 'running' || a.record.terminal || a.stopping || a.closed || a.handedOff
-  ? 'state' : a.adapter.capabilities.interventions?.[mode] ? null : 'capability';
+  ? 'state' : a.record.interventionModes?.[mode] ? null : 'capability';
 const deferred = () => {
   let resolve;
   const promise = new Promise((yes) => { resolve = yes; });
@@ -116,8 +116,9 @@ export class Controller {
     if (historyId && (!adapter.capabilities.loadsHistory || !adapter.capabilities.followUp)) throw error('FOLLOWUP_UNSUPPORTED');
     const executionId = randomUUID();
     const permissionMode = probePermission(getTargetById(provider), this.env)?.mode ?? null;
-    const record = this.records.begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, historyId, executionId, text, hostSessionId, now: this.clock.now() }, conversation?.generation ?? 0);
-    const a = { record, adapter, held: [], requests: new Set(), ready: deferred(), done: deferred(), remainingMs: this.graceMs, lastTick: this.clock.monotonic() };
+    const record = this.records.begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes: adapter.capabilities.interventions,
+      historyId, executionId, text, hostSessionId, now: this.clock.now() }, conversation?.generation ?? 0);
+    const a = { record, adapter, held: [], requests: new Set(), waiters: new Set(), inboxRequests: new Set(), ready: deferred(), done: deferred(), remainingMs: this.graceMs, lastTick: this.clock.monotonic() };
     a.supervisor = this.createSupervisor({ clock: this.clock, onRecord: (processes) => { a.record.processes = processes; this._eventWrite(a); } });
     // Snapshot the marker at dispatch. An old SubagentStop must not cancel a
     // later same-child follow-up; a changed marker is a new stop observation.
@@ -214,7 +215,8 @@ export class Controller {
             phase = 'provider_error'; next = false; continue;
           }
         }
-        this._terminal(a, { ...terminal, cause: terminal.outcome === 'completed' ? 'native_complete' : (a.stopCause || terminal.cause || 'provider_error') });
+        this._terminal(a, { ...terminal, cause: a.stopCause === 'user_cancel' ? 'user_cancel'
+          : terminal.outcome === 'completed' ? 'native_complete' : (a.stopCause || terminal.cause || 'provider_error') });
         await this._close(a, a.record.terminal.cause);
         break;
       }
@@ -292,13 +294,37 @@ export class Controller {
     if (marker && JSON.stringify(marker) !== a.stopMarker) { void this._close(a, 'owner_stop'); return; }
     const now = this.clock.monotonic();
     const elapsed = now - a.lastTick; a.lastTick = now;
-    if (a.requests.size) return;
     // A long scheduling gap can be suspend or event-loop starvation. Neither
     // proves owner loss. Pause the grace across it; wall-clock jumps never
     // expire a lease. Ordinary scheduled awake ticks consume the grace.
-    if (elapsed >= 0 && elapsed <= 2 * TICK_MS) a.remainingMs -= elapsed;
-    else this._lease(a);
-    if (a.remainingMs <= 0) void this._close(a, 'owner_lease_expired');
+    if (!a.requests.size) {
+      if (elapsed >= 0 && elapsed <= 2 * TICK_MS) a.remainingMs -= elapsed;
+      else this._lease(a);
+      if (a.remainingMs <= 0) { void this._close(a, 'owner_lease_expired'); return; }
+    }
+    this._inbox(a);
+  }
+  _inbox(a) {
+    const executionId = a.record.executionId;
+    for (const { requestId, request, reason } of this.records.readInbox(executionId)) {
+      if (a.inboxRequests.has(requestId)) continue;
+      const finish = outcome => this.records.finishInbox(executionId, requestId, outcome);
+      if (reason || request.executionId !== executionId || !this.live.has(request.executionId) || a.stopping) {
+        finish({ ok: false, status: 'intervention_unavailable', reason: reason ?? 'state' });
+        continue;
+      }
+      if (request.mode === 'cancel') {
+        finish({ ok: true, status: 'cancelling' });
+        void this._close(a, 'user_cancel');
+        continue;
+      }
+      a.inboxRequests.add(requestId);
+      void this.intervene({ executionId, from: 'user', mode: request.mode, text: request.text }).then(response => {
+        finish(response.ok ? { ok: true, status: 'accepted', interventionId: response.id } : response);
+      }, err => finish({ ok: false, status: 'intervention_unavailable', reason: err.code || 'delivery_failed' }))
+        .catch(err => { a.record.monitorError = err.code || err.message; void this._close(a, 'provider_error'); })
+        .finally(() => a.inboxRequests.delete(requestId));
+    }
   }
   _close(a, cause) {
     if (a.closing) return a.closing;
@@ -329,6 +355,7 @@ export class Controller {
     this.clock.clearTimeout(a.timer);
     const cleanup = await a.supervisor.terminate();
     a.closed = true;
+    this.records.removeInbox(a.record.executionId);
     for (const id of [...a.requests]) this.endRequest(id);
     this.live.delete(a.record.executionId);
     const response = { executionId: a.record.executionId, state: 'unknown', error: err.code || err.message, stopEvidence: cleanup };
@@ -408,14 +435,37 @@ export class Controller {
     const execution = this.records.readExecution(executionId);
     if (!execution || execution.owner !== owner) throw error('execution_unknown');
     const result = this.records.readResult(executionId);
-    if (result) return result;
+    if (result) return this._userNotice(owner, executionId) ?? result;
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 1_200_000) throw error('invalid_wait');
     const a = this.live.get(executionId);
-    if (!a || a.handedOff) return this.status({ executionId });
+    if (!a || a.handedOff) return this._userNotice(owner, executionId) ?? this.status({ executionId });
     const id = this.beginRequest({ owner, executionId, requestId, signal, kind: 'wait' });
-    try { return await bounded(this.clock, () => a.done.promise, timeoutMs, 'wait_timeout'); }
-    catch (err) { if (err.code === 'wait_timeout') return this.status({ executionId }); throw err; }
+    try {
+      const notice = !signal?.aborted && this._userNotice(owner, executionId);
+      if (notice) return notice;
+      return await new Promise(resolve => {
+        const finish = value => {
+          if (!a.waiters.delete(finish)) return;
+          this.clock.clearTimeout(timer);
+          resolve(value);
+        };
+        const timer = this.clock.setTimeout(() => finish(this.status({ executionId })), timeoutMs);
+        a.waiters.add(finish);
+        a.done.promise.then(finish);
+      });
+    }
     finally { this.endRequest(id); }
+  }
+  _userNotice(owner, executionId) {
+    const intervention = this.records.takeUserIntervention(executionId, owner);
+    return intervention ? { status: 'user_intervened', executionId, intervention } : null;
+  }
+  _notifyUser(a) {
+    for (const finish of a.waiters) {
+      const notice = this._userNotice(a.record.owner, a.record.executionId);
+      if (!notice) break;
+      finish(notice);
+    }
   }
   async intervene({ executionId, from, owner, mode, text, requestId, signal }) {
     if (!['caller', 'user'].includes(from)) throw error('INVALID_SENDER');
@@ -426,6 +476,7 @@ export class Controller {
     }
     if (typeof text !== 'string' || !text.length) throw error('INVALID_TEXT');
     const a = this.live.get(executionId);
+    if (mode === undefined) mode = a?.record.interventionModes.default;
     const unavailable = reason => ({ ok: false, status: 'intervention_unavailable', reason });
     const reason = interventionUnavailable(a, mode);
     if (reason || !['steer', 'queue', 'interrupt'].includes(mode)) return unavailable(reason || 'capability');
@@ -434,6 +485,7 @@ export class Controller {
       if (a.stopping || signal?.aborted) return unavailable('state');
       const input = { id: randomUUID(), from, mode, text, at: this.clock.now(), state: 'accepted' };
       a.record.interventions.push(input); this._persist(a);
+      if (from === 'user') this._notifyUser(a);
       const operation = (a.inputTail ?? Promise.resolve()).then(async () => {
         if (a.stopping || a.handedOff || a.closed) return unavailable('state');
         const nativeQueue = a.adapter.capabilities.interventions.queue === 'native';
@@ -488,7 +540,9 @@ export class Controller {
     const lease = savedLease && (result
       ? { ...savedLease, attached: false, requestIds: [], deadline: null, remainingMs: null }
       : { ...savedLease, remainingMs: live ? live.remainingMs : savedLease.deadline == null ? null : Math.max(0, savedLease.deadline - this.clock.now()) });
-    return { execution, result, lease, replyAvailable: !result && interventionUnavailable(live, 'steer') === null,
+    const interventions = { default: execution.interventionModes?.default ?? null,
+      ...Object.fromEntries(['steer', 'queue', 'interrupt'].map(mode => [mode, !result && interventionUnavailable(live, mode) === null])) };
+    return { execution, result, lease, interventions,
       state: result?.stopEvidence?.gone || execution.cleanup?.gone ? 'closed' : live ? execution.state : 'unknown' };
   }
   // Explicit startup reconciliation, never invoked by an observer. It never

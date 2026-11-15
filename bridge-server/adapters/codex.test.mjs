@@ -8,13 +8,14 @@ import { createInterface } from 'node:readline';
 import { SANDBOX_HOME } from '../../test/sandbox-home.mjs';
 import { fakeCodexBin } from '../../test/fake-codex-app-server.mjs';
 import { note, driftNote, threadItem } from '../../test/codex-wire-frames.mjs';
-import { ManualClock, until } from '../../test/controller/helpers.mjs';
+import { waitForResult, ManualClock, until } from '../../test/controller/helpers.mjs';
 import { fixtureSupervisor } from '../../test/controller/fixture-table.mjs';
 import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
 import { inspectCodexAppServerInstallation } from '../../lib/codex-install.mjs';
 import { codexAppServerContract, CODEX_PINNED_VERSION } from '../../lib/codex-app-server-contract.mjs';
 import { writeTargetChecks } from '../../lib/state.mjs';
+import { getTargetById } from '../../lib/target-registry.mjs';
 import { CodexAdapter, codexProvider } from './codex.mjs';
 
 const treeFile = fileURLToPath(new URL('../../test/controller/process-tree.mjs', import.meta.url));
@@ -128,7 +129,7 @@ if (process.argv[2] === 'app-server') {
   const send = (args = {}) => controller.send({ owner: 'child', provider: 'codex', cwd: dir, text: 'exact text\n  with spaces ', ...args });
   const rpc = (method, params, index = controls.length - 1) => controls[index](method, params);
   const emit = (...frames) => rpc('fake/emit', { frames });
-  const wait = (id) => controller.wait({ owner: records.readExecution(id).owner, executionId: id, timeoutMs: 10_000 });
+  const wait = (id) => waitForResult(controller, { owner: records.readExecution(id).owner, executionId: id, timeoutMs: 10_000 });
   const trace = () => { try { return readFileSync(env.CODEX_FAKE_TRACE, 'utf8').trim().split('\n').map(JSON.parse); } catch { return []; } };
   return { dir, env, clock, records, controller, adapters, supervisors, send, emit, rpc, wait, trace };
 }
@@ -338,8 +339,10 @@ test('provider entry uses cached readiness, validates models and creates indepen
   assert.equal(provider.ready, true);
   assert.equal(provider.modelAllowed('chosen-model'), true); assert.equal(provider.modelAllowed('two models'), false);
   assert.notEqual(provider.create(), provider.create());
-  assert.deepEqual(provider.create().capabilities, { followUp: true, steer: true, modelSelection: true, loadsHistory: true,
-    interventions: { default: 'steer', steer: true, queue: 'bridge', interrupt: true } });
+  const { capabilities } = provider.create();
+  assert.deepEqual(capabilities, { followUp: true, modelSelection: true, loadsHistory: true,
+    interventions: getTargetById('codex').capabilities.interventions });
+  assert.equal(capabilities.interventions, getTargetById('codex').capabilities.interventions);
 });
 
 

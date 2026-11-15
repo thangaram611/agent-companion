@@ -42,7 +42,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Controller } from './controller/controller.mjs';
-import { Records } from './controller/records.mjs';
+import { Records, firstLine } from './controller/records.mjs';
 import { systemClock } from './controller/clock.mjs';
 import { codexProvider, getCodexContractStatus } from './adapters/codex.mjs';
 import { claudeProvider } from './adapters/claude.mjs';
@@ -301,6 +301,8 @@ function terminalEnvelope(execution, result, action = 'wait') {
       survivors: evidence.survivors?.length ?? 0, cleanup_ms: evidence.cleanupMs ?? null,
       detection_delay_ms: evidence.detectionDelayMs ?? null, protocol: evidence.protocol ?? [] } : null,
     digest_uri: digestResourceUri(result.executionId),
+    ...(result.interventions?.length ? { interventions: result.interventions.map(({ from, mode, state, text }) =>
+      ({ from, mode, state, first_line: firstLine(text) })) } : {}),
   };
   return { ok: true, action, status, job_id: result.executionId, target: execution.provider,
     content: result.text ?? '', meta };
@@ -372,7 +374,9 @@ function runningEnvelope(view, action) {
 }
 
 async function handleWait(args, active, request) {
-  await active.wait({ owner: args.thread, executionId: args.job_id, timeoutMs: clampWaitSec(args.max_wait_sec) * 1000, ...request });
+  const response = await active.wait({ owner: args.thread, executionId: args.job_id, timeoutMs: clampWaitSec(args.max_wait_sec) * 1000, ...request });
+  if (response?.status === 'user_intervened') return asJson({ ok: true, action: 'wait', status: response.status,
+    job_id: args.job_id, intervention: response.intervention });
   const view = active.status({ executionId: args.job_id });
   if (!view.result) return asJson(runningEnvelope(view, 'wait'));
   publishResult(active.records, view.execution, view.result);
@@ -389,9 +393,10 @@ async function handleCancel(args, active, request) {
   return asJson(terminalEnvelope(view.execution, view.result, 'cancel'));
 }
 
-async function handleReply({ job_id, message, thread }, active, request) {
-  const response = await active.steer({ owner: thread, executionId: job_id, text: message, ...request });
-  return asJson({ action: 'reply', job_id, ...response });
+async function handleReply({ job_id, message, thread, mode }, active, request) {
+  const response = await active.intervene({ from: 'caller', owner: thread, executionId: job_id, mode, text: message, ...request });
+  return asJson({ action: 'reply', job_id, ...response,
+    ...(response.status === 'intervention_unavailable' ? { status: 'reply_unavailable' } : {}) });
 }
 
 function handleCatalog(env) {
@@ -421,7 +426,7 @@ function handleCatalog(env) {
             : target.capabilities.effortLevels ? 'Omit to inherit the companion configuration; an explicit effort overrides this conversation.'
               : 'Levels depend on the model and are checked at send. Omit to inherit the companion configuration; an explicit effort overrides this conversation.' },
         permission: permission ? { mode: permission.mode, source: permission.source, risk: permission.risk } : null,
-        capabilities: Object.fromEntries(['reply', 'resume', 'cancel', 'modelSelection', 'effortSelection']
+        capabilities: Object.fromEntries(['interventions', 'resume', 'cancel', 'modelSelection', 'effortSelection']
           .map((key) => [key, target.capabilities[key]])),
         readiness: {
           ready: checked?.ready ?? null,
@@ -451,7 +456,7 @@ function handleStatus({ job_id, diagnostics }, active) {
       effective_model: r?.effectiveModel ?? e.progress?.effectiveModel ?? e.effectiveModel ?? null,
       effective_effort: r?.effectiveEffort ?? e.progress?.effectiveEffort ?? e.effectiveEffort ?? null,
       cause: r?.cause ?? null, detail: r?.detail ?? null, native_refs: r?.nativeRefs ?? { historyId: e.historyId, nativeTurnId: e.nativeTurnId },
-      digest_uri: digestResourceUri(e.executionId), reply_available: view.replyAvailable };
+      digest_uri: digestResourceUri(e.executionId), interventions: view.interventions };
   };
   let response;
   if (job_id) {
@@ -478,7 +483,7 @@ const mcp = new Server(
       'must spawn that subagent rather than call these tools directly. Both hosts ' +
       'register it at plugin/session scope; execution calls require the native ' +
       'child owner. Tools: agent_send (returns ' +
-      'still_running synchronously), agent_wait (blocks until terminal), ' +
+      'still_running synchronously), agent_wait (blocks until terminal, user intervention or wait budget), ' +
       'agent_catalog, agent_status, agent_reply, and agent_cancel. The companion uses ' +
       'agent_send for kickoff then loops on agent_wait until terminal. ' +
       `Default target is ${defaultTargetId() || 'unset (pass target or run onboarding)'}; ` +
@@ -587,7 +592,7 @@ const AGENT_TOOLS = [
   {
     name: 'agent_wait',
     description: INTERNAL_TOOL_NOTE +
-      'Block on an existing agent job until terminal or until max_wait_sec elapses.',
+      'Block until terminal, a user_intervened notice (relay it and wait again), or max_wait_sec elapses.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -602,7 +607,7 @@ const AGENT_TOOLS = [
   {
     name: 'agent_status',
     description: INTERNAL_TOOL_NOTE +
-      'Return bridge/target state, or diagnostics for a specific agent job when job_id is provided.',
+      'Return bridge/target state and per-job interventions (default, steer, queue, interrupt usable now), or cached diagnostics.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -617,16 +622,18 @@ const AGENT_TOOLS = [
   {
     name: 'agent_reply',
     description: INTERNAL_TOOL_NOTE +
-      'Re-steer an in-flight agent job with a follow-up message when the companion adapter supports replies.',
+      'Send a steer, queue or interrupt message to a running job. Omit mode for that execution’s default; unsupported modes are refused without substitution.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         job_id: JOB_ID_FIELD,
+        mode: { type: 'string', enum: ['steer', 'queue', 'interrupt'],
+          description: 'Omit for the execution’s interventionModes.default. Check agent_status interventions for modes usable now.' },
         message: {
           type: 'string',
-          description: 'Follow-up text for a running execution whose adapter supports steer. Returns accepted and '
-            + 'confirmed separately; unsupported capability or execution state returns reply_unavailable.',
+          description: 'Follow-up text, up to 8000 characters. Steer may report accepted and confirmed separately; '
+            + 'unsupported capability or execution state returns reply_unavailable with reason capability or state.',
         },
       },
       required: ['job_id', 'message'],

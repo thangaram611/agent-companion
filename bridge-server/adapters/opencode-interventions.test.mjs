@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
 import { SANDBOX_HOME } from '../../test/sandbox-home.mjs';
-import { ManualClock } from '../../test/controller/helpers.mjs';
+import { waitForResult, ManualClock } from '../../test/controller/helpers.mjs';
 import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
 import { opencodeProvider } from './opencode.mjs';
@@ -56,7 +56,7 @@ test('m3 steer admission joins the actual store turn id through controller, work
   assert.deepEqual(joined.nativeTurnIds, [fixture.first.id, fixture.steer.id]);
   assert.equal(joined.interventions[0].state, 'joined');
   stream.write(`data: ${JSON.stringify({ type: 'session.execution.succeeded', data: { sessionID: fixture.sessionId } })}\n\n`);
-  const result = await controller.wait({ owner: 'child', executionId: sent.executionId });
+  const result = await waitForResult(controller, { owner: 'child', executionId: sent.executionId });
   const execution = records.readExecution(sent.executionId);
   assert.equal(result.text, 'ORIGINAL-A\n\nBANANA-42');
   assert.equal(result.turns.length, 1); assert.deepEqual(result.turns[0].messages, [sent.executionId, ack.id]);

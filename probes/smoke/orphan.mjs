@@ -31,7 +31,7 @@ try {
   assert.equal(final.content, result.text);
   const before = await second.readResource(final.meta.digest_uri);
   const status = await second.tool('agent_status', { job_id: sent.job_id });
-  assert.equal(status.reply_available, false);
+  assert.deepEqual(status.interventions, { default: 'steer', steer: false, queue: false, interrupt: false });
   assert.equal(await second.readResource(final.meta.digest_uri), before);
   assert.deepEqual(record('results', sent.job_id), result);
   console.log('PASS: bridge-loss cleanup, verified exit, durable result and read-only replacement status');

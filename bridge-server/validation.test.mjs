@@ -40,6 +40,13 @@ test('action schemas reject malformed inputs and normalize valid cancel/wait/sta
 
   const reply = validateAgentArgs({ action: 'reply', job_id: 'job-1', message: 'add tests' });
   assert.equal(reply.message, 'add tests');
+  assert.equal(reply.mode, undefined);
+  for (const mode of ['steer', 'queue', 'interrupt']) {
+    assert.equal(validateAgentArgs({ action: 'reply', job_id: 'j', message: 'm', mode }).mode, mode);
+  }
+  for (const mode of ['cancel', 'invalid', null, '', 1]) {
+    assert.throws(() => validateAgentArgs({ action: 'reply', job_id: 'j', message: 'm', mode }), /mode/);
+  }
   assert.throws(() => validateAgentArgs({ action: 'reply', message: 'hi' }), /job_id/);
   assert.throws(() => validateAgentArgs({ action: 'reply', job_id: 'job-1' }), /message/);
   assert.throws(() => validateAgentArgs({ action: 'reply', job_id: 'job-1', message: '' }), /message/);

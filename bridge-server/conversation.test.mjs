@@ -7,6 +7,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync, existsSy
 import { validateAgentArgs } from './validation.mjs';
 import { callArgs, mcp, resolveRouting, dispatch, getHostSessionId, _resetForTest } from './server.mjs';
 import { BASE_DIR, writeTargetChecks, writeDefaultTarget, writeDefaultModel } from '../lib/state.mjs';
+import { getTargetById } from '../lib/target-registry.mjs';
 
 test('conversational send accepts exact text and an explicit model, with no framing fields', () => {
   const task = '  Compare these lines.\n\nKeep the trailing whitespace.  \n';
@@ -67,7 +68,14 @@ test('catalog is ownerless and leaves cold and populated state/runtime directori
     assert.equal(claude.model.model, null);
     assert.equal(claude.model.description, 'inherits the Claude Code default; any model id or alias accepted, validated by Claude Code');
     assert.equal(claude.model.enumeration, 'not enumerable without a session');
-    assert.deepEqual(claude.capabilities, { reply: false, resume: true, cancel: true, modelSelection: true, effortSelection: true });
+    for (const target of first.targets) {
+      const capabilities = getTargetById(target.id).capabilities;
+      assert.deepEqual(target.capabilities, {
+        interventions: capabilities.interventions, resume: capabilities.resume, cancel: capabilities.cancel,
+        modelSelection: capabilities.modelSelection, effortSelection: capabilities.effortSelection,
+      });
+      assert.deepEqual(Object.keys(target.capabilities.interventions).sort(), ['default', 'interrupt', 'queue', 'steer']);
+    }
     assert.equal(Object.hasOwn(claude, 'contractStatus'), false);
     assert.equal(first.targets[0].readiness.ready, null);
 

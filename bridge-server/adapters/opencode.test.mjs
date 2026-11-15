@@ -5,12 +5,13 @@ import { mkdtempSync, readFileSync, writeFileSync, realpathSync, existsSync } fr
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SANDBOX_HOME } from '../../test/sandbox-home.mjs';
-import { ManualClock, until, deferred } from '../../test/controller/helpers.mjs';
+import { waitForResult, ManualClock, until, deferred } from '../../test/controller/helpers.mjs';
 import { ProcessSupervisor } from '../controller/process-supervisor.mjs';
 import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
 import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
 import { writeTargetChecks } from '../../lib/state.mjs';
+import { getTargetById } from '../../lib/target-registry.mjs';
 import { opencodeProvider } from './opencode.mjs';
 import { dispatch } from '../server.mjs';
 
@@ -91,7 +92,7 @@ function setup(t, extra = {}) {
     if (error) throw error;
     return result;
   };
-  const finish = (sent) => settle(controller.wait({ owner: records.readExecution(sent.executionId).owner, executionId: sent.executionId, timeoutMs: 100_000 }));
+  const finish = (sent) => settle(waitForResult(controller, { owner: records.readExecution(sent.executionId).owner, executionId: sent.executionId, timeoutMs: 100_000 }));
   return { dir, env, clock, provider, controller, records, adapters, supervisors, send, settle, finish, requests };
 }
 
@@ -101,8 +102,10 @@ test('provider readiness is cached and never spawns; model gate and capabilities
   assert.equal(h.provider.ready, true);
   assert.equal(h.provider.modelAllowed('fixture/model#fast'), true);
   assert.equal(h.provider.modelAllowed('malformed'), false);
-  assert.deepEqual(h.provider.create().capabilities, { followUp: true, steer: true, modelSelection: true, loadsHistory: true,
-    interventions: { default: 'steer', steer: true, queue: 'bridge', interrupt: true } });
+  const { capabilities } = h.provider.create();
+  assert.deepEqual(capabilities, { followUp: true, modelSelection: true, loadsHistory: true,
+    interventions: getTargetById('opencode').capabilities.interventions });
+  assert.equal(capabilities.interventions, getTargetById('opencode').capabilities.interventions);
   assert.deepEqual(h.requests(), []);
   writeTargetChecks({ opencode: { ready: false } });
   assert.equal(opencodeProvider({ env: h.env }).ready, false);

@@ -21,7 +21,7 @@ function setup(options = {}) {
   const create = () => {
     const terminal = deferred(), ack = deferred();
     const adapter = {
-      capabilities: { followUp: true, steer: false, modelSelection: true, loadsHistory: true, ...options.capabilities },
+      capabilities: { followUp: true, modelSelection: true, loadsHistory: true, ...options.capabilities },
       calls: [], terminal, ack,
       async start(args) { this.calls.push(['start', args]); if (options.startCrash) throw new Error('startup crash'); return { runtime: await args.supervisor.spawn(['fake'], { cwd: args.cwd }) }; },
       async openHistory(args) { this.calls.push(['openHistory', args]); if (options.historyError) throw Object.assign(new Error(options.historyError), { code: options.historyError }); if (options.historyCrash) throw new Error('HistoryUnavailable'); return { historyId: args.historyId || 'native-history', effectiveModel: 'effective-model' }; },

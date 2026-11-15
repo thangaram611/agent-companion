@@ -51,6 +51,7 @@ import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { makeUsage } from '../lib/usage.mjs';
+import { getTargetById } from '../lib/target-registry.mjs';
 
 const FAKE_UPDATES = ['agent_thought_chunk', 'agent_message_chunk', 'tool_call', 'tool_call_update', 'user_message_chunk'];
 
@@ -74,7 +75,8 @@ export function fakeAcpDescriptor({ id = 'fake-acp', loadSession = true, updates
     id,
     displayName: 'Fake ACP agent',
     implemented: true,
-    capabilities: { send: true, wait: true, status: true, cancel: true, reply: true, resume: true, jsonEvents: true, acp: true, serverMode: false, modelSelection: true },
+    capabilities: { send: true, wait: true, status: true, cancel: true, resume: true, jsonEvents: true, acp: true, serverMode: false, modelSelection: true,
+      interventions: getTargetById('copilot').capabilities.interventions },
     binaryEnv: 'FAKE_ACP_BIN',
     binaryNames: ['fake-acp-agent'],
     versionArgs: ['--version'],

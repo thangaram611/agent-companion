@@ -57,7 +57,7 @@ is ready; leave the model to the companion's own configuration unless the
 parent asked for one. Keep that choice for follow-ups on this conversation.
 
 The catalog is ownerless and read-only. It lists enabled companions, the default
-companion, per-companion model configuration, capabilities (reply, resume, cancel
+companion, per-companion model configuration, capabilities (interventions, resume, cancel
 and model selection), readiness and the installed version seen at the last check. It starts no session. A model list
 may be "not enumerable without a session"; absence alone does not rule out an
 explicitly requested model. The catalog describes effort selection; Codex levels
@@ -113,10 +113,10 @@ Antigravity also loads its saved conversation. Copilot follow-ups are refused wi
 `FOLLOWUP_UNSUPPORTED` until cold loading is qualified. Bridge loss stops the
 owned provider tree and keeps history; it does not preserve in-flight work.
 A missing or unloadable history fails explicitly, never as a fresh conversation.
-`agent_reply` steers only where capabilities and the running execution allow it;
-otherwise it returns `reply_unavailable`. Read `reply_available` from status.
-In-flight replies are only for Codex. A reply to a running Claude Code job is
-refused with `reply_unavailable`; tell the parent to wait or cancel.
+`agent_reply` supports steer, queue and interrupt where the running execution
+allows them; otherwise it returns `reply_unavailable` with its reason.
+Codex and OpenCode default to steer; Claude Code and Antigravity default to
+queue. Copilot supports cancel only. Read per-mode `interventions` from status.
 Send every follow-up to the companion through `agent_send`, even when the
 earlier reply seems to answer it already; the parent asked the companion.
 A different companion is a new conversation: this thread stays bound to the
@@ -136,17 +136,25 @@ cap. This line informs the parent; each wait returning satisfies the host's MCP
 idle budget. Progress text does not extend that budget. Terminal states are
 `completed`, `failed`, `stuck`, `cancelled`, `timeout` and `unreachable`.
 
+When a wait returns `user_intervened`, relay the intervention's sender, mode,
+text and time to the parent in one line, then keep waiting with the same `BUDGET`.
+This is a notice of accepted input, never the companion's answer. The bridge
+reports each user message once, including one accepted before the wait.
+
 followup_task / send_message arrivals are visible only between waits. Worst-case
 interrupt latency is one `BUDGET`. Handle input seen before the first wait too.
 Read new parent messages as instructions to continue, check status, reply or cancel.
 
-For a reply, call `mcp__agent_bridge__agent_status` with `job_id` first. It must
-report `reply_available: true` for that job. This is a per-job fact: the starting
-adapter and live state matter, not the companion name. If false, report that
-reply is unavailable and stop; do not cancel-and-resend to fake a reply. A reply steers
-the running turn only where the companion supports it (Codex); otherwise the bridge
-answers `reply_unavailable` with its reason, and you relay that. Call `mcp__agent_bridge__agent_reply` with `job_id` and `message`, and
-relay its acknowledgement as given.
+For a reply, call `mcp__agent_bridge__agent_status` with `job_id` first. Read
+`interventions` for that job: `default` names its preferred mode; `steer`, `queue`
+and `interrupt` say which modes are usable now. This is a per-job fact: the
+starting adapter and live state matter. Call `mcp__agent_bridge__agent_reply`
+with `job_id` and `message`; use the parent's requested `mode`, or omit `mode`
+for the companion's default. Queue waits for the companion to take the message;
+interrupt ends the running turn and sends the new text. If unavailable, relay
+`reply_unavailable` and its reason (`state` or `capability`); never substitute
+another mode, and do not cancel-and-resend to fake a reply. Relay the
+acknowledgement as given and keep waiting for the job's answer.
 
 For cancellation, call `mcp__agent_bridge__agent_cancel` with the requested job
 id, or the most recent `job_id` in your conversation. With no tracked job, report
@@ -159,6 +167,9 @@ Return the companion's answer as the companion gave it. Add your own observation
 under a separate `Observations` heading if you have any. If the companion asked
 a question, relay it to the parent. Send a follow-up the same way on this conversation.
 Report success only after the bridge reports `completed`.
+
+When `meta.interventions` is present, report every `not_delivered` message
+with its sender, mode and first line. Acceptance does not mean it was answered.
 
 When `meta.work_summary` is present, relay it compactly after the answer,
 including only non-empty parts: failed commands with exit codes (and the count

@@ -21,7 +21,10 @@ try {
   assert.equal(catalog.ok, true);
   const claude = catalog.targets.find((target) => target.id === 'claude');
   assert.ok(claude, 'catalog must list claude');
-  assert.deepEqual(claude.capabilities, { reply: false, resume: true, cancel: true, modelSelection: true });
+  assert.deepEqual(claude.capabilities, {
+    interventions: { default: 'queue', steer: false, queue: 'native', interrupt: true },
+    resume: true, cancel: true, modelSelection: true, effortSelection: true,
+  });
   assert.equal(claude.readiness.ready, readiness.ready);
   assert.ok(claude.readiness.checked_at);
   console.log('PASS: Claude catalog capabilities and parsed auth-status readiness');

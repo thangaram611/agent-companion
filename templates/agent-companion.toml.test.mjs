@@ -25,7 +25,7 @@ test('Codex role accepts plain language and keeps the seven instruction sections
   // Source/install comments may name templates/. Active instructions may not
   // teach the retired protocol, including in the parent-facing description.
   const active = `${description}\n${body}`;
-  assert.doesNotMatch(active, /JSON|payload|\b(?:templates?|modes?|strengths?|profiles?|verdicts?|fleet|parallel)\b|rubber.duck|router,? not a worker/i);
+  assert.doesNotMatch(active, /JSON|payload|\b(?:templates?|strengths?|profiles?|verdicts?|fleet|parallel)\b|rubber.duck|router,? not a worker/i);
   assert.doesNotMatch(active, /"(?:action|task|target|cwd)"\s*:/);
   assert.match(prose, /The companion does the work/);
 });
@@ -44,8 +44,8 @@ test('Codex role names all five companions and explains Claude continuity', () =
   assert.match(parent, /Claude Code host can delegate to a Claude Code companion/);
   assert.match(parent, /separate process with the user's own Claude login and cannot delegate through Agent Companion again/);
   assert.match(prose, /Codex, OpenCode and Claude Code follow-ups resume saved conversations cold/);
-  assert.match(prose, /In-flight replies are only for Codex/);
-  assert.match(prose, /running Claude Code job is refused with `reply_unavailable`; tell the parent to wait or cancel/);
+  assert.match(prose, /Codex and OpenCode default to steer; Claude Code and Antigravity default to queue/);
+  assert.match(prose, /Copilot supports cancel only/);
   assert.match(prose, /Send every follow-up to the companion through `agent_send`, even when the earlier reply seems to answer it already/);
   assert.match(prose, /A different companion is a new conversation: this thread stays bound to the companion that started it/);
   assert.match(prose, /refused with `provider_mismatch`\. Do not retry it here\. Tell the parent to spawn a new agent-companion/);
@@ -109,7 +109,7 @@ test('Codex role preserves bounded waits, per-job reply checks and cancel acknow
   assert.match(prose, /Keep looping until terminal.*no iteration cap/i);
   assert.match(prose, /followup_task.*send_message arrivals.*only between waits/);
   assert.match(prose, /interrupt latency is one `BUDGET`/);
-  assert.match(prose, /agent_status.*job_id.*reply_available: true.*that job/);
+  assert.match(prose, /agent_status.*job_id.*`interventions` for that job/);
   assert.match(prose, /per-job fact/);
   assert.match(prose, /do not cancel-and-resend to fake a reply/);
   assert.match(prose, /reply_unavailable/);
@@ -148,7 +148,7 @@ test('Codex host names the conversation and parent controls remain natural messa
   assert.match(prose, /resumes the saved conversation in a new process/);
   assert.match(prose, /Copilot follow-ups are refused with `FOLLOWUP_UNSUPPORTED`/);
   assert.match(prose, /Bridge loss stops the owned provider tree and keeps history/);
-  assert.match(prose, /`agent_reply` steers only where capabilities.*`reply_unavailable`/);
+  assert.match(prose, /`agent_reply` supports steer, queue and interrupt.*`reply_unavailable`/);
   assert.doesNotMatch(prose, /single-shot adapters|daemon no longer holds/);
   const parent = description.replace(/\s+/g, ' ');
   assert.match(parent, /spawn_agent.*`task_name`.*`agent_type`.*`message`/);

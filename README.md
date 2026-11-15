@@ -70,11 +70,15 @@ that same subagent to continue the review. The parent chooses what a good answer
 looks like; the bridge adds no instructions or required answer format.
 
 The catalog lists enabled companions, the default companion, per-companion model
-configuration, reply/resume/cancel/model-selection capabilities, readiness and
+configuration, intervention/resume/cancel/model-selection capabilities, readiness and
 the installed version seen at the last check. An unset model default is reported
 as inheriting the companion's own configuration. A list that needs a session is
 reported as "not enumerable without a session". Reading the catalog starts no
-work and changes no job, ownership, lease or result state.
+work and changes no job, ownership, lease or result state. Each target's
+`capabilities.interventions` contains `{ default, steer, queue, interrupt }`:
+`default` is a mode or null; `steer` and `interrupt` are booleans; `queue` is
+`false`, `bridge` or `native`. These registry capabilities describe support;
+`agent_status.interventions` reports which modes are usable on a job now.
 
 ![Agent Companion architecture](assets/readme/architecture.png)
 
@@ -88,18 +92,20 @@ answer, one cold companion runtime per answer. Details are in
 
 The table below is the current capability contract.
 
-| Companion | Per-answer runtime | Follow-up by cold resume | Reply / steer | Model selection | History |
+| Companion | Per-job runtime | Follow-up by cold resume | In-flight messages (default first) | Model selection | History |
 | --- | --- | --- | --- | --- | --- |
-| OpenCode 2.x | Private authenticated `opencode serve` | Saved session | Unsupported | `provider/model`, optional variant | Vendor-persisted session |
+| OpenCode 2.x | Private authenticated `opencode serve` | Saved session | Steer, queue, interrupt | `provider/model`, optional variant | Vendor-persisted session |
 | GitHub Copilot CLI | `copilot --acp` | Unsupported until qualified | Unsupported | Inherit or supported explicit model | Session id retained; cold load unqualified |
-| Codex CLI | `codex app-server` | `thread/resume` | `turn/steer` while running | Inherit or explicit override | Native thread and rollouts |
-| Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Unsupported | Session model after new/load | Native SQLite history |
-| Claude Code | `claude -p` | `--resume` saved session | Unsupported | Inherit or explicit override | Native transcripts |
+| Codex CLI | `codex app-server` | `thread/resume` | Steer, queue, interrupt | Inherit or explicit override | Native thread and rollouts |
+| Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Queue, interrupt (live qualification pending) | Session model after new/load | Native SQLite history |
+| Claude Code | `claude -p` | `--resume` saved session | Queue, interrupt | Inherit or explicit override | Native transcripts |
 
-All support send, wait, status and cancel. Every answer runs in a new process;
-there is no shared provider runtime or adapter-selection setting. Copilot
+All support send, wait, status and cancel. Every job starts in a new process;
+accepted messages can continue it through several turns on the same live session.
+There is no shared provider runtime or adapter-selection setting. Copilot
 follow-ups return `FOLLOWUP_UNSUPPORTED` until cold loading is qualified.
-`agent_reply` returns `reply_unavailable` unless that execution supports steer.
+`agent_reply` returns `reply_unavailable` with reason `state` or `capability`
+when the requested mode is unavailable; it never substitutes a mode.
 Bridge loss stops the owned tree through the cleanup watcher and keeps native
 history; in-flight work does not survive bridge replacement. The next message
 to the same native child resumes cold. An unavailable history fails explicitly.
@@ -167,8 +173,10 @@ The child cannot delegate again through Agent Companion. User/project settings,
 hooks, plugins and CLAUDE.md still load; background tasks are disabled.
 Transcripts stay in `~/.claude/projects` (or `CLAUDE_CONFIG_DIR/projects` when
 configured), and follow-ups resume them in a new process. The bridge retains the
-session id and does not clean up those transcripts. There is no in-flight reply:
-`reply_unavailable` means wait or cancel. Usage reports per-turn tokens; cost is
+session id and does not clean up those transcripts. In-flight messages default
+to queue: Claude decides whether they join this turn or start the next one.
+Interrupt sends the new message immediately through Claude's native control.
+Steer is refused. Usage reports per-turn tokens; cost is
 reported only for fresh history because Claude's resumed cost is cumulative.
 
 Claude Code 2.1.319 was measured as the companion, including installed delegation
@@ -451,9 +459,9 @@ read-only. Execution and continuation belong to the subagent.
 | --- | --- | --- |
 | `agent_catalog` | none | Enabled companions, default, model configuration, effort selection/levels, resolved permission (mode, source, risk), capabilities, readiness and last checked version. No job hydration, state writes or session creation. |
 | `agent_send` | `task`, `cwd`; optional `target`, `model`, `effort`, `max_wait_sec` | Send the child's exact message to one companion. |
-| `agent_wait` | `job_id`, `max_wait_sec` | Wait for the job within the same budget. |
-| `agent_status` | optional `job_id`, `verbose`, `diagnostics` | Observe global or per-job records; diagnostics includes cached target checks. |
-| `agent_reply` | `job_id`, `message` | Reply only when that job reports `reply_available: true`. |
+| `agent_wait` | `job_id`, `max_wait_sec` | Wait for a terminal result, user intervention notice, or the budget to elapse. |
+| `agent_status` | optional `job_id`, `verbose`, `diagnostics` | Observe records and per-mode `interventions` availability; diagnostics includes cached target checks. |
+| `agent_reply` | `job_id`, `message`; optional `mode` (`steer`, `queue`, `interrupt`) | Send in the requested mode, or the execution's default when omitted. Message limit: 8000 characters. |
 | `agent_cancel` | `job_id` | Cancel the named job. |
 
 Every send requires an absolute existing repo/worktree `cwd`. The host supplies
@@ -509,14 +517,43 @@ model or effort on a busy conversation returns `thread_busy`; target and cwd con
 have their own mismatch errors. `provider_mismatch` names the bound companion
 and cwd and tells the parent to spawn a new agent-companion for the requested
 companion. `cwd_mismatch` names the bound path and offers that path or a new
-agent-companion for the other repo. Wait, cancel, or use `agent_reply` when that
-job's `reply_available` is true. `agent_wait` defaults to 480 seconds and is
+agent-companion for the other repo. Wait, cancel, or use `agent_reply` in an
+available mode. `agent_status.interventions` contains `default` (the job's preferred
+mode, or null), and `steer`, `queue`, `interrupt` booleans describing availability
+now. After close all three are false. Refusals preserve `state` or `capability`;
+an unsupported mode is never replaced with another one.
+`agent_wait` defaults to 480 seconds and is
 capped at 1200 seconds per call. The subagent reuses the chosen budget; new
 parent messages are visible between waits.
+
+An accepted user message returns the owner's pending wait immediately with
+`status: user_intervened` and `intervention: { from: 'user', mode, text, at }`.
+`at` is the controller's acceptance time in epoch milliseconds. It carries no
+answer (`content`) or terminal metadata. Each notice is reported once, with a
+durable receipt; messages accepted between waits are returned by the next wait
+before any terminal answer. Both roles relay the notice in one line and keep
+waiting. User cancel is a normal terminal result with cause `user_cancel`.
+
+User requests use the owning host's state inbox:
+`inbox/<executionId>/<requestId>.json`, written atomically with mode 0600, holding
+`{ requestId, executionId, mode, text, at }`. Cancel uses mode `cancel` and no text.
+The controller reads live executions' inboxes on its tick, after owner stop and
+lease checks. Only regular files are read, at most 64 KiB of JSON and 8000 text
+characters. It writes `<requestId>.outcome.json` atomically with mode 0600:
+`{ requestId, ok, status, reason?, interventionId? }`, then removes the request.
+The view removes outcomes after reading; execution close removes the whole inbox,
+including requests left behind. Rejected input reports its reason; input for an
+execution not live in that bridge reports `state`. User input never renews the
+owner lease. The saved execution's `interventionModes` snapshots its adapter's
+capabilities for the view.
 
 Terminal envelope statuses are `completed`, `failed` and `cancelled`; durable
 results distinguish `completed`, `failed`, `interrupted`, `stopped` and
 `delivery_unknown`. Metadata includes cause, native references and stop evidence.
+When messages exist, `meta.interventions` adds `{ from, mode, state, first_line }`
+for each, with the first line capped at 80 characters. The subagent reports
+`not_delivered` messages. A job lists each native turn's answer once; a failed
+turn ends the job and leaves remaining input undelivered.
 Failures carry the provider's explanation in `content` (status: `partial_text`),
 after any partial answer and a blank line. The explanation is one line, capped at
 500 characters; error data, headers and response bodies are excluded. Failure
@@ -554,7 +591,8 @@ Per-host state lives under:
 `conversations/`, `executions/`, `leases/` and immutable `results/` hold ownership,
 history references, progress and verified cleanup evidence. `stops/` carries
 advisory owner-stop markers; `completions/` holds per-execution publication
-receipts. The hook queue is `runtime/completions.jsonl`. Legacy history/configuration
+receipts. `inbox/` holds user requests and outcomes; `intervention-notices/` holds
+the caller's durable notice receipts. The hook queue is `runtime/completions.jsonl`. Legacy history/configuration
 is migrated once, preserving native ids and refusing ambiguous mappings.
 
 Logs live under `runtime/`; the structured event log retains the

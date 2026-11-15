@@ -40,8 +40,9 @@ write live runtime state. They are outside `node --test`; see `probes/README.md`
 
 ## Architecture
 
-**One controller owns each execution.** Each answer starts a cold provider runtime
-in its own process group. The controller owns the process tree, native history
+**One controller owns each execution.** Each job starts a cold provider runtime
+in its own process group and loops over native turns while accepted input remains.
+The controller owns the process tree, native history
 reference, lease and terminal result. Pending send/wait/reply/cancel calls hold
 the owner's lease; gaps consume its grace. Stop markers supply explicit owner-stop
 evidence. On SIGINT, SIGTERM or stdin EOF, the bridge hands the recorded tree to
@@ -90,18 +91,32 @@ neither start work nor renew leases nor write execution state.
 
 **Capabilities are provider facts.** Codex uses app-server, OpenCode uses its
 2.x HTTP server, and Copilot/Antigravity use ACP. Claude Code uses its own `-p`
-stream-json protocol; cold follow-up via the saved session; no in-flight steer.
-There are no transport-selection knobs. Only Codex supports in-flight steer. Copilot cold follow-up is refused
+stream-json protocol; cold follow-up via the saved session. Codex and OpenCode
+support steer (their default), queue and interrupt. Claude and Antigravity
+support queue (their default) and interrupt; Copilot supports cancel only.
+Antigravity interventions still need live qualification. There are no transport-selection knobs. Copilot cold follow-up is refused
 until qualified; Antigravity reloads saved sessions. Per-companion model defaults
 and one-shot legacy migration belong to `lib/state.mjs`.
+
+**Interventions share one controller path.** `agent_reply` accepts an optional
+`mode`; omission uses the execution's saved `interventionModes.default`.
+Status reports per-mode `interventions` availability. The user's atomic, private
+`inbox/<executionId>/<requestId>.json` requests are read on the tick after owner
+stop/lease checks, without extending the lease. Outcomes are private atomic
+files; close removes that execution's inbox. An accepted user message wakes
+`agent_wait` with `user_intervened`, never an answer; durable notice receipts
+prevent repeats, including after a wait gap. Both roles relay it and keep waiting.
+User cancel produces a terminal result with cause `user_cancel`.
+Terminal `meta.interventions` exposes each message's sender, mode, state and first
+line, including `not_delivered` messages.
 
 ## Single-source-of-truth modules
 
 | Module | Owns |
 | --- | --- |
 | `bridge-server/server.mjs` | MCP attribution, envelopes, resource routing, completion publication and bridge-loss handoff. |
-| `bridge-server/controller/controller.mjs` | Execution lifecycle, owner requests, leases, stop observations and result decisions. |
-| `bridge-server/controller/records.mjs` | Atomic conversation/execution/lease/result records, generation and writer fencing, immutable results. |
+| `bridge-server/controller/controller.mjs` | Native turn loop, interventions, inbox consumption, caller notices, owner requests, leases, stop observations and result decisions. |
+| `bridge-server/controller/records.mjs` | Atomic conversation/execution/lease/result records, inbox I/O and cleanup, notice receipts, generation and writer fencing, immutable results. |
 | `bridge-server/controller/process-supervisor.mjs` | Owned process groups, descendant census, termination and PID/birth-identity verification. |
 | `bridge-server/adapters/{codex,opencode,acp,claude}.mjs` | Provider protocols, history loading, delivery acknowledgement, native progress, usage and model selection. |
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
@@ -168,8 +183,8 @@ and one-shot legacy migration belong to `lib/state.mjs`.
 - **Claude companion startup and results need their native semantics.** The child
   prints nothing until the first user line; the following `system/init` confirms
   the session id and acknowledges delivery. Init can repeat every turn. A
-  `result` is terminal even if the process stays alive for background work;
-  the controller still closes and verifies the owned tree. `subtype: success`
+  native `result` ends that turn even if the process stays alive; the controller
+  continues accepted input or closes and verifies the owned tree. `subtype: success`
   with `is_error: true` is a failure (measured when not logged in). `--bare`
   skips OAuth/keychain, so the adapter never uses it. `total_cost_usd` is
   cumulative on resume, so cost is reported only for fresh history. The child

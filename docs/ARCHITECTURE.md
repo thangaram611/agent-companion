@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-11-12
+Last updated: 2026-11-15
 
 ## Goal
 
@@ -48,7 +48,8 @@ flowchart TD
   Child --> Parent
 ```
 
-One controller owns each execution. The provider exits after every answer.
+One controller owns each execution. The job loops over native turns on its own
+live session while accepted input remains; the provider exits when the job closes.
 A later message to the same native child starts a new process and resumes its
 saved history. In-flight survival across bridge replacement is deliberately
 given up: bridge loss stops owned work and preserves history and results.
@@ -115,7 +116,7 @@ The parent supplies plain-language requests to the subagent. The six tools are
 `agent_catalog` takes no arguments. It reports enabled companions, the default,
 per-companion model configuration, `effort: { selection, levels, description }`,
 `permission: { mode, source, risk }` (null without a permission descriptor),
-reply/resume/cancel/model/effort-selection capabilities, readiness and the installed version seen at the last check. An
+intervention/resume/cancel/model/effort-selection capabilities, readiness and the installed version seen at the last check. An
 unset model default is labelled as inheriting the companion's configuration.
 The call is ownerless and observational: no hydration, ownership change, lease
 renewal, record write or session creation. If model enumeration needs a
@@ -230,24 +231,79 @@ activity; the server falls back to active command, then partial text, then null.
 An explicit native null is preserved, and terminal activity is null. Digest and
 progress publication are unchanged.
 
-Wait, status, reply and cancel retain their existing control semantics. Replies
-require that specific job's `reply_available: true`, based on its adapter capabilities
-and current live state. Catalog capabilities alone do not establish it: the catalog's
-`reply` mirrors the adapter's steer capability (Codex only), and the per-execution
-`reply_available` remains authoritative.
+`agent_reply` accepts `mode: steer|queue|interrupt`, defaulting to the execution's
+saved `interventionModes.default`. Refusals remain `reply_unavailable` with reason
+`state` or `capability`, never a substitute mode. Status projects `interventions:
+{ default, steer, queue, interrupt }`: the saved default and three booleans for
+modes usable now. All booleans are false after closure or when the bridge does
+not own the live execution. Catalog reports the registry's
+`capabilities.interventions`: supported modes, with queue `false`, `bridge` or
+`native`. Job status reports whether those modes are usable now.
+
+### Turn loop, interventions and user inbox
+
+`intervene({ executionId, from: 'caller'|'user', mode, text })` records the sender,
+mode, text, acceptance time and delivery state before reaching the adapter.
+Record mutations take the conversation lock; native writes are serialized on
+the execution's input chain. Caller input requires its native owner and holds
+the owner lease; user input never renews it. Unsupported modes and unavailable
+states are refused before recording input.
+
+After each native result, the controller settles accepted writes and continues
+while the adapter has pending input or the bridge holds messages. Native queued
+input stays with Claude, which decides whether it joins the current turn or
+starts another. Bridge-held queues start the next turn on the same session.
+Interrupt ends the active turn natively, then sends only the new text, ahead
+of held queues. Failure ends the job; outstanding messages become `not_delivered`.
+The result lists each turn's answer once, labelled with the message(s) it answers,
+and sums per-turn usage. The terminal envelope's optional `meta.interventions`
+contains `{ from, mode, state, first_line }` for each message; the first line is
+capped at 80 characters. Both roles report `not_delivered` messages.
+
+The user writes an atomic mode-0600 request to the owning host's state directory:
+`inbox/<executionId>/<requestId>.json`, containing
+`{ requestId, executionId, mode, text, at }`. Mode is steer, queue, interrupt or
+cancel; cancel omits text. On each live execution's tick, the controller checks
+stop markers and lease expiry before processing its inbox. It reads regular
+files only, without following symlinks, bounded to 64 KiB of JSON and 8000 text
+characters. Request identity, mode and timestamp are checked. Bad input returns
+a reason such as `invalid_file`, `invalid_request`, `request_too_large` or
+`text_too_long`; unavailable modes return `capability`, unavailable executions
+return `state`. The controller applies valid messages as `from: 'user'` and
+cancels with cause `user_cancel`. Acceptance time comes from the controller clock.
+
+The outcome is an atomic mode-0600 `<requestId>.outcome.json` containing
+`{ requestId, ok, status, reason?, interventionId? }`; success is `accepted`
+(cancel: `cancelling`). The controller removes the request after writing the
+outcome. The view deletes read outcomes. Saving a terminal result removes the execution's
+whole inbox, including requests left behind, in normal close, recovery and watcher
+cleanup. Late native acknowledgements do not recreate it. Each execution saves
+its adapter's `interventions` as `interventionModes` at creation.
+
+An accepted user message wakes a pending owner wait with `status: user_intervened`
+and `intervention: { from, mode, text, at }`, without `content` or terminal `meta`.
+Acceptance is recorded before native acknowledgement, so this is a notice of
+input, not delivery or an answer. If no wait is pending, the next wait returns
+the notice first, even if the job has since closed. Under the conversation lock,
+`intervention-notices/<executionId>.json` records reported ids before returning
+them, independently of the runtime's writer fence and immutable result. Concurrent
+waits claim each notice once; status never consumes it. Both role templates relay
+one line to the parent and wait again. Cancel itself generates no such notice;
+its normal terminal result carries `user_cancel`, including a native completion
+that races the cancellation.
 
 ## Companion Matrix
 
 All five companions support send, bounded wait, observational status and cancel.
-Each answer owns a new process, including the HTTP and ACP providers.
+Each job owns a new process, including the HTTP and ACP providers.
 
-| Companion | Per-answer runtime | Follow-up by cold resume | Reply / steer | Model selection | Native history |
+| Companion | Per-job runtime | Follow-up by cold resume | In-flight messages (default first) | Model selection | Native history |
 | --- | --- | --- | --- | --- | --- |
-| Codex CLI | `codex app-server` over stdio | `thread/resume` | `turn/steer`; accepted and confirmed are separate | Explicit override, otherwise inherited; effective model/effort recorded | Saved thread id and vendor rollouts |
-| OpenCode 2.x only | Private `opencode serve` on loopback | Saved session id | Unsupported | `provider/model`, optional variant; resolved model verified | Vendor-persisted session |
+| Codex CLI | `codex app-server` over stdio | `thread/resume` | Steer, queue, interrupt; steer accepted and confirmed are separate | Explicit override, otherwise inherited; effective model/effort recorded | Saved thread id and vendor rollouts |
+| OpenCode 2.x only | Private `opencode serve` on loopback | Saved session id | Steer, queue, interrupt | `provider/model`, optional variant; resolved model verified | Vendor-persisted session |
 | GitHub Copilot CLI | `copilot --acp` | `FOLLOWUP_UNSUPPORTED` until cold load is qualified | Unsupported | Inherited configuration or supported explicit model | Session id retained; cross-process load unqualified |
-| Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Unsupported | Session config option after both new and load | SQLite conversations under `~/.gemini/antigravity-acp/conversations/` |
-| Claude Code | `claude -p` stream-json over stdio | `--resume` saved session id | None; interrupt via stdin control request | Explicit override, otherwise inherited | Native session id and transcripts |
+| Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Queue, interrupt; live qualification pending | Session config option after both new and load | SQLite conversations under `~/.gemini/antigravity-acp/conversations/` |
+| Claude Code | `claude -p` stream-json over stdio | `--resume` saved session id | Queue, interrupt (`send_now`) | Explicit override, otherwise inherited | Native session id and transcripts |
 
 OpenCode validates the 2.x authenticated `/api` contract and runtime pid. Its
 bootstrap password stays only in adapter memory. The OS cwd and `PWD` both match
@@ -281,7 +337,8 @@ user message is not the acknowledgement. Results are filtered by session id;
 not necessarily the process; the controller owns close and termination.
 Interruption sends a stdin `control_request` with subtype `interrupt`; after an
 adapter-requested interrupt, `aborted_streaming` and `aborted_tools` map to
-`interrupted`. There is no steer support.
+`interrupted`. There is no steer support. Queued input is written immediately;
+native UUID lifecycle events identify joined messages and pending turns.
 
 The child denies `Agent(agent-companion)`,
 `mcp__plugin_agent-companion_agent-bridge__*` and `mcp__agent-bridge__*` through
@@ -337,12 +394,13 @@ processes. The provider factories create an adapter with this interface:
 | --- | --- |
 | `start({ cwd, env, model, effort, supervisor, historyId })` | Spawn via `supervisor.spawn(argv, opts)`; return `{ runtime }`. Startup failure becomes `failed: runtime_unavailable`. |
 | `openHistory({ historyId, model, effort })` | Null id creates history; a saved id must load unchanged or throw `HistoryUnavailable`. Apply model/effort rules and return `{ historyId, effectiveModel }`, plus effective effort and `nativeRefs` where reported (Codex supplies `transcriptPath` from both start and resume). |
-| `deliver({ text })` | Send verbatim once; return `{ nativeTurnId, acknowledged?, nativeRefs?, effectiveModel?, effectiveEffort? }` on native acknowledgement; a native turn id implies acknowledgement, otherwise `acknowledged: true` and `nativeTurnId: null` are required, carrying newly reported launch metadata. Ambiguous failure throws `DeliveryUnknown`; never retry delivery. |
-| `observe({ onProgress })` | Resolve one native outcome (`completed`, `failed`, `interrupted`) with text, usage, native refs and cause. Progress carries `lastActivityAt`, `activeCommand`, `retry`, `partialText` and optional `activity` (string or null). Transport loss throws `ProviderLost`. |
-| `interrupt()` | Request native turn interruption; never signal a process. |
+| `deliver({ text, messageId })` | Send verbatim once; return `{ nativeTurnId, acknowledged?, nativeRefs?, effectiveModel?, effectiveEffort? }` on native acknowledgement; a native turn id implies acknowledgement, otherwise `acknowledged: true` and `nativeTurnId: null` are required, carrying newly reported launch metadata. Ambiguous failure throws `DeliveryUnknown`; never retry delivery. |
+| `observe({ next, onProgress, onInput })` | Resolve one native outcome (`completed`, `failed`, `interrupted`) with text, usage, native refs and cause. `next` observes an already queued native turn; `onInput` reports message lifecycle. Progress carries `lastActivityAt`, `activeCommand`, `retry`, `partialText` and optional `activity` (string or null). Transport loss throws `ProviderLost`. |
+| `interrupt({ drain } = {})` | Request native turn interruption; `drain: true` waits for the turn boundary before another prompt. Stop-time interruption acknowledges promptly. Never signal a process. |
 | `close()` | Close protocol channels; process termination belongs to the supervisor. |
-| `capabilities` | `{ followUp, steer, modelSelection, loadsHistory }`; unsupported history load refuses follow-up. |
-| `steer({ text })` | Optional when `steer` is true; Codex reports acceptance separately from observed confirmation. |
+| `capabilities` | `{ followUp, modelSelection, loadsHistory, interventions }`; `interventions` references the target registry's `{ default, steer, queue, interrupt }`, with queue `false`, `bridge` or `native`. Unsupported history load refuses follow-up. |
+| `steer({ text, id })` | Supported by Codex and OpenCode; Codex reports acceptance separately from observed confirmation. |
+| `intervene(input)`, `hasPendingInput()` | Native queue/interrupt delivery and pending-turn observation, used for Claude. Other supported queues are held by the controller. |
 
 The one startup exception is Claude: `start` receives the saved `historyId` so it
 can choose `--session-id` versus `--resume` at spawn. Other adapters ignore that
@@ -378,11 +436,13 @@ alone is never proof of exit.
 | `default-target`, `default-model`, `default-model-<companion>` | Companion/model defaults written by onboarding; reads resolve environment → file → unset. |
 | `target-checks.json` | Last explicit readiness evidence; catalog/status read it without probing. |
 | `conversations/<owner>.json` | Provider, canonical cwd, model/effort overrides, native history, generation and current execution id. |
-| `executions/<id>.json` | Request, native references, transcript locator, start/end worktree snapshots, process identities, progress, lifecycle and writer authority. |
+| `executions/<id>.json` | Request, interventionModes, interventions and turns, native references, transcript locator, start/end worktree snapshots, process identities, progress, lifecycle and writer authority. |
 | `leases/<id>.json` | Attached owner requests and remaining grace. |
 | `results/<id>.json` | Immutable outcome, text/usage, work summary, native refs, selected/effective model and effort, stop cause and cleanup evidence. |
 | `locks/<owner>.lock` | Exclusive record mutation lock; crash leftovers fail closed as `RECORD_BUSY`. |
 | `stops/<owner>.json` | Advisory TaskStop/SubagentStop marker. Its snapshot at dispatch prevents an old stop from cancelling new work. |
+| `inbox/<id>/<requestId>.json`, `<requestId>.outcome.json` | User input and controller receipt; requests are removed after outcomes, read outcomes by the view, the directory at execution close. |
+| `intervention-notices/<id>.json` | Reported user intervention ids, claimed by owner waits under the conversation lock. |
 | `completions/<id>.json` | Publication receipt keyed by execution id. |
 | `runtime/completions.jsonl` | Hook delivery queue; terminal wait consumes the execution's entries. |
 | `runtime/agent-bridge.log`, `daemon.log` | Bridge and structured event logs; the latter is a retained filename, not a running service. |

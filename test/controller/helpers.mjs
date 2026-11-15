@@ -40,6 +40,15 @@ export function deferred() {
   return { promise, resolve, reject };
 }
 
+// Turn-loop assertions still need the final result after the caller has
+// received its user-input notices. Notice shape/count tests call wait directly.
+export async function waitForResult(controller, args) {
+  let response;
+  do { response = await controller.wait(args); }
+  while (response.status === 'user_intervened');
+  return response;
+}
+
 // Yield for actual child/ps I/O, never sleep for a lifecycle deadline. This
 // watchdog bounds external I/O; iteration counts starve children under full
 // suite load. All execution/lease/escalation timers still use ManualClock.
