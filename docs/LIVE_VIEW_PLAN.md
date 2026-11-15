@@ -1,9 +1,8 @@
 # Live view and interventions: plan
 
 Status: agreed 2026-11-15. Step 0 landed as 4e536d0; Step 1 as 2222e9b, 229b310
-and 2c9577b; Step 2 as 37e7b0e through 497a740. Step 3 is measured and
-designed (below); its build is in progress on `feat/interventions`. Step 4 is
-not started.
+and 2c9577b; Step 2 as 37e7b0e through 497a740. Step 3 is built and probed
+on `feat/interventions` (outcome below). Step 4 is not started.
 
 ## Goal
 
@@ -362,6 +361,35 @@ Check: controller tests for every mode × capability, including refusal after th
 job ends or the caller returns, queued messages behind a failed turn, and a
 Claude message that becomes the next turn; template and host-parity tests; the
 probes above; the full suite passes.
+
+Outcome (2026-11-15, branch `feat/interventions`):
+
+- Built in five briefs: the turn loop with Codex and Claude (1678928), OpenCode
+  and Antigravity (2e5ec76), the inbox, early notice, reply modes and the
+  registry as the one source of each companion's modes (61ee448), and the input
+  box (4c7eeff, c025fe3, merged as d4e7ccb). 860 tests pass.
+- Fixed in review: single-turn answers stay unlabelled; labels address the
+  caller (`User's message`, `Caller's message`); a steer between turns no longer
+  dereferences a missing turn; a job's usage sums its turns, with Claude's
+  cumulative `total_cost_usd` turned into each turn's share (measured: usage is
+  per turn, cost is cumulative); OpenCode publishes a stop-time interrupt on its
+  acknowledgement again and drains only for interrupt & send; drafts are cleaned
+  like native text.
+- Live probes through the real bridge from the branch (`/tmp/step3-measure/3d`,
+  isolated bridge state; Claude and Codex on loopback mocks, OpenCode on its
+  free model, Antigravity on the owner's login): Claude 54, Codex 59, OpenCode
+  26 and Antigravity 41 checks passed, none failed. They cover inbox requests
+  written with the view's own helper, outcomes (0600, consumed once), exactly
+  one early notice per user message, labelled multi-turn results, interrupt
+  then answer, user cancel (`user_cancel`), inbox removal at close and no
+  surviving process. Antigravity's queue and interrupt worked on the same ACP
+  session.
+- Not measured: installed hosts' hook attribution with interventions (the
+  probes use the free-backends client's synthetic subagent metadata); how
+  tmux and other multiplexers report shift+⇥.
+- Open: the draft has no cursor movement (←/→, Home/End); the view creates the
+  inbox directory itself, so a job that closes in between can leave an empty
+  directory.
 
 ### Step 4: Claude pane and progress line
 
