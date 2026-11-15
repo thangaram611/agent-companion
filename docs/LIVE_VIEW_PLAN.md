@@ -1,7 +1,8 @@
 # Live view and interventions: plan
 
 Status: agreed 2026-11-15. Step 0 landed as 4e536d0; Step 1 as 2222e9b, 229b310
-and 2c9577b. Steps 2–4 are not started.
+and 2c9577b. Step 2 is built on `feat/live-tui`, awaiting review. Steps 3–4 are
+not started.
 
 ## Goal
 
@@ -209,6 +210,60 @@ Check: a 10,000-line append, scroll, resize and collapse test with no frame over
 an agreed budget (set from a first measurement); headless snapshot tests; a
 manual read-only run against live jobs. If the gate fails, switch to Ratatui
 before Step 3.
+
+Outcome (2026-11-15, `feat/live-tui`, not merged):
+
+- Measured, Codex caller information (read-only, the owner's files): a Codex
+  execution's `owner` is the calling subagent's thread and `hostSessionId`
+  the root session. The subagent's rollout `session_meta` names its task
+  (`agent_path`, `/root/<task_name>` from `spawn_agent`), nickname and
+  `parent_thread_id`. The `spawn_agent` message in the parent's rollout is
+  encrypted (codex-cli 0.168), so no longer description is readable.
+  `$CODEX_HOME/session_index.jsonl` names the threads someone named (2 of 4 lead
+  sessions); `state_5.sqlite` titles are first user messages in a private,
+  versioned store and are not read. Codex jobs are titled by the task name
+  (underscores as spaces). Claude jobs use the Agent call's
+  `toolUseResult.description` matched by `agentId` (40 of 40 recent jobs);
+  lead transcripts reach 140 MB, so each is scanned once and then only its
+  appended bytes. The lead title is the latest `custom-title`, else `ai-title`.
+- Measured, launcher: `~/.local/bin` is on the owner's PATH (`~/.zprofile`).
+  Setup installs a two-line launcher that runs the checkout's
+  `hooks/launch-ui.sh`; off PATH, it prints the export line and edits no shell
+  file. The launch script resolves Node with `hooks/node-tools.sh` and finds
+  ink and react in the checkout's `bridge-server/node_modules` (setup's `npm ci`
+  or Claude's link into plugin data), else in Codex plugin data through the
+  bridge's resolver preload, which now relocates any bare package import from
+  `bridge-server/` sources. It installs nothing; the UI lives in
+  `bridge-server/ui/` for this resolution.
+- Measured, reader cost: a whole-file cursor read takes about 30 ms for 40 MB and
+  171 ms for a 140 MB Claude transcript (real stores). `followTranscript` keeps
+  the parse state and reads only appended bytes; tests compare it with cursor
+  reads at every append.
+- Gate (`bridge-server/ui/perf.test.mjs`): a running Codex job's JSONL grows to
+  10,020 items (17 MB) in 200 batches of 50 and 20 single appends; then 182 key
+  frames through Ink's stdin, 10 resizes across wide and narrow, 24 expand and
+  collapse frames, each timed to the flushed frame on a fake TTY. Apple M-series,
+  Node 26.13.1, five runs: append p95 8.3–9.2 ms, max 17.4–21.4; keys p95
+  7.8–9.1, max 16.9–21; resize max 57–63; expand all max 37–51; opening the
+  10,026-item job cold 55–78 ms. Budget, about three times that: append and keys
+  p95 25, max 60; resize 200; expand p95 120, max 200. Re-reading the whole file
+  per append measured append p95 27.1 ms and fails. Ink passes; Ratatui is not
+  needed.
+- Headless snapshots at 150 and 80 columns for a running, a finished and a
+  failed job, and the narrow list; a manual read-only run on the owner's live
+  state in a pty (alternate screen, keys, exit).
+- Decided while building: tokens come only from the result's usage (running
+  transcripts report usage per message or cumulative per thread, which does not
+  sum to a turn); the header says "done in 24h" to match the list window; the
+  item cursor shows only when the transcript has focus; an answer or provider
+  error repeated in the transcript reads "shown above"; an active record with
+  no result and no live process is `unknown`; native text loses terminal
+  escapes, bidi overrides and control characters, and no frame row contains a
+  newline (a heredoc command wraps as continuation rows).
+- Open: opening a job replays its transcript once, so selecting through very
+  large transcripts can stall for that read (171 ms at 140 MB). OpenCode and
+  Antigravity polling is covered by the reader fixtures, not by the gate.
+  Codex desktop as a host is unchecked.
 
 ### Step 3: Interventions
 

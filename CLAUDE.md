@@ -107,12 +107,16 @@ and one-shot legacy migration belong to `lib/state.mjs`.
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
 | `lib/state.mjs` | Default target/model configuration and one-shot migration of legacy settings/history. |
 | `lib/host.mjs` | Host conventions and sandbox guard; `AGENT_COMPANION_HOST` is authoritative, `.host` is diagnostic. |
-| `lib/transcripts.mjs` and `lib/transcripts/` | Read-only native transcript location, format fingerprints and normalized in-memory items. |
+| `lib/transcripts.mjs` and `lib/transcripts/` | Read-only native transcript location, format fingerprints, normalized in-memory items and live follow (`followTranscript`). |
 | `lib/work-summary.mjs` | Native turn selection and bounded commands, edits, errors and worktree summary projection. |
 | `lib/worktree-snapshot.mjs` | Bounded snapshots through a throwaway index and the diff-stat including any writer. |
 | `lib/digest.mjs` | Read-only, on-demand execution digest from native transcript and result records. |
 | `lib/target-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
+| `bridge-server/ui/jobs.mjs` | The live view's job list from both hosts' state and caller titles from host transcripts (Claude lead session, Codex rollout and session index). |
+| `bridge-server/ui/rows.mjs` | Sanitizing native text, cell widths, item folding and wrapping, and the cached row index. |
+| `bridge-server/ui/model.mjs` | Live-view state, keys, transcript follow and frame composition; `app.mjs` is only the Ink layer and the `ui` entry point. |
+| `hooks/launch-ui.sh`, `scripts/install-ui-launcher.mjs` | Running the live view with the hooks' Node and its dependencies; the `~/.local/bin/agent-companion` launcher. |
 
 ## Things that will bite you
 
@@ -138,6 +142,11 @@ and one-shot legacy migration belong to `lib/state.mjs`.
   reference to `plugin:agent-companion:agent-bridge` and tools to
   `mcp__plugin_agent-companion_agent-bridge__*`; the identity hook matches these
   as well as bare session tool names.
+- **The live view lives in `bridge-server/ui/` for its imports.** ESM finds `ink`
+  and `react` by walking up to `bridge-server/node_modules` (Claude's link); on
+  Codex, `hooks/resolve-codex-deps.mjs` relocates bare package imports only from
+  `bridge-server/` sources. A UI module elsewhere fails on both. Keep `lib/` free of
+  package imports. Native text reaching the terminal goes through `rows.mjs`'s `clean`.
 - **Sandbox tests before imports.** Put `import '../test/sandbox-home.mjs';` first
   in suites that reach state/runtime code. `lib/state.mjs` binds `BASE_DIR` at
   import time, so setting env in the test body is too late for static imports.

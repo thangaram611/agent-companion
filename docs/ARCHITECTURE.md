@@ -412,6 +412,14 @@ or unrecognized transcripts are explicit. URI fields, the resource template and
 result resource links remain unchanged. Both host roles relay the non-empty
 `meta.work_summary` after the answer and keep `meta.digest_uri` as the full view.
 
+`agent-companion ui` (`bridge-server/ui/`) is another read-only observer. It
+lists execution and result records from both hosts' state homes, follows the
+selected job's native transcript with `followTranscript` (JSONL by appended
+bytes, SQLite by polling the row cursor) and reads caller titles from the
+hosts' own transcripts. It writes nothing, renews no lease and signals nothing;
+an active record without a result whose recorded process is gone is shown as
+`unknown`, not running.
+
 The controller starts a bounded, asynchronous worktree snapshot alongside runtime
 startup and awaits it before delivery. Each snapshot copies the worktree index to
 a temporary file, stages there and writes a tree; it never changes the real index,

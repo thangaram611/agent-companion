@@ -578,6 +578,42 @@ transcript gaps, and the worktree diff-stat labelled as including any writer
 between turn start and end. Omitted counts stay explicit. The `meta.digest_uri`
 and result resource link remain the pointer to the full transcript view.
 
+## Live View
+
+`agent-companion ui` opens a read-only terminal view of companion jobs from
+both hosts' state directories: running jobs first, then the last 24 hours.
+`setup.sh` installs the `agent-companion` launcher in `~/.local/bin`; it runs
+this checkout's `hooks/launch-ui.sh` with the Node 26 the hooks resolve. When
+`~/.local/bin` is not on `PATH`, setup prints the line to add; until then run
+`~/.local/bin/agent-companion ui`, or `bash hooks/launch-ui.sh ui` from the
+checkout. Its dependencies (Ink, React) install with the bridge's.
+
+Each job card shows the caller's own title for the job (on Claude, the
+description the lead gave its agent-companion subagent; on Codex, the
+subagent's task name), otherwise the task's first line, then the companion and
+project. The selected job's header adds only the host and lead session, model
+and effort, tokens (finished jobs) and branch. Below it is that job's turn from
+the companion's own native transcript, followed as it grows, with the
+in-flight activity from the execution record as the last line. A finished job
+opens on its outcome: result, git change list, errors and answer. Command and
+tool output is folded to its first and last lines; the preamble is hidden.
+Under 110 columns one pane shows at a time.
+
+The view writes nothing, renews no lease and starts no work.
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓`, `j` `k` | Select a job; in the transcript, move between items |
+| `Enter`, `Tab`, `Esc` | Open or focus the job's transcript; back to the list |
+| `PgUp` `PgDn`, `Space` | Scroll the transcript a page |
+| `g`, `G` | Transcript top; bottom, following new items |
+| `e`, `E` | Expand the current item; all items |
+| `p` | Show the preamble (system and instruction text) |
+| `f` | Follow new items on or off |
+| `/` | Filter jobs (`Enter` keeps, `Esc` clears) |
+| `o` | Show jobs older than 24 hours |
+| `?`, `q` | Keys; quit |
+
 ## Diagnostics
 
 ```bash
@@ -627,6 +663,14 @@ These are the shell-syntax, JavaScript-syntax and test steps
 the repo root rather than an allow-list of directories, because an allow-list
 omitting `test/` skips cross-cutting checks such as the sync-exec timeout guard
 and the runtime sandbox guard.
+
+The live view's performance gate, `bridge-server/ui/perf.test.mjs`, runs with
+the suite: 10,000 appended transcript items, scrolling, resizing and
+expand/collapse under a per-frame budget recorded in
+[docs/LIVE_VIEW_PLAN.md](docs/LIVE_VIEW_PLAN.md#step-2-read-only-terminal-ui).
+Its headless snapshots are `bridge-server/ui/ui.test.mjs.snapshot`; after an
+intended change, regenerate them with `node --test --test-update-snapshots
+bridge-server/ui/ui.test.mjs` and review the diff.
 
 README images are generated bitmaps. Their specifications live in
 [assets/readme/PROMPTS.md](assets/readme/PROMPTS.md); regenerate from those
