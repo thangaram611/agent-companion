@@ -1,0 +1,383 @@
+{
+  "source": "m1 2026-11-15T12-54-29.725Z-spchWw; protocol fields projected; session, message and request UUIDs replaced",
+  "tool": [
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "queued",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "started",
+      "session_id": "session"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "session",
+      "model": "claude-haiku-5-5",
+      "user_message_uuids": [
+        "task"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "queued",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "started",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "completed",
+      "session_id": "session"
+    },
+    {
+      "session_id": "session",
+      "terminal_reason": "completed",
+      "is_error": false,
+      "subtype": "success",
+      "result": "mock2.0 mock2.1 mock2.2 mock2.3 mock2.4 mock2.5 mock2.6 mock2.7 mock2.8 mock2.9 ",
+      "type": "result",
+      "user_message_uuids": [
+        "task",
+        "message"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "completed",
+      "session_id": "session"
+    }
+  ],
+  "stream": [
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "queued",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "started",
+      "session_id": "session"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "session",
+      "model": "claude-haiku-5-5",
+      "user_message_uuids": [
+        "task"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "queued",
+      "session_id": "session"
+    },
+    {
+      "session_id": "session",
+      "terminal_reason": "completed",
+      "is_error": false,
+      "subtype": "success",
+      "result": "mock2.0 mock2.1 mock2.2 mock2.3 mock2.4 mock2.5 mock2.6 mock2.7 mock2.8 mock2.9 ",
+      "type": "result",
+      "user_message_uuids": [
+        "task"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "completed",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "started",
+      "session_id": "session"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "session",
+      "model": "claude-haiku-5-5",
+      "user_message_uuids": [
+        "message"
+      ]
+    },
+    {
+      "session_id": "session",
+      "terminal_reason": "completed",
+      "is_error": false,
+      "subtype": "success",
+      "result": "mock3.0 mock3.1 mock3.2 mock3.3 mock3.4 mock3.5 mock3.6 mock3.7 mock3.8 mock3.9 ",
+      "type": "result",
+      "user_message_uuids": [
+        "message"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "completed",
+      "session_id": "session"
+    }
+  ],
+  "now": [
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "queued",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "started",
+      "session_id": "session"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "session",
+      "model": "claude-haiku-5-5",
+      "user_message_uuids": [
+        "task"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "queued",
+      "session_id": "session"
+    },
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "control",
+        "response": {
+          "still_queued": [
+            "message"
+          ],
+          "send_now": "stopped"
+        }
+      }
+    },
+    {
+      "session_id": "session",
+      "terminal_reason": "aborted_streaming",
+      "is_error": true,
+      "subtype": "error_during_execution",
+      "type": "result",
+      "user_message_uuids": [
+        "task"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "cancelled",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "started",
+      "session_id": "session"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "session",
+      "model": "claude-haiku-5-5",
+      "user_message_uuids": [
+        "message"
+      ]
+    },
+    {
+      "session_id": "session",
+      "terminal_reason": "completed",
+      "is_error": false,
+      "subtype": "success",
+      "result": "mock3.0 mock3.1 mock3.2 mock3.3 mock3.4 mock3.5 mock3.6 mock3.7 mock3.8 mock3.9 ",
+      "type": "result",
+      "user_message_uuids": [
+        "message"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "completed",
+      "session_id": "session"
+    }
+  ],
+  "now-tool": [
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "queued",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "started",
+      "session_id": "session"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "session",
+      "model": "claude-haiku-5-5",
+      "user_message_uuids": [
+        "task"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "queued",
+      "session_id": "session"
+    },
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "control",
+        "response": {
+          "still_queued": [
+            "message"
+          ],
+          "send_now": "stopped"
+        }
+      }
+    },
+    {
+      "session_id": "session",
+      "terminal_reason": "aborted_tools",
+      "is_error": true,
+      "subtype": "error_during_execution",
+      "type": "result",
+      "user_message_uuids": [
+        "task"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "cancelled",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "started",
+      "session_id": "session"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "session",
+      "model": "claude-haiku-5-5",
+      "user_message_uuids": [
+        "message"
+      ]
+    },
+    {
+      "session_id": "session",
+      "terminal_reason": "completed",
+      "is_error": false,
+      "subtype": "success",
+      "result": "mock2.0 mock2.1 mock2.2 mock2.3 mock2.4 mock2.5 mock2.6 mock2.7 mock2.8 mock2.9 ",
+      "type": "result",
+      "user_message_uuids": [
+        "message"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "completed",
+      "session_id": "session"
+    }
+  ],
+  "cancel": [
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "queued",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "started",
+      "session_id": "session"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "session",
+      "model": "claude-haiku-5-5",
+      "user_message_uuids": [
+        "task"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "queued",
+      "session_id": "session"
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "message",
+      "state": "cancelled",
+      "session_id": "session"
+    },
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "control",
+        "response": {
+          "cancelled": true,
+          "still_queued": []
+        }
+      }
+    },
+    {
+      "session_id": "session",
+      "terminal_reason": "completed",
+      "is_error": false,
+      "subtype": "success",
+      "result": "mock2.0 mock2.1 mock2.2 mock2.3 mock2.4 mock2.5 mock2.6 mock2.7 mock2.8 mock2.9 ",
+      "type": "result",
+      "user_message_uuids": [
+        "task"
+      ]
+    },
+    {
+      "type": "command_lifecycle",
+      "command_uuid": "task",
+      "state": "completed",
+      "session_id": "session"
+    }
+  ]
+}

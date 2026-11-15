@@ -82,6 +82,18 @@ test('watcher records failed cleanup honestly without claiming stopped', async (
   assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'cleanup_unverified'); assert.equal(result.cause, 'bridge_loss');
 });
 
+test('watcher preserves turn attribution and intervention delivery states after bridge loss', async () => {
+  const records = makeRecords(), execution = records.begin(input('intervened'), 0);
+  execution.nativeTurnIds = ['one'];
+  execution.interventions = [{ id: 'queued', from: 'user', mode: 'queue', text: 'later', at: 2, state: 'accepted' }];
+  execution.turns = [{ nativeTurnId: 'one', messages: ['intervened'], outcome: 'completed', text: 'first answer' }];
+  records.handoff(execution);
+  const result = await cleanupExecution({ records, execution, createSupervisor: () => ({ terminate: async () => ({ gone: true }) }) });
+  assert.equal(result.text, 'first answer');
+  assert.equal(result.interventions[0].state, 'not_delivered');
+  assert.deepEqual(result.nativeTurnIds, ['one']); assert.deepEqual(result.turns, execution.turns);
+});
+
 test('production watcher CLI writes a durable result and exits without provider protocol', async () => {
   const records = makeRecords(); const execution = records.begin(input('empty-tree'), 0); records.handoff(execution);
   const watcher = await spawnCleanupWatcher({ stateDir: records.dir, executionId: execution.executionId });

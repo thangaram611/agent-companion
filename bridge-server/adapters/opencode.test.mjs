@@ -101,7 +101,8 @@ test('provider readiness is cached and never spawns; model gate and capabilities
   assert.equal(h.provider.ready, true);
   assert.equal(h.provider.modelAllowed('fixture/model#fast'), true);
   assert.equal(h.provider.modelAllowed('malformed'), false);
-  assert.deepEqual(h.provider.create().capabilities, { followUp: true, steer: false, modelSelection: true, loadsHistory: true });
+  assert.deepEqual(h.provider.create().capabilities, { followUp: true, steer: false, modelSelection: true, loadsHistory: true,
+    interventions: { default: null, steer: false, queue: false, interrupt: false } });
   assert.deepEqual(h.requests(), []);
   writeTargetChecks({ opencode: { ready: false } });
   assert.equal(opencodeProvider({ env: h.env }).ready, false);

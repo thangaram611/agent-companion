@@ -119,7 +119,8 @@ export class AcpAdapter {
     this.env = env;
     this.log = log;
     const loadsHistory = descriptor.acp.loadSession === true;
-    this.capabilities = { followUp: loadsHistory, steer: false, modelSelection: descriptor.capabilities.modelSelection === true, loadsHistory };
+    this.capabilities = { followUp: loadsHistory, steer: false, modelSelection: descriptor.capabilities.modelSelection === true, loadsHistory,
+      interventions: Object.freeze({ default: null, steer: false, queue: false, interrupt: false }) };
   }
   async start({ cwd, env = this.env, model, effort, supervisor }) {
     this.cwd = cwd;

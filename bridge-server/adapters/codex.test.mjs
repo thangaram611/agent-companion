@@ -338,7 +338,8 @@ test('provider entry uses cached readiness, validates models and creates indepen
   assert.equal(provider.ready, true);
   assert.equal(provider.modelAllowed('chosen-model'), true); assert.equal(provider.modelAllowed('two models'), false);
   assert.notEqual(provider.create(), provider.create());
-  assert.deepEqual(provider.create().capabilities, { followUp: true, steer: true, modelSelection: true, loadsHistory: true });
+  assert.deepEqual(provider.create().capabilities, { followUp: true, steer: true, modelSelection: true, loadsHistory: true,
+    interventions: { default: 'steer', steer: true, queue: 'bridge', interrupt: true } });
 });
 
 
@@ -519,4 +520,41 @@ test('thread start and resume expose the native rollout path', async () => {
     const history = await adapter.openHistory({ historyId });
     assert.equal(history.nativeRefs.transcriptPath, '/tmp/native-rollout.jsonl');
   }
+});
+
+for (const mode of ['queue', 'interrupt']) test(`${mode} continues with a distinct turn on the same live thread`, async t => {
+  const h = setup(t, { fault: mode === 'interrupt' ? 'interrupt' : '' });
+  const { executionId } = await h.send();
+  await h.emit(note('item/agentMessage/delta', { threadId: 'T1', turnId: 'TURN1', itemId: 'answer', delta: 'old partial' }));
+  await h.controller.intervene({ executionId, from: 'user', mode, text: 'ONLY-NEW-C' });
+  if (mode === 'queue') {
+    assert.equal(h.trace().filter(f => f.method === 'turn/start').length, 1);
+    await h.emit(terminal('completed', 'first answer'));
+  }
+  await until(() => h.trace().filter(f => f.method === 'turn/start').length === 2);
+  await h.emit(terminal('completed', 'new answer', 'TURN2'));
+  const result = await h.wait(executionId);
+  assert.deepEqual(result.nativeTurnIds, ['TURN1', 'TURN2']);
+  assert.equal(result.turns[0].outcome, mode === 'interrupt' ? 'interrupted' : 'completed');
+  assert.equal(result.turns[1].text, 'new answer');
+  assert.equal(result.interventions[0].state, 'answered');
+  assert.doesNotMatch(result.text, /old partial|\n\npartial/);
+  const starts = h.trace().filter(f => f.method === 'turn/start');
+  assert.equal(starts[0].params.threadId, starts[1].params.threadId);
+  assert.deepEqual(starts[1].params.input, [{ type: 'text', text: 'ONLY-NEW-C' }]);
+  assert.equal(h.supervisors.length, 1);
+});
+
+test('controller steer belongs to the active native turn and cannot create a second answer', async t => {
+  const h = setup(t), { executionId } = await h.send();
+  const reply = h.controller.steer({ owner: 'child', executionId, text: 'STEER-B' });
+  await until(() => h.trace().some(f => f.method === 'turn/steer'));
+  // Completion may arrive before the steer confirmation promise is settled.
+  await h.emit(note('item/completed', { threadId: 'T1', turnId: 'TURN1',
+    item: threadItem('userMessage', { id: 'input-b', content: [{ type: 'text', text: 'STEER-B' }] }) }), terminal());
+  assert.equal((await reply).ok, true);
+  const result = await h.wait(executionId);
+  assert.equal(result.turns.length, 1);
+  assert.deepEqual(result.turns[0].messages, [executionId, result.interventions[0].id]);
+  assert.equal(result.interventions[0].state, 'answered');
 });

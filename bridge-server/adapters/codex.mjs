@@ -49,7 +49,8 @@ export function checkCodexContract(installation, env) {
 }
 
 const PROTOCOL_MS = 10_000;
-const capabilities = Object.freeze({ followUp: true, steer: true, modelSelection: true, loadsHistory: true });
+const capabilities = Object.freeze({ followUp: true, steer: true, modelSelection: true, loadsHistory: true,
+  interventions: Object.freeze({ default: 'steer', steer: true, queue: 'bridge', interrupt: true }) });
 const failure = (code, cause) => Object.assign(new Error(code, { cause }), { code, name: code });
 const deferred = () => {
   let resolve, reject;
@@ -159,7 +160,13 @@ export class CodexAdapter {
   }
 
   async deliver({ text }) {
-    if (this.deliveryStarted) throw failure('DeliveryUnknown', new Error('delivery already attempted'));
+    if (this.deliveryStarted && !this.terminal) throw failure('DeliveryUnknown', new Error('turn still active or delivery unknown'));
+    if (this.terminal) {
+      this.terminal = null; this.nativeTurnId = null; this.activeTurnId = null;
+      this.messages.clear(); this.commandId = null; this.usage = undefined; this.usageBaseline = undefined;
+      this.progress = { lastActivityAt: null, activeCommand: null, retry: null, partialText: '' };
+      this.done = deferred(); this.done.promise.catch(() => {});
+    }
     this.deliveryStarted = true;
     try {
       const params = { threadId: this.threadId, cwd: this.cwd, input: [{ type: 'text', text }],
@@ -343,7 +350,7 @@ export class CodexAdapter {
     if (outcome) { this.progress.activeCommand = null; this.progress.retry = null; }
     this.onProgress?.({ ...this.progress, effectiveModel: this.effectiveModel, effectiveEffort: this.effectiveEffort });
     if (outcome) {
-      this.terminal = { outcome, text: this.progress.partialText, usage: this.usage,
+      this.terminal = { outcome, nativeTurnId: this.nativeTurnId, text: this.progress.partialText, usage: this.usage,
         nativeRefs: { threadId: this.threadId, turnId: this.nativeTurnId },
         effectiveModel: this.effectiveModel, effectiveEffort: this.effectiveEffort, error };
       this.activeTurnId = null;

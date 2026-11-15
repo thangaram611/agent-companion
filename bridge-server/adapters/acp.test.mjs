@@ -256,7 +256,8 @@ test('provider factories use cached readiness without spawning and expose qualif
     const provider = acpProvider(id, { env: { PATH: '', COPILOT_BIN: '/missing', ANTIGRAVITY_ACP_BIN: '/missing' } });
     assert.equal(provider.enabled, true); assert.equal(provider.ready, loadsHistory);
     assert.equal(provider.modelAllowed('test-model'), isModelAllowedFor(id, 'test-model'));
-    assert.deepEqual(provider.create().capabilities, { followUp: loadsHistory, steer: false, modelSelection: true, loadsHistory });
+    assert.deepEqual(provider.create().capabilities, { followUp: loadsHistory, steer: false, modelSelection: true, loadsHistory,
+      interventions: { default: null, steer: false, queue: false, interrupt: false } });
   }
   assert.throws(() => acpProvider('codex'), /ACP/);
 });

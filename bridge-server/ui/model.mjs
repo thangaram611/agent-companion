@@ -93,7 +93,9 @@ export class Model {
       this.poll(true);
       return true;
     }
-    const turnMoved = d.job.execution.nativeTurnId !== job.execution.nativeTurnId;
+    const turnMoved = d.job.execution.nativeTurnId !== job.execution.nativeTurnId
+      || d.job.execution.nativeTurnIds?.length !== job.execution.nativeTurnIds?.length
+      || d.job.execution.interventions?.length !== job.execution.interventions?.length;
     const statusMoved = d.job !== job;
     d.job = job;
     const read = this.poll(false);
@@ -126,7 +128,8 @@ export class Model {
   select() {
     const d = this.detail, { execution } = d.job;
     const all = [...d.items.values()];
-    const turn = selectTurnItems(all, { companion: d.job.provider, nativeTurnId: execution.nativeTurnId, startedAt: execution.startedAt });
+    const turn = selectTurnItems(all, { companion: d.job.provider, nativeTurnId: execution.nativeTurnId,
+      nativeTurnIds: execution.nativeTurnIds, interventions: execution.interventions, startedAt: execution.startedAt });
     const inTurn = new Set(turn);
     // Session-wide instructions carry no turn id; another turn's preamble is not this job's.
     d.preamble = all.filter(item => item.kind === 'preamble' && (item.turnId == null || inTurn.has(item)));

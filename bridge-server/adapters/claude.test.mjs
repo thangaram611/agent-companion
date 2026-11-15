@@ -124,7 +124,8 @@ test('a terminal before observe is retained; close is idempotent and steer is ab
   const snapshots = [], terminal = await adapter.observe({ onProgress: (progress) => snapshots.push(progress) });
   assert.equal(terminal.text, 'alpha'); assert.equal(snapshots.at(-1).partialText, 'alpha');
   assert.equal(adapter.steer, undefined);
-  assert.deepEqual(adapter.capabilities, { followUp: true, steer: false, modelSelection: true, loadsHistory: true });
+  assert.deepEqual(adapter.capabilities, { followUp: true, steer: false, modelSelection: true, loadsHistory: true,
+    interventions: { default: 'queue', steer: false, queue: 'native', interrupt: true } });
   const closing = adapter.close(); assert.equal(adapter.close(), closing); await closing;
   await adapter.close(); await adapter.interrupt();
 });
@@ -285,4 +286,110 @@ test('thinking counters and deltas set activity without retaining thinking conte
   send({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'private thought' } } });
   assert.equal(adapter.progress.activity, 'thinking');
   assert.doesNotMatch(JSON.stringify(adapter.progress), /private thought/);
+});
+
+const measured = JSON.parse(readFileSync(new URL('../../test/fixtures/interventions/claude.json', import.meta.url), 'utf8'));
+function measuredAdapter() {
+  const adapter = new ClaudeAdapter({ env: {} }), writes = [], states = [];
+  adapter.historyId = 'session'; adapter.nativeTurnId = 'task'; adapter.runtime = {};
+  adapter._write = async frame => {
+    writes.push(frame);
+    if (frame.type === 'control_request') adapter._message({ type: 'control_response',
+      response: { subtype: 'success', request_id: frame.request_id, response: { still_queued: ['message'], send_now: 'stopped' } } });
+  };
+  adapter.observe({ onInput: value => states.push(value) });
+  return { adapter, writes, states };
+}
+
+test('m1 tool-time queue joins the answer; lifecycle completion before result is retained', async () => {
+  const { adapter, writes, states } = measuredAdapter();
+  await adapter.intervene({ id: 'message', mode: 'queue', text: 'B verbatim\nnext line' });
+  for (const frame of measured.tool) adapter._message(frame);
+  const result = await adapter.observe();
+  assert.equal(result.outcome, 'completed'); assert.deepEqual(result.messages, ['task', 'message']);
+  assert.equal(await adapter.hasPendingInput(), false);
+  assert.deepEqual(writes, [{ type: 'user', uuid: 'message', session_id: 'session',
+    message: { role: 'user', content: 'B verbatim\nnext line' }, parent_tool_use_id: null }]);
+  assert.ok(states.some(s => s.id === 'message' && s.state === 'joined'));
+});
+
+for (const buffered of [false, true]) test(`m1 final-text queue becomes the next turn, buffered=${buffered}`, async () => {
+  const { adapter } = measuredAdapter();
+  await adapter.intervene({ id: 'message', mode: 'queue', text: 'B' });
+  const boundary = measured.stream.findIndex(frame => frame.type === 'result');
+  for (const frame of measured.stream.slice(0, boundary + 1)) adapter._message(frame);
+  assert.equal(await adapter.hasPendingInput(), true);
+  if (buffered) for (const frame of measured.stream.slice(boundary + 1)) adapter._message(frame);
+  const first = await adapter.observe(); assert.deepEqual(first.messages, ['task']);
+  assert.equal(await adapter.hasPendingInput(), true);
+  const second = adapter.observe({ next: true });
+  if (!buffered) {
+    const tail = measured.stream.slice(boundary + 1);
+    for (const frame of tail.slice(0, -1)) adapter._message(frame);
+    let settled = false;
+    const drained = adapter.hasPendingInput().then(value => { settled = true; return value; });
+    await Promise.resolve(); assert.equal(settled, false, 'result alone does not complete the UUID lifecycle');
+    adapter._message(tail.at(-1)); assert.equal(await drained, false);
+  }
+  assert.deepEqual((await second).messages, ['message']);
+  assert.equal((await second).nativeTurnId, 'message');
+  assert.equal(await adapter.hasPendingInput(), false);
+});
+
+for (const scenario of ['now', 'now-tool']) test(`m1 ${scenario}: message precedes send_now and gets its own answer`, async () => {
+  const { adapter, writes } = measuredAdapter();
+  await adapter.intervene({ id: 'message', mode: 'interrupt', text: 'ONLY-NEW' });
+  assert.equal(writes[0].type, 'user'); assert.equal(writes[0].message.content, 'ONLY-NEW');
+  assert.deepEqual(writes[1].request, { subtype: 'interrupt', send_now: true, message_uuid: 'message' });
+  for (const frame of measured[scenario]) adapter._message(frame);
+  const first = await adapter.observe();
+  assert.equal(first.outcome, 'interrupted'); assert.deepEqual(first.messages, ['task']);
+  assert.equal(await adapter.hasPendingInput(), true);
+  const second = await adapter.observe({ next: true });
+  assert.equal(second.outcome, 'completed'); assert.deepEqual(second.messages, ['message']);
+  assert.equal(await adapter.hasPendingInput(), false);
+});
+
+test('m1 cancellation drains pending input and reports not_delivered', async () => {
+  const { adapter, states } = measuredAdapter();
+  await adapter.intervene({ id: 'message', mode: 'queue', text: 'B' });
+  for (const frame of measured.cancel) adapter._message(frame);
+  assert.equal((await adapter.observe()).outcome, 'completed');
+  assert.equal(await adapter.hasPendingInput(), false);
+  assert.ok(states.some(s => s.id === 'message' && s.state === 'not_delivered'));
+});
+
+for (const scenario of ['tool', 'stream', 'now', 'now-tool']) test(`controller with m1 ${scenario} frames publishes one attributed result`, async t => {
+  const { adapter } = measuredAdapter();
+  const dir = mkdtempSync(join(SANDBOX_HOME, 'claude-turns-')), records = new Records({ dir });
+  adapter.start = async () => {};
+  adapter.openHistory = async () => ({ historyId: 'session' });
+  adapter.deliver = async ({ messageId }) => { adapter.nativeTurnId = messageId; return { nativeTurnId: messageId }; };
+  adapter.close = async () => {};
+  const controller = new Controller({ records, env: {}, snapshot: async () => ({ available: false, reason: 'test' }),
+    providers: { claude: { enabled: true, ready: true, create: () => adapter } },
+    createSupervisor: () => ({ terminate: async () => ({ gone: true }) }) });
+  t.after(() => { for (const a of controller.live.values()) clearTimeout(a.timer); });
+  const { executionId } = await controller.send({ owner: 'child', provider: 'claude', cwd: dir, text: 'task' });
+  await controller.intervene({ executionId, from: 'user', mode: scenario.startsWith('now') ? 'interrupt' : 'queue', text: 'B' });
+  const [input] = records.readExecution(executionId).interventions;
+  const id = uuid => uuid === 'task' ? executionId : uuid === 'message' ? input.id : uuid;
+  // Both results can be in the same stdout chunk, before the loop resumes.
+  // Measured on 2.1.325: usage is per turn, total_cost_usd is cumulative.
+  const usage = [{ total_cost_usd: 0.00004, usage: { input_tokens: 200, output_tokens: 40 } }, { total_cost_usd: 0.00006, usage: { input_tokens: 100, output_tokens: 20 } }];
+  let results = 0;
+  for (const frame of measured[scenario]) adapter._message({ ...frame, ...(frame.type === 'result' ? usage[results++] : {}),
+    ...(frame.command_uuid ? { command_uuid: id(frame.command_uuid) } : {}),
+    ...(frame.user_message_uuids ? { user_message_uuids: frame.user_message_uuids.map(id) } : {}) });
+  const result = await controller.wait({ owner: 'child', executionId });
+  assert.equal(result.outcome, 'completed'); assert.equal(result.turns.length, scenario === 'tool' ? 1 : 2);
+  assert.deepEqual(result.nativeTurnIds, scenario === 'tool' ? [executionId] : [executionId, input.id]);
+  assert.equal(result.interventions[0].state, 'answered');
+  if (result.turns.length > 1) {
+    assert.match(result.text, /^Task\n/); assert.match(result.text, /User's message/);
+    assert.ok(Math.abs(result.turns[1].usage.cost - 0.00002) < 1e-12, 'second turn reports only its own cost');
+    assert.ok(Math.abs(result.usage.cost - 0.00006) < 1e-12); assert.equal(result.usage.input_tokens, 300);
+  } else assert.doesNotMatch(result.text, /Task/);
+  assert.deepEqual(result.turns.at(-1).messages, scenario === 'tool' ? [executionId, input.id] : [input.id]);
+  if (scenario.startsWith('now')) assert.equal(result.turns[0].text, 'interrupted before answering');
 });

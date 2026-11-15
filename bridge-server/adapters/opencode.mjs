@@ -6,7 +6,8 @@ import { companionReady } from '../../lib/target-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 import { usageFromOpenCodeInfo, sumUsage } from '../../lib/usage.mjs';
 
-const capabilities = Object.freeze({ followUp: true, steer: false, modelSelection: true, loadsHistory: true });
+const capabilities = Object.freeze({ followUp: true, steer: false, modelSelection: true, loadsHistory: true,
+  interventions: Object.freeze({ default: null, steer: false, queue: false, interrupt: false }) });
 const failure = (code, cause) => Object.assign(new Error(code, { cause }), { name: code, code });
 const outcomes = { succeeded: 'completed', interrupted: 'interrupted', failed: 'failed' };
 

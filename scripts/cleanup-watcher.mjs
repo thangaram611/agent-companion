@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { Records } from '../bridge-server/controller/records.mjs';
+import { Records, resultText, resultUsage, discardInterventions } from '../bridge-server/controller/records.mjs';
 import { ProcessSupervisor } from '../bridge-server/controller/process-supervisor.mjs';
 import { systemClock } from '../bridge-server/controller/clock.mjs';
 
@@ -17,12 +17,14 @@ export async function cleanupExecution({ execution, records = new Records(), clo
   const supervisor = createSupervisor({ record: execution.processes, clock });
   const stopEvidence = await supervisor.terminate();
   const native = execution.terminal;
+  discardInterventions(execution);
   const result = {
     owner: execution.owner, executionId: execution.executionId, generation: execution.generation,
     outcome: native?.outcome || (stopEvidence.gone ? 'stopped' : 'failed'), cause: 'bridge_loss',
     detail: stopEvidence.gone ? native?.detail : 'cleanup_unverified',
-    text: native?.text ?? execution.progress?.partialText ?? '', usage: native?.usage,
-    nativeRefs: { historyId: execution.historyId, nativeTurnId: execution.nativeTurnId, ...native?.nativeRefs },
+    text: resultText(execution), usage: resultUsage(execution, native?.usage),
+    turns: execution.turns, interventions: execution.interventions, nativeTurnIds: execution.nativeTurnIds,
+    nativeRefs: { historyId: execution.historyId, nativeTurnId: execution.nativeTurnId, nativeTurnIds: execution.nativeTurnIds, ...native?.nativeRefs },
     selectedModel: execution.modelOverride, selectedEffort: execution.effortOverride, effectiveModel: native?.effectiveModel ?? execution.effectiveModel,
     effectiveEffort: native?.effectiveEffort ?? execution.effectiveEffort,
     stopEvidence, finishedAt: clock.now(),

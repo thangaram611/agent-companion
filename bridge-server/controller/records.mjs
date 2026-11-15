@@ -3,12 +3,38 @@ import { join } from 'node:path';
 import { BASE_DIR } from '../../lib/state.mjs';
 import { refuseRealHomeUnderTest } from '../../lib/host.mjs';
 import { writePrivateFileAtomic } from '../../lib/runtime-paths.mjs';
+import { sumUsage } from '../../lib/usage.mjs';
 
 const segment = (id) => {
   if (typeof id !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(id)) throw new Error('invalid record id');
   return id;
 };
 const error = (code) => Object.assign(new Error(code), { code });
+
+const firstLine = text => { const line = text.split(/\r?\n/)[0]; return line.length > 80 ? `${line.slice(0, 79)}…` : line; };
+// The same projections are used by normal close, recovery and the cleanup watcher.
+// One turn needs no labels; several list each answer once, labelled for the
+// caller, who reads the result: its own messages and the user's.
+export function resultText(execution, fallback = execution.terminal?.text ?? execution.turns?.[0]?.text ?? execution.progress?.partialText ?? '') {
+  if ((execution.turns?.length ?? 0) <= 1) return fallback;
+  return execution.turns.map(turn => {
+    const labels = turn.messages.map(id => {
+      if (id === execution.executionId) return 'Task';
+      const message = execution.interventions.find(input => input.id === id);
+      return `${message.from === 'user' ? "User's" : "Caller's"} message (${message.mode === 'queue' ? 'queued' : message.mode}): ${firstLine(message.text)}`;
+    });
+    return `${labels.join('; ')}\n\n${turn.outcome === 'interrupted' ? 'interrupted before answering' : turn.text}`;
+  }).join('\n\n');
+}
+// Adapters report each turn's own usage; a job's usage is their sum.
+export const resultUsage = (execution, fallback = execution.terminal?.usage) =>
+  (execution.turns?.length ?? 0) > 1 ? sumUsage(execution.turns.map(turn => turn.usage)) : fallback;
+
+export function discardInterventions(execution) {
+  for (const input of execution.interventions ?? []) {
+    if (input.state !== 'answered') input.state = 'not_delivered';
+  }
+}
 
 // All mutations take a per-conversation exclusive lock. No await occurs under
 // it, so a generation check and rename cannot interleave with another writer.
@@ -109,7 +135,8 @@ export class Records {
       }
       const generation = expectedGeneration + 1;
       if (this.readExecution(executionId)) throw error('execution_id_busy');
-      const execution = { owner, executionId, generation, provider, cwd, text, modelOverride, effortOverride, permissionMode, hostSessionId, state: 'starting', writer: 'controller', startedAt: now, processes: null };
+      const execution = { owner, executionId, generation, provider, cwd, text, modelOverride, effortOverride, permissionMode, hostSessionId, state: 'starting', writer: 'controller', startedAt: now, processes: null,
+        interventions: [], turns: [], nativeTurnIds: [] };
       this._write('executions', executionId, execution);
       // Effort becomes a conversation override only after openHistory accepts it.
       this._write('conversations', owner, { owner, generation, executionId, provider, cwd, modelOverride, effortOverride: old?.effortOverride, historyId });

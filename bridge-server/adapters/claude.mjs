@@ -27,14 +27,17 @@ function binaryFor(env, cwd) {
   throw failure('RuntimeUnavailable');
 }
 
-// One cold process, one user write. Controller deadlines and supervisor cleanup
-// own lifetime; init confirms delivery, whereas replay can wait for the model.
+// One cold process per execution, potentially several native turns. Input UUID
+// lifecycles, not elapsed time, determine whether another turn is pending.
 export class ClaudeAdapter {
-  capabilities = Object.freeze({ followUp: true, steer: false, modelSelection: true, loadsHistory: true });
+  capabilities = Object.freeze({ followUp: true, steer: false, modelSelection: true, loadsHistory: true,
+    interventions: Object.freeze({ default: 'queue', steer: false, queue: 'native', interrupt: true }) });
 
   constructor({ env = process.env, clock = systemClock, transcriptExists = claudeTranscriptExists } = {}) {
     this.env = env; this.clock = clock; this.transcriptExists = transcriptExists;
-    this.reader = new LineReader(); this.init = deferred(); this.done = deferred();
+    this.reader = new LineReader(); this.init = deferred();
+    this.turns = [deferred()]; this.observedTurn = 0; this.resultCount = 0;
+    this.inputs = new Map(); this.inputChanged = deferred();
     this.commands = new Map(); this.pending = new Map();
     this.progress = { lastActivityAt: null, activeCommand: null, retry: null, partialText: '', activity: null, effectiveModel: undefined };
   }
@@ -72,10 +75,10 @@ export class ClaudeAdapter {
     } catch (err) { throw failure('HistoryUnavailable', this.earlyError ? new Error(claudeTerminal(this.earlyError).text) : this.lost || err); }
   }
 
-  async deliver({ text }) {
+  async deliver({ text, messageId = randomUUID() }) {
     if (this.deliveryStarted) throw failure('DeliveryUnknown');
     this.deliveryStarted = true;
-    this.nativeTurnId = randomUUID();
+    this.nativeTurnId = messageId;
     try {
       if (this.lost || this.earlyError) throw this.lost || failure('DeliveryUnknown');
       await this._write({ type: 'user', uuid: this.nativeTurnId, session_id: this.historyId,
@@ -90,19 +93,46 @@ export class ClaudeAdapter {
     }
   }
 
-  observe({ onProgress } = {}) {
+  observe({ onProgress, onInput, next = false } = {}) {
+    if (next) this.observedTurn++;
     this.onProgress = onProgress;
+    this.onInput = onInput;
     if (this.progress.lastActivityAt !== null) onProgress?.({ ...this.progress });
-    return this.done.promise;
+    return this.turns[this.observedTurn].promise;
   }
 
-  async interrupt() {
-    if (this.terminal || !this.runtime) return;
+  async intervene({ id, text, mode }) {
+    this.inputs.set(id, { state: 'accepted', answered: false });
+    try {
+      await this._write({ type: 'user', uuid: id, session_id: this.historyId,
+        message: { role: 'user', content: text }, parent_tool_use_id: null });
+      if (mode === 'interrupt') await this.interrupt({ messageId: id });
+      return { accepted: true };
+    } catch (err) {
+      this.inputs.delete(id); this._inputChanged(); throw err;
+    }
+  }
+
+  async hasPendingInput() {
+    // A result precedes its completed lifecycle. Wait for that lifecycle before
+    // declaring the queue drained; another result can already be buffered.
+    while ([...this.inputs.values()].some(input => input.answered && !['completed', 'cancelled'].includes(input.state))) {
+      if (this.lost) throw this.lost;
+      await this.inputChanged.promise;
+    }
+    return this.resultCount > this.observedTurn + 1 || [...this.inputs.values()].some(input => !['completed', 'cancelled'].includes(input.state));
+  }
+
+  _inputChanged() { this.inputChanged.resolve(); this.inputChanged = deferred(); }
+
+  async interrupt({ messageId } = {}) {
+    if ((!messageId && this.terminal) || !this.runtime) return;
     this.interruptRequested = true;
     const request_id = randomUUID(), receipt = deferred();
     this.pending.set(request_id, receipt);
     try {
-      await this._write({ type: 'control_request', request_id, request: { subtype: 'interrupt' } });
+      await this._write({ type: 'control_request', request_id, request: { subtype: 'interrupt',
+        ...(messageId ? { send_now: true, message_uuid: messageId } : {}) } });
       await receipt.promise;
     } finally { this.pending.delete(request_id); }
   }
@@ -139,7 +169,8 @@ export class ClaudeAdapter {
     this.init.reject(this.lost);
     for (const receipt of this.pending.values()) receipt.reject(this.lost);
     this.pending.clear();
-    if (!this.terminal) this.done.reject(this.lost);
+    for (const turn of this.turns) turn.reject(this.lost);
+    this._inputChanged();
   }
 
   _message(frame) {
@@ -148,7 +179,25 @@ export class ClaudeAdapter {
       if (receipt) response.subtype === 'success' ? receipt.resolve() : receipt.reject(failure('interrupt_failed'));
       return;
     }
-    if (this.terminal || this.lost) return;
+    if (this.lost) return;
+    if (frame.type === 'command_lifecycle') {
+      if (frame.session_id !== this.historyId) return;
+      const input = this.inputs.get(frame.command_uuid);
+      if (!input) return;
+      input.state = frame.state;
+      if (frame.state === 'started') {
+        if (this.terminal) {
+          this.terminal = undefined; this.nativeTurnId = frame.command_uuid; this.interruptRequested = false;
+          this.commands.clear();
+          this.progress = { ...this.progress, partialText: '', activeCommand: null, retry: null, activity: null };
+        }
+        this.onInput?.({ id: frame.command_uuid, state: 'joined', nativeTurnId: this.nativeTurnId });
+      }
+      if (frame.state === 'cancelled') this.onInput?.({ id: frame.command_uuid, state: 'not_delivered' });
+      this._inputChanged();
+      return;
+    }
+    if (this.terminal) return;
     if (frame.type === 'result' && !this.initialized && (frame.is_error === true || frame.subtype !== 'success')) {
       // P3 has no session_id: preserve its early error for the history refusal.
       if (frame.session_id && frame.session_id !== this.historyId) return;
@@ -165,6 +214,18 @@ export class ClaudeAdapter {
       if (frame.session_id !== this.historyId) return;
       if (frame.type === 'result') {
         this.terminal = claudeTerminal(frame, { ...this.progress, interruptRequested: this.interruptRequested, includeCost: !this.resume });
+        this.terminal.nativeTurnId = this.nativeTurnId;
+        // Usage is per turn, but total_cost_usd is cumulative (measured on 2.1.325).
+        if (this.terminal.usage?.cost != null) {
+          const total = this.terminal.usage.cost;
+          this.terminal.usage = { ...this.terminal.usage, cost: total - (this.costSoFar ?? 0) };
+          this.costSoFar = total;
+        }
+        this.terminal.messages = frame.user_message_uuids ?? [this.nativeTurnId];
+        for (const id of this.terminal.messages) {
+          const input = this.inputs.get(id);
+          if (input) input.answered = true;
+        }
         this.commands.clear(); this.progress.activeCommand = null; this.progress.retry = null;
         this.progress.partialText = this.terminal.text ?? this.progress.partialText;
       } else if (frame.type === 'system' && frame.subtype === 'api_retry') {
@@ -202,7 +263,10 @@ export class ClaudeAdapter {
     else if (this.progress.activity?.startsWith('running ')) this.progress.activity = null;
     this.progress.lastActivityAt = this.clock.now();
     this.onProgress?.({ ...this.progress });
-    if (this.terminal) this.done.resolve(this.terminal);
+    if (this.terminal) {
+      this.turns[this.resultCount++].resolve(this.terminal);
+      this.turns.push(deferred());
+    }
   }
 }
 
