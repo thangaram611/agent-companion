@@ -1,8 +1,7 @@
 # Live view and interventions: plan
 
 Status: agreed 2026-11-15. Step 0 landed as 4e536d0; Step 1 as 2222e9b, 229b310
-and 2c9577b. Step 2 is built on `feat/live-tui`, awaiting review. Steps 3–4 are
-not started.
+and 2c9577b; Step 2 as 37e7b0e through 497a740. Steps 3–4 are not started.
 
 ## Goal
 
@@ -260,6 +259,11 @@ Outcome (2026-11-15, `feat/live-tui`, not merged):
   no result and no live process is `unknown`; native text loses terminal
   escapes, bidi overrides and control characters, and no frame row contains a
   newline (a heredoc command wraps as continuation rows).
+- Fixed in review: a refused command was also counted as failed in the outcome
+  line. Setup's `npm ci` emptied Claude's plugin-data install through the
+  checkout's `node_modules` link (reproduced; it happened to the owner's live
+  plugin on a Codex refresh); setup now removes only the link first, and
+  Claude's next session start links it again.
 - Open: opening a job replays its transcript once, so selecting through very
   large transcripts can stall for that read (171 ms at 140 MB). OpenCode and
   Antigravity polling is covered by the reader fixtures, not by the gate.
