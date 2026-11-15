@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.167.0",
+  "codexVersion": "0.169.0",
   "clientRequests": [
     {
       "method": "account/gatewayOAuth/cancel",
@@ -48,6 +48,11 @@
     {
       "method": "account/read",
       "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "account/securitySetup/read",
+      "paramsRequired": false,
       "required": []
     },
     {
@@ -337,6 +342,18 @@
     },
     {
       "method": "modelProvider/capabilities/read",
+      "paramsRequired": true,
+      "required": []
+    },
+    {
+      "method": "modelProvider/config/write",
+      "paramsRequired": true,
+      "required": [
+        "settings"
+      ]
+    },
+    {
+      "method": "modelProvider/list",
       "paramsRequired": true,
       "required": []
     },
@@ -721,6 +738,7 @@
       "params": {
         "authUrl": "string?",
         "error": "string?",
+        "loginId": "string?",
         "providerId": "string",
         "status": "enum:notReady|started|succeeded|failed"
       }
@@ -980,6 +998,7 @@
       "optional": false,
       "params": {
         "completedAtMs": "integer",
+        "contentTokenCount": "integer?",
         "item": "ThreadItem",
         "threadId": "string",
         "turnId": "string"
@@ -1724,6 +1743,7 @@
       "delivery": "enum:async?",
       "id": "string",
       "memoryCitation": "MemoryCitation?",
+      "moderation": "AgentMessageModeration?",
       "phase": "enum:commentary|partial_answer|final_answer?",
       "questions": "AsyncUserInputQuestion[]?",
       "text": "string",
