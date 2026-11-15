@@ -187,17 +187,17 @@ export class AcpAdapter {
     const response = conn._sendRequest('session/prompt', { sessionId: this.sessionId, prompt: [{ type: 'text', text }] });
     turn.promptId = conn.requestId;
     turn.terminal = response.then((result) => {
-      accepted.resolve({ nativeTurnId: turn.promptId });
+      accepted.resolve({ acknowledged: true, nativeTurnId: null, nativeRefs: { promptRequestId: turn.promptId } });
       const outcome = result?.stopReason === 'end_turn' ? 'completed' : result?.stopReason === 'cancelled' ? 'interrupted' : 'failed';
       return { outcome, text: events.messageChunks.join(''),
         usage: this.descriptor.acp.usage({ result, sessionId: this.sessionId, sinceMs: turn.sinceMs, paths: this.paths, readFile }),
-        nativeRefs: { sessionId: this.sessionId, promptId: turn.promptId },
+        nativeRefs: { sessionId: this.sessionId, promptRequestId: turn.promptId },
         cause: outcome === 'completed' ? 'native_complete' : 'provider_error' };
     }, (err) => {
       accepted.reject(failure('DeliveryUnknown', err));
       if (conn.dead || !conn.isAlive()) throw failure('ProviderLost', err);
       return { outcome: 'failed', text: events.messageChunks.join(''), cause: 'provider_error', detail: err.message, error: err.message,
-        nativeRefs: { sessionId: this.sessionId, promptId: turn.promptId } };
+        nativeRefs: { sessionId: this.sessionId, promptRequestId: turn.promptId } };
     }).finally(() => { turn.finished = true; conn.sessionCollectors.delete(this.sessionId); });
     // Observation attaches after acceptance; transport loss can race that gap.
     turn.terminal.catch(() => {});
@@ -208,7 +208,7 @@ export class AcpAdapter {
     if (!turn || turn.finished || params?.sessionId !== this.sessionId) return;
     // ACP's prompt response is terminal. A native update/permission request
     // for this live session is its earlier evidence of prompt acceptance.
-    turn.accepted.resolve({ nativeTurnId: turn.promptId });
+    turn.accepted.resolve({ acknowledged: true, nativeTurnId: null, nativeRefs: { promptRequestId: turn.promptId } });
     const active = turn.events.toolCalls.findLast((tool) => !['completed', 'failed', 'cancelled'].includes(tool.status));
     this.progress = { lastActivityAt: Date.now(), activeCommand: active ? active.input?.command || active.name : null,
       retry: params.update?.retry ?? null, partialText: turn.events.messageChunks.join('') };

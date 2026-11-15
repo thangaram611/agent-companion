@@ -318,7 +318,7 @@ function terminalEnvelope(execution, result, action = 'wait') {
   const meta = {
     status, job_id: result.executionId, thread: result.owner, target: execution.provider,
     cause: result.cause, detail: result.outcome === 'delivery_unknown' ? 'delivery_unknown' : result.detail ?? null,
-    usage: result.usage, selected_model: result.selectedModel ?? null, effective_model: result.effectiveModel ?? null,
+    work_summary: result.workSummary ?? null, usage: result.usage, selected_model: result.selectedModel ?? null, effective_model: result.effectiveModel ?? null,
     selected_effort: result.selectedEffort ?? null, effective_effort: result.effectiveEffort ?? null, native_refs: result.nativeRefs ?? {},
     stop_evidence: evidence ? { gone: evidence.gone, signals: evidence.signals?.length ?? 0,
       survivors: evidence.survivors?.length ?? 0, cleanup_ms: evidence.cleanupMs ?? null,

@@ -8,6 +8,9 @@ import { ProcessSupervisor } from './process-supervisor.mjs';
 import { systemClock, bounded } from './clock.mjs';
 import { cleanupExecution, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';
 import { appendProviderError } from '../provider-error.mjs';
+import { locateTranscript, readTranscript } from '../../lib/transcripts.mjs';
+import { snapshotWorktree, diffWorktrees } from '../../lib/worktree-snapshot.mjs';
+import { selectTurnItems, summarizeWork } from '../../lib/work-summary.mjs';
 
 const TICK_MS = 1000;
 const PROTOCOL_MS = 10_000;
@@ -25,13 +28,14 @@ const deferred = () => {
 // The host supplies trusted owner/request identities; this module does no
 // metadata attribution. send/wait/reply/cancel hold attachment until they return.
 export class Controller {
-  constructor({ providers, records = new Records(), clock = systemClock, env = process.env, createSupervisor = (opts) => new ProcessSupervisor(opts), launchWatcher = spawnCleanupWatcher, onProgress = () => {}, onResult = () => {} } = {}) {
+  constructor({ providers, records = new Records(), clock = systemClock, env = process.env, createSupervisor = (opts) => new ProcessSupervisor(opts), launchWatcher = spawnCleanupWatcher, snapshot = snapshotWorktree, onProgress = () => {}, onResult = () => {} } = {}) {
     this.providers = providers;
     this.records = records;
     this.clock = clock;
     this.env = env;
     this.createSupervisor = createSupervisor;
     this.launchWatcher = launchWatcher;
+    this.snapshot = snapshot;
     this.onProgress = onProgress;
     this.onResult = onResult;
     this.live = new Map();
@@ -137,6 +141,7 @@ export class Controller {
     let phase = 'runtime_unavailable';
     try {
       if (a.stopping) return;
+      a.startSnapshot = this._snapshot(a);
       a.started = true;
       await bounded(this.clock, () => a.adapter.start({ cwd: a.record.cwd, env: this.env, ...selection, supervisor: a.supervisor, historyId: this.records.readConversation(a.record.owner).historyId }), PROTOCOL_MS, 'runtime_unavailable');
       if (a.stopping) return;
@@ -149,12 +154,17 @@ export class Controller {
       a.record.effectiveModel = history.effectiveModel;
       a.record.effectiveEffort = history.effectiveEffort;
       this.records.writeConversation({ ...conversation, historyId: history.historyId, effortOverride: a.record.effortOverride });
+      a.record.nativeRefs = history.nativeRefs ?? {};
+      a.record.startSnapshot = await a.startSnapshot;
+      if (a.stopping) return;
       a.record.state = 'delivering'; this._persist(a); this.onProgress(a.record);
       phase = 'delivery_unknown'; a.nativeActive = true;
       const ack = await bounded(this.clock, () => a.adapter.deliver({ text: a.record.text }), PROTOCOL_MS, 'DeliveryUnknown');
       if (a.stopping) return;
-      if (!ack?.nativeTurnId) throw error('DeliveryUnknown');
-      a.record.nativeTurnId = ack.nativeTurnId;
+      if (!ack?.nativeTurnId && ack?.acknowledged !== true) throw error('DeliveryUnknown');
+      a.record.nativeTurnId = ack.nativeTurnId ?? null;
+      a.record.nativeRefs = { ...a.record.nativeRefs, ...ack.nativeRefs };
+      this._locate(a);
       a.record.effectiveModel = ack.effectiveModel ?? a.record.effectiveModel;
       a.record.effectiveEffort = ack.effectiveEffort ?? a.record.effectiveEffort;
       a.record.state = 'running'; a.record.deliveredAt = this.clock.now(); this._persist(a);
@@ -230,6 +240,31 @@ export class Controller {
     a.ready.resolve(response); a.done.resolve(response);
     return response;
   }
+  async _snapshot(a) {
+    try { return await this.snapshot(a.record.cwd, { env: this.env }); }
+    catch { return { available: false, reason: 'snapshot_failed' }; }
+  }
+  _locate(a) {
+    if (!a.record.transcript) {
+      try { a.record.transcript = locateTranscript({ companion: a.record.provider, historyId: a.record.historyId,
+        nativeRefs: a.record.nativeRefs, env: this.env }); }
+      catch { a.record.transcript = null; }
+    }
+  }
+  async _workSummary(a, cleanup) {
+    a.record.startSnapshot ??= await a.startSnapshot;
+    a.record.endSnapshot = cleanup.gone ? await this._snapshot(a) : { available: false, reason: 'cleanup_unverified' };
+    a.record.nativeRefs = { ...a.record.nativeRefs, ...a.record.terminal?.nativeRefs };
+    this._locate(a);
+    let transcript;
+    try { if (a.record.transcript) transcript = readTranscript(a.record.transcript); }
+    catch { transcript = { format: { detail: 'transcript_read_failed' }, items: [] }; }
+    const items = selectTurnItems(transcript?.items ?? [], { companion: a.record.provider,
+      nativeTurnId: a.record.nativeTurnId, startedAt: a.record.startedAt });
+    const worktree = await diffWorktrees(a.record.cwd, a.record.startSnapshot, a.record.endSnapshot, { env: this.env });
+    return { summary: summarizeWork({ locator: a.record.transcript, transcript, items, worktree }),
+      nativeError: items.find(item => item.kind === 'error')?.error };
+  }
   async _finish(a, cause) {
     const protocol = [];
     for (const method of [a.started && a.nativeActive !== false ? 'interrupt' : null, 'close'].filter(Boolean)) {
@@ -240,12 +275,19 @@ export class Controller {
     if (a.handedOff) return a.done.promise;
     a.record.cleanup = { ...cleanup, protocol, detectionDelayMs: cause === 'owner_lease_expired' ? a.stopDecidedMono - a.detachedAt : 0,
       cleanupMs: this.clock.monotonic() - a.stopDecidedMono };
-    const terminal = a.record.terminal;
+    const { summary: workSummary, nativeError } = await this._workSummary(a, cleanup);
+    if (a.handedOff) return a.done.promise;
+    let terminal = a.record.terminal;
+    if (a.record.provider === 'copilot' && terminal?.outcome === 'completed' && nativeError) {
+      terminal = a.record.terminal = { ...terminal, outcome: 'failed', cause: 'provider_error', detail: nativeError.type,
+        text: appendProviderError(terminal.text, nativeError.message) };
+    }
     const result = {
+      workSummary,
       owner: a.record.owner, executionId: a.record.executionId, generation: a.record.generation,
       outcome: terminal?.outcome || (cleanup.gone ? 'stopped' : 'failed'), cause: terminal?.cause || cause,
       detail: cleanup.gone ? terminal?.detail : 'cleanup_unverified', text: terminal?.text ?? a.record.progress?.partialText ?? '',
-      usage: terminal?.usage, nativeRefs: { historyId: a.record.historyId, nativeTurnId: a.record.nativeTurnId, ...terminal?.nativeRefs },
+      usage: terminal?.usage, nativeRefs: { historyId: a.record.historyId, nativeTurnId: a.record.nativeTurnId, ...a.record.nativeRefs, ...terminal?.nativeRefs },
       selectedModel: a.record.modelOverride, selectedEffort: a.record.effortOverride, effectiveModel: terminal?.effectiveModel ?? a.record.effectiveModel,
       effectiveEffort: terminal?.effectiveEffort ?? a.record.effectiveEffort,
       stopEvidence: a.record.cleanup, finishedAt: this.clock.now(),

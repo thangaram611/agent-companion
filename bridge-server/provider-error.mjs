@@ -13,6 +13,7 @@ function providerErrorMessage(error) {
 
 export function appendProviderError(text = '', error) {
   const message = providerErrorMessage(error);
-  if (!message || text.trim() === message) return text;
+  // Copilot streams "Error: <message>" as reply text; do not repeat it.
+  if (!message || text.includes(message)) return text;
   return text ? `${text}\n\n${message}` : message;
 }

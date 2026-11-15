@@ -32,7 +32,8 @@ function setup(options = {}) {
     };
     adapters.push(adapter); return adapter;
   };
-  const controller = new Controller({ providers: { fake: { enabled: true, ready: true, modelAllowed: (model) => ['a', 'b'].includes(model), create } }, records, clock,
+  // Lifecycle deadlines use the manual clock; git I/O is covered by snapshot integration tests.
+  const controller = new Controller({ snapshot: async () => ({ available: false, reason: 'test_non_git' }), providers: { fake: { enabled: true, ready: true, modelAllowed: (model) => ['a', 'b'].includes(model), create } }, records, clock,
     env: options.env || {}, createSupervisor, launchWatcher: options.launchWatcher || (async () => ({ pid: 123 })) });
   const send = (overrides = {}) => controller.send({ owner: 'child', provider: 'fake', cwd: dir, text: 'verbatim text\nwith context', ...overrides });
   const done = async (executionId) => {

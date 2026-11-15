@@ -507,3 +507,16 @@ test('unlisted Codex model lets backend reject vocabulary and relays its message
   const result = await h.wait(sent.executionId);
   assert.equal(result.outcome, 'failed'); assert.equal(result.text, 'invalid reasoning value: bogus');
 });
+
+test('thread start and resume expose the native rollout path', async () => {
+  for (const historyId of [null, 'thread']) {
+    const adapter = new CodexAdapter();
+    adapter.sandbox = { mode: 'workspace-write' };
+    adapter._call = async method => {
+      assert.equal(method, historyId ? 'thread/resume' : 'thread/start');
+      return { thread: { id: 'thread', path: '/tmp/native-rollout.jsonl' } };
+    };
+    const history = await adapter.openHistory({ historyId });
+    assert.equal(history.nativeRefs.transcriptPath, '/tmp/native-rollout.jsonl');
+  }
+});

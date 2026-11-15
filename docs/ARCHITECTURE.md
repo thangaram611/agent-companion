@@ -336,8 +336,8 @@ processes. The provider factories create an adapter with this interface:
 | Method / property | Contract |
 | --- | --- |
 | `start({ cwd, env, model, effort, supervisor, historyId })` | Spawn via `supervisor.spawn(argv, opts)`; return `{ runtime }`. Startup failure becomes `failed: runtime_unavailable`. |
-| `openHistory({ historyId, model, effort })` | Null id creates history; a saved id must load unchanged or throw `HistoryUnavailable`. Apply model/effort rules and return `{ historyId, effectiveModel }`, plus effective effort where reported. |
-| `deliver({ text })` | Send verbatim once; return `{ nativeTurnId, effectiveModel?, effectiveEffort? }` on native acknowledgement, carrying newly reported launch metadata. Ambiguous failure throws `DeliveryUnknown`; never retry delivery. |
+| `openHistory({ historyId, model, effort })` | Null id creates history; a saved id must load unchanged or throw `HistoryUnavailable`. Apply model/effort rules and return `{ historyId, effectiveModel }`, plus effective effort and `nativeRefs` where reported (Codex supplies `transcriptPath` from both start and resume). |
+| `deliver({ text })` | Send verbatim once; return `{ nativeTurnId, acknowledged?, nativeRefs?, effectiveModel?, effectiveEffort? }` on native acknowledgement; a native turn id implies acknowledgement, otherwise `acknowledged: true` and `nativeTurnId: null` are required, carrying newly reported launch metadata. Ambiguous failure throws `DeliveryUnknown`; never retry delivery. |
 | `observe({ onProgress })` | Resolve one native outcome (`completed`, `failed`, `interrupted`) with text, usage, native refs and cause. Progress carries `lastActivityAt`, `activeCommand`, `retry`, `partialText` and optional `activity` (string or null). Transport loss throws `ProviderLost`. |
 | `interrupt()` | Request native turn interruption; never signal a process. |
 | `close()` | Close protocol channels; process termination belongs to the supervisor. |
@@ -350,7 +350,8 @@ argument. Claude's `openHistory` checks that a saved transcript exists; delivery
 then checks the session id from init. Init cannot be awaited before sending input.
 
 ACP's prompt response is terminal, so an earlier native session update or
-permission request supplies its delivery acknowledgement. Retryable provider
+permission request supplies its delivery acknowledgement. ACP has no native turn id:
+its JSON-RPC prompt id is retained as `nativeRefs.promptRequestId`. Retryable provider
 errors remain progress. Usage uses `lib/usage.mjs`'s shared counters and optional
 model/cost fields; absent usage is never invented as zero.
 
@@ -377,9 +378,9 @@ alone is never proof of exit.
 | `default-target`, `default-model`, `default-model-<companion>` | Companion/model defaults written by onboarding; reads resolve environment → file → unset. |
 | `target-checks.json` | Last explicit readiness evidence; catalog/status read it without probing. |
 | `conversations/<owner>.json` | Provider, canonical cwd, model/effort overrides, native history, generation and current execution id. |
-| `executions/<id>.json` | Request, native references, process identities, progress, lifecycle and writer authority. |
+| `executions/<id>.json` | Request, native references, transcript locator, start/end worktree snapshots, process identities, progress, lifecycle and writer authority. |
 | `leases/<id>.json` | Attached owner requests and remaining grace. |
-| `results/<id>.json` | Immutable outcome, text/usage, native refs, selected/effective model and effort, stop cause and cleanup evidence. |
+| `results/<id>.json` | Immutable outcome, text/usage, work summary, native refs, selected/effective model and effort, stop cause and cleanup evidence. |
 | `locks/<owner>.lock` | Exclusive record mutation lock; crash leftovers fail closed as `RECORD_BUSY`. |
 | `stops/<owner>.json` | Advisory TaskStop/SubagentStop marker. Its snapshot at dispatch prevents an old stop from cancelling new work. |
 | `completions/<id>.json` | Publication receipt keyed by execution id. |
@@ -400,6 +401,26 @@ or verifies process absence. It never adopts old live work; until absence is
 proven, state stays `unknown` and a new execution is refused. Status does not
 reconcile, publish a completion or refresh a digest. The watcher writes only its
 fenced result; controller startup or an owner wait can publish it later.
+
+The controller starts a bounded, asynchronous worktree snapshot alongside runtime
+startup and awaits it before delivery. Each snapshot copies the worktree index to
+a temporary file, stages there and writes a tree; it never changes the real index,
+HEAD, refs or working files. Loose objects remain for git gc. After terminating the
+provider tree, the controller takes the end snapshot and reads the native transcript.
+It records a locator after acknowledgement, retrying at terminal if none was found.
+`workSummary` on the immutable result is exposed as `meta.work_summary` by terminal
+envelopes; the companion answer remains `content`. Commands (20), deduplicated
+edits (50), errors (20) and diff files (50) have omitted counts. Binary diff entries
+have `binary: true` and null line counts. The diff includes changes by any writer
+between snapshots and excludes ignored files. Read/snapshot failures produce
+unavailable sections. Unverified cleanup produces no end snapshot. The bridge-loss
+watcher does not compute a summary.
+
+Codex, Claude and OpenCode items are selected by the acknowledged native turn id;
+Copilot uses the whole execution-private session; Antigravity uses item creation
+times at or after execution start. Only Copilot's measured false completion is
+corrected: a native error item changes a completed outcome to `failed`, with
+`provider_error`, its native error type and an appended native error message.
 
 Claude keeps its own transcripts under `~/.claude/projects` (or
 `CLAUDE_CONFIG_DIR/projects`). The bridge stores only the native session id as
@@ -676,8 +697,10 @@ These passive fixtures establish host signals, not the shipped cleanup implement
 
 **Blast radius**
 
-- **The bridge runs no git and writes nothing inside a job's cwd.** An index hash
-  alone does not identify its mutator; see the incident's git-command and stat-cache
+- **A worktree diff does not attribute edits to the companion.** Snapshots use
+  git with a temporary index and write loose objects, never the real index, refs
+  or working files. Changes from any writer are included. An index hash alone
+  does not identify its mutator; see the incident's git-command and stat-cache
   evidence in [`RELIABILITY_REMEDIATION.md` F4](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
 - **Status is not attachment or recovery.** It reads records without renewing
   the lease, writing a result, publishing a completion or spawning a provider.

@@ -151,7 +151,7 @@ export class CodexAdapter {
       }
       this.threadId = id; this.model = model;
       this._metadata(result);
-      return { historyId: id, effectiveModel: this.effectiveModel, effectiveEffort: this.effectiveEffort };
+      return { historyId: id, nativeRefs: { transcriptPath: result.thread.path }, effectiveModel: this.effectiveModel, effectiveEffort: this.effectiveEffort };
     } catch (err) {
       if (['EFFORT_NOT_ALLOWED', 'CAPABILITY_UNAVAILABLE'].includes(err.code)) throw err;
       throw failure('HistoryUnavailable', err);

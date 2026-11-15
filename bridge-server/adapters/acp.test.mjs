@@ -107,7 +107,7 @@ test('new session then cold follow-up loads the same history in a new process an
   assert.equal(h.frames('initialize')[0].params.clientInfo.name, modeled().acp.clientName);
   assert.ok(first.stopEvidence.gone && second.stopEvidence.gone);
   assert.equal(second.usage, null); // Antigravity has no measured native usage.
-  assert.equal(second.nativeRefs.promptId, h.frames('session/prompt')[1].id);
+  assert.equal(second.nativeRefs.promptRequestId, h.frames('session/prompt')[1].id);
 });
 
 test('Copilot-style follow-up is refused with FOLLOWUP_UNSUPPORTED before any process starts', async (t) => {
@@ -358,4 +358,16 @@ for (const effort of [undefined, 'low']) test(`Antigravity config connection los
   assert.equal(h.frames('session/set_config_option').length, 1);
   assert.equal(h.frames('session/prompt').length, 0);
   assert.equal(h.records.readConversation('child').effortOverride, undefined);
+});
+
+test('ACP acknowledges delivery without inventing a native turn id', async t => {
+  const h = setup(t);
+  const sent = await h.send();
+  assert.equal(sent.acknowledged, true);
+  const execution = h.records.readExecution(sent.executionId);
+  assert.equal(execution.nativeTurnId, null);
+  assert.equal(execution.nativeRefs.promptRequestId, h.frames('session/prompt')[0].id);
+  const result = await h.finish(sent);
+  assert.equal(result.nativeRefs.promptRequestId, h.frames('session/prompt')[0].id);
+  assert.equal(Object.hasOwn(result.nativeRefs, 'promptId'), false);
 });
