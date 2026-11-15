@@ -104,6 +104,7 @@ case "$HOST" in
 esac
 
 DEPS_STATUS="not installed this run"
+UI_STATUS="not installed this run"
 CLAUDE_STATUS="not installed this run"
 CODEX_STATUS="not installed this run"
 CLAUDE_COMPANION="not inspected"
@@ -129,6 +130,7 @@ finish() {
     echo "=== Setup complete (host=$HOST) ==="
   fi
   echo "Dependencies: $DEPS_STATUS; tests: $TEST_STATUS"
+  echo "Live view: $UI_STATUS"
   if [ "$DO_CLAUDE" = 1 ]; then
     echo "Claude: $CLAUDE_STATUS; companion: $CLAUDE_COMPANION"
     [ "$APPLY_STARTED" = 0 ] || echo "  Start a fresh Claude session: claude --plugin-dir \"$SCRIPT_DIR\""
@@ -306,6 +308,7 @@ done
 
 echo "Intended installation changes:"
 echo "  Install bridge-server dependencies in $SCRIPT_DIR/bridge-server."
+echo "  Install or refresh the live-view launcher ~/.local/bin/agent-companion (runs this checkout's hooks/launch-ui.sh)."
 [ "$DO_CLAUDE" = 0 ] || echo "  Materialize the Claude agent; merge companion permissions into ~/.claude/settings.json."
 [ "$DO_CODEX" = 0 ] || echo "  Create ${CODEX_HOME:-$HOME/.codex} if needed; refresh the Codex plugin, verify MCP and agent, and remove legacy managed hooks."
 echo "  Write diagnostic install markers after each harness finishes."
@@ -344,6 +347,20 @@ else
   fail "bridge-server/package.json not found at $BRIDGE_DIR"
   exit 1
 fi
+
+echo ""
+
+# --- Live-view launcher (host-independent) ---------------------------------
+
+STEP="live-view launcher"
+printf "Installing the live-view launcher...\n"
+UI_OUTPUT="$(node "$SCRIPT_DIR/scripts/install-ui-launcher.mjs")"
+printf '%s\n' "$UI_OUTPUT"
+case "$UI_OUTPUT" in
+  *"left unchanged"*) UI_STATUS="launcher not installed; a file agent-companion did not write is kept" ;;
+  *"not on PATH"*) UI_STATUS="run ~/.local/bin/agent-companion ui (add ~/.local/bin to PATH for agent-companion ui)" ;;
+  *) UI_STATUS="run agent-companion ui" ;;
+esac
 
 echo ""
 

@@ -77,6 +77,8 @@ test('builds a Codex marketplace root with a nested plugin package', () => {
       false,
       'release package should not include validator tests',
     );
+    assert.equal(existsSync(path.join(pluginRoot, 'bridge-server', 'ui', 'app.mjs')), true, 'the live view ships with the bridge');
+    assert.equal(existsSync(path.join(pluginRoot, 'bridge-server', 'ui', 'ui.test.mjs.snapshot')), false, 'test snapshots are not shipped');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

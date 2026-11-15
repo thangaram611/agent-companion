@@ -65,7 +65,7 @@ function shouldCopy(src) {
   const base = path.basename(src);
   if (base === 'node_modules' || base === '.plugin-data' || base === 'dist') return false;
   if (base === '.DS_Store' || base.endsWith('.log')) return false;
-  if (base.endsWith('.test.mjs')) return false;
+  if (base.endsWith('.test.mjs') || base.endsWith('.test.mjs.snapshot')) return false;
   return true;
 }
 

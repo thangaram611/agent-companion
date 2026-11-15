@@ -292,6 +292,10 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
     const first = runSetup(sourceRoot, home, codexHome, binDir, logPath);
     assert.equal(first.status, 0, first.stderr || first.stdout);
     assert.match(first.stdout, /Codex agent-bridge MCP registration verified/);
+    // The live-view launcher lands in the (sandboxed) home and names the checkout.
+    assert.match(first.stdout, /UI launcher installed: .*\.local\/bin\/agent-companion/);
+    assert.match(first.stdout, /Live view: run ~\/\.local\/bin\/agent-companion ui \(add ~\/\.local\/bin to PATH/);
+    assert.ok(readFileSync(path.join(home, '.local/bin/agent-companion'), 'utf8').includes(path.join(realpathSync(sourceRoot), 'hooks/launch-ui.sh')));
     assert.match(first.stdout, /start a fresh session/);
 
     const calls = readCalls(logPath);
@@ -360,6 +364,7 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
 
     const second = runSetup(sourceRoot, home, codexHome, binDir, logPath);
     assert.equal(second.status, 0, second.stderr || second.stdout);
+    assert.match(second.stdout, /UI launcher unchanged/);
     assert.equal(existsSync(path.join(pluginRoot, 'stale-cache-marker-again')), false);
     assert.deepEqual(readFileSync(agentPath), stableAgentBytes);
     assert.deepEqual(readFileSync(hooksPath), stableHooksBytes);
