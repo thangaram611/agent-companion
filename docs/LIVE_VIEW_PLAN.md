@@ -1,6 +1,7 @@
 # Live view and interventions: plan
 
-Status: agreed 2026-11-15. Step 0 landed as 4e536d0; Steps 1–4 are not started.
+Status: agreed 2026-11-15. Step 0 landed as 4e536d0. Step 1 is done on branch
+feat/live-handover (pending merge). Steps 2–4 are not started.
 
 ## Goal
 
@@ -36,9 +37,9 @@ Measured in isolated homes unless noted. Spike artefacts are under `/tmp`
 | Companion | Location | Format | Live? | Id mapping | Version fingerprint |
 | --- | --- | --- | --- | --- | --- |
 | Codex 0.169 | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<threadId>.jsonl` | JSONL; `response_item`, `event_msg` (`item_completed` with `CommandExecution`, `AgentMessage`, web search), `token_count` | Yes: 27→45 lines in 25 s during a turn (observed read-only on a live bridge run). Completed items only; no deltas. | `Thread.path` in app-server responses, marked `[UNSTABLE]`; else glob on thread id | Record types; `session_meta` |
-| Claude Code 2.1.325 | `$CLAUDE_CONFIG_DIR/projects/<dir>/<sessionId>.jsonl` | JSONL; `user`, `assistant`, `system`, `attachment` and bookkeeping records | Yes: an interactive session's file grew between tool calls (observed read-only); a `-p` companion transcript is checked in Step 1 | The adapter already scans for it (`claudeTranscriptExists`) | Message records carry `version` (e.g. `2.1.325`); bookkeeping records do not |
+| Claude Code 2.1.325 | `$CLAUDE_CONFIG_DIR/projects/<dir>/<sessionId>.jsonl` | JSONL; `user`, `assistant`, `system`, `attachment` and bookkeeping records | Yes, per message: measured for an interactive session (read-only) and for the bridge's non-bare `-p` companion in an isolated home | The adapter already scans for it (`claudeTranscriptExists`) | Message records carry `version` (e.g. `2.1.325`); bookkeeping records do not |
 | Copilot 1.0.112 | `$COPILOT_HOME/session-state/<sessionId>/events.jsonl` | JSONL; `user.message`, `assistant.turn_start/end`, `assistant.message` (whole, no deltas), `tool.execution_start` (with the command) and `tool.execution_complete` (exit code, output), `session.usage_record` | Yes, at event boundaries: a running tool is on disk from its start; text lands when the message completes | Directory name equals the ACP session id (measured) | `session.start` carries `version: 1`, `producer`, `copilotVersion` |
-| OpenCode 2.3.0 | `opencode.db` (`OPENCODE_DB` or XDG data) | SQLite; `session_v2`, `session_message` rows ordered by `seq`, JSON `data`; types `user`, `assistant` (with `content`), `idle`, `model-switched`, `agent-switched` | Rows carry `time_created`/`time_updated`; in-place streaming updates not yet measured | Session id | Latest `migration.id` |
+| OpenCode 2.3.0 | `opencode.db` (`OPENCODE_DB` or XDG data) | SQLite; `session_v2`, `session_message` rows ordered by `seq`, JSON `data`; types `user`, `assistant` (with `content`), `idle`, `model-switched`, `agent-switched` | Rows are created when a step starts and updated when it completes (1–3 s later); updates in between were not observed | Session id | Latest `migration.id` |
 | Antigravity 1.1.1 | `$GEMINI_HOME/antigravity-acp/conversations/<sessionId>.db` | SQLite (WAL); `steps(idx, step_type, status, step_format, step_payload…)`; payloads are protobuf with no published schema | Yes, per step: a running command is on disk with status 2 and flips to 3 when done (measured on a live bridge job, the operator's real home) | File name equals the bridge's history id, the ACP session id (measured) | `step_format`, and the field numbers below |
 
 Antigravity is the weak link: its steps are undocumented protobuf. A schema-less
@@ -120,8 +121,9 @@ Check: the suite passes on Node 26; doctor reports a clear refusal on Node 24.
   result, edit, usage, status. It stores nothing.
 - Adapters record where their transcript lives as a native reference, such as
   Codex's `Thread.path`.
-- Each reader carries a format fingerprint. An unknown fingerprint or record
-  type yields "format unrecognized for <companion> <version>", never a guess.
+- Each reader reports the native format version but never gates on it, because
+  companions release often. Every record type is mapped, listed as known
+  bookkeeping, or returned as a counted `unrecognized` item, never a guess.
 - At turn start the controller records a worktree snapshot with a throwaway
   index (`GIT_INDEX_FILE=<tmp> git add -A && git write-tree`), leaving the user's
   index untouched. At terminal it builds the handover summary: final answer,
@@ -130,15 +132,38 @@ Check: the suite passes on Node 26; doctor reports a clear refusal on Node 24.
 - `agent-digest://<id>` renders from the transcript on demand. The controller
   stops writing `runtime/digests/`.
 
-Measure first: Antigravity's other step types (file edits, reads, errors),
-OpenCode in-place updates while streaming, the Claude `-p` transcript's record
-types and live writes, Codex `Thread.path` on `thread/resume` as well as
-`thread/start`. (Copilot's and Antigravity's location, id mapping and
-incremental writes are measured above.)
+Measure first (done; see Outcome): Antigravity's other step types, OpenCode
+in-place updates, the Claude `-p` transcript, Codex `Thread.path` on resume.
 
 Check: per-companion fixtures captured from isolated runs; a drift test fails on
 an unknown record type; summary unit tests; the git snapshot leaves `git status`
 and the index unchanged; the full suite passes.
+
+Outcome (2026-11-15, branch feat/live-handover):
+
+- Measured: Codex returns `thread.path` on both thread/start and thread/resume;
+  the bridge's `nativeTurnId` is the transcript's native turn id for Codex,
+  Claude and OpenCode across first, follow-up and failed turns; Copilot runs one
+  session per execution; Antigravity turns are selected by step timestamps.
+- Fixtures from isolated captures missed the operator's real record types
+  (Codex code-mode `exec`, extension tools, compaction, MCP and subagent calls;
+  Claude and Copilot bookkeeping). Mappings were extended from structure-only,
+  scrubbed samples taken locally. Read-only over real stores: Codex 150/150 and
+  Copilot 33/33 files fully recognized, Claude 146/150 (31 of 44,397 items in
+  four rare types stay explicit).
+- Defects fixed: a Copilot in-turn provider failure (429 after Copilot's own
+  retries) arrived as reply text with `end_turn` and was reported completed;
+  its native `session.error` now makes the result failed. The ACP adapter
+  reported the JSON-RPC request id as `nativeTurnId`; delivery is now
+  acknowledged with `nativeTurnId: null` and `promptRequestId`.
+- Verified through the real bridge in isolated homes for Codex, Claude,
+  OpenCode and Copilot: work summaries, the git diff-stat in a git worktree, and
+  `agent-digest://` rendered on demand with no `runtime/digests/` written.
+- Not captured: an Antigravity provider failure; OpenCode row updates between a
+  step's start and completion.
+- For Step 2: an incremental JSONL read re-parses the whole file to keep tool
+  joins and turn ids right, then returns only new items. The 10,000-line gate
+  must include that cost.
 
 ### Step 2: Read-only terminal UI
 
