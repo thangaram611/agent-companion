@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agent-companion ui — always-on message box (v2)</title>
+<style>
+  :root { --bg:#0d1117; --line:#262c36; --fg:#c9d1d9; --dim:#7d8590; --faint:#3d444d;
+          --green:#3fb950; --red:#f85149; --yellow:#d29922; --blue:#58a6ff; --violet:#bc8cff; --cyan:#39c5cf; --sel:#1b2533; }
+  body { margin:0; background:#06080b; color:var(--fg); font:14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+  main { max-width:1180px; margin:0 auto; padding:28px 24px 60px; }
+  h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:16px; margin:34px 0 6px; } p, li { color:#aab4c0; }
+  .term { background:var(--bg); border:1px solid var(--line); border-radius:8px; overflow:hidden; box-shadow:0 8px 30px #0008; }
+  .bar { padding:6px 10px; background:#161b22; border-bottom:1px solid var(--line); font-size:12px; color:var(--dim); }
+  pre { margin:0; padding:12px 14px; font:13px/1.6 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; color:var(--fg); overflow-x:auto; }
+  .g{color:var(--green)} .r{color:var(--red)} .y{color:var(--yellow)} .b{color:var(--blue)} .c{color:var(--cyan)}
+  .d{color:var(--dim)} .f{color:var(--faint)} .w{color:#f0f3f6;font-weight:600} .sel{background:var(--sel)}
+  table { border-collapse:collapse; font-size:13px; margin-top:8px; } td, th { border:1px solid var(--line); padding:5px 9px; text-align:left; vertical-align:top; } th { background:#161b22; }
+</style>
+</head>
+<body><main>
+<h1>Always-on message box, like the companion's own app (v2)</h1>
+<p>Dummy data. The right side reads like Codex, Claude Code or OpenCode: transcript, live line, then an input box pinned to the bottom. When the job has focus, you type straight into the box. ⏎ sends in the mode shown on the box, which starts on that companion's own default; shift+⇥ switches mode, the way Claude Code cycles its modes.</p>
+
+<h2>1. Codex job running, typing a steer</h2>
+<div class="term"><div class="bar">agent-companion ui · 150 columns · job focused</div>
+<pre> <span class="w">agent-companion</span>  <span class="d">2 running · 4 done in 24h</span>
+
+<span class="sel"> <span class="g">●</span> <span class="w">Step 3b-2: adapters</span>          <span class="g">6:40</span> </span><span class="f">│</span>  <span class="d">Claude Code › Live view plan · gpt-6-astra max · interventions</span>
+<span class="sel">   <span class="d">codex · agent-companion</span>             </span><span class="f">│</span>
+                                         <span class="f">│</span>  <span class="d">task</span>   Implement Step 3b-2 of docs/LIVE_VIEW_PLAN.md: interventions for the… <span class="f">+31</span>
+ <span class="g">●</span> <span class="w">Restore spec triage</span>          <span class="g">0:41</span>  <span class="f">│</span>
+   <span class="d">opencode · hermes</span>                     <span class="f">│</span>  <span class="w">$ node --test bridge-server/adapters/opencode.test.mjs</span>              <span class="r">exit 1</span>
+                                         <span class="f">│</span>    <span class="d">✖ steer is acknowledged on the running session</span>
+ <span class="g">✓</span> <span class="w">Review auth middleware</span>        <span class="d">12m</span>  <span class="f">│</span>    <span class="f">+6 lines</span>
+   <span class="d">claude · oikos-web</span>                    <span class="f">│</span>
+                                         <span class="f">│</span>  The steer test fails because the fake server never reports idle.
+                                         <span class="f">│</span>
+                                         <span class="f">│</span>  <span class="g">● running $ node --test bridge-server/adapters/opencode.test.mjs · 0:07</span>
+                                         <span class="f">│</span>
+                                         <span class="f">│</span>  <span class="f">╭──────────────────────────────────────────────────────────────────────────────────────────╮</span>
+                                         <span class="f">│</span>  <span class="f">│</span> <span class="w">›</span> Keep the fake server; add an idle event after the step instead.▌                       <span class="f">│</span>
+                                         <span class="f">│</span>  <span class="f">╰──────────────────────────────────────────────────────────────────────────────────────────╯</span>
+                                         <span class="f">│</span>  <span class="g">steer</span> <span class="d">· joins the running turn now</span>           <span class="f">⏎ send · shift+⇥ mode · ctrl+x cancel job · esc jobs</span>
+</pre></div>
+
+<h2>2. Claude job after sending: queued until the turn ends</h2>
+<div class="term"><div class="bar">agent-companion ui · 150 columns · job focused</div>
+<pre> <span class="w">agent-companion</span>  <span class="d">2 running · 4 done in 24h</span>
+
+ <span class="g">●</span> <span class="w">Step 3b-2: adapters</span>          <span class="g">6:52</span>  <span class="f">│</span>  <span class="d">Claude Code › Auth hardening · opus-5.5 xhigh · auth-guard</span>
+   <span class="d">codex · agent-companion</span>               <span class="f">│</span>
+                                         <span class="f">│</span>  <span class="d">task</span>   Review the auth middleware for CSRF gaps and fix what you find.
+<span class="sel"> <span class="g">●</span> <span class="w">Review auth middleware</span>       <span class="g">3:05</span> </span><span class="f">│</span>
+<span class="sel">   <span class="d">claude · oikos-web</span>                  </span><span class="f">│</span>  <span class="w">$ npm test -- auth</span>                                                       <span class="g">ok</span>
+                                         <span class="f">│</span>
+                                         <span class="f">│</span>  I added a guard for mutating GET routes. Writing up the summary now.
+                                         <span class="f">│</span>
+                                         <span class="f">│</span>  <span class="g">● responding</span>
+                                         <span class="f">│</span>  <span class="y">◌ you · queued</span>  Also check the logout route.  <span class="f">runs after this turn</span>
+                                         <span class="f">│</span>  <span class="f">╭──────────────────────────────────────────────────────────────────────────────────────────╮</span>
+                                         <span class="f">│</span>  <span class="f">│</span> <span class="w">›</span> <span class="f">Message Claude Code…</span>                                                                   <span class="f">│</span>
+                                         <span class="f">│</span>  <span class="f">╰──────────────────────────────────────────────────────────────────────────────────────────╯</span>
+                                         <span class="f">│</span>  <span class="g">queue</span> <span class="d">· runs after the current turn</span>         <span class="f">⏎ send · shift+⇥ mode · ctrl+x cancel job · esc jobs</span>
+</pre></div>
+<p>A sent message waits between the live line and the box with its state (<span class="y">waiting for the bridge</span>, <span class="y">queued</span>), then moves into the transcript as <span class="d">you</span> when the companion takes it. A refusal shows once in red with its reason.</p>
+
+<h2>3. Finished or failed job: no box</h2>
+<div class="term"><div class="bar">agent-companion ui · 150 columns · job focused</div>
+<pre>                                         <span class="f">│</span>  <span class="g">✓ done in 6:02</span>  3 commands, <span class="r">1 failed</span> · 2 files changed
+                                         <span class="f">│</span>  The middleware skipped the CSRF check on GET routes that mutate state…        <span class="f">+14</span>
+                                         <span class="f">│</span>
+                                         <span class="f">│</span>  <span class="f">transcript ↓ (12 items)</span>
+
+ <span class="f">↑↓ items   e expand   ctrl+o expand all   esc jobs   ? keys</span>
+</pre></div>
+<p>Messages go only to running jobs, so an ended job shows its outcome and transcript with the Step 2 keys and no input box.</p>
+
+<h2>4. Narrow (80 columns): one pane, same box</h2>
+<div class="term"><div class="bar">agent-companion ui · 80 columns · job open</div>
+<pre>  <span class="d">Codex › Live view plan · gpt-6-astra max · interventions</span>
+
+  The steer test fails because the fake server never reports idle.
+
+  <span class="g">● running $ node --test …/opencode.test.mjs · 0:07</span>
+  <span class="f">╭────────────────────────────────────────────────────────────────────────╮</span>
+  <span class="f">│</span> <span class="w">›</span> Keep the fake server; add an idle event after the step instead.▌    <span class="f">│</span>
+  <span class="f">╰────────────────────────────────────────────────────────────────────────╯</span>
+  <span class="g">steer</span>                              <span class="f">⏎ send · shift+⇥ mode · esc jobs</span>
+</pre></div>
+
+<h2>5. Cancel (ctrl+x) asks once, in the box</h2>
+<div class="term"><div class="bar">agent-companion ui · 80 columns</div>
+<pre>  <span class="f">╭────────────────────────────────────────────────────────────────────────╮</span>
+  <span class="f">│</span> <span class="r">Cancel this job?</span> The lead is told you cancelled it.    <span class="w">y</span> <span class="d">yes</span>  <span class="w">n</span> <span class="d">no</span>   <span class="f">│</span>
+  <span class="f">╰────────────────────────────────────────────────────────────────────────╯</span>
+</pre></div>
+
+<h2>Keys while a running job has focus</h2>
+<table>
+<tr><th>Key</th><th>Action</th><th>Why</th></tr>
+<tr><td>typing, ⏎</td><td>Write and send in the shown mode</td><td>Like the provider apps</td></tr>
+<tr><td>shift+⇥</td><td>Next mode the companion supports (steer, queue, interrupt &amp; send)</td><td>Claude Code cycles modes with shift+⇥</td></tr>
+<tr><td>ctrl+j</td><td>New line in the message</td><td>Works in every terminal; shift+⏎ does not</td></tr>
+<tr><td>↑↓, PgUp PgDn</td><td>Scroll the transcript</td><td>Letters now type, so scrolling moves off j/k</td></tr>
+<tr><td>ctrl+o</td><td>Expand or fold all outputs</td><td>Claude Code's transcript toggle</td></tr>
+<tr><td>ctrl+x</td><td>Cancel the job (asks once)</td><td></td></tr>
+<tr><td>esc</td><td>Back to the job list; the draft is kept</td><td>Never interrupts the companion by accident</td></tr>
+<tr><td>ctrl+c</td><td>Clear the draft; on an empty box, quit</td><td>Like Claude Code</td></tr>
+</table>
+<p>On the job list and on ended jobs the existing single-letter keys stay: j k, / filter, o older, e expand, q quit.</p>
+</main></body></html>

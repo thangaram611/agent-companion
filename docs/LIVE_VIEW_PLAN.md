@@ -330,8 +330,18 @@ Design (decided 2026-11-15, after the measurements above):
   `mode`, defaulting to the companion's own. Status reports per-mode
   availability instead of `reply_available`. Both role templates and the
   host-parity test change.
-- The live view gains a message box with a mode choice, and cancel (built by
-  Claude or an Opus subagent, not Codex).
+- The live view gains an input box and cancel (built by Claude or an Opus
+  subagent, not Codex), approved as `docs/mockups/live-view-interventions.html`:
+  a running job's pane reads like the companion's own app, with the input box
+  pinned under the live line. Opening a running job focuses the box; ⏎ sends in
+  the mode shown, which starts on the companion's default; shift+⇥ cycles the
+  modes that job supports; ctrl+j adds a line; ↑↓ and PgUp/PgDn scroll; ctrl+o
+  expands all outputs; ctrl+x cancels the job after one confirmation; esc
+  returns to the list and keeps the draft; ctrl+c clears the draft, then quits.
+  A sent message waits between the live line and the box with its state until
+  the companion takes it. Ended or failed jobs show no box and keep the step 2
+  keys. Transcript labels: `task` (the lead's request), `lead` (its later
+  messages) and `you`.
 
 Build order, each a separate brief and commit:
 
