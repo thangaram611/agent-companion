@@ -133,7 +133,7 @@ Claude companion implementation and qualification are tracked separately:
 | Live Claude companion smoke from Claude Code | Done 2026-11-09 | Same report: nested Claude parent → Claude child, configured default model applied, follow-up relayed, TaskStop interrupt verified gone. |
 | Older Claude Code versions | UNVERIFIED | 2.1.319 measured; the 2.1.259 flag minimum is not full compatibility proof. |
 
-CI runs on Ubuntu with Node 22. Install dependencies first, as
+CI runs on Ubuntu with Node 26. Install dependencies first, as
 `.github/workflows/ci.yml` does:
 
 ```bash
@@ -209,8 +209,8 @@ completed stages and recovers on rerun. `scripts/setup-codex-install.test.mjs`
 and `scripts/onboard.test.mjs` cover these with fake CLIs. Setup itself spends
 no quota; its readiness report does not qualify a live companion response.
 
-Require the green Node 22 baseline, the full root-discovered regression suite
-on supported local runtimes (including Node 24), required compatibility/CI checks,
+Require the green Node 26 baseline, the full root-discovered regression suite
+on supported local runtimes (Node 26 or newer), required compatibility/CI checks,
 qualified cold providers and installed-form smoke. No release/completion claim
 while a required capability remains unqualified.
 

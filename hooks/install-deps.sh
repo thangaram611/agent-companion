@@ -24,9 +24,11 @@ if [ -r "$TOOLS" ]; then
   . "$TOOLS"
 fi
 NODE_BIN="$(resolve_node 2>/dev/null || true)"
-if [ -n "$NODE_BIN" ]; then
-  export PATH="$(dirname "$NODE_BIN"):${PATH:-}"
+if [ -z "$NODE_BIN" ]; then
+  node_requirement_error
+  exit 1
 fi
+export PATH="$(dirname "$NODE_BIN"):${PATH:-}"
 NPM_BIN="$(resolve_npm 2>/dev/null || true)"
 if [ -z "$NPM_BIN" ]; then
   echo "agent-companion: npm not found; cannot install bridge dependencies" >&2

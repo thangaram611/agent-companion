@@ -149,13 +149,16 @@ echo "=== agent-companion setup: preflight (host=$HOST) ==="
 
 printf "Checking prerequisites...\n"
 
+# shellcheck source=hooks/node-tools.sh
+. "$SCRIPT_DIR/hooks/node-tools.sh"
 if ! command -v node >/dev/null 2>&1; then
-  fail "node not found on PATH. Install Node.js >= 22."
+  node_requirement_error ''
   exit 1
 fi
-NODE_VER=$(node -e "console.log(process.version.slice(1).split('.')[0])")
-if [ "$NODE_VER" -lt 22 ] 2>/dev/null; then
-  fail "Node.js >= 22 required (found v$NODE_VER)."
+NODE_VERSION=$(node --version)
+NODE_VER="${NODE_VERSION#v}"
+if [ "${NODE_VER%%.*}" -lt 26 ] 2>/dev/null; then
+  node_requirement_error "$NODE_VERSION"
   exit 1
 fi
 ok "node v$(node --version | tr -d 'v')"

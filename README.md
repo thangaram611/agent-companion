@@ -179,7 +179,7 @@ See the [release gates](docs/RELEASE_READINESS.md#release-gates).
 
 ## Requirements
 
-- Node.js `>= 22`.
+- Node.js `>= 26`.
 - `npm`.
 - `jq` for hook delivery.
 - At least one companion runtime:

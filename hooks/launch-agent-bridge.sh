@@ -61,7 +61,7 @@ TOOLS="$PLUGIN_PACKAGE_ROOT/hooks/node-tools.sh"
 . "$TOOLS"
 NODE_BIN="$(resolve_node 2>/dev/null || true)"
 [ -n "$NODE_BIN" ] || {
-  echo "agent-companion: Node.js 22 or newer is required" >&2
+  node_requirement_error
   exit 1
 }
 

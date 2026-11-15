@@ -9,7 +9,20 @@ _cc_validate_node() {
   local candidate="$1"
   [ -n "$candidate" ] && [ -x "$candidate" ] || return 1
   env -i HOME="$HOME" PATH=/usr/bin:/bin \
-    "$candidate" -e 'const major=Number(process.versions.node.split(".")[0]); if (major < 22) process.exit(1); console.log(process.execPath)' 2>/dev/null
+    "$candidate" -e 'const major=Number(process.versions.node.split(".")[0]); if (major < 26) process.exit(1); console.log(process.execPath)' 2>/dev/null
+}
+
+# Shared refusal for setup and hooks; a caller can supply a known version.
+node_requirement_error() {
+  local version="${1:-}" candidate=""
+  if [ "$#" -eq 0 ]; then
+    for candidate in "${AGENT_COMPANION_NODE:-}" "$(type -P node 2>/dev/null)"; do
+      [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+      version="$("$candidate" --version 2>/dev/null)" || continue
+      [ -n "$version" ] && break
+    done
+  fi
+  printf 'agent-companion: Node.js 26 or newer is required%s. Upgrade with `brew upgrade node`, or install the current LTS from https://nodejs.org.\n' "${version:+ (found $version)}" >&2
 }
 
 resolve_node() {
