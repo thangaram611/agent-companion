@@ -122,20 +122,26 @@ test('loads static and dynamic SDK imports from plugin data with ESM conditions 
       name: '@test/sdk', type: 'module', exports: { import: './index.mjs', require: './wrong.cjs' },
     }));
     writeFileSync(path.join(sdk, 'index.mjs'), 'export const value = "SDK";');
+    // An unscoped package (as ink and react are for the UI) relocates too.
+    const plain = path.join(data, 'bridge-server/node_modules/plain-pkg');
+    mkdirSync(plain, { recursive: true });
+    writeFileSync(path.join(plain, 'package.json'), JSON.stringify({ name: 'plain-pkg', type: 'module', exports: './index.mjs' }));
+    writeFileSync(path.join(plain, 'index.mjs'), 'export default "PLAIN";');
     writeFileSync(path.join(fixture.root, 'bridge-server/local.mjs'), 'export const local = "local";');
     writeFileSync(path.join(fixture.root, 'bridge-server/server.mjs'), `
 import { value } from '@test/sdk';
+import plain from 'plain-pkg';
 import { local } from './local.mjs';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 // server.mjs starts MCP only when it is the entry point, not when imported.
 assert.equal(process.argv[1], fileURLToPath(import.meta.url));
 assert.equal((await import('@test/sdk')).value, value);
-console.log(value, local);
+console.log(value, plain, local);
 `);
     const result = run(fixture, 1);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, 'SDK local\n');
+    assert.equal(result.stdout, 'SDK PLAIN local\n');
     assert.equal(existsSync(path.join(fixture.root, 'bridge-server/node_modules')), false);
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });

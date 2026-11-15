@@ -1,0 +1,195 @@
+exports[`failed job at 150 columns 1`] = `
+ agent-companion  2 running · 2 done in 24h
+
+ ● Restore spec triage              0:41 │  Codex › Release checks · fixture-mock
+   opencode · hermes                     │
+                                         │  ✗ failed after 0:10 · rate_limit
+ ● Step 1b-2: digest on demand      4:12 │  git: unavailable (not_a_git_repository)
+   codex · agent-companion               │
+                                         │  Failed to get response from the AI model; retried 5 times (total retry wait time: 5.00 seconds) Last
+ ✓ Review auth middleware            12m │  error: 429 FIXTURE overloaded: HTTP 429
+   claude · oikos-web                    │
+                                         │  transcript ↓ (2 items)
+ ✗ rate limit probe                   1h │
+   copilot · scratch                     │  preamble · 2 items · p shows
+                                         │
+                                         │  you    Reply with the word FAILURE.
+                                         │
+                                         │  ✗ rate_limit, shown above
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+                                         │
+ 1 older                                 │
+
+ ↑↓ jobs   ⇥ focus   e expand   f follow   / filter   ? keys
+`;
+
+exports[`failed job at 80 columns 1`] = `
+ agent-companion  2 running · 2 done in 24h
+
+  Codex › Release checks · fixture-mock
+
+▎ ✗ failed after 0:10 · rate_limit
+▎ git: unavailable (not_a_git_repository)
+
+▎ Failed to get response from the AI model; retried 5 times (total retry wait
+▎ time: 5.00 seconds) Last error: 429 FIXTURE overloaded: HTTP 429
+
+▎ transcript ↓ (2 items)
+
+  preamble · 2 items · p shows
+
+  you    Reply with the word FAILURE.
+
+  ✗ rate_limit, shown above
+
+ ↑↓ items   esc back   e expand   f follow   ? keys
+`;
+
+exports[`finished job at 150 columns 1`] = `
+ agent-companion  2 running · 2 done in 24h
+
+ ● Restore spec triage              0:41 │  Claude Code › Auth hardening · opus-5.5 xhigh · 412k tokens · auth-guard
+   opencode · hermes                     │
+                                         │  ✓ done in 6:02  3 commands, 1 failed · 2 files changed
+ ● Step 1b-2: digest on demand      4:12 │  git, any writer: src/auth.ts +18 −6 · src/auth.test.ts +40
+   codex · agent-companion               │
+                                         │  The middleware skipped the CSRF check on GET routes that mutate
+ ✓ Review auth middleware            12m │  state. I added a guard and tests; one unrelated date-helper test
+   claude · oikos-web                    │  still fails.
+                                         │
+ ✗ rate limit probe                   1h │  Changes:
+   copilot · scratch                     │  - src/auth.ts: reject mutating GET routes without a token                                               +3
+                                         │
+                                         │  transcript ↓ (6 items)
+                                         │
+                                         │  you    Review the auth middleware for CSRF gaps and fix what you find.
+                                         │  think  Reading the middleware first.
+                                         │
+                                         │  $ rg -n csrf src                                                                                        ok
+                                         │    src/auth.ts:12: csrf
+                                         │
+                                         │  ✎ src/auth.ts  updated
+ 1 older                                 │
+
+ ↑↓ jobs   ⇥ focus   e expand   f follow   / filter   ? keys
+`;
+
+exports[`finished job at 80 columns 1`] = `
+ agent-companion  2 running · 2 done in 24h
+
+  Claude Code › Auth hardening · opus-5.5 xhigh · 412k tokens · auth-guard
+
+▎ ✓ done in 6:02  3 commands, 1 failed · 2 files changed
+▎ git, any writer: src/auth.ts +18 −6 · src/auth.test.ts +40
+
+▎ The middleware skipped the CSRF check on GET routes that mutate
+▎ state. I added a guard and tests; one unrelated date-helper test
+▎ still fails.
+
+▎ Changes:
+▎ - src/auth.ts: reject mutating GET routes without a token                   +3
+
+▎ transcript ↓ (6 items)
+
+  you    Review the auth middleware for CSRF gaps and fix what you find.
+  think  Reading the middleware first.
+
+  $ rg -n csrf src                                                            ok
+    src/auth.ts:12: csrf
+
+  ✎ src/auth.ts  updated
+
+
+ ↑↓ items   esc back   e expand   f follow   ? keys
+`;
+
+exports[`job list at 80 columns 1`] = `
+ agent-companion  2 running · 2 done in 24h
+
+ ● Restore spec triage                                                     0:41
+   opencode · hermes
+
+ ● Step 1b-2: digest on demand                                             4:12
+   codex · agent-companion
+
+ ✓ Review auth middleware                                                   12m
+   claude · oikos-web
+
+ ✗ rate limit probe                                                          1h
+   copilot · scratch
+
+
+
+
+
+
+
+
+
+
+ 1 older
+
+ ↑↓ jobs   ⏎ open   / filter   o older   ? keys
+`;
+
+exports[`running job at 150 columns 1`] = `
+ agent-companion  2 running · 2 done in 24h
+
+ ● Restore spec triage              0:41 │  Claude Code › Live view plan · gpt-6-astra high · main
+   opencode · hermes                     │
+                                         │  $ rg -n "digest" bridge-server lib                                                                      ok
+ ● Step 1b-2: digest on demand      4:12 │    lib/file-0.mjs:1  const DIGEST_0 = …
+   codex · agent-companion               │    lib/file-1.mjs:2  const DIGEST_1 = …
+                                         │    +19 lines
+ ✓ Review auth middleware            12m │    lib/file-21.mjs:22  const DIGEST_21 = …
+   claude · oikos-web                    │    lib/file-22.mjs:23  const DIGEST_22 = …
+                                         │
+ ✗ rate limit probe                   1h │  ✎ lib/digest.mjs  added
+   copilot · scratch                     │  ✎ bridge-server/server.mjs  updated
+                                         │
+                                         │  $ node --test lib/digest.test.mjs                                                                   exit 1
+                                         │    ✖ on-demand digest renders the running native turn
+                                         │      at frame 0
+                                         │    +7 lines
+                                         │      at frame 8
+                                         │    tests 1 failed
+                                         │
+                                         │  One test fails on the running case; fixing the renderer now.
+                                         │
+ 1 older                                 │  ● running $ node --test lib/digest.test.mjs
+
+ ↑↓ jobs   ⇥ focus   e expand   f follow   / filter   ? keys
+`;
+
+exports[`running job at 80 columns 1`] = `
+ agent-companion  2 running · 2 done in 24h
+
+  Claude Code › Live view plan · gpt-6-astra high · main
+
+  $ rg -n "digest" bridge-server lib                                          ok
+    lib/file-0.mjs:1  const DIGEST_0 = …
+    lib/file-1.mjs:2  const DIGEST_1 = …
+    +19 lines
+    lib/file-21.mjs:22  const DIGEST_21 = …
+    lib/file-22.mjs:23  const DIGEST_22 = …
+
+  ✎ lib/digest.mjs  added
+  ✎ bridge-server/server.mjs  updated
+
+  $ node --test lib/digest.test.mjs                                       exit 1
+    ✖ on-demand digest renders the running native turn
+      at frame 0
+    +7 lines
+      at frame 8
+    tests 1 failed
+
+▎ One test fails on the running case; fixing the renderer now.
+
+  ● running $ node --test lib/digest.test.mjs
+
+ ↑↓ items   esc back   e expand   f follow   ? keys
+`;
