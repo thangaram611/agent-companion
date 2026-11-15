@@ -43,8 +43,8 @@ function pendingState({ state, mode }) {
   if (state === 'accepted') return mode === 'steer' ? ['sending', ''] : ['interrupting', 'runs once this turn stops'];
   return [clean(state), ''];
 }
-// Typed or pasted text: a carriage return inside it is a new line; other control keys are not text.
-const draftText = text => text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+// Typed or pasted text: a carriage return inside it is a new line; escapes and control characters go, as in native text.
+const draftText = text => clean(text.replace(/\r\n?/g, '\n'));
 // Claude records a message that joined the running turn as a queued_command
 // attachment (measured on 2.1.325): a message, not preamble.
 const joinedMessages = new WeakMap();

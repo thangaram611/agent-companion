@@ -111,11 +111,11 @@ test('⏎ writes one private request per the inbox contract; its outcome is read
   enter(model);
   assert.throws(() => box.requests(), { code: 'ENOENT' }, 'an empty or blank box sends nothing');
   ctrl(model, 'c');
-  model.paste('Keep the fake server;\r\nadd an idle event.');
+  model.paste('Keep the fake server;\x1b[31m\x9b\x85\u202e\r\nadd an idle event.');
   enter(model);
   const { name, request, mode } = box.take();
   assert.deepEqual(box.requests(), [name], 'one file, no temporary left');
-  assert.deepEqual(request, { requestId: name.slice(0, -5), executionId: 'run-1', mode: 'steer', text: 'Keep the fake server;\nadd an idle event.', at: f.NOW });
+  assert.deepEqual(request, { requestId: name.slice(0, -5), executionId: 'run-1', mode: 'steer', text: 'Keep the fake server;\nadd an idle event.', at: f.NOW }, 'escape sequences, C1 controls and bidi overrides are not text');
   assert.equal(mode, 0o600);
   assert.equal(statSync(box.dir).mode & 0o777, 0o700);
   assert.match(screen(model), /◌ you · waiting for the bridge  Keep the fake server; add an idle event\.\n +╭/);
