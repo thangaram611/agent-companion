@@ -178,6 +178,7 @@ and one-shot legacy migration belong to `lib/state.mjs`.
 | `docs/MVP_TRACKER.md` | What is done, what the current limitations are, what is next. |
 | `docs/RELEASE_READINESS.md` | Release gates and source-backed vendor compatibility notes. |
 | `docs/DIRECTION_ASSESSMENT.md` | Active redesign direction, review evidence and upgrade checks. |
+| `docs/LIVE_VIEW_PLAN.md` | Live transcript view and interventions: agreed decisions, measured native-transcript evidence, steps with checks. |
 | [Claude host report](probes/host-qualification/claude/REPORT-2026-11-05.md) | Claude 2.1.318 owner, stop/loss, cwd and per-call-wall measurements. |
 | [Codex host report](probes/host-qualification/codex/REPORT-2026-11-05.md) | Codex 0.166.0 equivalent measurements; desktop and operator-only gaps remain unqualified. |
 | [Claude companion report](probes/host-qualification/claude-companion/REPORT-2026-11-09.md) | Claude Code 2.1.319 as a companion: protocol measurements, live probe and installed runs on both hosts. |

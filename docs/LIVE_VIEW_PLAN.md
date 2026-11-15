@@ -1,0 +1,209 @@
+# Live view and interventions: plan
+
+Status: agreed 2026-11-15. Step 0 landed as 4e536d0; Steps 1–4 are not started.
+
+## Goal
+
+While a companion works, the person watching the host can read its transcript
+live and intervene. The calling agent learns of every intervention at once and
+receives a curated handover at the end, not the whole transcript.
+
+## Decisions
+
+Agreed with the owner on 2026-11-15:
+
+| Topic | Decision |
+| --- | --- |
+| Source of truth | Each companion's own transcript. The bridge stores no second copy. |
+| In-flight work | The execution record's existing `progress` (partial text, active command, activity), overwritten on each update. |
+| Detail | Everything the companion records. Preamble (system/developer text, instruction files) collapsed by default. |
+| Handover to the caller | Final answer plus a work summary: transcript-reported edits and commands, and a labelled git diff-stat of the worktree between turn start and end. The full transcript is readable on demand. Replaces today's digest. |
+| Interventions | One controller feature with two senders: the caller through `agent_reply` modes and the user through an inbox. Modes: steer, queue, interrupt & send, cancel. Each companion's own default applies. |
+| Caller awareness | A user intervention makes the caller's pending `agent_wait` return early with what happened. |
+| After the caller returns | The view is read-only. |
+| Native attach | Not built. |
+| UI | Shared Node core first, then a terminal UI in Ink 8, then a Claude Code pane and an MCP progress line. The web page is deferred for its own design discussion. |
+| Runtime | Node 26 (current LTS) required; use its features. |
+
+## Evidence
+
+Measured in isolated homes unless noted. Spike artefacts are under `/tmp`
+(`claude-queue-spike`, `codex-attach-spike`, `oc-attach-spike`,
+`copilot-events-spike`, `agy-measure` with its decoder in `agy-measure-run`).
+
+### Native transcripts
+
+| Companion | Location | Format | Live? | Id mapping | Version fingerprint |
+| --- | --- | --- | --- | --- | --- |
+| Codex 0.169 | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<threadId>.jsonl` | JSONL; `response_item`, `event_msg` (`item_completed` with `CommandExecution`, `AgentMessage`, web search), `token_count` | Yes: 27→45 lines in 25 s during a turn (observed read-only on a live bridge run). Completed items only; no deltas. | `Thread.path` in app-server responses, marked `[UNSTABLE]`; else glob on thread id | Record types; `session_meta` |
+| Claude Code 2.1.325 | `$CLAUDE_CONFIG_DIR/projects/<dir>/<sessionId>.jsonl` | JSONL; `user`, `assistant`, `system`, `attachment` and bookkeeping records | Yes: an interactive session's file grew between tool calls (observed read-only); a `-p` companion transcript is checked in Step 1 | The adapter already scans for it (`claudeTranscriptExists`) | Message records carry `version` (e.g. `2.1.325`); bookkeeping records do not |
+| Copilot 1.0.112 | `$COPILOT_HOME/session-state/<sessionId>/events.jsonl` | JSONL; `user.message`, `assistant.turn_start/end`, `assistant.message` (whole, no deltas), `tool.execution_start` (with the command) and `tool.execution_complete` (exit code, output), `session.usage_record` | Yes, at event boundaries: a running tool is on disk from its start; text lands when the message completes | Directory name equals the ACP session id (measured) | `session.start` carries `version: 1`, `producer`, `copilotVersion` |
+| OpenCode 2.3.0 | `opencode.db` (`OPENCODE_DB` or XDG data) | SQLite; `session_v2`, `session_message` rows ordered by `seq`, JSON `data`; types `user`, `assistant` (with `content`), `idle`, `model-switched`, `agent-switched` | Rows carry `time_created`/`time_updated`; in-place streaming updates not yet measured | Session id | Latest `migration.id` |
+| Antigravity 1.1.1 | `$GEMINI_HOME/antigravity-acp/conversations/<sessionId>.db` | SQLite (WAL); `steps(idx, step_type, status, step_format, step_payload…)`; payloads are protobuf with no published schema | Yes, per step: a running command is on disk with status 2 and flips to 3 when done (measured on a live bridge job, the operator's real home) | File name equals the bridge's history id, the ACP session id (measured) | `step_format`, and the field numbers below |
+
+Antigravity is the weak link: its steps are undocumented protobuf. A schema-less
+wire decode read everything needed from a live job: step type 14 is user input
+(text at field 19.2); 15 is the model's reply (text at 20.1, model id at 5.24.8,
+tool calls at 20.7 with id, name and JSON arguments); 21 is a command (command
+line at 28.23, output at 28.21, cwd at 28.2). Status 2 is running and 3 is done.
+These field numbers are the reader's fixture; any unknown step type or missing
+field yields "format unrecognized", never a guess.
+
+### Interventions
+
+| Companion | Own default mid-turn | Steer | Interrupt & send | Cancel |
+| --- | --- | --- | --- | --- |
+| Codex | Steer: `Enter` submits immediately, `Tab` queues (`codex-rs/tui/src/bottom_pane/chat_composer.rs` at rust-v0.169.0; `steer` feature graduated) | `turn/steer`; spike: mid-turn input restarted generation inside the same turn | `turn/interrupt`, then `turn/start` on the same thread | Existing |
+| Claude Code | Queue. A message written during a tool call joined the same turn after the tool finished, as "The user sent a new message while you were working"; written during final text it ran as the next turn | Effectively, at tool boundaries | `interrupt` with `send_now: true` started a new turn on the same session | Existing; `cancel_async_message` drops a queued message |
+| OpenCode | Prompts are acknowledged `delivery: "steer"` through `session.inbox.*`; mid-turn behaviour not measured | Not measured | `/interrupt`, then prompt | Existing |
+| Antigravity | ACP runs one prompt at a time: queue | No | `session/cancel`, then load and prompt | Existing |
+| Copilot | Follow-up is refused (`FOLLOWUP_UNSUPPORTED`) | No | No | Existing |
+
+Only Claude's interrupt & send was measured end to end; the Codex, OpenCode and
+Antigravity sequences are compositions of protocol calls the adapters already
+use. The Claude measurement ran with `--bare` for isolation, which the adapter
+never uses. One process ran several turns in the same session. Trap: the controller
+treats Claude's `result` as terminal and closes the tree, so a message queued
+during the final text would be lost unless the controller delivers it.
+
+### Rejected options
+
+- **Native attach.** Codex: a second client (`codex --remote … resume <thread>`)
+  rendered the turn live, could steer, and interrupted it with Esc or Ctrl+C; the
+  bridge would have to move app-server from stdio to a private Unix socket
+  speaking WebSocket (measured: `101 Switching Protocols` on `/rpc`). OpenCode:
+  `opencode --server <url> --session <id>` with `OPENCODE_PASSWORD` attached and
+  steered; its input was visible to the bridge as `session.inbox.enqueued`.
+  Claude only attaches `--bg` sessions. Copilot and Antigravity have none.
+  Neither working option has a read-only mode.
+- **A bridge-written event log.** It would duplicate the transcript.
+- **MCP progress as the main view.** It is one line. Claude shows the message in
+  its spinner (`RELIABILITY_REMEDIATION.md` §0 measurement); Codex 0.169 only
+  writes it to tracing logs (`rmcp-client/src/logging_client_handler.rs`).
+
+### UI platform
+
+- Claude Code mods (2.1.325, "EARLY ACCESS: may change without notice"): a probe
+  mod redrew a band from a file appended by another process within a second,
+  with no model call. `hooks/hooks.json` can carry the plugin's command hooks
+  and a `modules` entry together (`claude plugin validate` passed on a copy).
+  Not measured: redraw while the main loop is busy.
+- Ink 8.0.0 (npm, 2026-10-03): Node >=22, React >=19.3, ESM.
+- OpenTUI 0.9.0 (npm, 2026-11-14): Bun or Node >=26.4 with `--experimental-ffi`;
+  Node CI covers Linux x64 only. Not chosen.
+- Node 26.13.1 is the LTS line "Lithium" (nodejs.org/dist/index.json).
+  `node:sqlite` is a release candidate there (Stability 1.2 since v25.7.0).
+
+## Non-goals
+
+Native attach, a web page (until its own design), Windows, and any change to
+what the companion is asked: task text stays verbatim.
+
+## Steps
+
+Each step lands and is tested alone. Before each step, measure its open
+unknowns in isolated homes; a failed measurement changes the step, not the
+evidence.
+
+### Step 0: Node 26 floor
+
+Raise `engines.node` to `>=26` in both `package.json` files, make doctor and the
+dependency installer refuse older Node with the upgrade command, and run the
+test suite and CI on Node 26.
+
+Check: the suite passes on Node 26; doctor reports a clear refusal on Node 24.
+
+### Step 1: Transcript core and handover
+
+- One module locates and reads each companion's native transcript and yields a
+  normalized, in-memory item list: user, assistant, reasoning, tool call, tool
+  result, edit, usage, status. It stores nothing.
+- Adapters record where their transcript lives as a native reference, such as
+  Codex's `Thread.path`.
+- Each reader carries a format fingerprint. An unknown fingerprint or record
+  type yields "format unrecognized for <companion> <version>", never a guess.
+- At turn start the controller records a worktree snapshot with a throwaway
+  index (`GIT_INDEX_FILE=<tmp> git add -A && git write-tree`), leaving the user's
+  index untouched. At terminal it builds the handover summary: final answer,
+  edits and commands with exit codes from the transcript, errors,
+  interventions, usage, and the labelled git diff-stat.
+- `agent-digest://<id>` renders from the transcript on demand. The controller
+  stops writing `runtime/digests/`.
+
+Measure first: Antigravity's other step types (file edits, reads, errors),
+OpenCode in-place updates while streaming, the Claude `-p` transcript's record
+types and live writes, Codex `Thread.path` on `thread/resume` as well as
+`thread/start`. (Copilot's and Antigravity's location, id mapping and
+incremental writes are measured above.)
+
+Check: per-companion fixtures captured from isolated runs; a drift test fails on
+an unknown record type; summary unit tests; the git snapshot leaves `git status`
+and the index unchanged; the full suite passes.
+
+### Step 2: Read-only terminal UI
+
+- `agent-companion ui` lists jobs from both hosts' state directories (companion,
+  model, effort, state, elapsed, tokens, owner) and follows a selected job's
+  transcript live, with the in-flight line at the bottom.
+- JSONL is followed by offset reads on change; SQLite by polling `seq` or
+  `time_updated`.
+- Ink 8 with alternate screen, indexed wrapped rows and visible-row rendering.
+- Dependencies install through `hooks/install-deps.sh` into plugin data on both
+  hosts; nothing generated or symlinked inside the Codex bundle.
+
+Measure first: how a user launches it on each host (a plugin `bin`, a slash
+command that prints the command, or `node <plugin>/scripts/ui.mjs`).
+
+Check: a 10,000-line append, scroll, resize and collapse test with no frame over
+an agreed budget (set from a first measurement); headless snapshot tests; a
+manual read-only run against live jobs. If the gate fails, switch to Ratatui
+before Step 3.
+
+### Step 3: Interventions
+
+- Controller: `intervene({ executionId, from: 'caller' | 'user', mode, text })`
+  under the conversation lock, recorded on the execution.
+- The user's path is an inbox file (0600) the controller reads on its tick, like
+  stop markers. A stop marker for the owner (the caller has returned) makes the
+  inbox refuse with a visible reason.
+- Adapters advertise per-mode support. Queue falls back to delivering a
+  follow-up on the same native history after the turn ends; interrupt & send
+  interrupts, then follows up with only the new text.
+- Claude: hold a message queued during the final text and deliver it as the next
+  turn, never lose it at `result`.
+- `agent_wait` returns early with `user_intervened` (mode, text, time); the
+  subagent relays it and waits again.
+- `agent_reply` gains `mode`, defaulting to the companion's own. Status reports
+  per-mode availability instead of `reply_available`. Both role templates and
+  the host-parity test change.
+- The UI gains cancel and a message box with a mode choice.
+
+Measure first: Claude's queue on the adapter's real startup path (no `--bare`);
+OpenCode mid-turn steer; Codex steer through the bridge's own connection.
+
+Check: controller tests for every mode × capability, including refusal after
+the caller returns; isolated live probes for Claude, Codex and OpenCode; template
+and host-parity tests; the full suite passes.
+
+### Step 4: Claude pane and progress line
+
+- A pane per running job, tied to its Agent row through `agent.spawn`'s
+  `agentId`, which is the execution's owner.
+- The mod has no Node and `$.fs.read` stops at 4 MiB, so it streams the core
+  reader through `$.process.spawn`. Controls write the same inbox.
+- The bridge sends MCP progress with the in-flight line during `agent_wait`.
+
+Measure first: whether Claude shows progress for a subagent's tool call, and
+whether the pane redraws while the main loop is busy.
+
+Check: `claude plugin validate`; mod tests under `claude plugin test`; a manual
+live run.
+
+## Risks
+
+- The native formats are private. Expect reader breakage on companion upgrades;
+  the fingerprints make it explicit, and fixtures make the fix quick.
+- The mod API may change without notice; failures are isolated to the pane.
+- Changing `agent_reply` changes the lead's contract on both hosts.
+- The git snapshot writes loose objects into the repository's object store;
+  `git gc` reclaims them.
