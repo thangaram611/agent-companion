@@ -6,8 +6,8 @@ import { companionReady } from '../../lib/target-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 import { usageFromOpenCodeInfo, sumUsage } from '../../lib/usage.mjs';
 
-const capabilities = Object.freeze({ followUp: true, steer: false, modelSelection: true, loadsHistory: true,
-  interventions: Object.freeze({ default: null, steer: false, queue: false, interrupt: false }) });
+const capabilities = Object.freeze({ followUp: true, steer: true, modelSelection: true, loadsHistory: true,
+  interventions: Object.freeze({ default: 'steer', steer: true, queue: 'bridge', interrupt: true }) });
 const failure = (code, cause) => Object.assign(new Error(code, { cause }), { name: code, code });
 const outcomes = { succeeded: 'completed', interrupted: 'interrupted', failed: 'failed' };
 
@@ -31,7 +31,6 @@ class OpenCodeAdapter {
     this.target = target;
     this.channel = new AbortController();
     this.http = new Agent({ keepAlive: true });
-    this.interrupted = new Promise(resolve => { this.resolveInterrupt = resolve; });
   }
 
   async start({ cwd, env = this.env, model, supervisor }) {
@@ -177,8 +176,15 @@ class OpenCodeAdapter {
 
   async deliver({ text }) {
     try {
-      if (this.delivered) throw failure('AlreadyDelivered');
+      if (this.delivered && !this.terminal) throw failure('AlreadyDelivered');
       this.delivered = true;
+      // An interrupted turn is published on its acknowledgement; let its own
+      // events finish before the next turn replaces the accumulator and stream.
+      await this.native?.catch(() => {});
+      this.terminal = null; this.observation = null; this.native = null; this.steering = null;
+      this.interrupted = new Promise(resolve => { this.resolveInterrupt = resolve; });
+      this.nativeTurnId = null; this.messageId = null; this.steerIds = new Set();
+      this.progress = { lastActivityAt: null, activeCommand: null, retry: null, partialText: '' };
       this.acc = createTurnAccumulator(this.sessionId);
       // Subscribe first; fast terminal events can precede the admission reply.
       this.stream = await this._request('/event', { stream: true });
@@ -189,14 +195,31 @@ class OpenCodeAdapter {
     } catch (cause) { throw failure('DeliveryUnknown', cause); }
   }
 
-  observe({ onProgress }) {
-    this.observation ??= Promise.race([this._observe(onProgress), this.interrupted]);
+  observe({ onProgress, onInput } = {}) {
+    if (onProgress) this.onProgress = onProgress;
+    if (onInput) this.onInput = onInput;
+    this.native ??= this._observe();
+    this.observation ??= Promise.race([this.native, this.interrupted]).then(terminal => (this.terminal = terminal));
     return this.observation;
   }
 
-  async _observe(onProgress) {
+  async steer({ text, id }) {
+    if (!this.nativeTurnId || this.acc.terminal || this.terminal) throw failure('DeliveryUnknown');
+    this.steering = this._request(this.sessionPath + '/prompt', { method: 'POST', body: { text } }).then(response => {
+      const ack = response.data?.data;
+      if (!ack?.id || ack.sessionID !== this.sessionId || ack.delivery !== 'steer') throw failure('DeliveryUnknown');
+      this.steerIds.add(ack.id);
+      // 2.3.0 stores the admission id as a separate user row when consumed.
+      // The transcript reader uses that row's id for all following items.
+      this.onInput?.({ id, state: 'joined', nativeTurnId: ack.id });
+      return { accepted: true, confirmed: true, nativeTurnId: ack.id };
+    });
+    return this.steering;
+  }
+
+  async _observe() {
     let pending = '';
-    const progress = { activeCommand: null, retry: null };
+    const progress = this.progress;
     try {
       this.stream.setEncoding('utf8');
       for await (const chunk of this.stream) {
@@ -221,7 +244,8 @@ class OpenCodeAdapter {
             if (Number.isInteger(shell?.pid) && shell.pid > 1) await this.supervisor.recordDescendant(shell.pid);
           }
           if (['session.tool.success', 'session.tool.failed', 'session.shell.ended'].includes(event.type)) progress.activeCommand = null;
-          onProgress?.({ ...progress, lastActivityAt: this.clock.now(), partialText: this.acc.snapshot().message, effectiveEffort: this.effectiveEffort });
+          Object.assign(progress, { lastActivityAt: this.clock.now(), partialText: this.acc.snapshot().message, effectiveEffort: this.effectiveEffort });
+          this.onProgress?.({ ...progress });
           if (this.acc.terminal || event.type === 'session.idle') return await this._terminal();
         }
       }
@@ -233,6 +257,9 @@ class OpenCodeAdapter {
   }
 
   async _terminal() {
+    // A fast final event can beat a steer's HTTP receipt. Learn all admitted
+    // user ids before walking back through the store to this turn's first one.
+    await this.steering?.catch(() => {});
     // Same projection/paging as the legacy transcript reader, but anchored to
     // THIS admission id. Neither session.outcome nor an older idle is evidence.
     const messages = [];
@@ -243,8 +270,9 @@ class OpenCodeAdapter {
       if (!Array.isArray(page?.data)) throw failure('ProviderLost');
       for (const message of page.data) {
         if (message.type === 'user') {
-          if (message.id !== this.nativeTurnId) throw failure('ProviderLost');
-          found = true; break;
+          if (message.id === this.nativeTurnId) { found = true; break; }
+          if (!this.steerIds.has(message.id)) throw failure('ProviderLost');
+          continue;
         }
         messages.push(message);
       }
@@ -263,7 +291,7 @@ class OpenCodeAdapter {
     for (const assistant of assistants.toReversed()) this._model(assistant.model);
     const texts = assistants.map(m => (m.content || []).filter(p => p.type === 'text').map(p => p.text).join(''));
     return {
-      outcome, effectiveEffort: this.effectiveEffort, text: (outcome === 'failed' ? texts.find(Boolean) : texts[0]) || '',
+      outcome, nativeTurnId: this.nativeTurnId, effectiveEffort: this.effectiveEffort, text: (outcome === 'failed' ? texts.find(Boolean) : texts[0]) || '',
       error: outcome === 'failed' ? [idle, ...assistants].map(m => m?.error?.message).find(m => typeof m === 'string' && m.trim()) : undefined,
       usage: sumUsage(assistants.map(m => usageFromOpenCodeInfo({ ...m, modelID: m.model?.id }, 'opencode-server'))),
       nativeRefs: { sessionId: this.sessionId, messageId: assistants[0]?.id || this.messageId || this.nativeTurnId },
@@ -271,16 +299,18 @@ class OpenCodeAdapter {
     };
   }
 
-  async interrupt() {
-    if (!this.sessionId) return;
+  // `drain`: interrupt & send waits for the turn's own terminal (its stored usage,
+  // no stale events); stop publishes the acknowledgement at once.
+  async interrupt({ drain = false } = {}) {
+    if (!this.sessionId || this.terminal) return;
     if (this.channel.signal.aborted) throw failure('ProviderLost');
     const ack = (await this._request(this.sessionPath + '/interrupt', { method: 'POST' })).data;
     if (typeof ack?.interrupted !== 'boolean') throw failure('InterruptUnacknowledged');
-    if (ack.interrupted) {
+    if (ack.interrupted && !drain) {
       // Native acknowledgement is also an abort outcome. Publish it before
       // close can tear down a pending SSE/transcript read during owner stop.
       const snapshot = this.acc?.snapshot();
-      this.resolveInterrupt({ outcome: 'interrupted', text: snapshot?.message || '', usage: snapshot?.usage,
+      this.resolveInterrupt?.({ outcome: 'interrupted', nativeTurnId: this.nativeTurnId, text: snapshot?.message || '', usage: snapshot?.usage,
         nativeRefs: { sessionId: this.sessionId, messageId: this.messageId || this.nativeTurnId }, cause: 'provider_error' });
     }
   }

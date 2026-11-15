@@ -1,6 +1,6 @@
 // Preloaded by the adapter suite before the shared fake ACP agent. Faults
 // alter its wire output; the session/permission implementation stays shared.
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
 
@@ -54,5 +54,14 @@ process.stdout.write = (chunk, ...args) => {
   }
   if (update && env.ACP_FIXTURE_RETRY === '1') frame.params.update.retry = { attempt: 2, cause: 'reconnect' };
   if (frame.result?.sessionId && env.ACP_FIXTURE_MODEL) frame.result.models = { currentModelId: env.ACP_FIXTURE_MODEL };
+  if (terminal && env.ACP_FIXTURE_GATE) {
+    // Hold the native prompt response until the test releases this request.
+    const timer = setInterval(() => {
+      if (!existsSync(`${env.ACP_FIXTURE_GATE}.${frame.id}`)) return;
+      clearInterval(timer);
+      write(JSON.stringify(frame) + '\n', ...args);
+    }, 5);
+    return true;
+  }
   return write(JSON.stringify(frame) + '\n', ...args);
 };

@@ -120,7 +120,7 @@ export class AcpAdapter {
     this.log = log;
     const loadsHistory = descriptor.acp.loadSession === true;
     this.capabilities = { followUp: loadsHistory, steer: false, modelSelection: descriptor.capabilities.modelSelection === true, loadsHistory,
-      interventions: Object.freeze({ default: null, steer: false, queue: false, interrupt: false }) };
+      interventions: descriptor.acp.interventions ?? Object.freeze({ default: null, steer: false, queue: false, interrupt: false }) };
   }
   async start({ cwd, env = this.env, model, effort, supervisor }) {
     this.cwd = cwd;
@@ -178,9 +178,11 @@ export class AcpAdapter {
     }
   }
   deliver({ text }) {
-    // One execution, one prompt. Even a failed/ambiguous send is never retried.
-    if (this.turn) return Promise.reject(failure('DeliveryUnknown'));
+    // Descriptors opt into another prompt after the previous response, on this
+    // same live connection. The controller decides whether to continue.
+    if (this.turn && (!this.turn.finished || !this.capabilities.interventions.queue)) return Promise.reject(failure('DeliveryUnknown'));
     const conn = this.connection;
+    this.progress = null;
     const accepted = deferred();
     const events = { messageChunks: [], thoughtChunks: [], toolCalls: [], plans: [] };
     const turn = this.turn = { accepted, events, sinceMs: Date.now(), finished: false };

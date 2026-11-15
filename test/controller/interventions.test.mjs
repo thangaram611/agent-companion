@@ -96,6 +96,19 @@ test('bridge queue stays held until a successful boundary; answers and ids are o
   assert.equal(result.text, "Task\n\nfirst answer\n\nUser's message (queued): new text\n\nsecond answer");
 });
 
+test('bridge turns without native ids retain separate answers', async t => {
+  const h = setup(t), deliver = h.adapter.deliver.bind(h.adapter);
+  h.adapter.deliver = async args => { await deliver(args); return { acknowledged: true, nativeTurnId: null }; };
+  const { executionId } = await h.send();
+  await h.input(executionId, 'queue');
+  await h.finish('completed', 'first');
+  await h.finish('completed', 'second');
+  const result = await h.result(executionId);
+  assert.deepEqual(result.turns.map(t => [t.nativeTurnId, t.text]), [[null, 'first'], [null, 'second']]);
+  assert.deepEqual(result.nativeTurnIds, []);
+  assert.match(result.text, /Task\n\nfirst/); assert.match(result.text, /queued.*\n\nsecond/);
+});
+
 test('steer joins its turn, preserves the legacy reply entry and caller lease handling', async t => {
   const h = setup(t), { executionId } = await h.send();
   await h.clock.advance(2000);

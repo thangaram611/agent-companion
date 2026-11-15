@@ -257,7 +257,8 @@ test('provider factories use cached readiness without spawning and expose qualif
     assert.equal(provider.enabled, true); assert.equal(provider.ready, loadsHistory);
     assert.equal(provider.modelAllowed('test-model'), isModelAllowedFor(id, 'test-model'));
     assert.deepEqual(provider.create().capabilities, { followUp: loadsHistory, steer: false, modelSelection: true, loadsHistory,
-      interventions: { default: null, steer: false, queue: false, interrupt: false } });
+      interventions: id === 'antigravity' ? { default: 'queue', steer: false, queue: 'bridge', interrupt: true }
+        : { default: null, steer: false, queue: false, interrupt: false } });
   }
   assert.throws(() => acpProvider('codex'), /ACP/);
 });
@@ -371,4 +372,89 @@ test('ACP acknowledges delivery without inventing a native turn id', async t => 
   const result = await h.finish(sent);
   assert.equal(result.nativeRefs.promptRequestId, h.frames('session/prompt')[0].id);
   assert.equal(Object.hasOwn(result.nativeRefs, 'promptId'), false);
+});
+
+const input = (h, sent, mode, text) => h.controller.intervene({ executionId: sent.executionId, from: 'user', mode, text });
+const releasePrompt = (h, index) => writeFileSync(`${h.childEnv.ACP_FIXTURE_GATE}.${h.frames('session/prompt')[index].id}`, '');
+
+test('Antigravity queues on the live process and session, keeping both answers without invented turn ids', async t => {
+  const h = setup(t, { descriptor: modeled() });
+  h.childEnv.ACP_FIXTURE_GATE = join(h.dir, 'release');
+  const sent = await h.send();
+  await until(() => h.progress.some(p => p.partialText === 'ready'));
+  const queued = await input(h, sent, 'queue', 'CONTINUATION\nonly this text');
+  assert.equal(queued.ok, true);
+  assert.equal(h.frames('session/prompt').length, 1);
+  const progressOffset = h.progress.length;
+  releasePrompt(h, 0);
+  await until(() => h.frames('session/prompt').length === 2);
+  await until(() => h.progress.some(p => p.partialText === 'continued'));
+  assert.equal(h.progress[progressOffset].partialText, '');
+  assert.equal(h.progress[progressOffset].activeCommand, null);
+  assert.equal(h.progress[progressOffset].retry, null);
+  releasePrompt(h, 1);
+  const result = await h.finish(sent);
+  assert.deepEqual(result.turns.map(t => [t.nativeTurnId, t.text]), [[null, 'ready'], [null, 'continued']]);
+  assert.deepEqual(result.turns.map(t => t.messages), [[sent.executionId], [queued.id]]);
+  assert.deepEqual(result.nativeTurnIds, []); assert.equal(result.usage, null);
+  assert.equal(result.interventions[0].state, 'answered');
+  assert.deepEqual(h.frames('session/prompt').map(f => f.params), [
+    { sessionId: 'fake-sess-1', prompt: [{ type: 'text', text: 'exact text\n  with spacing' }] },
+    { sessionId: 'fake-sess-1', prompt: [{ type: 'text', text: 'CONTINUATION\nonly this text' }] },
+  ]);
+  assert.equal(h.supervisors.length, 1); assert.equal(h.frames('initialize').length, 1);
+  assert.equal(h.frames('session/new').length, 1); assert.equal(h.frames('session/load').length, 0);
+  assert.equal(h.frames('session/set_config_option').length, 1);
+});
+
+test('Antigravity waits for the cancelled prompt response, then sends only new text on the live session', async t => {
+  const h = setup(t, { descriptor: modeled() });
+  h.childEnv.ACP_FIXTURE_GATE = join(h.dir, 'release');
+  const sent = await h.send({ text: 'sleep:60000 original task' });
+  assert.deepEqual(await input(h, sent, 'steer', 'unsupported'), { ok: false, status: 'intervention_unavailable', reason: 'capability' });
+  const replacing = input(h, sent, 'interrupt', 'CONTINUATION\nnew text alone');
+  await until(() => h.frames('session/cancel').length === 1);
+  assert.equal(h.frames('session/prompt').length, 1);
+  releasePrompt(h, 0); await replacing;
+  await until(() => h.frames('session/prompt').length === 2);
+  releasePrompt(h, 1);
+  const result = await h.finish(sent);
+  assert.deepEqual(result.turns.map(t => [t.outcome, t.text]), [['interrupted', 'interrupted before answering'], ['completed', 'continued']]);
+  assert.deepEqual(result.nativeTurnIds, []); assert.equal(result.usage, null);
+  assert.equal(result.interventions[0].state, 'answered');
+  assert.deepEqual(h.frames('session/prompt')[1].params, { sessionId: 'fake-sess-1', prompt: [{ type: 'text', text: 'CONTINUATION\nnew text alone' }] });
+  assert.equal(h.frames('session/load').length, 0); assert.equal(h.frames('session/new').length, 1);
+  assert.equal(h.frames('initialize').length, 1); assert.equal(h.supervisors.length, 1);
+});
+
+test('Copilot refuses every intervention mode without writes, while cancel still works', async t => {
+  const h = setup(t, { descriptor: getTargetById('copilot') });
+  const sent = await h.send({ text: 'sleep:60000' });
+  for (const mode of ['steer', 'queue', 'interrupt']) {
+    assert.deepEqual(await input(h, sent, mode, 'not supported'), { ok: false, status: 'intervention_unavailable', reason: 'capability' });
+  }
+  assert.deepEqual(h.records.readExecution(sent.executionId).interventions, []);
+  assert.equal(h.frames('session/cancel').length, 0); assert.equal(h.frames('session/prompt').length, 1);
+  const result = await h.controller.cancel({ owner: 'child', executionId: sent.executionId });
+  assert.equal(result.outcome, 'interrupted'); assert.equal(h.frames('session/cancel').length, 1);
+  await assert.rejects(h.adapters[0].deliver({ text: 'unqualified follow-up' }), { code: 'DeliveryUnknown' });
+});
+
+test('ACP resets the usage window and collectors for each descriptor-enabled bridge turn', async t => {
+  const descriptor = fakeAcpDescriptor(), usage = descriptor.acp.usage, windows = [];
+  descriptor.acp = { ...descriptor.acp, interventions: getTargetById('antigravity').acp.interventions,
+    usage: args => { windows.push(args.sinceMs); return usage(args); } };
+  const h = setup(t, { descriptor });
+  h.childEnv.ACP_FIXTURE_GATE = join(h.dir, 'release');
+  const sent = await h.send();
+  await input(h, sent, 'queue', 'CONTINUATION');
+  const firstSince = h.adapters[0].turn.sinceMs;
+  releasePrompt(h, 0);
+  await until(() => h.frames('session/prompt').length === 2);
+  const nextSince = h.adapters[0].turn.sinceMs;
+  releasePrompt(h, 1);
+  const result = await h.finish(sent);
+  assert.deepEqual(windows, [firstSince, nextSince]); assert.ok(nextSince > firstSince);
+  assert.deepEqual(result.turns.map(t => [t.text, t.usage.input_tokens]), [['ready', 1234], ['continued', 1234]]);
+  assert.equal(result.usage.input_tokens, 2468); assert.equal(h.supervisors.length, 1);
 });

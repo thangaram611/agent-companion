@@ -79,6 +79,10 @@ if (process.argv[2] === 'tool') {
         { id: 'high', settings: { reasoningEffort: 'high' } },
       ] })) });
     if (path === '/api/model/default') return reply(200, { data: defaults });
+    if (path === '/api/fixture/finish' && mode === 'interventions') {
+      finish(body?.outcome || 'succeeded');
+      return reply(200, {});
+    }
     if (path === '/api/event') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.write(': connected\r\n\r\n');
@@ -116,11 +120,25 @@ if (process.argv[2] === 'tool') {
     if (operation === 'interrupt') {
       if (tool && tool.exitCode === null) { tool.kill(); await once(tool, 'exit'); }
       const interrupted = Boolean(active);
-      if (interrupted) finish('interrupted');
+      if (interrupted && process.env.FAKE_OPENCODE_DEFER_INTERRUPT !== '1') finish('interrupted');
       return reply(200, { interrupted });
     }
     if (operation !== 'prompt') return reply(404, {});
     const user = { id: 'msg_' + randomUUID(), type: 'user', text: body.text };
+    if (active && mode === 'interventions') {
+      // A steer is a new stored user message between steps of the same run.
+      active.assistant.tokens = { input: 7, output: 2 };
+      active.assistant.cost = 0.02;
+      session.messages.push(user);
+      const assistant = { id: 'msg_' + randomUUID(), type: 'assistant', model: { ...defaults },
+        content: [{ type: 'text', text: 'steered: ' + body.text }] };
+      session.messages.push(assistant); active.assistant = assistant; save();
+      emit('session.inbox.delivered', { sessionID: id, inboxID: user.id });
+      emit('session.step.started', { sessionID: id, assistantMessageID: assistant.id, model: assistant.model });
+      if (process.env.FAKE_OPENCODE_FINISH_BEFORE_STEER_ACK === '1') finish('succeeded');
+      return reply(200, { data: { ...user, sessionID: id,
+        delivery: process.env.FAKE_OPENCODE_STEER_DELIVERY || 'steer' } });
+    }
     session.messages.push(user); save();
     const assistant = { id: 'msg_' + randomUUID(), type: 'assistant', model: { ...(session.model || defaults) }, content: [] };
     if (mode === 'execution-mismatch') assistant.model.id = 'different';
@@ -143,6 +161,9 @@ if (process.argv[2] === 'tool') {
       rows.push(toolRow); saveRows();
       emit('session.tool.progress', { sessionID: id, assistantMessageID: assistant.id, id: 'tool', metadata: { shellID: 'sh_fixture' } });
       if (mode === 'retry') emit('session.retry.scheduled', { sessionID: id, assistantMessageID: assistant.id, attempt: 2, at: Date.now(), error: { type: 'rate_limit', message: 'retrying' } });
+    } else if (mode === 'interventions') {
+      emit('session.tool.called', { sessionID: id, assistantMessageID: assistant.id, id: 'held', input: { command: 'active ' + body.text } });
+      emit('session.retry.scheduled', { sessionID: id, assistantMessageID: assistant.id, attempt: 2 });
     } else if (mode !== 'drop-stream' && mode !== 'die') {
       finish(['provider-error', 'quota'].includes(mode) ? 'failed' : 'succeeded');
     }

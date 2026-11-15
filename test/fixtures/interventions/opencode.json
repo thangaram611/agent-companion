@@ -1,0 +1,180 @@
+{
+  "source": "OpenCode 2.3.0, isolated free-model m3 steer capture, 2026-11-15. Store rows checked against capture; paths replaced; reasoning and tool metadata omitted.",
+  "version": "20261030054400_job",
+  "sessionId": "ses_e20a8b478ffetiWm59w9k3G5NG",
+  "first": {
+    "id": "msg_1df574bc4001T4bedkMrds5xFG",
+    "sessionID": "ses_e20a8b478ffetiWm59w9k3G5NG",
+    "time": {
+      "created": 1794748402672
+    },
+    "type": "user",
+    "payload": {
+      "text": "Run this exact command once with your shell tool: '/fixture/node' '/fixture/work/slow.mjs'\nWait for the command to complete. It prints SLOW_DONE after twenty seconds. Then answer with ORIGINAL-A and any additional code requested by a later user message. Do not use any other command or tool."
+    },
+    "delivery": "steer"
+  },
+  "steer": {
+    "id": "msg_1df57560d0010TzUF7sXnI7Kj1",
+    "sessionID": "ses_e20a8b478ffetiWm59w9k3G5NG",
+    "time": {
+      "created": 1794748405262
+    },
+    "type": "user",
+    "payload": {
+      "text": "MIDTURN-B: the additional code is BANANA-42. After the currently running command finishes, include BANANA-42 with ORIGINAL-A in your final answer. Do not run another command."
+    },
+    "delivery": "steer"
+  },
+  "rows": [
+    {
+      "id": "msg_1df574ba20019Q0E5FrSHyigpA",
+      "session_id": "ses_e20a8b478ffetiWm59w9k3G5NG",
+      "type": "model-switched",
+      "seq": 1,
+      "time_created": 1794748402594,
+      "data": {
+        "time": {
+          "created": 1794748402594
+        },
+        "model": {
+          "id": "flint-40b-free",
+          "providerID": "opencode"
+        }
+      }
+    },
+    {
+      "id": "msg_1df574bc4001T4bedkMrds5xFG",
+      "session_id": "ses_e20a8b478ffetiWm59w9k3G5NG",
+      "type": "user",
+      "seq": 5,
+      "time_created": 1794748402676,
+      "data": {
+        "time": {
+          "created": 1794748402676
+        },
+        "text": "Run this exact command once with your shell tool: '/fixture/node' '/fixture/work/slow.mjs'\nWait for the command to complete. It prints SLOW_DONE after twenty seconds. Then answer with ORIGINAL-A and any additional code requested by a later user message. Do not use any other command or tool."
+      }
+    },
+    {
+      "id": "msg_1df574bf7001W0YPvCZLCOuoLu",
+      "session_id": "ses_e20a8b478ffetiWm59w9k3G5NG",
+      "type": "assistant",
+      "seq": 6,
+      "time_created": 1794748402681,
+      "data": {
+        "time": {
+          "created": 1794748402681,
+          "firstToken": 1794748403211,
+          "streamed": 1794748404507,
+          "completed": 1794748425241
+        },
+        "agent": "build",
+        "model": {
+          "id": "flint-40b-free",
+          "providerID": "opencode",
+          "variant": "default"
+        },
+        "content": [
+          {
+            "type": "tool",
+            "id": "call_7c52791fff774cb69733efb6",
+            "name": "shell",
+            "state": {
+              "status": "completed",
+              "input": {
+                "command": "/fixture/node '/fixture/work/slow.mjs'"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "SLOW_DONE\n"
+                }
+              ],
+              "metadata": {
+                "exit": 0
+              }
+            }
+          }
+        ],
+        "finish": "tool-calls",
+        "rawFinish": "tool_calls",
+        "cost": 0,
+        "tokens": {
+          "input": 3437,
+          "output": 107,
+          "reasoning": 0,
+          "cache": {
+            "read": 1792,
+            "write": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "msg_1df57560d0010TzUF7sXnI7Kj1",
+      "session_id": "ses_e20a8b478ffetiWm59w9k3G5NG",
+      "type": "user",
+      "seq": 17,
+      "time_created": 1794748425247,
+      "data": {
+        "time": {
+          "created": 1794748425247
+        },
+        "text": "MIDTURN-B: the additional code is BANANA-42. After the currently running command finishes, include BANANA-42 with ORIGINAL-A in your final answer. Do not run another command."
+      }
+    },
+    {
+      "id": "msg_1df57a425001AAzvfIglRhXhFl",
+      "session_id": "ses_e20a8b478ffetiWm59w9k3G5NG",
+      "type": "assistant",
+      "seq": 18,
+      "time_created": 1794748425257,
+      "data": {
+        "time": {
+          "created": 1794748425257,
+          "firstToken": 1794748425901,
+          "streamed": 1794748428245,
+          "completed": 1794748428247
+        },
+        "agent": "build",
+        "model": {
+          "id": "flint-40b-free",
+          "providerID": "opencode",
+          "variant": "default"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "ORIGINAL-A\n\nBANANA-42"
+          }
+        ],
+        "finish": "stop",
+        "rawFinish": "stop",
+        "cost": 0,
+        "tokens": {
+          "input": 137,
+          "output": 168,
+          "reasoning": 0,
+          "cache": {
+            "read": 5248,
+            "write": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "msg_1df57afdc001WFRgt8B7Jd6Y4S",
+      "session_id": "ses_e20a8b478ffetiWm59w9k3G5NG",
+      "type": "idle",
+      "seq": 26,
+      "time_created": 1794748428252,
+      "data": {
+        "time": {
+          "created": 1794748428252
+        },
+        "outcome": "succeeded"
+      }
+    }
+  ]
+}

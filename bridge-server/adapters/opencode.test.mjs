@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync, realpathSync, existsSync } fr
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SANDBOX_HOME } from '../../test/sandbox-home.mjs';
-import { ManualClock, until } from '../../test/controller/helpers.mjs';
+import { ManualClock, until, deferred } from '../../test/controller/helpers.mjs';
 import { ProcessSupervisor } from '../controller/process-supervisor.mjs';
 import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
@@ -101,8 +101,8 @@ test('provider readiness is cached and never spawns; model gate and capabilities
   assert.equal(h.provider.ready, true);
   assert.equal(h.provider.modelAllowed('fixture/model#fast'), true);
   assert.equal(h.provider.modelAllowed('malformed'), false);
-  assert.deepEqual(h.provider.create().capabilities, { followUp: true, steer: false, modelSelection: true, loadsHistory: true,
-    interventions: { default: null, steer: false, queue: false, interrupt: false } });
+  assert.deepEqual(h.provider.create().capabilities, { followUp: true, steer: true, modelSelection: true, loadsHistory: true,
+    interventions: { default: 'steer', steer: true, queue: 'bridge', interrupt: true } });
   assert.deepEqual(h.requests(), []);
   writeTargetChecks({ opencode: { ready: false } });
   assert.equal(opencodeProvider({ env: h.env }).ready, false);
@@ -368,4 +368,98 @@ for (const model of [undefined, 'fixture/chosen#fast']) test(`OpenCode without e
     assert.equal(result.effectiveEffort, null);
   }
   assert.equal(h.requests().some(r => r.path === '/api/model'), false);
+});
+
+const intervene = (h, sent, mode, text) => h.controller.intervene({ executionId: sent.executionId, from: 'user', mode, text });
+const endTurn = (h, outcome = 'succeeded') => h.adapters[0]._request('/fixture/finish', { method: 'POST', body: { outcome } });
+const prompts = h => h.requests().filter(r => r.path?.endsWith('/prompt'));
+
+for (const earlyResult of [false, true]) test(`OpenCode steer acknowledges and joins its stored user id, including result before receipt: ${earlyResult}`, async t => {
+  const h = setup(t, { FAKE_OPENCODE_MODE: 'interventions', FAKE_OPENCODE_FINISH_BEFORE_STEER_ACK: earlyResult ? '1' : '' });
+  const sent = await h.send();
+  const joined = [], adapter = h.adapters[0], onInput = adapter.onInput;
+  adapter.onInput = input => { joined.push(input); onInput?.(input); };
+  const ack = await intervene(h, sent, 'steer', 'new direction\nonly once');
+  assert.equal(ack.ok, true); assert.equal(ack.accepted, true); assert.equal(ack.confirmed, true);
+  const session = Object.values(JSON.parse(readFileSync(join(h.dir, 'history.json'))))[0];
+  const user = session.messages.findLast(m => m.type === 'user');
+  assert.deepEqual(joined, [{ id: ack.id, state: 'joined', nativeTurnId: user.id }]);
+  if (!earlyResult) await endTurn(h);
+  const result = await h.finish(sent);
+  assert.equal(result.outcome, 'completed'); assert.equal(result.text, 'steered: new direction\nonly once');
+  assert.deepEqual(result.nativeTurnIds, session.messages.filter(m => m.type === 'user').map(m => m.id));
+  assert.equal(result.turns.length, 1);
+  assert.deepEqual(result.turns[0].messages, [sent.executionId, ack.id]);
+  assert.equal(result.interventions[0].state, 'answered');
+  assert.equal(result.usage.input_tokens, 18); assert.equal(result.usage.output_tokens, 5); assert.equal(result.usage.cost, 0.03);
+  assert.equal(h.supervisors.length, 1);
+});
+
+test('OpenCode does not claim a steer when native admission confirms another delivery mode', async t => {
+  const h = setup(t, { FAKE_OPENCODE_MODE: 'interventions', FAKE_OPENCODE_STEER_DELIVERY: 'queue' });
+  const sent = await h.send();
+  await assert.rejects(intervene(h, sent, 'steer', 'must be steer'), { code: 'DeliveryUnknown' });
+  assert.equal(h.records.readExecution(sent.executionId).interventions[0].state, 'not_delivered');
+  assert.equal(prompts(h).length, 2, 'no fallback or resend');
+});
+
+test('OpenCode bridge queue uses the live session after idle, with fresh progress and per-turn usage', async t => {
+  const h = setup(t, { FAKE_OPENCODE_MODE: 'interventions' });
+  const sent = await h.send();
+  const queued = await intervene(h, sent, 'queue', 'second text');
+  assert.equal(queued.ok, true); assert.equal(prompts(h).length, 1);
+  const nextProgress = [], observe = h.adapters[0].observe.bind(h.adapters[0]);
+  h.adapters[0].observe = options => observe({ ...options, onProgress: progress => { nextProgress.push(progress); options.onProgress(progress); } });
+  await endTurn(h);
+  await until(() => h.records.readExecution(sent.executionId).progress?.partialText === 'answer: second text', 'next turn progress');
+  assert.equal(h.records.readResult(sent.executionId), null);
+  await endTurn(h);
+  const result = await h.finish(sent);
+  assert.deepEqual(prompts(h).map(r => r.body), [{ text: 'hello' }, { text: 'second text' }]);
+  assert.equal(new Set(prompts(h).map(r => r.path)).size, 1);
+  assert.equal(new Set(h.requests().map(r => r.pid)).size, 1);
+  assert.equal(h.requests().filter(r => r.path === '/api/session' && r.method === 'POST').length, 1);
+  assert.deepEqual(result.turns.map(t => [t.text, t.usage.input_tokens, t.usage.output_tokens, t.usage.cost]),
+    [['answer: hello', 11, 3, 0.01], ['answer: second text', 11, 3, 0.01]]);
+  assert.equal(result.usage.input_tokens, 22); assert.equal(result.usage.cost, 0.02);
+  assert.equal(nextProgress[0].partialText, ''); assert.equal(nextProgress[0].activeCommand, null); assert.equal(nextProgress[0].retry, null);
+  assert.deepEqual(result.turns.map(t => t.messages), [[sent.executionId], [queued.id]]);
+  assert.equal(result.interventions[0].state, 'answered');
+});
+
+test('OpenCode refuses a late steer while the completed turn is still reading its store', async t => {
+  const h = setup(t, { FAKE_OPENCODE_MODE: 'interventions' }), sent = await h.send();
+  const reading = deferred(), release = deferred(), terminal = h.adapters[0]._terminal.bind(h.adapters[0]);
+  h.adapters[0]._terminal = async () => { reading.resolve(); await release.promise; return terminal(); };
+  await endTurn(h); await reading.promise;
+  try {
+    await assert.rejects(intervene(h, sent, 'steer', 'too late'), { code: 'DeliveryUnknown' });
+    assert.equal(prompts(h).length, 1);
+  } finally { release.resolve(); }
+  assert.equal((await h.finish(sent)).text, 'answer: hello');
+});
+
+test('OpenCode interrupt waits for native idle before sending only the replacement, then can interrupt again', async t => {
+  const h = setup(t, { FAKE_OPENCODE_MODE: 'interventions', FAKE_OPENCODE_DEFER_INTERRUPT: '1' });
+  const sent = await h.send();
+  const interrupt = intervene(h, sent, 'interrupt', 'replacement');
+  await until(() => h.requests().some(r => r.path?.endsWith('/interrupt')), 'abort requested');
+  await h.clock.flush();
+  assert.equal(prompts(h).length, 1, 'abort admission is not an idle boundary');
+  await endTurn(h, 'interrupted'); await interrupt;
+  await until(() => prompts(h).length === 2);
+  await until(() => h.records.readExecution(sent.executionId).progress?.partialText === 'answer: replacement');
+  const again = intervene(h, sent, 'interrupt', 'final text');
+  await until(() => h.requests().filter(r => r.path?.endsWith('/interrupt')).length === 2);
+  await endTurn(h, 'interrupted'); await again;
+  await until(() => h.records.readExecution(sent.executionId).progress?.partialText === 'answer: final text');
+  await endTurn(h);
+  const result = await h.finish(sent);
+  assert.deepEqual(result.turns.map(t => t.outcome), ['interrupted', 'interrupted', 'completed']);
+  assert.deepEqual(result.turns.map(t => t.usage.input_tokens), [11, 11, 11]);
+  assert.equal(result.usage.input_tokens, 33);
+  assert.doesNotMatch(result.text, /answer: hello|answer: replacement/);
+  assert.deepEqual(prompts(h).map(r => r.body), [{ text: 'hello' }, { text: 'replacement' }, { text: 'final text' }]);
+  assert.equal(new Set(prompts(h).map(r => r.pid)).size, 1);
+  assert.equal(new Set(prompts(h).map(r => r.path)).size, 1);
 });

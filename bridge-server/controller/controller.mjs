@@ -247,8 +247,13 @@ export class Controller {
   }
   _recordTurn(a, terminal) {
     const nativeTurnId = terminal.nativeTurnId ?? a.turn?.nativeTurnId ?? a.record.nativeTurnId ?? null;
-    const existing = a.record.turns.find(turn => turn.nativeTurnId === nativeTurnId);
-    const messages = terminal.messages ?? a.turn?.messages ?? existing?.messages ?? [];
+    const answered = terminal.messages ?? a.turn?.messages;
+    // ACP has no native turn id. The initiating message distinguishes its
+    // turns; a post-close correction without a new turn updates the last one.
+    const existing = nativeTurnId == null
+      ? answered ? a.record.turns.find(turn => turn.messages[0] === answered[0]) : a.record.turns.at(-1)
+      : a.record.turns.find(turn => turn.nativeTurnId === nativeTurnId);
+    const messages = answered ?? existing?.messages ?? [];
     this._turnIds(a, [nativeTurnId]);
     const text = terminal.outcome === 'interrupted' ? 'interrupted before answering'
       : terminal.outcome === 'failed' ? appendProviderError(terminal.text ?? a.record.progress?.partialText, terminal.error) : terminal.text ?? '';
@@ -437,7 +442,7 @@ export class Controller {
           if (mode === 'queue' && !nativeQueue) a.held.push(input);
           else if (mode === 'interrupt' && !nativeQueue) {
             a.held.push(input);
-            await bounded(this.clock, () => a.adapter.interrupt(), PROTOCOL_MS, 'interrupt_timeout');
+            await bounded(this.clock, () => a.adapter.interrupt({ drain: true }), PROTOCOL_MS, 'interrupt_timeout');
           } else {
             ack = mode === 'steer' ? await a.adapter.steer({ text, id: input.id })
               : await bounded(this.clock, () => a.adapter.intervene(input), PROTOCOL_MS, 'DeliveryUnknown');
