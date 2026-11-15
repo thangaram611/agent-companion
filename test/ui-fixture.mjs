@@ -37,7 +37,9 @@ export function uiFixture(t) {
     { type: 'session_meta', payload: { id: 'thread-child', parent_thread_id: 'root-1', agent_path: '/root/rate_limit_probe', agent_nickname: 'Popper' } }]));
   json(join(env.CODEX_HOME, 'session_index.jsonl'), jsonl([{ id: 'root-1', thread_name: 'Release checks' }]));
 
-  // Running Codex job, as in the mockup; turn-1 is an earlier job's turn.
+  // Running Codex job, as in the mockup, from a bridge that takes messages;
+  // turn-1 is an earlier job's turn. The running OpenCode job's record comes
+  // from an older bridge: no interventionModes.
   const running = join(root, 'transcripts/rollout-run.jsonl');
   const output = n => Array.from({ length: n }, (_, i) => `lib/file-${i}.mjs:${i + 1}  const DIGEST_${i} = …`).join('\n');
   json(running, jsonl([
@@ -80,6 +82,7 @@ export function uiFixture(t) {
       [execution({ executionId: 'run-1', owner: 'agent-run', hostSessionId: 'lead-1', provider: 'codex', cwd: repo, text: 'Step 1b-2 of the live-view plan',
         startedAt: NOW - 4 * M - 12 * S, state: 'running', processes: { pid: 4242 }, historyId: 'thread-run', nativeTurnId: 'turn-2',
         effectiveModel: 'gpt-6-astra', effectiveEffort: 'high', transcript: locator('codex', running, 'thread-run'),
+        interventionModes: { default: 'steer', steer: true, queue: 'bridge', interrupt: true }, interventions: [], turns: [], nativeTurnIds: ['turn-2'],
         progress: { activeCommand: 'node --test lib/digest.test.mjs', partialText: '', lastActivityAt: NOW - 18 * S } })],
       [execution({ executionId: 'op-1', owner: 'agent-op', hostSessionId: 'lead-1', provider: 'opencode', cwd: join(root, 'work/hermes'), text: 'Triage the restore spec',
         startedAt: NOW - 41 * S, state: 'running', processes: { pid: 4343 }, effectiveModel: { providerID: 'opencode', id: 'flint-40b-free', variant: 'default' },
@@ -111,7 +114,7 @@ export function uiFixture(t) {
   }
   const dirs = [{ host: 'claude', dir: claude }, { host: 'codex', dir: codex }];
   return {
-    root, env, running, NOW,
+    root, env, running, NOW, states: { claude, codex },
     model: ({ size = { columns: 150, rows: 26 }, now = () => NOW } = {}) =>
       new Model({ env, source: createJobSource({ dirs, env, alive: () => true }), now, size }),
     append: records => appendFileSync(running, jsonl(records)),

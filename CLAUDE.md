@@ -130,7 +130,8 @@ line, including `not_delivered` messages.
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
 | `bridge-server/ui/jobs.mjs` | The live view's job list from both hosts' state and caller titles from host transcripts (Claude lead session, Codex rollout and session index). |
 | `bridge-server/ui/rows.mjs` | Sanitizing native text, cell widths, item folding and wrapping, and the cached row index. |
-| `bridge-server/ui/model.mjs` | Live-view state, keys, transcript follow and frame composition; `app.mjs` is only the Ink layer and the `ui` entry point. |
+| `bridge-server/ui/model.mjs` | Live-view state, keys, message boxes, transcript follow and frame composition; `app.mjs` is only the Ink layer and the `ui` entry point. |
+| `bridge-server/ui/inbox.mjs` | The live view's only writes: atomic 0600 inbox request files, and deleting each outcome it has read. |
 | `hooks/launch-ui.sh`, `scripts/install-ui-launcher.mjs` | Running the live view with the hooks' Node and its dependencies; the `~/.local/bin/agent-companion` launcher. |
 
 ## Things that will bite you

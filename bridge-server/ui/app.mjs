@@ -2,7 +2,7 @@
 // keys and the terminal size, and polls on a timer; the model owns state and
 // layout. Plain .mjs with createElement, so there is no build step.
 import { createElement as h, useEffect, useSyncExternalStore } from 'react';
-import { Box, Text, render, useApp, useInput, useWindowSize } from 'ink';
+import { Box, Text, render, useApp, useInput, usePaste, useWindowSize } from 'ink';
 import { Model } from './model.mjs';
 
 const POLL_MS = 250;
@@ -26,6 +26,8 @@ function Live({ model, pollMs }) {
   model.exit = exit;
   useEffect(() => model.setSize({ columns: size.columns, rows: size.rows }), [size.columns, size.rows]);
   useInput((input, key) => model.key(input, key));
+  // Bracketed paste: a pasted newline is text, never ⏎.
+  usePaste(text => model.paste(text));
   useEffect(() => {
     const timer = setInterval(() => model.tick(), pollMs);
     return () => clearInterval(timer);
@@ -35,14 +37,16 @@ function Live({ model, pollMs }) {
 
 export function run({ model, stdout = process.stdout, stdin = process.stdin, pollMs = POLL_MS, ...options } = {}) {
   model ??= new Model({ size: { columns: stdout.columns || 80, rows: stdout.rows || 24 } });
-  const app = render(h(Live, { model, pollMs }), { stdout, stdin, alternateScreen: true, ...options });
+  // ctrl+c reaches the model: in a message box it clears the draft first.
+  const app = render(h(Live, { model, pollMs }), { stdout, stdin, alternateScreen: true, exitOnCtrlC: false, ...options });
   return { model, app };
 }
 
 const USAGE = `usage: agent-companion ui
 
-A read-only live view of companion jobs from both hosts' state directories:
-running jobs first, then the last 24 hours. Press ? in the view for keys.
+A live view of companion jobs from both hosts' state directories: running
+jobs first, then the last 24 hours. A running job's message box sends to its
+bridge's inbox. Press ? in the list for keys.
 `;
 if (import.meta.main) {
   const args = process.argv.slice(2);

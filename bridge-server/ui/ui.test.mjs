@@ -1,9 +1,12 @@
 import '../../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { appendFileSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createElement as h } from 'react';
 import { renderToString } from 'ink';
-import { Screen } from './app.mjs';
+import { PassThrough, Writable } from 'node:stream';
+import { Screen, run } from './app.mjs';
 import { codexItem, uiFixture } from '../../test/ui-fixture.mjs';
 
 const RAW = { serializers: [value => value] };
@@ -28,6 +31,249 @@ for (const columns of [150, 80]) {
     });
   }
 }
+const MODES = { default: 'steer', steer: true, queue: 'bridge', interrupt: true };
+const ctrl = (model, letter) => model.key(letter, { ctrl: true });
+const type = (model, text) => { for (const ch of text) model.key(ch, {}); };
+const enter = model => model.key('\r', { return: true });
+// The bridge's side of the inbox contract, by hand: the one request, then its outcome.
+function inbox(f, id = 'run-1') {
+  const dir = join(f.states.claude, 'inbox', id);
+  const requests = () => readdirSync(dir).filter(name => !name.endsWith('.outcome.json'));
+  return { dir, requests,
+    take() {
+      const [name] = requests();
+      const request = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+      return { name, request, mode: statSync(join(dir, name)).mode & 0o777 };
+    },
+    answer(requestId, outcome) {
+      unlinkSync(join(dir, `${requestId}.json`));
+      writeFileSync(join(dir, `${requestId}.outcome.json`), JSON.stringify({ requestId, ...outcome }), { mode: 0o600 });
+    } };
+}
+const styleOf = (model, text) => model.render().flat().find(([cell]) => cell.includes(text))?.[1];
+
+test('running job focused with a queued message and a draft at 150 columns', t => {
+  const f = uiFixture(t);
+  f.setExecution('run-1', () => ({ interventions: [{ id: 'q1', from: 'caller', mode: 'queue', text: 'Also check the logout route.', at: f.NOW - 3000, state: 'accepted' }] }));
+  const model = open(f, 'claude:run-1', 150);
+  press(model, 'tab');
+  type(model, 'Keep the fake server; add an idle event after the step instead.');
+  t.assert.snapshot(screen(model), RAW);
+});
+test('cancel confirmation at 80 columns', t => {
+  const model = open(uiFixture(t), 'claude:run-1', 80);
+  ctrl(model, 'x');
+  t.assert.snapshot(screen(model), RAW);
+});
+
+test('opening a running job focuses its box: letters type, ctrl+j adds a line, shift+tab cycles modes, esc keeps each job\'s draft', t => {
+  const f = uiFixture(t);
+  f.setExecution('op-1', () => ({ interventionModes: { default: 'queue', steer: false, queue: 'bridge', interrupt: true } }));
+  const model = open(f, 'claude:run-1', 80);
+  type(model, 'q?/egG');
+  assert.match(screen(model), /│ › q\?\/egG▌ +│/, 'single-letter keys type into the box');
+  model.key('\n', {});
+  ctrl(model, 'j');
+  type(model, 'next');
+  model.key('', { backspace: true });
+  assert.match(screen(model), /│ › q\?\/egG +│\n +│ +│\n +│   nex▌ +│/, 'ctrl+j, as LF or under the kitty protocol, adds a line');
+  model.key('\r', { return: true, meta: true });
+  assert.match(screen(model), /│   nex +│\n +│ +▌ +│/, 'shift+⏎ or alt+⏎ adds a line and never sends');
+  assert.deepEqual(readdirSync(f.states.claude).filter(name => name === 'inbox'), []);
+  assert.match(screen(model), /\n  steer +⏎ send · shift\+⇥ mode · ctrl\+x cancel job · esc jobs$/);
+  model.key('', { tab: true, shift: true });
+  assert.match(screen(model), /\n  queue +⏎ send/);
+  model.key('', { tab: true });
+  assert.match(screen(model), /\n  queue +⏎ send/, 'plain tab does nothing in the box');
+  model.key('', { tab: true, shift: true });
+  model.key('', { tab: true, shift: true });
+  assert.match(screen(model), /\n  steer +⏎ send/);
+  press(model, 'escape');
+  assert.match(screen(model), /↑↓ jobs {3}⏎ open/);
+  press(model, 'upArrow', 'return');
+  assert.match(screen(model), /│ › Message OpenCode… +│/);
+  assert.match(screen(model), /\n  queue +⏎ send · shift\+⇥ mode/, 'a job starts on its own default mode');
+  type(model, 'other');
+  press(model, 'escape', 'downArrow', 'return');
+  assert.match(screen(model), /│   nex +│\n +│ +▌ +│/, 'each job keeps its own draft');
+  assert.match(screen(model), /\+7 lines/);
+  ctrl(model, 'o');
+  assert.match(screen(model), /at frame 4/, 'ctrl+o expands all outputs');
+  ctrl(model, 'o');
+  assert.match(screen(model), /\+7 lines/);
+});
+
+test('⏎ writes one private request per the inbox contract; its outcome is read once and deleted; the companion\'s copy is labelled you', t => {
+  const f = uiFixture(t), box = inbox(f);
+  const model = open(f, 'claude:run-1', 80);
+  enter(model);
+  type(model, '   ');
+  enter(model);
+  assert.throws(() => box.requests(), { code: 'ENOENT' }, 'an empty or blank box sends nothing');
+  ctrl(model, 'c');
+  model.paste('Keep the fake server;\x1b[31m\x9b\x85\u202e\r\nadd an idle event.');
+  enter(model);
+  const { name, request, mode } = box.take();
+  assert.deepEqual(box.requests(), [name], 'one file, no temporary left');
+  assert.deepEqual(request, { requestId: name.slice(0, -5), executionId: 'run-1', mode: 'steer', text: 'Keep the fake server;\nadd an idle event.', at: f.NOW }, 'escape sequences, C1 controls and bidi overrides are not text');
+  assert.equal(mode, 0o600);
+  assert.equal(statSync(box.dir).mode & 0o777, 0o700);
+  assert.match(screen(model), /◌ you · waiting for the bridge  Keep the fake server; add an idle event\.\n +╭/);
+  assert.match(screen(model), /│ › Message Codex… +│/, 'the box is cleared');
+  model.tick();
+  assert.match(screen(model), /waiting for the bridge/);
+
+  box.answer(request.requestId, { ok: true, status: 'accepted', interventionId: 'i-1' });
+  model.tick();
+  assert.deepEqual(readdirSync(box.dir), [], 'the outcome is deleted once read');
+  assert.match(screen(model), /◌ you · accepted  Keep the fake server/);
+  f.setExecution('run-1', () => ({ interventions: [{ id: 'i-1', from: 'user', mode: 'steer', text: request.text, at: f.NOW, state: 'joined' }] }));
+  model.tick();
+  assert.match(screen(model), /◌ you · joined  Keep the fake server; add an idle event\.  in the running turn/);
+  assert.doesNotMatch(screen(model), /accepted/);
+  f.append([codexItem('turn-2', { type: 'UserMessage', id: 'steer-1', content: [{ type: 'text', text: request.text }] })]);
+  model.tick();
+  assert.match(screen(model), /you {4}Keep the fake server;  +\+1/, 'the companion took it: the transcript shows it as yours');
+  assert.doesNotMatch(screen(model), /◌ you/);
+});
+
+test('a refused message shows once in red with its reason and returns to the empty box', t => {
+  const f = uiFixture(t), box = inbox(f);
+  const model = open(f, 'claude:run-1', 80);
+  type(model, 'too long');
+  enter(model);
+  box.answer(box.take().request.requestId, { ok: false, status: 'intervention_unavailable', reason: 'text_too_long' });
+  model.tick();
+  assert.match(screen(model), /✗ you · refused: too long  too long/);
+  assert.equal(styleOf(model, 'refused'), 'bad');
+  assert.match(screen(model), /│ › too long▌ +│/);
+  model.key('', { backspace: true });
+  enter(model);
+  assert.doesNotMatch(screen(model), /refused/, 'the next send replaces the refusal');
+  assert.match(screen(model), /◌ you · waiting for the bridge  too lon/);
+});
+
+test('ctrl+x asks inside the box: n restores it, y writes a cancel request with no text', t => {
+  const f = uiFixture(t), box = inbox(f);
+  const model = open(f, 'claude:run-1', 80);
+  type(model, 'draft');
+  ctrl(model, 'x');
+  assert.match(screen(model), /│ Cancel this job\? The lead is told you cancelled it\. +y yes {2}n no │/);
+  type(model, 'z');
+  enter(model);
+  assert.match(screen(model), /Cancel this job\?/, 'other keys wait for an answer');
+  press(model, 'n');
+  assert.match(screen(model), /│ › draft▌ +│/);
+  ctrl(model, 'x');
+  press(model, 'y');
+  const { request } = box.take();
+  assert.deepEqual(request, { requestId: request.requestId, executionId: 'run-1', mode: 'cancel', at: f.NOW });
+  assert.match(screen(model), /◌ you · cancel · waiting for the bridge\n/);
+  assert.match(screen(model), /│ › draft▌ +│/, 'the draft stays');
+  box.answer(request.requestId, { ok: true, status: 'accepted' });
+  model.tick();
+  assert.match(screen(model), /■ you · cancel · stopping the job/);
+});
+
+test('ctrl+c clears a draft, then quits; on the list it quits, and ctrl+letters are not letter keys', t => {
+  const f = uiFixture(t);
+  let quit = 0;
+  const model = open(f, 'claude:run-1', 80);
+  model.exit = () => quit++;
+  type(model, 'abc');
+  ctrl(model, 'c');
+  assert.equal(quit, 0);
+  assert.match(screen(model), /│ › Message Codex… +│/);
+  ctrl(model, 'c');
+  assert.equal(quit, 1);
+  press(model, 'escape');
+  ctrl(model, 'o');
+  ctrl(model, 'q');
+  assert.doesNotMatch(screen(model), /Antigravity scenario/, 'ctrl+o is not o (older jobs)');
+  assert.equal(quit, 1, 'ctrl+q is not q');
+  ctrl(model, 'c');
+  assert.equal(quit, 2);
+});
+
+test('pending and transcript labels: task, lead and you from the record; an unmatched message stays user', t => {
+  const f = uiFixture(t);
+  const at = f.NOW - 60_000;
+  f.setExecution('run-1', () => ({ interventions: [
+    { id: 'l0', from: 'caller', mode: 'steer', text: 'Lead steer.', at, state: 'joined' },
+    { id: 'u1', from: 'user', mode: 'interrupt', text: 'Stop and use the idle event.', at: at + 2000, state: 'accepted' },
+    { id: 'l1', from: 'caller', mode: 'queue', text: 'Also check the logout route.', at: at + 1000, state: 'accepted' },
+    { id: 'u0', from: 'user', mode: 'queue', text: 'Dropped.', at: at + 500, state: 'not_delivered' },
+    { id: 'u2', from: 'user', mode: 'steer', text: 'Answered.', at, state: 'answered' }] }));
+  f.append([codexItem('turn-2', { type: 'UserMessage', id: 'x1', content: [{ type: 'text', text: 'Lead steer.' }] }),
+    codexItem('turn-2', { type: 'UserMessage', id: 'x2', content: [{ type: 'text', text: 'Not recorded.' }] })]);
+  const model = open(f, 'claude:run-1', 150, 40);
+  press(model, 'tab', 'pageUp', 'pageUp');
+  const text = screen(model);
+  assert.match(text, /│  task {3}Step 1b-2 of the live-view plan/);
+  assert.match(text, /│  lead {3}Lead steer\.\n[^\n]*│  user {3}Not recorded\./);
+  press(model, 'pageDown', 'pageDown');
+  assert.match(screen(model), /✗ you · not delivered  Dropped\.\n[^\n]*◌ lead · queued  Also check the logout route\.  runs after this turn\n[^\n]*◌ you · interrupting  Stop and use the idle event\.  runs once this turn stops\n[^\n]*╭/);
+  assert.doesNotMatch(screen(model), /· joined|Answered/, 'a message in the transcript, or answered, is no longer pending');
+});
+
+test('a Claude message that joined the running turn is a message, labelled by its sender', t => {
+  const f = uiFixture(t);
+  appendFileSync(join(f.root, 'transcripts/claude-done.jsonl'), JSON.stringify({ type: 'attachment', sessionId: 'sess-done', uuid: 'att-1',
+    attachment: { type: 'queued_command', prompt: 'Also check the logout route.', source_uuid: 'i-9', commandMode: 'prompt' } }) + '\n');
+  f.setExecution('done-1', () => ({ interventions: [{ id: 'i-9', from: 'user', mode: 'queue', text: 'Also check the logout route.', at: f.NOW - 13 * 60_000, state: 'answered' }] }));
+  const model = open(f, 'claude:done-1', 150, 60);
+  const text = screen(model);
+  assert.match(text, /│  task {3}Review the auth middleware/);
+  assert.match(text, /│  you {4}Also check the logout route\./);
+  assert.doesNotMatch(text, /preamble ·/);
+});
+
+test('an older bridge\'s running job shows no box but a one-line hint, and keeps the step 2 keys', t => {
+  const model = open(uiFixture(t), 'claude:op-1', 80);
+  const text = screen(model);
+  assert.match(text, /● responding\n+ {2}messages need the updated bridge; this job started on an older one\n\n ↑↓ items {3}esc back/);
+  assert.doesNotMatch(text, /╭/);
+});
+
+test('a companion with no message modes offers cancel only', t => {
+  const f = uiFixture(t);
+  f.setExecution('run-1', () => ({ interventionModes: { default: null, steer: false, queue: false, interrupt: false } }));
+  const model = open(f, 'claude:run-1', 80);
+  type(model, 'ignored');
+  enter(model);
+  model.paste('ignored');
+  const text = screen(model);
+  assert.match(text, /│ › Codex takes no messages while it works +│\n +╰─+╯\n  cancel only +ctrl\+x cancel job · esc jobs$/);
+  ctrl(model, 'x');
+  press(model, 'y');
+  assert.equal(inbox(f).take().request.mode, 'cancel');
+});
+
+test('when the job ends the box goes and the draft stays in memory only', t => {
+  const f = uiFixture(t);
+  const model = open(f, 'claude:run-1', 80);
+  type(model, 'kept draft');
+  ctrl(model, 'x');
+  f.setExecution('run-1', () => ({ state: 'closed' }));
+  model.tick();
+  const text = screen(model);
+  assert.doesNotMatch(text, /╭|kept draft|Cancel this job/);
+  assert.match(text, /↑↓ items {3}esc back/);
+  assert.equal(model.boxes.get('claude:run-1').draft, 'kept draft');
+  assert.deepEqual(readdirSync(f.states.claude).filter(name => name === 'inbox'), [], 'nothing was written');
+});
+
+test('a long or many-line draft wraps inside the box; every row fits and none holds a newline', t => {
+  const model = open(uiFixture(t), 'claude:run-1', 80);
+  model.paste(['first line', 'second ' + 'word '.repeat(40), ...Array.from({ length: 60 }, (_, i) => `line ${i}`)].join('\n'));
+  const rows = model.render().map(row => row.map(([text]) => text).join(''));
+  assert.equal(rows.length, 26);
+  for (const row of rows) { assert.doesNotMatch(row, /\n/); assert.ok(row.length <= 80, row); }
+  const text = rows.join('\n');
+  assert.match(text, /│ {3}line 59▌ +│\n +╰/, 'the box shows the draft\'s last rows, where the cursor is');
+  assert.match(text, /● running \$ node --test lib\/digest.test.mjs/, 'the live line keeps a row');
+});
+
 test('job list at 80 columns', t => t.assert.snapshot(screen(uiFixture(t).model({ size: { columns: 80, rows: 26 } })), RAW));
 
 test('narrow: Enter opens the job full width, Esc returns; resizing keeps it open', t => {
@@ -36,17 +282,20 @@ test('narrow: Enter opens the job full width, Esc returns; resizing keeps it ope
   assert.match(screen(model), /Claude Code › Live view plan · gpt-6-astra high · main/);
   assert.doesNotMatch(screen(model), /Restore spec triage/);
   model.setSize({ columns: 150, rows: 26 });
-  assert.match(screen(model), /Restore spec triage[\s\S]*│▎/, 'the list returns beside the focused transcript');
+  assert.match(screen(model), /Restore spec triage[\s\S]*│ {2}steer · joins the running turn now +⏎ send/, 'the list returns beside the focused box');
   model.setSize({ columns: 80, rows: 26 });
   press(model, 'escape');
   assert.match(screen(model), /Restore spec triage/);
 });
 
-test('any terminal size renders without throwing', t => {
-  const model = open(uiFixture(t), 'claude:done-1', 80);
-  for (const [columns, rows] of [[1, 1], [5, 3], [29, 7], [109, 9], [110, 9], [400, 200]]) {
-    model.setSize({ columns, rows });
-    assert.ok(screen(model).length);
+test('any terminal size renders without throwing, with or without a message box', t => {
+  const f = uiFixture(t);
+  for (const model of [open(f, 'claude:done-1', 80), open(f, 'claude:run-1', 80)]) {
+    model.paste('a draft\nof two lines');
+    for (const [columns, rows] of [[1, 1], [5, 3], [29, 7], [109, 9], [110, 9], [400, 200]]) {
+      model.setSize({ columns, rows });
+      assert.ok(screen(model).length);
+    }
   }
 });
 
@@ -61,25 +310,32 @@ test('cards: caller titles, companion · project, running clock, age, older coun
   assert.match(text, /2 running · 2 done in 24h/);
 });
 
-test('follow: appended items arrive at the bottom; moving up stops following until G', t => {
+test('follow: appended items arrive above the box; scrolling up stops following until scrolled back down', t => {
   const f = uiFixture(t);
   const model = open(f, 'claude:run-1', 150);
   press(model, 'tab');
   f.append([codexItem('turn-2', { type: 'AgentMessage', id: 'n1', content: [{ type: 'text', text: 'NEW-REPLY-1' }] })]);
   model.tick();
   const rows = screen(model).split('\n');
-  assert.ok(rows.findIndex(row => row.includes('NEW-REPLY-1')) > rows.length - 8, 'the new reply is near the bottom');
-  assert.match(rows.at(-3), /● running \$ node --test lib\/digest.test.mjs/, 'the live line is the last transcript line');
+  const top = rows.findIndex(row => row.includes('╭'));
+  assert.ok(rows.findIndex(row => row.includes('NEW-REPLY-1')) > top - 5, 'the new reply is just above the box');
+  assert.match(rows[top - 1], /● running \$ node --test lib\/digest.test.mjs/, 'the live line is the last transcript line');
   press(model, 'upArrow', 'upArrow');
   f.append(Array.from({ length: 30 }, (_, i) => codexItem('turn-2', { type: 'AgentMessage', id: `m${i}`, content: [{ type: 'text', text: `LATER-${i}` }] })));
   model.tick();
   assert.doesNotMatch(screen(model), /LATER-29/);
-  press(model, 'G');
+  press(model, 'pageDown', 'pageDown', 'pageDown', 'pageDown', 'pageDown');
   assert.match(screen(model), /LATER-29/);
+  f.append([codexItem('turn-2', { type: 'AgentMessage', id: 'n2', content: [{ type: 'text', text: 'FOLLOWED-AGAIN' }] })]);
+  model.tick();
+  assert.match(screen(model), /FOLLOWED-AGAIN/);
 });
 
 test('folding: e expands the cursor item, E expands all, p shows the preamble', t => {
-  const model = open(uiFixture(t), 'claude:run-1', 150, 80);
+  // An older bridge's running job has no box, so the transcript takes the keys.
+  const f = uiFixture(t);
+  f.setExecution('run-1', () => ({ interventionModes: undefined }));
+  const model = open(f, 'claude:run-1', 150, 80);
   press(model, 'tab', 'g');
   assert.match(screen(model), /\+19 lines/);
   assert.match(screen(model), /preamble · 1 item · p shows/);
@@ -147,4 +403,26 @@ test('a multi-line command, activity or title never puts a newline inside a fram
   const text = rows.join('\n');
   assert.match(text, /\$ cat > notes\.txt <<'EOF' +ok\n[^\n]*│ {4}first *\n[^\n]*│ {4}second/);
   assert.match(text, /● running \$ python3 - <<EOF/);
+});
+
+test('through Ink\'s stdin: bracketed paste, shift+tab, ctrl+x then y, and ctrl+c reach the box', async t => {
+  const f = uiFixture(t);
+  const model = f.model({ size: { columns: 80, rows: 26 } });
+  const stdout = Object.assign(new Writable({ write(chunk, encoding, done) { done(); } }), { columns: 80, rows: 26, isTTY: true });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+  const { app } = run({ model, stdout, stdin, pollMs: 1e9, interactive: true, patchConsole: false });
+  t.after(() => app.unmount());
+  const send = async sequence => { stdin.write(sequence); await new Promise(resolve => setTimeout(resolve, 30)); };
+  await send('\x1b[B'); await send('\r');
+  await send('\x1b[200~line one\r\nline two\x1b[201~');
+  const box = model.boxes.get('claude:run-1');
+  assert.equal(box.draft, 'line one\nline two', 'a pasted newline is text, not ⏎');
+  await send('\x1b[Z');
+  assert.equal(box.mode, 'queue');
+  await send('\x18'); await send('y');
+  assert.equal(inbox(f).take().request.mode, 'cancel');
+  await send('\x03');
+  assert.equal(box.draft, '', 'ctrl+c clears the draft first');
+  await send('\x03');
+  await app.waitUntilExit();
 });

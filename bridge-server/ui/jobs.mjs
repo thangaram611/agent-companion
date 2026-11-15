@@ -1,6 +1,7 @@
 // Read-only job list for the live view: every execution in both hosts' state
 // directories, with the caller's own name for the job where the host records
-// it. Nothing here writes a record, renews a lease or signals a process.
+// it. Nothing here writes a record, renews a lease or signals a process; the
+// view's messages go through inbox.mjs.
 import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -57,7 +58,8 @@ export function createJobSource({ dirs = stateDirs(), env = process.env, alive =
           } catch { continue; }
           if (!execution?.executionId) continue;
           const status = statusOf(execution, result, alive);
-          jobs.push({ key: `${host}:${id}`, host, execution, result, status, provider: execution.provider,
+          // `dir` is the owning host's state dir, where the job's inbox lives.
+          jobs.push({ key: `${host}:${id}`, host, dir, execution, result, status, provider: execution.provider,
             project: execution.cwd ? basename(execution.cwd) : '', startedAt: execution.startedAt,
             finishedAt: result?.finishedAt ?? null });
         }
