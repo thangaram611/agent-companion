@@ -1,7 +1,7 @@
 # Live view and interventions: plan
 
-Status: agreed 2026-11-15. Step 0 landed as 4e536d0. Step 1 is done on branch
-feat/live-handover (pending merge). Steps 2–4 are not started.
+Status: agreed 2026-11-15. Step 0 landed as 4e536d0; Step 1 as 2222e9b, 229b310
+and 2c9577b. Steps 2–4 are not started.
 
 ## Goal
 
@@ -139,7 +139,7 @@ Check: per-companion fixtures captured from isolated runs; a drift test fails on
 an unknown record type; summary unit tests; the git snapshot leaves `git status`
 and the index unchanged; the full suite passes.
 
-Outcome (2026-11-15, branch feat/live-handover):
+Outcome (2026-11-15):
 
 - Measured: Codex returns `thread.path` on both thread/start and thread/resume;
   the bridge's `nativeTurnId` is the transcript's native turn id for Codex,
