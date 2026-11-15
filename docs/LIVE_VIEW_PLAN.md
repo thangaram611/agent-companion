@@ -1,7 +1,9 @@
 # Live view and interventions: plan
 
 Status: agreed 2026-11-15. Step 0 landed as 4e536d0; Step 1 as 2222e9b, 229b310
-and 2c9577b; Step 2 as 37e7b0e through 497a740. Steps 3–4 are not started.
+and 2c9577b; Step 2 as 37e7b0e through 497a740. Step 3 is measured and
+designed (below); its build is in progress on `feat/interventions`. Step 4 is
+not started.
 
 ## Goal
 
@@ -21,7 +23,9 @@ Agreed with the owner on 2026-11-15:
 | Handover to the caller | Final answer plus a work summary: transcript-reported edits and commands, and a labelled git diff-stat of the worktree between turn start and end. The full transcript is readable on demand. Replaces today's digest. |
 | Interventions | One controller feature with two senders: the caller through `agent_reply` modes and the user through an inbox. Modes: steer, queue, interrupt & send, cancel. Each companion's own default applies. |
 | Caller awareness | A user intervention makes the caller's pending `agent_wait` return early with what happened. |
-| After the caller returns | The view is read-only. |
+| When messages are accepted | Only while the job runs. Once a job has ended, or the caller has returned, the view is read-only for it. |
+| Job result with interventions | A job ends only when nothing is pending. Its result lists each turn's answer once, in order, labelled with the message it answers; an interrupted turn reads "interrupted before answering" without partial text. No answer reaches the caller twice. |
+| The user's messages | Delivered verbatim like the caller's; the execution record and the caller's early return name the sender. |
 | Native attach | Not built. |
 | UI | Shared Node core first, then a terminal UI in Ink 8, then a Claude Code pane and an MCP progress line. The web page is deferred for its own design discussion. |
 | Runtime | Node 26 (current LTS) required; use its features. |
@@ -56,16 +60,30 @@ field yields "format unrecognized", never a guess.
 | --- | --- | --- | --- | --- |
 | Codex | Steer: `Enter` submits immediately, `Tab` queues (`codex-rs/tui/src/bottom_pane/chat_composer.rs` at rust-v0.169.0; `steer` feature graduated) | `turn/steer`; spike: mid-turn input restarted generation inside the same turn | `turn/interrupt`, then `turn/start` on the same thread | Existing |
 | Claude Code | Queue. A message written during a tool call joined the same turn after the tool finished, as "The user sent a new message while you were working"; written during final text it ran as the next turn | Effectively, at tool boundaries | `interrupt` with `send_now: true` started a new turn on the same session | Existing; `cancel_async_message` drops a queued message |
-| OpenCode | Prompts are acknowledged `delivery: "steer"` through `session.inbox.*`; mid-turn behaviour not measured | Not measured | `/interrupt`, then prompt | Existing |
+| OpenCode | Steer: a prompt sent mid-turn is acknowledged `delivery: "steer"` and reaches the model between steps of the same run | Measured (2.3.0) | Abort, then a prompt with only the new text: measured | Existing |
 | Antigravity | ACP runs one prompt at a time: queue | No | `session/cancel`, then load and prompt | Existing |
 | Copilot | Follow-up is refused (`FOLLOWUP_UNSUPPORTED`) | No | No | Existing |
 
-Only Claude's interrupt & send was measured end to end; the Codex, OpenCode and
-Antigravity sequences are compositions of protocol calls the adapters already
-use. The Claude measurement ran with `--bare` for isolation, which the adapter
-never uses. One process ran several turns in the same session. Trap: the controller
-treats Claude's `result` as terminal and closes the tree, so a message queued
-during the final text would be lost unless the controller delivers it.
+Step 3's measurements (2026-11-15; Claude 2.1.325, Codex 0.169.0, OpenCode
+2.3.0; loopback mocks and OpenCode's free model, isolated homes, $0; evidence in
+`/tmp/step3-measure/`):
+
+- Claude on the adapter's real startup path (no `--bare`) matches the spike: a
+  message written during a tool call joins the running turn; one written during
+  the final text runs as the next turn; a message written after `result` to the
+  live process starts another turn in the same session; `interrupt` with
+  `send_now`, `cancel_async_message` and requeue behave as before. Each message
+  reports `command_lifecycle` states (queued, started, completed, cancelled) by
+  UUID. `result` carries no pending list, and the gap before a queued turn
+  starts was about 3 ms in one sample, so the controller tracks accepted UUIDs
+  until each completes or is cancelled; no timer decides the queue is empty.
+- Codex through the bridge's own connection: `agent_reply` steer was confirmed
+  in the same native turn; the next model request carried the steer text; the
+  rollout records it as a second user message in that turn, and the job
+  completed. Interrupt & send at the app-server: `turn/interrupt`, then
+  `turn/start` with only the new text on the same thread, gives a distinct turn;
+  the rollout records the abort and the new message under the new turn.
+- OpenCode: see the table. The answer reflected both prompts.
 
 ### Rejected options
 
@@ -271,29 +289,53 @@ Outcome (2026-11-15, `feat/live-tui`, not merged):
 
 ### Step 3: Interventions
 
-- Controller: `intervene({ executionId, from: 'caller' | 'user', mode, text })`
-  under the conversation lock, recorded on the execution.
-- The user's path is an inbox file (0600) the controller reads on its tick, like
-  stop markers. A stop marker for the owner (the caller has returned) makes the
-  inbox refuse with a visible reason.
-- Adapters advertise per-mode support. Queue falls back to delivering a
-  follow-up on the same native history after the turn ends; interrupt & send
-  interrupts, then follows up with only the new text.
-- Claude: hold a message queued during the final text and deliver it as the next
-  turn, never lose it at `result`.
-- `agent_wait` returns early with `user_intervened` (mode, text, time); the
-  subagent relays it and waits again.
-- `agent_reply` gains `mode`, defaulting to the companion's own. Status reports
-  per-mode availability instead of `reply_available`. Both role templates and
-  the host-parity test change.
-- The UI gains cancel and a message box with a mode choice.
+Design (decided 2026-11-15, after the measurements above):
 
-Measure first: Claude's queue on the adapter's real startup path (no `--bare`);
-OpenCode mid-turn steer; Codex steer through the bridge's own connection.
+- One controller entry, `intervene({ executionId, from: 'caller' | 'user', mode, text })`,
+  under the conversation lock. Modes are steer, queue, interrupt (interrupt &
+  send) and cancel. A mode the companion lacks is refused, never substituted.
+  Each intervention is recorded on the execution (sender, mode, text, time,
+  delivery state) before it reaches the companion.
+- A job is a loop of native turns. After each turn ends, the controller continues
+  while the companion reports pending input (Claude's queued UUIDs) or the
+  bridge holds a queued message (delivered as the next turn on the same live
+  session). Interrupt & send ends the running turn natively, then delivers only
+  the new text. The job ends when nothing is pending; the result lists each
+  turn's answer once, labelled with the message it answers. A failed turn ends
+  the job; messages still queued are reported as not delivered.
+- Per companion (own default first): Codex steer (`turn/steer`), queue (next
+  `turn/start`), interrupt (`turn/interrupt` then `turn/start`). Claude queue
+  (written at once; Claude decides same or next turn), interrupt (`send_now`).
+  OpenCode steer (mid-turn prompt), queue, interrupt (abort then prompt).
+  Antigravity queue and interrupt (`session/cancel` then prompt), to qualify
+  live. Copilot cancel only.
+- The user's path is an inbox file (0600) in the owning host's state, read on
+  the controller tick like stop markers. Messages are accepted only while the
+  job runs and the owner has not stopped; otherwise the inbox entry is refused
+  with a visible reason.
+- `agent_wait` returns early with `user_intervened` (sender, mode, text, time,
+  no answer); the subagent relays it and waits again. `agent_reply` gains
+  `mode`, defaulting to the companion's own. Status reports per-mode
+  availability instead of `reply_available`. Both role templates and the
+  host-parity test change.
+- The live view gains a message box with a mode choice, and cancel (built by
+  Claude or an Opus subagent, not Codex).
 
-Check: controller tests for every mode × capability, including refusal after
-the caller returns; isolated live probes for Claude, Codex and OpenCode; template
-and host-parity tests; the full suite passes.
+Build order, each a separate brief and commit:
+
+1. 3b-1: the controller's turn loop, intervention records and modes, with the
+   Codex and Claude adapters.
+2. 3b-2: OpenCode, Antigravity and Copilot capabilities and adapters.
+3. 3b-3: the inbox, `agent_wait` early return, `agent_reply` modes, status,
+   both templates and host parity.
+4. 3c: the live view's message box and cancel.
+5. 3d: isolated live probes through the bridge for Claude, Codex and OpenCode
+   (the step 3 harnesses), and a live Antigravity run on the owner's login.
+
+Check: controller tests for every mode × capability, including refusal after the
+job ends or the caller returns, queued messages behind a failed turn, and a
+Claude message that becomes the next turn; template and host-parity tests; the
+probes above; the full suite passes.
 
 ### Step 4: Claude pane and progress line
 
