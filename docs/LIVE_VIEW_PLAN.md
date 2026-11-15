@@ -167,17 +167,43 @@ Outcome (2026-11-15):
 
 ### Step 2: Read-only terminal UI
 
-- `agent-companion ui` lists jobs from both hosts' state directories (companion,
-  model, effort, state, elapsed, tokens, owner) and follows a selected job's
-  transcript live, with the in-flight line at the bottom.
-- JSONL is followed by offset reads on change; SQLite by polling `seq` or
-  `time_updated`.
+Decided with the owner on 2026-11-15 (mockup: `docs/mockups/live-view-tui.html`):
+
+- Layout A: two panes. The left list has one two-line card per job: status
+  glyph, job title and age, then dim `companion · project`. The right pane
+  shows the selected job: one dim header line with only what the card lacks
+  (host › lead session, model, effort, tokens, branch), then the transcript.
+  The live line appears once, as the transcript's last line. A finished job
+  opens on its outcome (result line, git change list, answer), transcript
+  below. Each fact appears once; five emphasis levels as in the mockup.
+- Narrow terminals (under about 110 columns): one pane at a time. The list
+  fills the screen, Enter opens the job full width, Esc returns.
+- Jobs: all jobs from both hosts' state directories, running first, then the
+  last 24 hours; a key shows older ones; `/` filters.
+- Job title: the calling subagent's task description where the host records
+  it (measured available on the Claude host: the record's `hostSessionId`
+  leads to the lead session's transcript, whose Agent call result names the
+  subagent id), otherwise the first line of the task. The lead session's
+  title comes from that transcript too.
+- Detail: preamble hidden until asked for; command and tool output folded to
+  the first and last few lines with a count; a key expands an item or all.
+- Read-only. Built by Claude or an Opus subagent, not Codex.
+- Launch: setup.sh installs an `agent-companion` launcher in `~/.local/bin`
+  that runs the plugin's UI with a Node 26 it resolves the way the hooks do.
+  A Claude plugin `bin/` reaches only Claude's own Bash tool and blocks
+  claude.ai and Cowork installs, so it is not used.
+- In-flight text comes from the execution's `progress`; it is essential for
+  OpenCode, which writes reply text to its own store only when a step
+  completes (measured: a 70 s reply landed in one write).
+- JSONL is followed by cursor reads on change; SQLite by polling with the
+  reader's row cursor.
 - Ink 8 with alternate screen, indexed wrapped rows and visible-row rendering.
 - Dependencies install through `hooks/install-deps.sh` into plugin data on both
   hosts; nothing generated or symlinked inside the Codex bundle.
 
-Measure first: how a user launches it on each host (a plugin `bin`, a slash
-command that prints the command, or `node <plugin>/scripts/ui.mjs`).
+Measure first: the Codex host's caller information (owner thread → parent
+thread and its name); that `~/.local/bin` is on PATH or what setup must say
+when it is not; how the launcher finds the plugin root and Node on each host.
 
 Check: a 10,000-line append, scroll, resize and collapse test with no frame over
 an agreed budget (set from a first measurement); headless snapshot tests; a

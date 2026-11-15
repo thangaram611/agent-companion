@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agent-companion ui — layout A, v3</title>
+<style>
+  :root { --bg:#0d1117; --line:#262c36; --fg:#c9d1d9; --dim:#7d8590; --faint:#3d444d;
+          --green:#3fb950; --red:#f85149; --yellow:#d29922; --blue:#58a6ff; --violet:#bc8cff; --cyan:#39c5cf; --sel:#1b2533; }
+  body { margin:0; background:#06080b; color:var(--fg); font:14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+  main { max-width:1180px; margin:0 auto; padding:28px 24px 60px; }
+  h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:16px; margin:34px 0 6px; } p, li { color:#aab4c0; }
+  .term { background:var(--bg); border:1px solid var(--line); border-radius:8px; overflow:hidden; box-shadow:0 8px 30px #0008; }
+  .bar { padding:6px 10px; background:#161b22; border-bottom:1px solid var(--line); font-size:12px; color:var(--dim); }
+  pre { margin:0; padding:12px 14px; font:13px/1.6 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; color:var(--fg); overflow-x:auto; }
+  .g{color:var(--green)} .r{color:var(--red)} .y{color:var(--yellow)} .b{color:var(--blue)} .v{color:var(--violet)} .c{color:var(--cyan)}
+  .d{color:var(--dim)} .f{color:var(--faint)} .w{color:#f0f3f6;font-weight:600} .sel{background:var(--sel)}
+  table { border-collapse:collapse; font-size:13px; margin-top:8px; } td, th { border:1px solid var(--line); padding:5px 9px; text-align:left; } th { background:#161b22; }
+</style>
+</head>
+<body><main>
+<h1>Layout A, v3: each fact once, four levels of emphasis</h1>
+<p>Dummy data. The left card answers "what is this job and how is it doing"; the right header adds only what the card does not show; the live line appears once, as the last line of the transcript.</p>
+
+<h2>Running job selected</h2>
+<div class="term"><div class="bar">agent-companion ui · 150 columns</div>
+<pre> <span class="w">agent-companion</span>  <span class="d">2 running · 4 done today</span>
+
+<span class="sel"> <span class="g">●</span> <span class="w">Step 1b-2: digest on demand</span>  <span class="g">4:12</span> </span><span class="f">│</span>  <span class="d">Claude Code › Live view plan · gpt-6-astra high · 182k tokens · main</span>
+<span class="sel">   <span class="d">codex · agent-companion</span>             </span><span class="f">│</span>
+                                         <span class="f">│</span>  <span class="d">you</span>    Step 1b-2 of the live-view plan: render agent-digest on demand… <span class="f">+44</span>
+ <span class="g">●</span> <span class="w">Restore spec triage</span>          <span class="g">0:41</span>  <span class="f">│</span>  <span class="d">think  Inspecting where the digest is written today and who reads it.</span>
+   <span class="d">opencode · hermes</span>                     <span class="f">│</span>
+                                         <span class="f">│</span>  <span class="w">$ rg -n "digest" bridge-server lib</span>                          <span class="g">ok</span>
+ <span class="g">✓</span> <span class="w">Review auth middleware</span>        <span class="d">12m</span>  <span class="f">│</span>    <span class="d">bridge-server/server.mjs:205  const DIGEST_RESOURCE_SCHEME = …</span>
+   <span class="d">claude · oikos-web</span>                    <span class="f">│</span>    <span class="d">lib/runtime-paths.mjs:108     export function digestPathForJob(…</span>
+                                         <span class="f">│</span>    <span class="f">+21 lines</span>
+ <span class="r">✗</span> <span class="w">Rate-limit probe</span>               <span class="r">1h</span>  <span class="f">│</span>
+   <span class="d">copilot · scratch</span>                     <span class="f">│</span>  <span class="c">✎</span> lib/digest.mjs                    <span class="d">added</span>
+                                         <span class="f">│</span>  <span class="c">✎</span> bridge-server/server.mjs          <span class="d">+31 −58</span>
+ <span class="g">✓</span> <span class="w">Antigravity scenario</span>           <span class="d">2h</span>  <span class="f">│</span>
+   <span class="d">antigravity · notes-app</span>               <span class="f">│</span>  <span class="w">$ node --test lib/digest.test.mjs</span>                         <span class="r">exit 1</span>
+                                         <span class="f">│</span>    <span class="d">✖ on-demand digest renders the running native turn</span>
+ <span class="f">3 older</span>                                 <span class="f">│</span>    <span class="f">+9 lines</span>
+                                         <span class="f">│</span>
+                                         <span class="f">│</span>  One test fails on the running case; fixing the renderer now.
+                                         <span class="f">│</span>
+                                         <span class="f">│</span>  <span class="g">● running $ node --test lib/digest.test.mjs · 0:18</span>
+
+ <span class="f">↑↓ jobs   ⇥ focus   e expand   f follow   ? keys</span></pre></div>
+
+<h2>Finished job selected</h2>
+<div class="term"><div class="bar">agent-companion ui · 150 columns</div>
+<pre> <span class="w">agent-companion</span>  <span class="d">2 running · 4 done today</span>
+
+ <span class="g">●</span> <span class="w">Step 1b-2: digest on demand</span>  <span class="g">4:12</span>  <span class="f">│</span>  <span class="d">Claude Code › Auth hardening · opus-5.5 xhigh · 412k tokens · main</span>
+   <span class="d">codex · agent-companion</span>               <span class="f">│</span>
+                                         <span class="f">│</span>  <span class="g">✓ done in 6:02</span>  3 commands, <span class="r">1 failed</span> · 2 files changed
+ <span class="g">●</span> <span class="w">Restore spec triage</span>          <span class="g">0:41</span>  <span class="f">│</span>  <span class="d">git, any writer: src/auth.ts +18 −6 · src/auth.test.ts +40</span>
+   <span class="d">opencode · hermes</span>                     <span class="f">│</span>
+                                         <span class="f">│</span>  The middleware skipped the CSRF check on GET routes that mutate
+<span class="sel"> <span class="g">✓</span> <span class="w">Review auth middleware</span>        <span class="d">12m</span> </span><span class="f">│</span>  state. I added a guard and tests; one unrelated date-helper test
+<span class="sel">   <span class="d">claude · oikos-web</span>                   </span><span class="f">│</span>  still fails.                                                <span class="f">+14</span>
+                                         <span class="f">│</span>
+ <span class="r">✗</span> <span class="w">Rate-limit probe</span>               <span class="r">1h</span>  <span class="f">│</span>  <span class="f">transcript ↓ (12 items)</span>
+   <span class="d">copilot · scratch</span>                     <span class="f">│</span>
+                                         <span class="f">│</span>
+ <span class="g">✓</span> <span class="w">Antigravity scenario</span>           <span class="d">2h</span>  <span class="f">│</span>
+   <span class="d">antigravity · notes-app</span>               <span class="f">│</span>
+
+ <span class="f">↑↓ jobs   ⇥ focus   e expand   f follow   ? keys</span></pre></div>
+<p>A finished job opens on its outcome: the result line, the git change list, then the answer, with the transcript below it.</p>
+
+<h2>Emphasis levels</h2>
+<table>
+<tr><th>Level</th><th>Style</th><th>Used for</th></tr>
+<tr><td>1</td><td>bright, bold</td><td>Job titles; command lines in the transcript</td></tr>
+<tr><td>2</td><td>normal</td><td>The companion's replies; edited file paths</td></tr>
+<tr><td>3</td><td>colour only</td><td>Status: green running/ok, red failed/exit ≠ 0, yellow unfinished/refused</td></tr>
+<tr><td>4</td><td>dim</td><td>Context: companion · project, caller, model, tokens, command output, your prompt, thinking</td></tr>
+<tr><td>5</td><td>faint</td><td>Fold counts, the divider, key hints</td></tr>
+</table>
+<p>Job title source: the subagent's own task description on the Claude host (measured available); the first line of the task otherwise.</p>
+</main></body></html>
