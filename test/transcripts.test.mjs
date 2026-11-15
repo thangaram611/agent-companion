@@ -1,7 +1,7 @@
 import './sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync, mkdirSync, rmSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync, mkdirSync, rmSync, appendFileSync, renameSync, truncateSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -117,6 +117,56 @@ for (const companion of ['codex', 'claude', 'copilot']) {
     assert.deepEqual(readTranscript(loc, { after: second.cursor }).items, []);
   });
 }
+for (const companion of ['codex', 'claude', 'copilot']) {
+  test(`${companion}: follow keeps the parse state and matches cursor reads at every append`, async t => {
+    const { readTranscript, followTranscript } = await api();
+    const dir = new URL(`${companion}/`, root);
+    const bytes = Buffer.concat(readdirSync(dir).sort().map(n => readFileSync(new URL(n, dir))));
+    const loc = { companion, kind: 'jsonl', path: join(temp(t), 'transcript'), sessionId: companion };
+    writeFileSync(loc.path, '');
+    const follow = followTranscript(loc);
+    const merged = new Map();
+    let cursor = 0;
+    // Uneven chunks split lines mid-record, as a live writer does.
+    for (let at = 0, step = 1; at < bytes.length; at += step, step = step * 3 % 997 + 1) {
+      appendFileSync(loc.path, bytes.subarray(at, at + step));
+      const expected = readTranscript(loc, { after: cursor });
+      const got = follow.read();
+      assert.equal(got.reset, false);
+      assert.equal(got.cursor, expected.cursor);
+      assert.deepEqual(got.items, expected.items);
+      assert.deepEqual(got.format, expected.format);
+      cursor = got.cursor;
+      for (const item of got.items) merged.set(item.id, item);
+    }
+    assert.deepEqual([...merged.values()], readTranscript(loc).items);
+  });
+}
+test('follow reads only appended bytes and restarts on a replaced or shrunk file', async t => {
+  const { readTranscript, followTranscript } = await api();
+  const loc = { companion: 'codex', kind: 'jsonl', path: join(temp(t), 'transcript'), sessionId: 'codex' };
+  const bytes = jsonl('codex');
+  const half = bytes.lastIndexOf(10, bytes.length / 2) + 1;
+  writeFileSync(loc.path, bytes.subarray(0, half));
+  const follow = followTranscript(loc);
+  assert.ok(follow.read().items.length);
+  const intact = { ...loc, path: loc.path + '.intact' };
+  writeFileSync(intact.path, bytes);
+  const expected = readTranscript(intact, { after: half }).items;
+  // Blank the bytes already read, in place, then append: a replaying read loses
+  // the session and turn context; follow never reads those bytes again.
+  const damaged = Buffer.concat([Buffer.alloc(half, ' '), bytes.subarray(half)]);
+  damaged[half - 1] = 10;
+  writeFileSync(loc.path, damaged, { flag: 'r+' });
+  assert.notDeepEqual(readTranscript(loc, { after: half }).items, expected);
+  assert.deepEqual(follow.read().items, expected);
+  renameSync(intact.path, loc.path);
+  const replaced = follow.read();
+  assert.equal(replaced.reset, true);
+  assert.deepEqual(replaced.items, readTranscript(loc).items);
+  truncateSync(loc.path, half);
+  assert.equal(follow.read().reset, true);
+});
 test('antigravity: streaming step 9 is upserted when finalized', async t => {
   const { readTranscript } = await api();
   const first = readTranscript(fixture(t, 'antigravity', { streaming: true }));
