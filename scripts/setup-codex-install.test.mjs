@@ -5,6 +5,7 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -66,6 +67,8 @@ if [ "\${1:-}" = "--version" ]; then
   echo 10.0.0
 else
   [ -z "\${FAKE_NPM_LOG:-}" ] || printf '%s\\n' "$*" >> "$FAKE_NPM_LOG"
+  # Like npm ci: empty node_modules first, through a link if it is one.
+  [ "\${FAKE_NPM_EMPTY:-}" != 1 ] || [ "\${1:-}" != ci ] || rm -rf node_modules/*
   exit "\${FAKE_NPM_EXIT:-0}"
 fi
 exit 0
@@ -564,6 +567,19 @@ test('both harnesses preserve independent defaults, legacy files and unrelated s
   assert.equal(saved.theme, 'dark');
   assert.ok(saved.permissions.allow.includes('Bash(custom)'));
   assert.deepEqual(saved.permissions.deny, ['Bash(blocked)']);
+});
+
+test('setup installs dependencies without emptying the target of a linked node_modules', (t) => {
+  const f = setupFixture(t);
+  const data = path.join(f.tmp, 'plugin data', 'node_modules');
+  mkdirSync(path.join(data, 'installed-package'), { recursive: true });
+  const link = path.join(f.source, 'bridge-server', 'node_modules');
+  symlinkSync(data, link);
+  const run = f.run(['--skip-tests'], { FAKE_NPM_EMPTY: '1' });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(readFileSync(f.npmLog, 'utf8'), /^ci /m);
+  assert.deepEqual(readdirSync(data), ['installed-package']);
+  assert.notEqual(lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink(), true);
 });
 
 test('partial installation reports completed stages, preserves defaults and succeeds on rerun', (t) => {

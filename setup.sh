@@ -336,6 +336,10 @@ STEP="bridge dependencies"
 printf "Installing bridge server dependencies...\n"
 BRIDGE_DIR="$SCRIPT_DIR/bridge-server"
 if [ -d "$BRIDGE_DIR" ] && [ -f "$BRIDGE_DIR/package.json" ]; then
+  # Claude's SessionStart links node_modules into its plugin data. npm ci would
+  # empty that install through the link, so drop only the link; the next
+  # session start links it again.
+  [ ! -L "$BRIDGE_DIR/node_modules" ] || rm "$BRIDGE_DIR/node_modules"
   if [ -f "$BRIDGE_DIR/package-lock.json" ]; then
     cd "$BRIDGE_DIR" && npm ci --silent --no-audit --no-fund
   else
