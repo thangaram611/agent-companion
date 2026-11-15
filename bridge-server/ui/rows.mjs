@@ -38,12 +38,13 @@ export function cut(text, w) {
   return out + '…';
 }
 export const segsWidth = segs => segs.reduce((sum, [text]) => sum + width(text), 0);
-// Exactly `w` cells: cut, then pad with spaces in the last segment's style.
+// Exactly `w` cells on one line: cut, then pad in the last segment's background.
 export function fitSegs(segs, w, padStyle = 'normal') {
   const out = [];
   let used = 0;
-  for (const [text, style, bg] of segs) {
+  for (let [text, style, bg] of segs) {
     if (used >= w) break;
+    if (text.includes('\n')) text = text.replaceAll('\n', ' ');
     const piece = width(text) <= w - used ? text : cut(text, w - used);
     out.push([piece, style, bg]); used += width(piece);
   }
@@ -58,7 +59,8 @@ export function layoutLine({ segs, right = null, indent = 0, hang = indent, wrap
   let row, col, rowStart, limit = Math.max(1, w - (right ? segsWidth(right) + 2 : 0));
   // Most lines fit one row: skip tokenizing (it dominates a full rewrap).
   const pad = Math.min(indent, w - 1);
-  if (pad + segsWidth(segs) <= limit) {
+  const multiline = segs.some(([text]) => text.includes('\n'));
+  if (!multiline && pad + segsWidth(segs) <= limit) {
     row = pad ? [[' '.repeat(pad), 'normal']] : [];
     for (const [text, style] of segs) if (text) { const last = row.at(-1); if (last && last[1] === style) last[0] += text; else row.push([text, style]); }
     if (right) row.push([' '.repeat(Math.max(1, w - pad - segsWidth(segs) - segsWidth(right))), 'normal'], ...right);
@@ -74,15 +76,18 @@ export function layoutLine({ segs, right = null, indent = 0, hang = indent, wrap
   const newRow = () => { rows.push(row); limit = Math.max(1, w); start(hang); };
   start(indent);
   if (!wrap) {
-    for (const [text, style] of segs) {
+    for (const [raw, style] of segs) {
+      const text = raw.replaceAll('\n', ' ');
       const piece = width(text) <= limit - col ? text : cut(text, limit - col);
       push(piece, style);
       if (piece !== text) break;
     }
   } else for (const [text, style] of segs) {
     const ascii = ASCII.test(text);
-    for (const token of text.split(/( +)/)) {
+    // A newline inside a segment (a heredoc command) starts a new row.
+    for (const token of text.split(/( +|\n)/)) {
       if (!token) continue;
+      if (token === '\n') { newRow(); continue; }
       const tw = ascii ? token.length : width(token);
       if (col + tw <= limit) { push(token, style, tw); continue; }
       if (token[0] === ' ') { newRow(); continue; }

@@ -18,6 +18,8 @@ const HIDDEN = new Set(['usage', 'turn_end', 'preamble']);
 // One-row items sit together; anything taller gets a blank line around it.
 const COMPACT = new Set(['user', 'reasoning', 'edit', 'preamble']);
 const SQLITE_POLL_MS = 1000, LOCATE_MS = 2000;
+// Card and header fields are one line each.
+const one = text => clean(text).replace(/\s*\n\s*/g, ' ');
 const tokens = n => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
 const HELP = [['↑↓ j k', 'jobs, or transcript items when the transcript has focus'], ['⏎ ⇥ esc', 'open or focus the job; back to the list'],
   ['PgUp PgDn', 'scroll the transcript a page'], ['g G', 'transcript top; bottom and follow'], ['e E', 'expand the item; expand all'],
@@ -259,7 +261,8 @@ export class Model {
   // The screen: title, blank, body, blank, key hints. Each row is exactly `columns` wide.
   render() {
     if (this.frame) return this.frame;
-    const { columns: W, rows: H } = this.size;
+    // Below this the layout cannot fit; Ink cuts what a tinier terminal cannot show.
+    const W = Math.max(30, this.size.columns), H = Math.max(8, this.size.rows);
     const bodyH = Math.max(1, H - 4);
     const title = [[' ', 'normal'], ['agent-companion', 'title'], [`  ${this.counts.running} running · ${this.counts.done} done in 24h`, 'dim']];
     if (this.filter && !this.editing) title.push([`  /${this.filter}`, 'dim']);
@@ -296,10 +299,10 @@ export class Model {
       const when = job.status === 'running' ? clock(now - job.startedAt) : age(now - (job.finishedAt ?? job.startedAt));
       const whenStyle = job.status === 'running' || job.status === 'completed' ? (job.status === 'running' ? 'ok' : 'dim') : style;
       // ' ● ' title, at least two spaces, the time, one space.
-      const name = cut(clean(job.caller.title), w - 6 - width(when));
+      const name = cut(one(job.caller.title), w - 6 - width(when));
       rows.push([[' ', 'normal', bg], [glyph, style, bg], [' ', 'normal', bg], [name, 'title', bg],
         [' '.repeat(w - 4 - width(name) - width(when)), 'normal', bg], [when, whenStyle, bg], [' ', 'normal', bg]]);
-      rows.push(fitSegs([['   ', 'normal', bg], [cut(`${job.provider} · ${clean(job.project)}`, w - 4), 'dim', bg]], w));
+      rows.push(fitSegs([['   ', 'normal', bg], [cut(`${job.provider} · ${one(job.project)}`, w - 4), 'dim', bg]], w));
       rows.push([]);
     }
     if (olderLine) { while (rows.length < h - 1) rows.push([]); rows.push([[` ${this.counts.older} older`, 'faint']]); }
@@ -315,8 +318,8 @@ export class Model {
     const model = modelName(result?.effectiveModel ?? progress.effectiveModel ?? execution.effectiveModel ?? execution.modelOverride);
     const effort = result?.effectiveEffort ?? progress.effectiveEffort ?? execution.effectiveEffort ?? execution.effortOverride;
     const used = result?.usage?.total_tokens;
-    const parts = [HOSTS[job.host] + (job.caller.lead ? ` › ${clean(job.caller.lead)}` : ''),
-      [model, effort].filter(Boolean).map(String).map(clean).join(' '), used != null ? `${tokens(used)} tokens` : '', d.branch ? clean(d.branch) : ''];
+    const parts = [HOSTS[job.host] + (job.caller.lead ? ` › ${one(job.caller.lead)}` : ''),
+      [model, effort].filter(Boolean).map(String).map(one).join(' '), used != null ? `${tokens(used)} tokens` : '', d.branch ? one(d.branch) : ''];
     const pad = ' '.repeat(margin);
     const header = [[pad + parts.filter(Boolean).join(' · '), 'dim']];
     const height = Math.max(1, h - 2);

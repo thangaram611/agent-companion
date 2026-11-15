@@ -42,6 +42,14 @@ test('narrow: Enter opens the job full width, Esc returns; resizing keeps it ope
   assert.match(screen(model), /Restore spec triage/);
 });
 
+test('any terminal size renders without throwing', t => {
+  const model = open(uiFixture(t), 'claude:done-1', 80);
+  for (const [columns, rows] of [[1, 1], [5, 3], [29, 7], [109, 9], [110, 9], [400, 200]]) {
+    model.setSize({ columns, rows });
+    assert.ok(screen(model).length);
+  }
+});
+
 test('cards: caller titles, companion · project, running clock, age, older count', t => {
   const text = screen(uiFixture(t).model());
   assert.match(text, /● Restore spec triage +0:41 │/);
@@ -125,4 +133,18 @@ test('native terminal escapes never reach the frame', t => {
   const cells = model.render().flat().map(([text]) => text).join('');
   assert.match(cells, /tests 1 failed/);
   assert.doesNotMatch(cells, /\x1b/);
+});
+
+test('a multi-line command, activity or title never puts a newline inside a frame row', t => {
+  const f = uiFixture(t);
+  f.append([codexItem('turn-2', { type: 'CommandExecution', id: 'heredoc', command: ['/bin/zsh', '-lc', "cat > notes.txt <<'EOF'\nfirst\nsecond\nEOF"], status: 'completed', exit_code: 0, aggregated_output: '' })]);
+  f.setExecution('run-1', () => ({ progress: { activeCommand: 'python3 - <<EOF\nprint(1)\nEOF', lastActivityAt: f.NOW } }));
+  const model = open(f, 'claude:run-1', 150, 40);
+  model.tick();
+  const rows = model.render().map(row => row.map(([text]) => text).join(''));
+  assert.equal(rows.length, 40);
+  for (const row of rows) assert.doesNotMatch(row, /\n/);
+  const text = rows.join('\n');
+  assert.match(text, /\$ cat > notes\.txt <<'EOF' +ok\n[^\n]*│ {4}first *\n[^\n]*│ {4}second/);
+  assert.match(text, /● running \$ python3 - <<EOF/);
 });
