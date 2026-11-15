@@ -313,6 +313,18 @@ Design (decided 2026-11-15, after the measurements above):
   the controller tick like stop markers. Messages are accepted only while the
   job runs and the owner has not stopped; otherwise the inbox entry is refused
   with a visible reason.
+- Inbox contract (shared by 3b-3 and 3c): the live view writes one request per
+  file, atomically (temporary file, then rename), mode 0600, at
+  `<host state dir>/inbox/<executionId>/<requestId>.json` with
+  `{ requestId, executionId, mode, text, at }`; mode is steer, queue, interrupt
+  or cancel (cancel has no text). The owning bridge's controller reads its live
+  executions' inbox directories on its tick, applies each request as
+  `from: 'user'`, then writes `<requestId>.outcome.json`
+  (`{ requestId, ok, status, reason?, interventionId? }`, same atomic write) and
+  removes the request. A request for an execution that is not live in that
+  bridge is answered with reason `state`. At start the controller records the
+  adapter's `interventions` capability on the execution as `interventionModes`,
+  so the view offers only the modes that job supports, plus cancel.
 - `agent_wait` returns early with `user_intervened` (sender, mode, text, time,
   no answer); the subagent relays it and waits again. `agent_reply` gains
   `mode`, defaulting to the companion's own. Status reports per-mode
