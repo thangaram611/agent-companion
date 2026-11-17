@@ -696,6 +696,16 @@ the elapsed time; once the job ends, its outcome and duration. The rows refresh
 every second while a job runs, from the same execution records, and the mod
 writes nothing. Other subagents' rows stay as Claude Code draws them.
 
+The mod also opens a **Companions** pane when a companion job starts (on
+terminals from 144 columns; `/companion` opens it at any width). With the main
+conversation in view it lists this session's jobs as cards, running first;
+pick one to switch to its subagent's view. With a companion subagent in view
+the pane shows that job read-only, as the live view's job pane does: its
+turn from the companion's own transcript, pending messages and the live line,
+or the outcome once it ended. `← jobs` goes back. The pane's transcript comes
+from a small Node child per viewed job (`launch-ui.sh follow`), ended when the
+view or the job changes.
+
 ## Diagnostics
 
 ```bash

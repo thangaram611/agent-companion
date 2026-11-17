@@ -135,11 +135,12 @@ line, including `not_delivered` messages.
 | `lib/target-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
 | `bridge-server/ui/jobs.mjs` | The live view's job list from both hosts' state and caller titles from host transcripts (Claude lead session, Codex rollout and session index). |
-| `bridge-server/ui/rows.mjs` | Sanitizing native text, cell widths, item folding and wrapping, and the cached row index. |
-| `bridge-server/ui/model.mjs` | Live-view state, keys, message boxes, transcript follow and frame composition; `app.mjs` is only the Ink layer and the `ui` entry point. |
+| `bridge-server/ui/rows.mjs` | Sanitizing native text, cell widths, item folding and wrapping, a job's transcript blocks, card head and pending lines for both views, and the cached row index. |
+| `bridge-server/ui/follow.mjs` | One job's transcript follow and turn selection for both views, and the `follow` entry that streams them to the Claude pane as JSON lines. |
+| `bridge-server/ui/model.mjs` | Live-view state, keys, message boxes and frame composition; `app.mjs` is only the Ink layer and the `ui` entry point. |
 | `bridge-server/ui/inbox.mjs` | The live view's only writes: atomic 0600 inbox request files, and deleting each outcome it has read. |
-| `hooks/mod.ts` | Claude Code's mod (Codex ignores it): each agent-companion subagent's agent-list row from the bridge's records, read on a clock only while a job runs. |
-| `hooks/launch-ui.sh`, `scripts/install-ui-launcher.mjs` | Running the live view with the hooks' Node and its dependencies; the `~/.local/bin/agent-companion` launcher. |
+| `hooks/mod.ts` | Claude Code's mod (Codex ignores it): each agent-companion subagent's agent-list row from the bridge's records, read on a clock only while a job runs, and the Companions pane that follows the view, one `follow` child per viewed job. |
+| `hooks/launch-ui.sh`, `scripts/install-ui-launcher.mjs` | Running the live view and the pane's `follow` children with the hooks' Node and the view's dependencies; the `~/.local/bin/agent-companion` launcher. |
 
 ## Things that will bite you
 
@@ -173,7 +174,9 @@ line, including `not_delivered` messages.
 - **The mod has no Node.** `hooks/mod.ts` runs in Claude Code's mod
   environment: it imports only import-free files (`bridge-server/ui/rows.mjs`,
   `lib/model-name.mjs`, typed by their `.d.mts`) and reads records through
-  `$.fs`. Its tests run under `claude plugin test .`, not `node --test`.
+  `$.fs`; the pane's transcript comes from a `launch-ui.sh follow` child it
+  streams with `$.process.spawn`. Its tests run under `claude plugin test .`,
+  not `node --test`.
 - **Sandbox tests before imports.** Put `import '../test/sandbox-home.mjs';` first
   in suites that reach state/runtime code. `lib/state.mjs` binds `BASE_DIR` at
   import time, so setting env in the test body is too late for static imports.
