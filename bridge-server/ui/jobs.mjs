@@ -21,16 +21,17 @@ export function stateDirs(env = process.env) {
 
 // A result is final. Without one, an active record whose recorded process is
 // gone (the bridge was killed before any handoff) is `unknown`, not running.
-function statusOf(execution, result, alive) {
+export function statusOf(execution, result, alive) {
   if (result) return result.outcome;
   return ACTIVE.has(execution.state) && (!execution.processes?.pid || alive(execution.processes.pid)) ? 'running' : 'unknown';
 }
 
-export function createJobSource({ dirs = stateDirs(), env = process.env, alive = pidAlive } = {}) {
-  const stores = dirs.map(({ host, dir }) => ({ host, dir, records: new Records({ dir, log() {} }) }));
+// Records by path, parsed again only when the file changed, so an unchanged
+// record keeps its identity. Executions change while running; results are
+// immutable once written (`final`). An unreadable record reads as null.
+export function recordReader() {
   const files = new Map();
-  // Executions change while running; results are immutable once written.
-  function read(path, final = false) {
+  return function read(path, final = false) {
     const cached = files.get(path);
     if (final && cached?.value) return cached.value;
     let stat;
@@ -40,7 +41,12 @@ export function createJobSource({ dirs = stateDirs(), env = process.env, alive =
     try { value = JSON.parse(readFileSync(path, 'utf8')); } catch { /* unreadable record: not listed */ }
     files.set(path, { mtimeMs: stat.mtimeMs, size: stat.size, value });
     return value;
-  }
+  };
+}
+
+export function createJobSource({ dirs = stateDirs(), env = process.env, alive = pidAlive } = {}) {
+  const stores = dirs.map(({ host, dir }) => ({ host, dir, records: new Records({ dir, log() {} }) }));
+  const read = recordReader();
   return {
     // Running jobs first, then the rest by when they finished, newest first.
     list() {

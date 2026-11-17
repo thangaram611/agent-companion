@@ -18,6 +18,13 @@ if [ -z "$NODE_BIN" ]; then
   exit 1
 fi
 
+# Claude Code's Companions pane follows one job through `follow`, which
+# imports no packages.
+if [ "${1:-}" = follow ]; then
+  shift
+  exec "$NODE_BIN" "$ROOT/bridge-server/ui/follow.mjs" "$@"
+fi
+
 UI="$ROOT/bridge-server/ui/app.mjs"
 if [ -r "$ROOT/bridge-server/node_modules/ink/package.json" ]; then
   exec "$NODE_BIN" "$UI" "$@"

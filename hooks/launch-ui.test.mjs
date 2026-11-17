@@ -25,7 +25,7 @@ node_requirement_error() { echo 'agent-companion: Node.js 26 or newer is require
     writeFileSync(path.join(dir, 'ink/package.json'), JSON.stringify({ name: 'ink', type: 'module', exports: './index.mjs' }));
     writeFileSync(path.join(dir, 'ink/index.mjs'), `export default ${JSON.stringify(name)};`);
   };
-  const run = (env = {}) => spawnSync('/bin/bash', [path.join(root, 'hooks/launch-ui.sh'), 'ui'], {
+  const run = (env = {}, args = ['ui']) => spawnSync('/bin/bash', [path.join(root, 'hooks/launch-ui.sh'), ...args], {
     env: { PATH: process.env.PATH, HOME: dir, CODEX_HOME: path.join(dir, 'codex home'), FAKE_NODE: process.execPath, ...env }, encoding: 'utf8' });
   return { dir, root, pkg, run };
 }
@@ -56,4 +56,12 @@ test('missing dependencies or Node fail with what to do, without starting the UI
   result = f.run({ FAKE_NODE: '' });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Node\.js 26 or newer is required/);
+});
+
+test('follow, for the Claude pane, runs without the UI packages', t => {
+  const f = fixture(t);
+  writeFileSync(path.join(f.root, 'bridge-server/ui/follow.mjs'), `console.log('follow', process.argv.slice(2).join(' '));\n`);
+  const result = f.run({}, ['follow', '/state', 'job-1']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'follow /state job-1\n');
 });

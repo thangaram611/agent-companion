@@ -1,7 +1,13 @@
-// One job's transcript as the views follow it: located in its companion's
-// native store, read as it grows and narrowed to the job's turn. Read-only.
+// One job's transcript as both views follow it: the live view's job pane
+// (model.mjs) reads it in process, and Claude Code's Companions pane
+// (hooks/mod.ts), which has no Node, reads it as JSON lines from the `follow`
+// entry below. Read-only: nothing here writes a record or signals a process.
+import { isAbsolute } from 'node:path';
 import { followTranscript, locateTranscript } from '../../lib/transcripts.mjs';
 import { selectTurnItems } from '../../lib/work-summary.mjs';
+import { Records } from '../controller/records.mjs';
+import { pidAlive } from '../controller/process-supervisor.mjs';
+import { branchOf, recordReader, statusOf } from './jobs.mjs';
 import { clean } from './rows.mjs';
 
 const HIDDEN = new Set(['usage', 'turn_end', 'preamble']);
@@ -71,4 +77,84 @@ export class JobTranscript {
     }
     return { list, preamble, labels, taken };
   }
+}
+
+// The pane draws only what fits; the rest is in `agent-companion ui`.
+const TAIL = 100, POLL_MS = 250;
+const turnOf = ({ nativeTurnId, nativeTurnIds, interventions }) => `${nativeTurnId}|${nativeTurnIds?.length}|${interventions?.length}`;
+
+// One job's lines for the pane: { job } whenever its records or status
+// change, then { turn, items } whenever its selected turn does: the last
+// TAIL items' ids, how many come before them, their labels, the recorded
+// messages the transcript shows (taken), whether the transcript was found and
+// its format, with only the items not sent before. tick() answers the lines
+// since the last tick and whether the job has ended, its final read done.
+export function createFollow({ dir, executionId, env = process.env, now = Date.now, alive = pidAlive }) {
+  const records = new Records({ dir, log() {} }), read = recordReader();
+  const paths = { execution: records.path('executions', executionId), result: records.path('results', executionId) };
+  const transcript = new JobTranscript({ env, now });
+  let job = null, branch, seen = null, turn = null, sent = new Map(), sentTurn = null;
+  return {
+    tick() {
+      const execution = read(paths.execution);
+      if (!execution?.executionId) throw new Error(`no execution record ${executionId} in ${dir}`);
+      const result = read(paths.result, true);
+      const status = statusOf(execution, result, alive);
+      const lines = [];
+      if (execution !== job?.execution || result !== job?.result || status !== job?.status) {
+        branch ??= branchOf(execution.cwd);
+        job = { provider: execution.provider, execution, result, status };
+        lines.push({ job: { status, execution, result, branch } });
+      }
+      const ended = status !== 'running';
+      let items = [];
+      if (transcript.poll(job, seen === null || ended) || turnOf(execution) !== seen) {
+        seen = turnOf(execution);
+        const { list, labels, taken } = transcript.select(job);
+        const tail = list.slice(-TAIL);
+        turn = { ids: tail.map(item => item.id), earlier: list.length - tail.length,
+          labels: Object.fromEntries(tail.flatMap(item => labels.has(item.id) ? [[item.id, labels.get(item.id)]] : [])), taken: [...taken] };
+        items = tail.filter(item => sent.get(item.id) !== item);
+        sent = new Map(tail.map(item => [item.id, item]));
+      }
+      const message = { ...turn, located: Boolean(transcript.locator),
+        format: transcript.format && { version: transcript.format.version, detail: transcript.format.detail } };
+      const key = JSON.stringify(message);
+      if (items.length || key !== sentTurn) { lines.push({ turn: message, items }); sentTurn = key; }
+      return { lines: lines.map(line => JSON.stringify(line)), ended };
+    },
+  };
+}
+
+const USAGE = `usage: agent-companion follow <state dir> <execution id>
+
+Prints one companion job's records and selected transcript items as JSON
+lines while it runs, then exits after the final read once it has ended.
+Claude Code's Companions pane runs it; it reads only.
+`;
+if (import.meta.main) {
+  const [dir, executionId, ...rest] = process.argv.slice(2);
+  let follow;
+  try {
+    if (!dir || !isAbsolute(dir) || rest.length) throw new Error('needs an absolute state dir and an execution id');
+    follow = createFollow({ dir, executionId });
+  } catch {
+    process.stderr.write(USAGE);
+    process.exit(2);
+  }
+  // The pane ends it by killing it; a pane whose session died leaves it orphaned.
+  const parent = process.ppid;
+  process.stdout.on('error', () => process.exit(0));
+  let timer = null;
+  const step = () => {
+    let out;
+    try { out = follow.tick(); } catch (error) {
+      process.stderr.write(`agent-companion follow: ${error.message}\n`);
+      process.exit(1);
+    }
+    for (const line of out.lines) process.stdout.write(line + '\n');
+    if (out.ended || process.ppid !== parent) { clearInterval(timer); timer = false; }
+  };
+  step();
+  if (timer === null) timer = setInterval(step, POLL_MS);
 }
