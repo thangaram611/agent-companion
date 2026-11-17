@@ -497,3 +497,20 @@ test('antigravity: a cancelled command keeps its native running status', async t
   const command = result.items.find(i => i.kind === 'command');
   assert.equal(command.command, 'sleep 30 && echo LATE'); assert.equal(command.status, 'running');
 });
+
+test('opencode: a shell command killed by its timeout is failed, naming the signal (measured on 2.3.0)', async t => {
+  const { readTranscript } = await api();
+  const loc = fixture(t, 'opencode');
+  const before = readTranscript(loc);
+  const db = new DatabaseSync(loc.path);
+  const part = { id: 'prt_timeout', type: 'tool', name: 'shell', state: { status: 'completed', input: { command: 'sleep 150' },
+    content: [{ type: 'text', text: 'Command timed out after 120 seconds.\nExit code: 143 (SIGTERM)' }],
+    metadata: { status: 'completed', signal: 'SIGTERM', timeout: true } } };
+  db.prepare('INSERT INTO session_message VALUES(?,?,?,?,?,?,?)').run('msg_timeout', loc.sessionId, 'assistant', 998, 1, 1,
+    JSON.stringify({ content: [part], time: { completed: 2 } }));
+  db.close();
+  const [command] = readTranscript(loc, { after: before.cursor }).items.filter(i => i.kind === 'command');
+  assert.equal(command.status, 'failed');
+  assert.equal(command.exitCode, null);
+  assert.equal(command.signal, 'SIGTERM');
+});
