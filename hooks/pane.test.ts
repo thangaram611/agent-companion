@@ -12,6 +12,11 @@ const pane = (view: { agentId?: string } = {}, bodyRows = 18, bodyColumns = 64, 
   plugin: 'agent-companion', surface: 'terminal' as const, component: 'Pane' as const, requestId: 'companions',
   props: { title: 'Companions', isFocused, bodyColumns, placement: 'dock' as const, scroll: { offset: 0, bodyRows }, view },
 })
+// The band above the prompt, which the mod leaves to the engine.
+const band = (view: { agentId?: string } = {}) => ({
+  plugin: 'agent-companion', surface: 'terminal' as const, component: 'AbovePrompt' as const, requestId: 'band',
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 12, bodyColumns: 100, scroll: { offset: 0, bodyRows: 12 }, view },
+})
 const agentRow = (id: string, description: string) => ({
   surface: 'terminal' as const, component: 'AgentRow' as const, requestId: id,
   props: { id, description, type: 'agent-companion', status: 'running', kind: 'local_agent', taskStatus: 'running', label: description,
@@ -30,12 +35,15 @@ type Run = { exitCode: number; stdout: string; stderr: string }
 // The engine beneath the mod: the bridge's records from memory (`reads` counts
 // them), agent_send answering each subagent's job, `launch-ui.sh jobs`
 // answering each session's list (`sessions`, or `run` in its place), the
-// session's id, the pane's open, the view (refused for `unviewable` agents)
-// and the debug log.
+// session's id, the pane's open, the view (refused for `unviewable` agents),
+// the debug log, and the session's commands (`commands`; `registers` counts
+// the calls). The kit hands no hook of a test a plugin's $.ui.focus (2.1.326):
+// each rejects, so `rings` reads the keys the mod tried from its debug log.
 function engine(on: On, files: Record<string, unknown>, jobs: Record<string, string>, now: number,
   { sessions = {}, unviewable = [], run }: { sessions?: Record<string, Listed>; unviewable?: string[]; run?: Run } = {}) {
   mock.env(on, { HOME })
-  const seen = { reads: 0, opens: [] as unknown[], views: [] as unknown[], lists: [] as (readonly string[])[], logs: [] as unknown[] }
+  const seen = { reads: 0, opens: [] as unknown[], views: [] as unknown[], lists: [] as (readonly string[])[], logs: [] as { text: string }[],
+    commands: new Set<string>(), registers: 0, rings: () => seen.logs.flatMap(({ text }) => /ring stays off (\S+) \(/.exec(text)?.[1] ?? []) }
   on('fs.read', (_, e) => {
     seen.reads++
     return e.path in files ? { value: JSON.stringify(files[e.path]) } : { deny: `ENOENT: ${e.path}` }
@@ -53,7 +61,7 @@ function engine(on: On, files: Record<string, unknown>, jobs: Record<string, str
     return { value: e.agentId && unviewable.includes(e.agentId) ? { deny: 'no agent holds that id' } : {} }
   })
   on('ui.log', (_, e) => { seen.logs.push(e); return { value: undefined } })
-  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('command.register', (_, e) => { seen.registers++; seen.commands.add(e.name); return { value: { command: e.name } } })
   return Object.assign(seen, { clock: mock.clock(on, { now }) })
 }
 
@@ -115,18 +123,24 @@ test("the list: this session's jobs as cards, running first, and a card opens it
   expect(await screen(ui)).toBe([
     ' Companions  2 running · 1 done',
     '',
-    '1: ● Second opinion on schema                              2:06',
-    '     claude · ◌ your message queued',
+    '1: Second opinion on schema                                 2:06',
+    '   ● claude · ◌ your message queued',
     '',
-    '2: ● Step 3b-2: adapters                                   6:41',
-    '     codex · running $ node --test opencode.test.mjs',
+    '2: Step 3b-2: adapters                                      6:41',
+    '   ● codex · running $ node --test opencode.test.mjs',
     '',
-    '3: ✓ Review auth middleware                                  4m',
-    '     opencode · ✓ done in 0:38',
+    '3: Review auth middleware                                     4m',
+    '   ✓ opencode · done in 0:38',
     '',
     ' ctrl+x tab for keys · 1–3 or ⏎ open a job',
   ].join('\n'))
-  expect((await ui.find({ key: 'a3' }))?.type).toBe('Button')
+  // A card's Button is one plain line: an unstyled label to the pane's edge
+  // after the engine's "1: ", which the ring inverts whole; its second row,
+  // glyph and colours, is a Text outside it.
+  const card = await ui.find({ key: 'a3' })
+  expect(card).toMatchObject({ type: 'Button', props: { plain: true, hotkey: '1' }, children: [] })
+  expect(card?.props.label).toBe('Second opinion on schema' + ' '.repeat(33) + '2:06')
+  expect((await ui.find({ type: 'Text', text: '● claude · ◌ your message queued' }))?.props).toMatchObject({ wrap: 'truncate-end' })
 
   await ui.press({ key: 'a1' })
   expect(seen.views).toEqual([{ agentId: 'a1' }])
@@ -253,7 +267,7 @@ test('an agent the mod does not know, or a companion subagent with no job yet, s
   expect(seen.views).toEqual([])
 })
 
-test('/companion opens the pane at any width with the keys, no background of its own, and lists the jobs again', async ($, on) => {
+test('/companion opens the pane at any width with the keys, no background of its own, and lists the jobs and registers itself again', async ($, on) => {
   const seen = engine(on, {}, {}, START)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.run', () => ({}))
@@ -261,8 +275,34 @@ test('/companion opens the pane at any width with the keys, no background of its
   expect(await $.command.run({ command: 'companion', args: '' } as never)).toEqual({})
   expect(seen.opens).toEqual([{ id: 'companions', title: 'Companions', backgroundColor: 'transparent', focus: true }])
   await seen.clock.settle()
-  // One list at the session's start, one at the open.
+  // One list and one registration at the session's start, one each at the open.
   expect(seen.lists).toHaveLength(2)
+  expect(seen.registers).toBe(2)
+})
+
+test('a return to the main conversation registers /companion again, seen by the pane or, the pane closed, by the band; redraws register nothing', async ($, on) => {
+  const seen = engine(on, {}, {}, START)
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(pane())
+  await ui.redraw()
+  await ui.redraw(pane({ agentId: 'e1' }).props)
+  // Claude Code was seen dropping it while a subagent was in view.
+  seen.commands.clear()
+  await ui.redraw()
+  await seen.clock.settle()
+  expect(seen.registers).toBe(1)
+  await ui.redraw(pane({}).props)
+  await ui.redraw()
+  await seen.clock.settle()
+  expect([seen.registers, [...seen.commands]]).toEqual([2, ['companion']])
+  await ui.unmount()
+
+  for (const view of [{}, { agentId: 'e1' }, { agentId: 'e2' }]) await $.ui.render(band(view))
+  seen.commands.clear()
+  for (const view of [{}, {}]) await $.ui.render(band(view))
+  await seen.clock.settle()
+  expect([seen.registers, [...seen.commands]]).toEqual([3, ['companion']])
 })
 
 // A session's subagents as `launch-ui.sh jobs` lists them: the first still runs, the
@@ -287,13 +327,13 @@ test("a resumed session's list is rebuilt from the records for its own id, nine 
   expect(lines.slice(0, 6)).toEqual([
     ' Companions  1 running · 22 done',
     '',
-    '1: ● Job r1                                                1:00',
-    '     codex · working',
+    '1: Job r1                                                   1:00',
+    '   ● codex · working',
     '',
-    '2: ✓ Job r2                                                  1m',
+    '2: Job r2                                                     1m',
   ])
   expect(lines.slice(-5)).toEqual([
-    '     codex · ✓ done in 0:30',
+    '   ✓ codex · done in 0:30',
     '',
     ' 14 older · agent-companion ui shows them',
     '',
@@ -311,7 +351,7 @@ test("a resumed session's list is rebuilt from the records for its own id, nine 
   await ui.redraw()
   const now = (await screen(ui)).split('\n')
   expect(now[0]).toBe(' Companions  2 running · 22 done')
-  expect(now[2]).toMatch(/^1: ● New probe +0:11$/)
+  expect(now[2]).toMatch(/^1: New probe +0:11$/)
   expect(now.at(-3)).toBe(' 15 older · agent-companion ui shows them')
   expect(seen.lists).toHaveLength(2)
   await ui.unmount()
@@ -345,11 +385,13 @@ test("a card whose subagent Claude Code cannot view opens its job in the pane; '
     'ctrl+x tab for keys  b: ← jobs',
   ].join('\n'))
   expect(children.map(child => child.job)).toEqual(['rj2'])
-  expect(seen.logs).toEqual([{ text: 'agent-companion: no view of subagent r2 (no agent holds that id); the Companions pane shows its job', to: 'debug' }])
+  expect(seen.logs[0]).toEqual({ text: 'agent-companion: no view of subagent r2 (no agent holds that id); the Companions pane shows its job', to: 'debug' })
+  expect(seen.rings()).toEqual(['jobs'])
 
-  // Back to the list without moving Claude Code's view.
+  // Back to the list without moving Claude Code's view, the ring asked onto the first card.
   await ui.press({ key: 'jobs' })
   expect(seen.views).toEqual([{ agentId: 'r2' }])
+  expect(seen.rings()).toEqual(['jobs', 'a1'])
   expect(await screen(ui)).toMatch(/^ Companions  1 running · 1 done/)
 
   // The person viewing a companion subagent replaces the pane's pick, and their main view shows the list.
@@ -362,7 +404,7 @@ test("a card whose subagent Claude Code cannot view opens its job in the pane; '
   await ui.unmount()
 })
 
-test("keys: the first card and '← jobs' take the ring, digits and b press them, and the hint names ctrl+x tab until the pane holds the keys", async ($, on) => {
+test("keys: the first card and '← jobs' take the ring, each switch puts it there again, digits and b press them, and the hint names ctrl+x tab until the pane holds the keys", async ($, on) => {
   const seen = engine(on, {}, {}, START + 60_000, { sessions: { [SESSION]: { jobs: listed(1), older: [] } } })
   follows(on, {})
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -374,11 +416,14 @@ test("keys: the first card and '← jobs' take the ring, digits and b press them
 
   await ui.press({ key: 'r1' })
   expect(seen.views).toEqual([{ agentId: 'r1' }])
+  // The ring is asked onto '← jobs'; the kit's refusal leaves the rest as it was.
+  expect(seen.rings()).toEqual(['jobs'])
   await ui.redraw(pane({ agentId: 'r1' }, 12, 64, true).props)
-  expect((await ui.find({ key: 'jobs' }))?.props).toMatchObject({ hotkey: 'b', autoFocus: true, plain: true })
+  expect(await ui.find({ key: 'jobs' })).toMatchObject({ props: { label: '← jobs', hotkey: 'b', autoFocus: true, plain: true, dimColor: true }, children: [] })
   expect((await screen(ui)).split('\n').at(-1)).toBe('esc returns  b: ← jobs')
   await ui.press({ key: 'jobs' })
   expect(seen.views).toEqual([{ agentId: 'r1' }, {}])
+  expect(seen.rings()).toEqual(['jobs', 'r1'])
   await ui.unmount()
 })
 
@@ -392,7 +437,7 @@ test('a failed list says why, and the jobs the mod saw start stay', async ($, on
     ' Companions  1 running · 0 done',
     ' earlier jobs not read: agent-companion: Node.js 26 or newer is required.',
     '',
-    '1: ● Probe the bridge                                      1:01',
+    '1: Probe the bridge                                         1:01',
   ])
   await ui.unmount()
 })

@@ -711,8 +711,9 @@ transcript come from small Node children (`launch-ui.sh jobs`, and
 `launch-ui.sh follow` per shown job, ended when the view or the job changes).
 
 From the keyboard, `ctrl+x tab` gives the pane the keys, with the first card
-(or `← jobs`) under the focus ring; Tab and the arrows move it, Enter
-presses, Esc hands the keys back. While the pane holds them:
+(or `← jobs`) under the focus ring, where each switch between the list and a
+job puts it again; Tab and the arrows move it, Enter presses, Esc hands the
+keys back. While the pane holds them:
 
 | Key | Action |
 | --- | --- |

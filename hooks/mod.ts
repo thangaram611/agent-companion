@@ -58,6 +58,8 @@ const SGR: Record<string, string> = { ok: '32', warn: '33', bad: '31' }
 const PANE = 'companions'
 // The list's cards, each pressed by its digit; the session's other jobs are counted.
 const CARDS = 9
+// The engine's "1: " before a plain Button's label.
+const HOTKEY = 3
 // rows.mjs's styles as theme colour keys, so the pane follows the person's theme.
 const STYLE: Record<string, { color?: string; weight?: 'bold' }> = {
   title: { weight: 'bold' }, dim: { color: 'inactive' }, faint: { color: 'subtle' },
@@ -72,6 +74,8 @@ let follow: Follow | undefined
 let picked: string | undefined
 // The last rebuild: how many of the session's jobs it left off the list, and why it failed.
 let older = 0, rebuilds = 0, failure: string | undefined
+// The agent in view when a site last drew, so a return to the main conversation is seen once.
+let shownAgent: string | undefined
 
 // lib/host.mjs's claude state dir: AGENT_COMPANION_HOME, else ~/.claude/agent-companion.
 async function stateDir($: EngineInterface) {
@@ -165,10 +169,34 @@ function body(a: Agent, now: number, columns: number | undefined, titleWidth: nu
     .map(([text, style]) => style && SGR[style] ? `\x1b[${SGR[style]}m${text}\x1b[39m` : text).join('').trimEnd()
 }
 
+// Claude Code 2.1.326 dropped /companion from the typeahead after the person
+// viewed a subagent and came back (cause unknown). Each open and each return
+// to the main conversation registers it again: the engine lists a forgotten
+// one again and ignores an unchanged repeat. The name stays a literal here,
+// where claude plugin validate reads it.
+function registerCommand($: EngineInterface) {
+  return $.command.register({ name: 'companion', description: "Show this session's companion jobs, or the job of the companion subagent in view" })
+}
+function sawView($: EngineInterface, agentId: string | undefined) {
+  if (shownAgent && !agentId) void registerCommand($).catch(() => {})
+  shownAgent = agentId
+}
+
 // Each open lists the session's jobs again; the person's own takes the keys.
 function openPane($: EngineInterface, focus?: true) {
   void rebuild($)
+  void registerCommand($).catch(() => {})
   return $.ui.open({ id: PANE, title: 'Companions', backgroundColor: 'transparent', ...(focus && { focus }) })
+}
+
+// After the pane switches between the list and a job, its ring would rest on
+// nothing; this puts it on the new screen's first control. A pane not holding
+// the keys refuses, and an element never drawn ends the wait: both harmless,
+// noted in the debug log.
+function ring($: EngineInterface, key: string) {
+  void $.ui.focus({ requestId: PANE, key }).then(moved => moved.deny, String)
+    .then(why => why && $.ui.log(`agent-companion: the Companions pane's ring stays off ${key} (${why})`, { to: 'debug' }))
+    .catch(() => {})
 }
 
 // This session's jobs from the records, the ones whose start the mod did not
@@ -262,13 +290,14 @@ function cards(now: number) {
     .sort((x, y) => at(y) - at(x) || y.a.execution.startedAt - x.a.execution.startedAt)
 }
 const titleOf = (a: Agent) => a.title || (clean(a.execution?.text ?? '').split('\n')[0] ?? '')
-// A card's second row, under its title: the companion, then what it is doing or how it ended.
-function cardLine({ a, status }: { a: Agent; status: string }, now: number): Seg[] {
-  const line: Seg[] = [['     ', 'normal'], [`${clean(a.execution.provider)} · `, 'dim']]
+// A card's second row, under its title: the status glyph, the companion,
+// then what it is doing or how it ended, the glyph not repeated.
+function cardLine({ a, status }: { a: Agent; status: string }, glyph: Seg, now: number): Seg[] {
+  const line: Seg[] = [[' '.repeat(HOTKEY)], glyph, [` ${clean(a.execution.provider)} · `, 'dim']]
   if (status === 'running') return [...line, ...doing(a.execution, now).map(([text, style]): Seg => [text, style === 'ok' ? 'dim' : style])]
   if (status === 'unknown') return [...line, ['no result', 'warn']]
   const [text, style] = outcomeLabel({ execution: a.execution, result: a.result })
-  return [...line, [text, status === 'completed' ? 'dim' : style]]
+  return [...line, [text.slice(2), status === 'completed' ? 'dim' : style]]
 }
 
 // The viewed job's rows, exactly what fits in `rows`: a running job follows
@@ -293,7 +322,7 @@ function jobRows(a: Agent, f: Follow, now: number, w: number, rows: number): Seg
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'companion', description: "Show this session's companion jobs, or the job of the companion subagent in view" })
+    await registerCommand($)
     void rebuild($)
     return next(e)
   })
@@ -337,9 +366,17 @@ export const register: Register = on => {
     return next({ ...e, props: { ...e.props, body: body(a, now, columns, titleWidth) } })
   })
 
+  // The band above the prompt is drawn again at every switch of the view,
+  // the pane open or not; the mod draws nothing there.
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    sawView($, e.props.view?.agentId)
+    return next(e)
+  })
+
   // Draws only from what the clock and the children already brought in.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
+    sawView($, e.props.view?.agentId)
     // A module loaded under an open pane (a reload) has not listed the session's jobs yet.
     if (!rebuilds) void rebuild($)
     const now = await $.clock.now(), w = Math.max(16, e.props.bodyColumns), focused = e.props.isFocused
@@ -353,10 +390,15 @@ export const register: Register = on => {
     const id = inView?.jobId ? viewed : picked, a = id ? agents.get(id) : undefined
     if (id && a?.jobId) {
       followJob($, a.jobId)
-      const back = () => inView?.jobId ? $.ui.view({}) : (picked = undefined, $.ui.invalidate('ui.render'))
+      const back = async () => {
+        if (inView?.jobId) await $.ui.view({})
+        else { picked = undefined; $.ui.invalidate('ui.render') }
+        const first = cards(await $.clock.now())[0]
+        if (first) ring($, first.id)
+      }
       return column(...jobRows(a, follow!, now, w, e.props.scroll.bodyRows).map(row),
         h(Box, { flexDirection: 'row', justifyContent: 'space-between' }, row([[focused ? 'esc returns' : 'ctrl+x tab for keys', 'faint']]),
-          h(Button, { key: 'jobs', plain: true, dimColor: true, hotkey: 'b', autoFocus: true, onPress: back }, '← jobs')))
+          h(Button, { key: 'jobs', label: '← jobs', plain: true, dimColor: true, hotkey: 'b', autoFocus: true, onPress: back })))
     }
     stopFollow()
     // A card switches Claude Code to its subagent's view; one Claude Code
@@ -368,6 +410,7 @@ export const register: Register = on => {
         picked = agentId
         $.ui.invalidate('ui.render')
       }
+      ring($, 'jobs')
     }
     const list = cards(now), shown = list.slice(0, CARDS), more = older + list.length - shown.length
     const running = list.filter(c => c.status === 'running').length
@@ -375,11 +418,17 @@ export const register: Register = on => {
     const failed = failure ? [row([[` earlier jobs not read: ${failure}`, 'warn']])] : []
     if (!list.length) return column(title, ...failed, row([]), row([[' No companion jobs in this session yet', 'dim']]))
     const keys = shown.length === 1 ? '1' : `1–${shown.length}`
-    // A card's digit leads its title ("1: ● …"), drawn by the engine.
+    // A card is a plain Button whose label is one unstyled string, since the
+    // engine inverts each styled part of a label on its own: the title, and
+    // the time at the pane's edge less the engine's "1: ". That is cardHead's
+    // line less its ' ● ' and trailing ' '; the glyph leads the row below,
+    // outside the Button.
     return column(title, ...failed, row([]),
-      ...shown.flatMap((c, i) => [h(Button, { key: c.id, plain: true, hotkey: String(i + 1), ...(i === 0 ? { autoFocus: true as const } : {}), onPress: () => open(c.id) },
-        ...spans(cardHead({ status: c.status, startedAt: c.a.execution.startedAt, finishedAt: c.a.result?.finishedAt }, titleOf(c.a), now, w - 2).slice(1)),
-        '\n', ...spans(fitSegs(cardLine(c, now), w))), row([])]),
+      ...shown.flatMap((c, i) => {
+        const head = cardHead({ status: c.status, startedAt: c.a.execution.startedAt, finishedAt: c.a.result?.finishedAt }, titleOf(c.a), now, w - HOTKEY + 4)
+        return [h(Button, { key: c.id, label: head.slice(3, 6).map(([text]) => text).join(''), plain: true, hotkey: String(i + 1),
+          ...(i === 0 ? { autoFocus: true as const } : {}), onPress: () => open(c.id) }), row(fitSegs(cardLine(c, head[1]!, now), w)), row([])]
+      }),
       ...(more ? [row([[` ${more} older · agent-companion ui shows them`, 'faint']]), row([])] : []),
       row([[focused ? ` ${keys} or ⏎ open a job · esc returns` : ` ctrl+x tab for keys · ${keys} or ⏎ open a job`, 'faint']]))
   })
