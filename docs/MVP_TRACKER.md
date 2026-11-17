@@ -93,6 +93,11 @@ remains separate from implementation; see the release gates below.
   directory) without bridge cleanup, and follow-ups need those files.
 - Codex rollouts accumulate under `$CODEX_HOME/sessions` without automatic
   cleanup. Sandbox boundaries are in [Architecture](ARCHITECTURE.md#negative-results).
+- Antigravity is paused on `agy_acp_server.par` 1.1.1 (registry: 1.5.0) pending
+  the switch in decision 8. Unreproduced here: t3code reports that Antigravity
+  ends a turn that hit an upstream API error with `end_turn` and the error as
+  reply text, and a quota exhaustion with `refusal`. The bridge would report the
+  first as `completed`.
 
 ## Decisions
 
@@ -141,6 +146,21 @@ remains separate from implementation; see the release gates below.
    Account risk stays with the operator; recheck this boundary before widening
    the integration.
 
+   **Re-read 2026-11-17, switch decided, all Antigravity work paused.** The
+   [FAQ](https://antigravity.google/docs/faq) now names this host directly:
+   "Why can't I use third-party software (such as Claude Code, OpenClaw, or
+   OpenCode) with my Antigravity login? … a violation of our Terms of Service
+   … can result in suspension or termination", and "Wrapping `agy` inside
+   third-party coding agents or applications … is not supported under consumer
+   plans". For third-party agents it recommends a Gemini Enterprise or AI Studio
+   API key. Google's [ACP page](https://antigravity.google/docs/ide/extensions/acp/)
+   says "Any ACP client can launch Antigravity CLI", lists only editors,
+   registers `agy acp` for every client except Android Studio, and no longer
+   mentions `agy_acp_server.par`. The user decided to move to Homebrew
+   `agy acp` and keep the personal Google login, accepting the account risk,
+   with every Antigravity change and live run paused until they resume it.
+   The queued work is in [Next Backlog](#next-backlog).
+
 9. Additional companions or transports require recurring use and an adoption
    check; the available paired-review evidence is insufficient to justify expansion.
    **Accepted scope, 2026-11-09:** the user approved Claude Code as the fifth
@@ -167,6 +187,32 @@ remains separate from implementation; see the release gates below.
   limits; partial assistant text does not establish what changed on disk.
 - Permission mirroring remains a separate decision: align called-agent access
   with the caller only after the desired policy and acceptance checks are agreed.
+- Antigravity (paused 2026-11-17; resume only on the user's word):
+  1. Switch the runtime to Homebrew `agy acp`. Measured 2026-11-17: `agy` 1.5.9
+     has `acp` with `--login`, `--sandbox`, `--dangerously-skip-permissions`,
+     `--disable-telemetry` and `--process-per-session`. Google documents
+     credentials cached by `agy` and `-32000 "Authentication required"` without
+     them. Re-measure every 1.1.1 fact in Architecture's Negative Results
+     (protocol answer, `session/load` survival, per-session model, permission
+     requests, usage, credential store), then retire
+     `scripts/install-antigravity-acp.mjs` and its probe.
+  2. Reproduce, then fix, the suspected upstream-error-as-success. Capture a real
+     failing turn first, e.g. a model the account cannot use. Evidence so far is
+     t3code's `apps/server/src/provider/acp/AntigravityTurnOutcome.ts`: it names
+     native step type 17 `CORTEX_STEP_TYPE_ERROR_MESSAGE` and reads the turn's
+     last step for `Error <code>, Message: …, Status: …`, `QUOTA_EXHAUSTED` and
+     reset times. Our `lib/transcripts/antigravity.mjs` reads step 17 only as a
+     permission-refused tool call (the one local row, 2026-11-17, is a denial);
+     the controller's native-error override is Copilot-only. The fix would make
+     that override a target-registry setting instead of an id check.
+- Generic ACP companions (deferred 2026-11-17): run any agent from the
+  [ACP registry](https://agentclientprotocol.com/get-started/registry) (about 45,
+  e.g. Gemini, Goose, Cursor, Qwen) or a local ACP command through the shared ACP
+  adapter, as t3code does ([providers-acp.md](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-acp.md)).
+  Each agent's quirks are per-agent facts (see Negative Results: approval flags,
+  advertised `loadSession`, usage shapes), so an unqualified agent would get
+  conservative defaults: no cold follow-up, cancel only, no usage. Needs decision
+  9's adoption check and a named agent the user would actually use.
 
 ## Validation Commands
 

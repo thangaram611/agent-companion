@@ -154,7 +154,11 @@ Configuration:
   server under `~/.gemini/antigravity-acp/` and the login keychain.
   `AGENT_COMPANION_ANTIGRAVITY_PERMISSION=all|edit|none` controls permission
   answers (default `all`). Use the real project cwd: its sandbox resolves
-  symlinks. Model selection is reapplied after each history load. The
+  symlinks. Model selection is reapplied after each history load. Google's
+  FAQ names Claude Code among third-party software that must not use an
+  Antigravity login, and calls wrapping `agy` in third-party agents unsupported
+  on consumer plans; suspension or termination of the account is the stated
+  risk, and it is the account holder's. The
   account/terms assessment remains [tracker item 8](docs/MVP_TRACKER.md).
 
 See [Architecture](docs/ARCHITECTURE.md) for protocol and lifecycle details,

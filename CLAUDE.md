@@ -197,6 +197,9 @@ line, including `not_delivered` messages.
   sessions. The server is Google's `agy_acp_server.par`, installed by
   `scripts/install-antigravity-acp.mjs`. Re-read `docs/MVP_TRACKER.md` item 8's
   account/terms assessment before widening what the bridge does with that login.
+  All Antigravity work is paused since 2026-11-17 (switch to `agy acp` decided,
+  queued in the tracker's Next Backlog); no changes or live runs until the user
+  resumes it.
 
 ## Docs
 

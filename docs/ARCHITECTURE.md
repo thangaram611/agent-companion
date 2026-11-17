@@ -873,6 +873,10 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   also depends on distribution and authentication: Homebrew supplied 0.46.0 while
   npm supplied 0.59.0, and consumer “Login with Google” was refused. The distribution,
   authentication and terms evidence belongs in `docs/MVP_TRACKER.md` item 8.
+  **Superseded 2026-11-17:** Homebrew `agy` 1.5.9 has an `acp` subcommand, and
+  Google's ACP page registers `agy acp` for every client except Android Studio.
+  The move to it is decided and paused (tracker decision 8); until then the
+  1.1.1 measurements above describe the shipped runtime.
 - **A model is not always a spawn flag.** Google's agy_acp_server 1.1.1 takes the model
   as a session config option (`session/set_config_option`, id `model`; `session/set_model`
   answers too) and a `session/load`ed session comes back on the default model (measured
