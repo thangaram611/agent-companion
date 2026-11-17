@@ -104,7 +104,9 @@ function body(a: Agent, now: number, columns: number | undefined, titleWidth: nu
     const [text, style] = outcomeLabel({ execution, result })
     segs.push([' · '], [text, result.outcome === 'completed' ? undefined : style])
   } else {
-    const model = jobModel(execution).map(clean).join(' ')
+    // The companion is already named: drop its own provider prefix (opencode/flint-40b-free).
+    const provider = clean(execution.provider)
+    const model = jobModel(execution).map(clean).map(m => m.startsWith(`${provider}/`) ? m.slice(provider.length + 1) : m).join(' ')
     if (model) segs.push([` · ${model}`])
     const waiting = queued(execution)
     if (waiting) segs.push([' · '], [`◌ your ${waiting === 1 ? 'message' : `${waiting} messages`} queued`, 'warn'])

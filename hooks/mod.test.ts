@@ -82,7 +82,7 @@ test('a job started before the mod loaded is found through its conversation reco
 
   // The clock finds the job and redraws the row.
   await clock.advance(1000)
-  expect(plain(seen.at(-1))).toBe('Review auth middleware  opencode · opencode/flint-40b-free · responding · 0:42')
+  expect(plain(seen.at(-1))).toBe('Review auth middleware  opencode · flint-40b-free · responding · 0:42')
 
   files[`${DIR}/results/j2.json`] = { executionId: 'j2', outcome: 'completed', finishedAt: START + 38_000 }
   await clock.advance(1000)
