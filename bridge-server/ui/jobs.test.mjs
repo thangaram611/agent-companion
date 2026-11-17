@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { branchOf, createCallers, createJobSource, sessionJobs } from './jobs.mjs';
 import { uiFixture } from '../../test/ui-fixture.mjs';
@@ -118,6 +118,19 @@ test("one Claude session's jobs for the pane: each subagent's newest, running fi
   // Another session's job is never listed.
   assert.deepEqual(jobs('lead-2').jobs.map(job => job.execution.executionId), ['done-1']);
   assert.deepEqual(jobs('nobody'), { jobs: [], older: [] });
+});
+
+test("a resumed Claude session that got a new id still lists the jobs of the subagents its transcript spawned", t => {
+  const f = uiFixture(t);
+  // Measured 2026-11-17 on 2.1.326: a resume can continue under a new session
+  // id, copying the history, Agent results with their agentIds included, under it.
+  const lead3 = join(f.env.CLAUDE_CONFIG_DIR, 'projects/-work/lead-3.jsonl');
+  mkdirSync(dirname(lead3), { recursive: true });
+  writeFileSync(lead3, ['agent-run', 'agent-op', 'agent-old'].map(agentId =>
+    JSON.stringify({ sessionId: 'lead-3', toolUseResult: { status: 'async_launched', agentId, description: agentId } })).join('\n') + '\n');
+  const listed = sessionJobs({ dir: f.states.claude, sessionId: 'lead-3', limit: 9, env: f.env, alive: () => true });
+  assert.deepEqual(listed.jobs.map(job => job.execution.executionId), ['op-1', 'run-1', 'old-1']);
+  assert.deepEqual(listed.jobs.map(job => job.title), ['Restore spec triage', 'Step 1b-2: digest on demand', 'Antigravity scenario']);
 });
 
 test('through launch-ui.sh: jobs prints one JSON line without the UI packages and refuses bad arguments', t => {

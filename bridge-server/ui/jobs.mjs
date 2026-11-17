@@ -79,17 +79,31 @@ export function createJobSource({ dirs = stateDirs(), env = process.env, alive =
 }
 
 // One Claude Code session's jobs for its Companions pane (hooks/mod.ts), which
-// has no Node and rebuilds its list from them, a resumed session included: the
+// has no Node and rebuilds its list from them, a resumed session included (its
+// recorded id, or a subagent its transcript spawned): the
 // newest job of each of the session's subagents in list() order, the first
 // `limit` with the lead's title for each, and the ids of the session's other jobs.
 export function sessionJobs({ dir, sessionId, limit, env = process.env, alive = pidAlive }) {
   const source = createJobSource({ dirs: [{ host: 'claude', dir }], env, alive });
-  const all = source.list().filter(job => job.execution.hostSessionId === sessionId);
+  const spawned = sessionAgents(sessionId, env);
+  const all = source.list().filter(job => job.execution.hostSessionId === sessionId || spawned.has(job.execution.owner));
   const owners = new Set();
   const jobs = all.filter(job => !owners.has(job.execution.owner) && owners.add(job.execution.owner)).slice(0, limit)
     .map(job => ({ owner: job.execution.owner, title: source.caller(job).title, status: job.status, execution: job.execution, result: job.result }));
   const listed = new Set(jobs.map(job => job.execution.executionId));
   return { jobs, older: all.flatMap(job => listed.has(job.execution.executionId) ? [] : [job.execution.executionId]) };
+}
+
+// The subagents a Claude session spawned, from the Agent results its
+// transcript records. A resume can continue under a new session id (measured
+// 2026-11-17 on 2.1.326: two resumes in a row each got one), copying the
+// history, these results included, under it; the jobs keep the id they started under.
+function sessionAgents(sessionId, env) {
+  const path = locateTranscript({ companion: 'claude', historyId: sessionId, env })?.path;
+  if (!path) return new Set();
+  const lead = { ino: null, offset: 0, agents: new Map(), custom: null, ai: null };
+  try { scanLead(path, lead); } catch { return new Set(); }
+  return new Set(lead.agents.keys());
 }
 
 const firstLine = text => String(text ?? '').split('\n').map(line => line.trim()).find(Boolean) ?? '';
