@@ -8,9 +8,11 @@ import { jobModel } from '../lib/model-name.mjs'
 // agent-companion subagent's row in the agent list carries its job's
 // progress, read from the bridge's records; other subagents' rows are left to
 // the engine. One Companions pane follows the view: this session's jobs as
-// cards, or the job of the companion subagent in view, its transcript
-// streamed by a Node child (`launch-ui.sh follow`) while it is shown. Native
-// text reaches the screen only through rows.mjs's clean.
+// cards, rebuilt from the records by a Node child (`launch-ui.sh jobs`) at
+// the session's start and each open, or the job of the companion subagent in
+// view, or of a card Claude Code could not view, its transcript streamed by a
+// Node child (`launch-ui.sh follow`) while it is shown. Native text reaches
+// the screen only through rows.mjs's clean.
 
 type Agent = {
   title: string
@@ -20,6 +22,8 @@ type Agent = {
   result?: any
   texts?: string
   looked?: boolean
+  // On the list: its job started under the mod, or the last rebuild listed it.
+  listed?: boolean
 }
 // The viewed job as its `follow` child prints it (bridge-server/ui/follow.mjs).
 type Turn = { ids: string[]; earlier: number; labels: Record<string, string>; taken: string[]; located: boolean; format: { version?: unknown; detail?: string } | null }
@@ -52,6 +56,8 @@ const GRACE_MS = 120_000
 // colour alone, leaving the engine's dim or bold for the row.
 const SGR: Record<string, string> = { ok: '32', warn: '33', bad: '31' }
 const PANE = 'companions'
+// The list's cards, each pressed by its digit; the session's other jobs are counted.
+const CARDS = 9
 // rows.mjs's styles as theme colour keys, so the pane follows the person's theme.
 const STYLE: Record<string, { color?: string; weight?: 'bold' }> = {
   title: { weight: 'bold' }, dim: { color: 'inactive' }, faint: { color: 'subtle' },
@@ -62,6 +68,10 @@ const agents = new Map<string, Agent>()
 let timer: { cancel: () => void } | undefined
 let dir: string | undefined
 let follow: Follow | undefined
+// The agent whose job the pane shows itself, Claude Code having refused its view.
+let picked: string | undefined
+// The last rebuild: how many of the session's jobs it left off the list, and why it failed.
+let older = 0, rebuilds = 0, failure: string | undefined
 
 // lib/host.mjs's claude state dir: AGENT_COMPANION_HOME, else ~/.claude/agent-companion.
 async function stateDir($: EngineInterface) {
@@ -103,7 +113,7 @@ async function tick($: EngineInterface) {
       a.looked = true
       const jobId = parse(await readText($, `${base}/conversations/${id}.json`))?.executionId
       if (!isId(jobId)) continue
-      a.jobId = jobId
+      Object.assign(a, { jobId, listed: true })
     }
     const execution = await readText($, `${base}/executions/${a.jobId}.json`)
     const result = await readText($, `${base}/results/${a.jobId}.json`)
@@ -155,7 +165,46 @@ function body(a: Agent, now: number, columns: number | undefined, titleWidth: nu
     .map(([text, style]) => style && SGR[style] ? `\x1b[${SGR[style]}m${text}\x1b[39m` : text).join('').trimEnd()
 }
 
-const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: 'Companions', backgroundColor: 'transparent' })
+// Each open lists the session's jobs again; the person's own takes the keys.
+function openPane($: EngineInterface, focus?: true) {
+  void rebuild($)
+  return $.ui.open({ id: PANE, title: 'Companions', backgroundColor: 'transparent', ...(focus && { focus }) })
+}
+
+// This session's jobs from the records, the ones whose start the mod did not
+// see included: a resumed session has no rows for its earlier subagents. The
+// newest rebuild wins; a job the mod saw start since stays on the list.
+async function rebuild($: EngineInterface) {
+  const n = ++rebuilds
+  let out: any, why: string | undefined
+  try {
+    const ran = await $.process.run(['bash', `${$.plugin.root}/hooks/launch-ui.sh`, 'jobs', await stateDir($), await $.session.id(), String(CARDS)])
+    out = ran.exitCode === 0 && parse(ran.stdout)
+    if (!Array.isArray(out?.jobs) || !Array.isArray(out.older)) why = ran.stderr.trim().split('\n').at(-1) || `exit ${ran.exitCode}`
+  } catch (error) { why = String(error) }
+  if (n !== rebuilds) return
+  failure = why && clean(why)
+  if (!why) {
+    const owners = new Set<string>(), old = new Set(out.older)
+    for (const job of out.jobs) {
+      const jobId = job.execution?.executionId
+      if (!isId(jobId) || typeof job.owner !== 'string') continue
+      owners.add(job.owner)
+      const a = agents.get(job.owner) ?? { title: '' }
+      agents.set(job.owner, a)
+      a.title ||= clean(job.title)
+      // A newer job the mod saw start stands.
+      if (a.jobId && a.jobId !== jobId && !(a.execution?.startedAt < job.execution.startedAt)) continue
+      Object.assign(a, { jobId, execution: job.execution, result: job.result, texts: undefined })
+      // No result and no process: its subagent ended unseen, so its record is not read again.
+      if (job.status !== 'running' && !job.result) a.endedAt ??= 0
+    }
+    for (const [id, a] of agents) a.listed = owners.has(id) || (a.listed && !old.has(a.jobId))
+    older = old.size
+    startClock($)
+  }
+  $.ui.invalidate('ui.render')
+}
 
 // One child per viewed job, started by the pane's render and never waited on.
 function followJob($: EngineInterface, jobId: string) {
@@ -209,13 +258,13 @@ function take(f: Follow, message: any) {
 // This session's jobs, running first, then the rest by when they ended.
 function cards(now: number) {
   const at = (c: { status: string; a: Agent }) => c.status === 'running' ? Infinity : c.a.result?.finishedAt ?? c.a.execution.startedAt
-  return [...agents].flatMap(([id, a]) => a.jobId && a.execution ? [{ id, a, status: statusOf(a, now) }] : [])
+  return [...agents].flatMap(([id, a]) => a.listed && a.jobId && a.execution ? [{ id, a, status: statusOf(a, now) }] : [])
     .sort((x, y) => at(y) - at(x) || y.a.execution.startedAt - x.a.execution.startedAt)
 }
 const titleOf = (a: Agent) => a.title || (clean(a.execution?.text ?? '').split('\n')[0] ?? '')
-// A card's second row: the companion, then what it is doing or how it ended.
+// A card's second row, under its title: the companion, then what it is doing or how it ended.
 function cardLine({ a, status }: { a: Agent; status: string }, now: number): Seg[] {
-  const line: Seg[] = [['   ', 'normal'], [`${clean(a.execution.provider)} · `, 'dim']]
+  const line: Seg[] = [['     ', 'normal'], [`${clean(a.execution.provider)} · `, 'dim']]
   if (status === 'running') return [...line, ...doing(a.execution, now).map(([text, style]): Seg => [text, style === 'ok' ? 'dim' : style])]
   if (status === 'unknown') return [...line, ['no result', 'warn']]
   const [text, style] = outcomeLabel({ execution: a.execution, result: a.result })
@@ -245,11 +294,12 @@ function jobRows(a: Agent, f: Follow, now: number, w: number, rows: number): Seg
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'companion', description: "Show this session's companion jobs, or the job of the companion subagent in view" })
+    void rebuild($)
     return next(e)
   })
-  // The person's own open: placed at any width.
+  // The person's own open: placed at any width, with the keys.
   on('command.run', { command: 'companion' }, async $ => {
-    await openPane($)
+    await openPane($, true)
     return {}
   })
 
@@ -260,11 +310,12 @@ export const register: Register = on => {
     const jobId = parse(ran.text)?.job_id
     if (e.agentId && isId(jobId)) {
       const a = agents.get(e.agentId) ?? { title: '' }
+      agents.set(e.agentId, a)
+      // Its subagent sent it, so that subagent runs.
       if (a.jobId !== jobId) {
-        Object.assign(a, { jobId, execution: undefined, result: undefined, texts: undefined })
+        Object.assign(a, { jobId, execution: undefined, result: undefined, texts: undefined, endedAt: undefined, listed: true })
         void openPane($).catch(() => {})
       }
-      agents.set(e.agentId, a)
       startClock($)
     }
     return ran
@@ -286,33 +337,57 @@ export const register: Register = on => {
     return next({ ...e, props: { ...e.props, body: body(a, now, columns, titleWidth) } })
   })
 
-  // Draws only from what the clock and the child already brought in.
+  // Draws only from what the clock and the children already brought in.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const now = await $.clock.now(), w = Math.max(16, e.props.bodyColumns)
+    // A module loaded under an open pane (a reload) has not listed the session's jobs yet.
+    if (!rebuilds) void rebuild($)
+    const now = await $.clock.now(), w = Math.max(16, e.props.bodyColumns), focused = e.props.isFocused
     const spans = (segs: Seg[]) => segs.map(([text, style]) => h(Text, STYLE[style ?? ''] ?? null, text))
     const row = (segs: Seg[]) => h(Text, { wrap: 'truncate-end' }, ...(segs.length ? spans(segs) : [' ']))
     // h() answers any node; a column Box is the element a pane takes.
     const column = (...children: unknown[]) => h(Box, { flexDirection: 'column' }, ...children) as RenderElement
-    const id = e.props.view?.agentId, a = id ? agents.get(id) : undefined
-    if (a?.jobId) {
+    const viewed = e.props.view?.agentId, inView = viewed ? agents.get(viewed) : undefined
+    // The person's view of a companion subagent wins over the pane's own pick.
+    if (inView?.jobId) picked = undefined
+    const id = inView?.jobId ? viewed : picked, a = id ? agents.get(id) : undefined
+    if (id && a?.jobId) {
       followJob($, a.jobId)
+      const back = () => inView?.jobId ? $.ui.view({}) : (picked = undefined, $.ui.invalidate('ui.render'))
       return column(...jobRows(a, follow!, now, w, e.props.scroll.bodyRows).map(row),
-        h(Box, { flexDirection: 'row', justifyContent: 'flex-end' }, h(Button, { key: 'jobs', plain: true, dimColor: true, onPress: () => $.ui.view({}) }, '← jobs')))
+        h(Box, { flexDirection: 'row', justifyContent: 'space-between' }, row([[focused ? 'esc returns' : 'ctrl+x tab for keys', 'faint']]),
+          h(Button, { key: 'jobs', plain: true, dimColor: true, hotkey: 'b', autoFocus: true, onPress: back }, '← jobs')))
     }
     stopFollow()
-    const list = cards(now), running = list.filter(c => c.status === 'running').length
-    const title = row([[' '], ['Companions', 'title'], [`  ${running} running · ${list.length - running} done`, 'dim']])
-    if (!list.length) return column(title, row([]), row([[' No companion jobs in this session yet', 'dim']]))
-    return column(title, row([]),
-      ...list.flatMap(c => [h(Button, { key: c.id, plain: true, onPress: () => $.ui.view({ agentId: c.id }) },
-        ...spans(cardHead({ status: c.status, startedAt: c.a.execution.startedAt, finishedAt: c.a.result?.finishedAt }, titleOf(c.a), now, w)),
+    // A card switches Claude Code to its subagent's view; one Claude Code
+    // cannot show (a resumed session lists no earlier subagent) opens here.
+    const open = async (agentId: string) => {
+      const shown = await $.ui.view({ agentId }).catch((error: unknown) => ({ deny: String(error) }))
+      if (shown.deny) {
+        $.ui.log(`agent-companion: no view of subagent ${agentId} (${shown.deny}); the Companions pane shows its job`, { to: 'debug' })
+        picked = agentId
+        $.ui.invalidate('ui.render')
+      }
+    }
+    const list = cards(now), shown = list.slice(0, CARDS), more = older + list.length - shown.length
+    const running = list.filter(c => c.status === 'running').length
+    const title = row([[' '], ['Companions', 'title'], [`  ${running} running · ${list.length - running + older} done`, 'dim']])
+    const failed = failure ? [row([[` earlier jobs not read: ${failure}`, 'warn']])] : []
+    if (!list.length) return column(title, ...failed, row([]), row([[' No companion jobs in this session yet', 'dim']]))
+    const keys = shown.length === 1 ? '1' : `1–${shown.length}`
+    // A card's digit leads its title ("1: ● …"), drawn by the engine.
+    return column(title, ...failed, row([]),
+      ...shown.flatMap((c, i) => [h(Button, { key: c.id, plain: true, hotkey: String(i + 1), ...(i === 0 ? { autoFocus: true as const } : {}), onPress: () => open(c.id) },
+        ...spans(cardHead({ status: c.status, startedAt: c.a.execution.startedAt, finishedAt: c.a.result?.finishedAt }, titleOf(c.a), now, w - 2).slice(1)),
         '\n', ...spans(fitSegs(cardLine(c, now), w))), row([])]),
-      row([[' ⏎ open job', 'faint']]))
+      ...(more ? [row([[` ${more} older · agent-companion ui shows them`, 'faint']]), row([])] : []),
+      row([[focused ? ` ${keys} or ⏎ open a job · esc returns` : ` ctrl+x tab for keys · ${keys} or ⏎ open a job`, 'faint']]))
   })
 
+  // The next open starts on the list.
   on('ui.close', { id: PANE }, ($, e, next) => {
     stopFollow()
+    picked = undefined
     return next(e)
   })
 }

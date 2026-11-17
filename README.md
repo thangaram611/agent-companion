@@ -697,14 +697,27 @@ every second while a job runs, from the same execution records, and the mod
 writes nothing. Other subagents' rows stay as Claude Code draws them.
 
 The mod also opens a **Companions** pane when a companion job starts (on
-terminals from 144 columns; `/companion` opens it at any width). With the main
-conversation in view it lists this session's jobs as cards, running first;
-pick one to switch to its subagent's view. With a companion subagent in view
-the pane shows that job read-only, as the live view's job pane does: its
-turn from the companion's own transcript, pending messages and the live line,
-or the outcome once it ended. `← jobs` goes back. The pane's transcript comes
-from a small Node child per viewed job (`launch-ui.sh follow`), ended when the
-view or the job changes.
+terminals from 144 columns; `/companion` opens it at any width and gives it
+the keys). With the main conversation in view it lists this session's jobs as
+cards, running first, then the nine newest, the older ones counted; the list
+is read again from the execution records at the session's start (a resumed
+session included) and at each open. Pick a card to switch to its subagent's
+view; where Claude Code cannot show that subagent (a resumed session has none
+of its earlier ones), the pane shows the job itself. With a companion subagent
+in view the pane shows that job read-only, as the live view's job pane does:
+its turn from the companion's own transcript, pending messages and the live
+line, or the outcome once it ended. `← jobs` goes back. The list and the
+transcript come from small Node children (`launch-ui.sh jobs`, and
+`launch-ui.sh follow` per shown job, ended when the view or the job changes).
+
+From the keyboard, `ctrl+x tab` gives the pane the keys, with the first card
+(or `← jobs`) under the focus ring; Tab and the arrows move it, Enter
+presses, Esc hands the keys back. While the pane holds them:
+
+| Key | Action |
+| --- | --- |
+| `1`–`9` | Open that card's job |
+| `b` | `← jobs`: back to the list |
 
 ## Diagnostics
 
