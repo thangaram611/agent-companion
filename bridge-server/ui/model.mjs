@@ -8,7 +8,7 @@ import { jobModel } from '../../lib/model-name.mjs';
 import { JobTranscript } from './follow.mjs';
 import { takeOutcome, writeRequest } from './inbox.mjs';
 import { branchOf, createJobSource } from './jobs.mjs';
-import { Pane, boxRows, cardHead, clean, cut, fitSegs, jobBlocks, layoutLine, one, pendingInputs, pendingLine, segsWidth, width } from './rows.mjs';
+import { Pane, boxRows, cardHead, clean, cut, fitSegs, jobBlocks, layoutLine, one, pendingInputs, pendingLine, segsWidth, width, COMPANION_NAMES, MODE_HINTS, supportedModes } from './rows.mjs';
 
 const DAY = 86_400_000;
 export const WIDE = 110;
@@ -21,9 +21,8 @@ const HELP = [['↑↓ j k', 'jobs, or transcript items when the transcript has 
   ['', 'In a running job, the message box has the keys:'], ['typing ⏎', 'write; send in the shown mode'], ['shift+⇥ ctrl+j', 'next mode; new line'],
   ['↑↓ PgUp PgDn', 'scroll the transcript'], ['ctrl+o', 'expand or fold all outputs'], ['ctrl+x', 'cancel the job, after one confirmation'],
   ['esc', 'back to the list, keeping the draft'], ['ctrl+c', 'clear the draft; on an empty box, quit']];
-const NAMES = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', antigravity: 'Antigravity', copilot: 'Copilot' };
-const MODES = { steer: 'joins the running turn now', queue: 'runs after the current turn', interrupt: 'stops this turn, then sends' };
-const supported = job => ['steer', 'queue', 'interrupt'].filter(mode => job.execution.interventionModes?.[mode]);
+const NAMES = COMPANION_NAMES, MODES = MODE_HINTS;
+const supported = job => supportedModes(job.execution);
 const REFUSED = { state: 'the job takes no more messages', capability: 'not supported by this companion', text_too_long: 'too long', request_too_large: 'too long' };
 // Typed or pasted text: a carriage return inside it is a new line; escapes and control characters go, as in native text.
 const draftText = text => clean(text.replace(/\r\n?/g, '\n'));

@@ -18,11 +18,13 @@ if [ -z "$NODE_BIN" ]; then
   exit 1
 fi
 
-# Claude Code's Companions pane follows one job through `follow` and lists its
-# session's jobs through `jobs`; neither imports packages.
+# Claude Code's Companions pane follows one job through `follow`, lists its
+# session's jobs through `jobs` and sends a message or cancel through `send`;
+# none imports packages.
 case "${1:-}" in
   follow) shift; exec "$NODE_BIN" "$ROOT/bridge-server/ui/follow.mjs" "$@" ;;
   jobs) shift; exec "$NODE_BIN" "$ROOT/bridge-server/ui/jobs.mjs" "$@" ;;
+  send) shift; exec "$NODE_BIN" "$ROOT/bridge-server/ui/inbox.mjs" "$@" ;;
 esac
 
 UI="$ROOT/bridge-server/ui/app.mjs"

@@ -700,19 +700,26 @@ The mod also opens a **Companions** pane when a companion job starts (on
 terminals from 144 columns; `/companion` opens it at any width and gives it
 the keys). With the main conversation in view it lists this session's jobs as
 cards, running first, then the nine newest, the older ones counted; the list
-is read again from the execution records at the session's start (a resumed
-session included) and at each open. Pick a card to switch to its subagent's
+is read again from the execution records at the session's start and at each
+open, a resumed session included: its jobs are the ones its transcript's
+subagents own, whatever session id the resume gave it. Pick a card to switch to its subagent's
 view; where Claude Code cannot show that subagent (a resumed session has none
 of its earlier ones), the pane shows the job itself. With a companion subagent
-in view the pane shows that job read-only, as the live view's job pane does:
-its turn from the companion's own transcript, pending messages and the live
-line, or the outcome once it ended. `← jobs` goes back. The list and the
-transcript come from small Node children (`launch-ui.sh jobs`, and
-`launch-ui.sh follow` per shown job, ended when the view or the job changes).
+in view the pane shows that job as the live view's job pane does: its turn
+from the companion's own transcript, pending messages and the live line, or
+the outcome once it ended. A running job that takes messages has the live
+view's message box under its live line, with the keys in it: Enter sends in
+the mode shown (the companion's own default first; `mode ▸` cycles through
+the modes it takes), `cancel job` asks once, and a refusal says why and keeps
+the text. Copilot takes cancel only. `← jobs` goes back. The list, the
+transcript and each message go through small Node children (`launch-ui.sh
+jobs`, `launch-ui.sh follow` per shown job, ended when the view or the job
+changes, and `launch-ui.sh send`, which writes the inbox request and waits for
+the bridge's outcome).
 
 From the keyboard, `ctrl+x tab` gives the pane the keys, with the first card
-(or `← jobs`) under the focus ring, where each switch between the list and a
-job puts it again; Tab and the arrows move it, Enter presses, Esc hands the
+(or a running job's message box, else `← jobs`) under the focus ring, where
+each switch between the list and a job puts it again; Tab and the arrows move it, Enter presses, Esc hands the
 keys back. While the pane holds them:
 
 | Key | Action |

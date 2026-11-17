@@ -388,3 +388,9 @@ export class Pane {
     return out;
   }
 }
+
+// Both views' input boxes: each companion's own name, what each message mode
+// does, and the modes a job's companion takes (recorded on its execution).
+export const COMPANION_NAMES = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', antigravity: 'Antigravity', copilot: 'Copilot' };
+export const MODE_HINTS = { steer: 'joins the running turn now', queue: 'runs after the current turn', interrupt: 'stops this turn, then sends' };
+export const supportedModes = execution => ['steer', 'queue', 'interrupt'].filter(mode => execution?.interventionModes?.[mode]);

@@ -1,7 +1,7 @@
 import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import { Pane, cardHead, clean, clock, fitSegs, jobBlocks, layoutLine, liveLines, outcomeLabel, pendingInputs, pendingLine, segsWidth, cut, width,
-  type Block, type Seg } from '../bridge-server/ui/rows.mjs'
+  type Block, type Seg, COMPANION_NAMES, MODE_HINTS, supportedModes } from '../bridge-server/ui/rows.mjs'
 import { jobModel } from '../lib/model-name.mjs'
 
 // Claude Code's mod for agent-companion (Codex ignores hooks modules). Each
@@ -76,6 +76,39 @@ let picked: string | undefined
 let older = 0, rebuilds = 0, failure: string | undefined
 // The agent in view when a site last drew, so a return to the main conversation is seen once.
 let shownAgent: string | undefined
+
+// A running job's message box, per job: the draft, the mode it sends in (the
+// companion's own default first), the cancel question, and the last send's
+// state. The draft outlives the job's end and the pane's close, in memory only.
+type MessageBox = { draft: string; mode: string | null; confirm: boolean; sending: boolean; refused?: string }
+const boxes = new Map<string, MessageBox>()
+function boxOf(jobId: string, execution: any): MessageBox {
+  let box = boxes.get(jobId)
+  if (!box) {
+    const modes = supportedModes(execution), preferred = execution?.interventionModes?.default
+    boxes.set(jobId, box = { draft: '', mode: modes.includes(preferred) ? preferred : modes[0] ?? null, confirm: false, sending: false })
+  }
+  return box
+}
+
+// One message or cancel through the inbox: `launch-ui.sh send` writes the
+// request as the live view does (inbox.mjs) and waits for the owning bridge's
+// outcome. Accepted, the record's own pending line takes over; refused, the
+// reason shows once and the draft stays.
+async function sendRequest($: EngineInterface, jobId: string, box: MessageBox, mode: string, text?: string) {
+  box.sending = true; box.refused = undefined
+  $.ui.invalidate('ui.render')
+  try {
+    const ran = await $.process.run(['bash', `${$.plugin.root}/hooks/launch-ui.sh`, 'send', await stateDir($), jobId, mode, ...(text === undefined ? [] : [text])], { timeoutMs: 20_000 })
+    const outcome = parse(ran.stdout)?.outcome
+    if (ran.exitCode !== 0) box.refused = clean(ran.stderr.trim().split('\n')[0] || `exit ${ran.exitCode}`)
+    else if (!outcome) box.refused = 'no answer from the bridge yet; it reads requests while its session is open'
+    else if (!outcome.ok) box.refused = clean(outcome.reason === 'state' ? 'the job no longer takes messages' : outcome.reason === 'capability' ? `this companion does not take ${mode}` : outcome.reason ?? outcome.status ?? 'refused')
+    else if (mode !== 'cancel') box.draft = ''
+  } catch (error) { box.refused = clean(String(error)) }
+  box.sending = false
+  $.ui.invalidate('ui.render')
+}
 
 // lib/host.mjs's claude state dir: AGENT_COMPANION_HOME, else ~/.claude/agent-companion.
 async function stateDir($: EngineInterface) {
@@ -375,7 +408,7 @@ export const register: Register = on => {
 
   // Draws only from what the clock and the children already brought in.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Input } = $.ui.resolve(e)
     sawView($, e.props.view?.agentId)
     // A module loaded under an open pane (a reload) has not listed the session's jobs yet.
     if (!rebuilds) void rebuild($)
@@ -396,9 +429,37 @@ export const register: Register = on => {
         const first = cards(await $.clock.now())[0]
         if (first) ring($, first.id)
       }
-      return column(...jobRows(a, follow!, now, w, e.props.scroll.bodyRows).map(row),
-        h(Box, { flexDirection: 'row', justifyContent: 'space-between' }, row([[focused ? 'esc returns' : 'ctrl+x tab for keys', 'faint']]),
-          h(Button, { key: 'jobs', label: '← jobs', plain: true, dimColor: true, hotkey: 'b', autoFocus: true, onPress: back })))
+      // The job as jobRows draws it: the child's record, else the clock's.
+      const status = follow?.job?.status ?? (a.execution ? statusOf(a, now) : null), execution = follow?.job?.execution ?? a.execution
+      const box = status === 'running' && execution?.interventionModes ? boxOf(a.jobId, execution) : null
+      const jobsButton = h(Button, { key: 'jobs', label: '← jobs', plain: true, dimColor: true, hotkey: 'b', ...(box ? {} : { autoFocus: true as const }), onPress: back })
+      if (!box) return column(...jobRows(a, follow!, now, w, e.props.scroll.bodyRows).map(row),
+        h(Box, { flexDirection: 'row', justifyContent: 'space-between' }, row([[focused ? 'esc returns' : 'ctrl+x tab for keys', 'faint']]), jobsButton))
+      const jobId = a.jobId, modes = supportedModes(execution), name = COMPANION_NAMES[execution.provider] ?? clean(execution.provider)
+      const redraw = () => $.ui.invalidate('ui.render')
+      // The box under the live line, as in the live view: the companion's
+      // modes only, its default first; Copilot takes cancel alone.
+      const field = box.mode
+        ? [h(Input, { key: 'message', label: '›', placeholder: `Message ${name}…`, value: box.draft, rows: 2, submitLabel: `send · ${box.mode}`, autoFocus: true,
+            onInput: (value: string) => { box.draft = value },
+            // Kept as sent, so a refusal leaves it in the box.
+            onSubmit: (value: string) => { if (!value.trim() || box.sending) return; box.draft = value; void sendRequest($, jobId, box, box.mode!, value) } })]
+        : [row([[`${name} takes no messages while it works · cancel only`, 'dim']])]
+      const state = box.sending ? [row([['◌ sending…', 'faint']])] : box.refused ? [row([[`✗ not sent: ${box.refused}`, 'bad']])] : []
+      const cycle = () => { box.mode = modes[(modes.indexOf(box.mode!) + 1) % modes.length]!; redraw() }
+      const controls = box.confirm
+        ? h(Box, { flexDirection: 'row', gap: 2 }, row([['Cancel this job? ', 'bad'], ['The lead is told you cancelled it.', 'dim']]),
+            h(Button, { key: 'cancel-yes', label: 'yes, cancel', plain: true, onPress: () => { box.confirm = false; void sendRequest($, jobId, box, 'cancel') } }),
+            h(Button, { key: 'cancel-no', label: 'no', plain: true, autoFocus: true, onPress: () => { box.confirm = false; redraw(); ring($, box.mode ? 'message' : 'jobs') } }))
+        : h(Box, { flexDirection: 'row', gap: 2 },
+            ...(modes.length > 1 ? [h(Button, { key: 'mode', label: `mode: ${box.mode} ▸`, plain: true, onPress: cycle })] : []),
+            ...(box.mode ? [row([[MODE_HINTS[box.mode] ?? '', 'dim']])] : []),
+            h(Button, { key: 'cancel', label: 'cancel job', plain: true, dimColor: true, onPress: () => { box.confirm = true; redraw(); ring($, 'cancel-no') } }),
+            jobsButton)
+      // The transcript gets what the box, its state and controls leave.
+      const spare = 2 + (box.mode ? 3 : 1) + state.length
+      return column(...jobRows(a, follow!, now, w, Math.max(4, e.props.scroll.bodyRows - spare)).map(row), ...field, ...state, controls,
+        row([[focused ? 'esc returns to the chat' : 'ctrl+x tab for keys', 'faint']]))
     }
     stopFollow()
     // A card switches Claude Code to its subagent's view; one Claude Code
@@ -410,7 +471,9 @@ export const register: Register = on => {
         picked = agentId
         $.ui.invalidate('ui.render')
       }
-      ring($, 'jobs')
+      // A running job that takes messages opens with the keys in its box.
+      const opened = agents.get(agentId)
+      ring($, opened?.execution && statusOf(opened, await $.clock.now()) === 'running' && supportedModes(opened.execution).length ? 'message' : 'jobs')
     }
     const list = cards(now), shown = list.slice(0, CARDS), more = older + list.length - shown.length
     const running = list.filter(c => c.status === 'running').length
