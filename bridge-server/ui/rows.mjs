@@ -310,7 +310,7 @@ export function jobBlocks(job, { list, preamble = [], labels = new Map(), locate
   }
   // Unrecognized records show inline; this is for a missing or unreadable store.
   if (!located || format?.version == null) {
-    const text = !located ? (ended ? 'transcript not found' : 'waiting for the transcript') : `transcript not recognized: ${format?.detail ?? 'not read yet'}`;
+    const text = !located ? (ended ? 'transcript not found' : 'waiting for the transcript') : `transcript not recognized: ${clean(format?.detail ?? 'not read yet')}`;
     blocks.push({ key: 'notice', source: text, flags: '', lines: () => [{ segs: [[text, located ? 'warn' : 'dim']] }, { segs: [] }] });
   }
   if (preamble.length && !showPreamble) {

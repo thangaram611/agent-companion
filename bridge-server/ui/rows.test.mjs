@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Pane, clean, cut, itemLines, layoutLine, segsWidth, width } from './rows.mjs';
+import { Pane, clean, cut, itemLines, jobBlocks, layoutLine, segsWidth, width } from './rows.mjs';
 
 const text = rows => rows.map(row => row.map(([t]) => t).join(''));
 
@@ -60,4 +60,10 @@ test('a refused command counts as refused, not also as failed', async () => {
     workSummary: { commands: [{ command: 'rm -rf x', status: 'failed', exitCode: null, denied: 'Denied by user (*)' }, { command: 'false', exitCode: 1 }] } } };
   const first = outcomeLines(job)[0].segs.map(([t]) => t).join('');
   assert.equal(first, '✓ done in 0:05  2 commands, 1 failed, 1 refused');
+});
+
+test("an unrecognized transcript's notice is clean: the reader's detail can quote a native record's type", () => {
+  const job = { status: 'running', execution: { executionId: 'j', provider: 'codex', startedAt: 0, progress: {} } };
+  const [notice] = jobBlocks(job, { list: [], located: true, format: { version: null, detail: 'evil\x1b]0;title\x07\x1b[31m: bad' }, now: 0 });
+  assert.deepEqual(notice.lines()[0].segs, [['transcript not recognized: evil: bad', 'warn']]);
 });
