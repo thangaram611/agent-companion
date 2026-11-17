@@ -401,13 +401,32 @@ Outcome (2026-11-15, branch `feat/interventions`):
   inbox directory itself, so a job that closes in between can leave an empty
   directory.
 
-### Step 4: Claude pane and progress line
+### Step 4: Claude pane and agent rows
 
-- A pane per running job, tied to its Agent row through `agent.spawn`'s
-  `agentId`, which is the execution's owner.
-- The mod has no Node and `$.fs.read` stops at 4 MiB, so it streams the core
-  reader through `$.process.spawn`. Controls write the same inbox.
-- The bridge sends MCP progress with the in-flight line during `agent_wait`.
+Decided 2026-11-17 with the owner, after the measurements below; approved as
+`docs/mockups/live-view-claude-pane.html`:
+
+- A mod shipped in this plugin (Claude Code only; Codex ignores it). It follows
+  Claude Code's theme: theme colour keys, never raw colours, and a pane opened
+  with `backgroundColor: "transparent"` (the default pane colour measured as a
+  visible mismatch against the chat).
+- Agent rows: each agent-companion subagent's row in Claude Code's agent list
+  carries its job's progress: title, companion · model, the live line (the
+  running command, responding, a queued message of the person's, retrying) and
+  elapsed time, refreshed while it runs. Other subagents' rows are untouched.
+- One pane, "Companions", that follows the view the person has on screen: with
+  the main conversation in view it lists this session's companion jobs as the
+  live view's cards (running first); picking one switches Claude Code to that
+  subagent's view (`$.ui.view`), and with an agent-companion subagent in view
+  the pane shows its job like the live view's job pane: the same labels,
+  folding, pending messages and input box, cancel included. Any other view
+  shows the list. Unasked it opens when a companion job starts and places only
+  on wide terminals; `/companion` opens it at any width.
+- Reuse, never copy: text through `bridge-server/ui/rows.mjs`; the transcript
+  from the core reader in a Node child streamed with `$.process.spawn`; inbox
+  requests and outcomes through `bridge-server/ui/inbox.mjs` in a Node child.
+- The MCP progress line is dropped: its text reaches only the calling loop's
+  spinner, a subagent's own view; the agent row is where the lead's view looks.
 
 Measure first: whether Claude shows progress for a subagent's tool call, and
 whether the pane redraws while the main loop is busy.

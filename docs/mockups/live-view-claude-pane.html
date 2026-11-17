@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agent-companion inside Claude Code — Step 4, v2</title>
+<style>
+  :root { --bg:#0d1117; --line:#262c36; --fg:#c9d1d9; --dim:#7d8590; --faint:#3d444d;
+          --green:#3fb950; --red:#f85149; --yellow:#d29922; --cyan:#39c5cf; --orange:#d97757; --sel:#1b2533; }
+  body { margin:0; background:#06080b; color:var(--fg); font:14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+  main { max-width:1280px; margin:0 auto; padding:28px 24px 60px; }
+  h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:16px; margin:34px 0 6px; } p, li { color:#aab4c0; }
+  .term { background:var(--bg); border:1px solid var(--line); border-radius:8px; overflow:hidden; box-shadow:0 8px 30px #0008; }
+  .bar { padding:6px 10px; background:#161b22; border-bottom:1px solid var(--line); font-size:12px; color:var(--dim); }
+  pre { margin:0; padding:12px 14px; font:12.5px/1.6 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre; color:var(--fg); overflow-x:auto; }
+  .g{color:var(--green)} .r{color:var(--red)} .y{color:var(--yellow)} .c{color:var(--cyan)} .o{color:var(--orange)}
+  .d{color:var(--dim)} .f{color:var(--faint)} .w{color:#f0f3f6;font-weight:600} .sel{background:var(--sel)}
+</style>
+</head>
+<body><main>
+<h1>agent-companion inside Claude Code (Step 4, v2): several companions at once</h1>
+<p>Dummy data: one session running three companion jobs (Codex, OpenCode, Claude), one finished, plus an ordinary Explore subagent. The pane has no colour of its own (it shows the chat background through), so it does not look like a different box.</p>
+
+<h2>1. The agent list below the status line: one row per companion job</h2>
+<div class="term"><div class="bar">Claude Code · any width</div>
+<pre> <span class="f">╭─────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+ <span class="f">│</span> &gt;                                                                                           <span class="f">│</span>
+ <span class="f">╰─────────────────────────────────────────────────────────────────────────────────────────────╯</span>
+ <span class="d">  opus-5.5 · agent-companion · main</span>
+   <span class="g">●</span> <span class="w">Step 3b-2: adapters</span>        <span class="d">codex · gpt-6-astra max ·</span> <span class="g">running $ node --test …/opencode.test.mjs</span> <span class="d">· 6:40</span>
+   <span class="g">●</span> <span class="w">Review auth middleware</span>     <span class="d">opencode · flint-40b ·</span> <span class="g">responding</span> <span class="d">· 0:41</span>
+   <span class="g">●</span> <span class="w">Second opinion on schema</span>   <span class="d">claude · opus-5.5 ·</span> <span class="y">◌ your message queued</span> <span class="d">· 2:05</span>
+   <span class="d">●</span> <span class="d">Explore: find the retry code   (Claude Code's own row, untouched)</span>
+   <span class="d">✓</span> <span class="w">Probe job</span>                  <span class="d">opencode · done in 0:38</span></pre></div>
+<p>Each agent-companion subagent's row carries its own job's live line; rows of other subagents stay as Claude Code draws them. This list is Claude Code's own, with its own keys: pick a row to open that agent.</p>
+
+<h2>2. Main conversation in view: the pane lists this session's companion jobs</h2>
+<div class="term"><div class="bar">Claude Code · 170 columns · main conversation in view</div>
+<pre> <span class="o">⏺</span> All three are running. I'll merge the adapter work    <span class="f">│</span> <span class="w">Companions</span>  <span class="d">3 running · 1 done</span>
+   when Codex finishes.                                  <span class="f">│</span>
+                                                         <span class="f">│</span><span class="sel"> <span class="g">●</span> <span class="w">Step 3b-2: adapters</span>                     <span class="g">6:40</span> </span>
+                                                         <span class="f">│</span><span class="sel">   <span class="d">codex · running $ node --test …</span>              </span>
+                                                         <span class="f">│</span>
+                                                         <span class="f">│</span> <span class="g">●</span> <span class="w">Review auth middleware</span>                  <span class="g">0:41</span>
+                                                         <span class="f">│</span>   <span class="d">opencode · responding</span>
+                                                         <span class="f">│</span>
+                                                         <span class="f">│</span> <span class="g">●</span> <span class="w">Second opinion on schema</span>                <span class="g">2:05</span>
+                                                         <span class="f">│</span>   <span class="d">claude · </span><span class="y">your message queued</span>
+                                                         <span class="f">│</span>
+                                                         <span class="f">│</span> <span class="d">✓</span> <span class="w">Probe job</span>                               <span class="d">12m</span>
+ <span class="f">╭─────────────────────────────────────────────────────╮</span> <span class="f">│</span>   <span class="d">opencode · done in 0:38</span>
+ <span class="f">│</span> &gt;                                                   <span class="f">│</span> <span class="f">│</span>
+ <span class="f">╰─────────────────────────────────────────────────────╯</span> <span class="f">│</span> <span class="f">⏎ open job</span></pre></div>
+<p>The same cards as the live view's job list (title from the lead, companion, what it is doing). Picking one switches Claude Code to that subagent's view, and the pane follows (3).</p>
+
+<h2>3. A companion job's subagent in view: the pane shows that job, with the input box</h2>
+<div class="term"><div class="bar">Claude Code · 170 columns · viewing the "Step 3b-2: adapters" subagent</div>
+<pre> <span class="d">agent-companion · Step 3b-2: adapters</span>                 <span class="f">│</span> <span class="w">Step 3b-2: adapters</span>  <span class="d">codex · gpt-6-astra max</span>
+                                                       <span class="f">│</span>
+ <span class="o">⏺</span> agent_send  <span class="d">codex · still running</span>                    <span class="f">│</span> <span class="d">task</span>  Implement Step 3b-2 of docs/LIVE_VIEW_PLA… <span class="f">+31</span>
+ <span class="o">⏺</span> agent_wait  <span class="d">(waiting up to 480 s)</span>                    <span class="f">│</span>
+                                                       <span class="f">│</span> <span class="w">$ node --test …/opencode.test.mjs</span>        <span class="r">exit 1</span>
+                                                       <span class="f">│</span>   <span class="d">✖ steer is acknowledged on the running session</span>
+                                                       <span class="f">│</span>   <span class="f">+6 lines</span>
+                                                       <span class="f">│</span>
+                                                       <span class="f">│</span> The steer test fails because the fake server never
+                                                       <span class="f">│</span> reports idle.
+                                                       <span class="f">│</span>
+                                                       <span class="f">│</span> <span class="g">● running $ node --test …/opencode.test.mjs · 0:07</span>
+                                                       <span class="f">│</span> <span class="f">╭───────────────────────────────────────────────╮</span>
+ <span class="f">╭───────────────────────────────────────────────────╮</span> <span class="f">│</span> <span class="f">│</span> <span class="w">›</span> <span class="f">Message Codex…</span>                              <span class="f">│</span>
+ <span class="f">│</span> &gt;                                                 <span class="f">│</span> <span class="f">│</span> <span class="f">╰───────────────────────────────────────────────╯</span>
+ <span class="f">╰───────────────────────────────────────────────────╯</span> <span class="f">│</span> <span class="g">steer</span>  <span class="f">⏎ send · mode ▾ · cancel job · ← jobs</span></pre></div>
+<p>The left side is Claude Code's own view of the subagent (its bridge calls). The pane shows what the companion itself is doing, from the companion's native transcript, with the same labels, folding and input box as the live view. "← jobs" goes back to the main conversation and the list. Viewing any other subagent, the pane shows the list.</p>
+
+<h2>Narrow terminals</h2>
+<p>Below 144 columns a pane opened by itself waits; <code>/companion</code> opens it at any width (Claude Code then places it above the prompt). The agent rows (1) work at every width.</p>
+</main></body></html>
