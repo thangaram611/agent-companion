@@ -154,6 +154,7 @@ function commandStatus(item, ended) {
   if (item.exitCode === 0) return [['ok', 'ok']];
   if (item.exitCode != null) return [[`exit ${item.exitCode}`, 'bad']];
   if (['running', 'streaming'].includes(item.status)) return ended ? [['unfinished', 'warn']] : [['running', 'ok']];
+  if (item.status === 'unfinished') return [['unfinished', 'warn']];
   if (item.status === 'failed') return [['failed', 'bad']];
   return null;
 }

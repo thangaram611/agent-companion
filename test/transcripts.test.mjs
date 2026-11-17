@@ -498,6 +498,22 @@ test('antigravity: a cancelled command keeps its native running status', async t
   assert.equal(command.command, 'sleep 30 && echo LATE'); assert.equal(command.status, 'running');
 });
 
+test('opencode: a shell command a cancel or interrupt stopped is unfinished, not failed (measured on 2.3.0)', async t => {
+  const { readTranscript } = await api();
+  const loc = fixture(t, 'opencode');
+  const before = readTranscript(loc);
+  const db = new DatabaseSync(loc.path);
+  // A user cancel: the part errors with `interrupted` and neither exit nor signal.
+  const part = { id: 'prt_cancel', type: 'tool', name: 'shell', state: { status: 'error', input: { command: 'sleep 100' },
+    error: { type: 'tool.execution', message: '[no output]' }, metadata: { shellID: 'sh_1', interrupted: true, truncated: false } } };
+  db.prepare('INSERT INTO session_message VALUES(?,?,?,?,?,?,?)').run('msg_cancel', loc.sessionId, 'assistant', 998, 1, 1,
+    JSON.stringify({ content: [part], error: { type: 'aborted', message: 'Step interrupted' }, time: { completed: 2 } }));
+  db.close();
+  const [command] = readTranscript(loc, { after: before.cursor }).items.filter(i => i.kind === 'command');
+  assert.equal(command.status, 'unfinished');
+  assert.equal(command.exitCode, null);
+});
+
 test('opencode: a shell command killed by its timeout is failed, naming the signal (measured on 2.3.0)', async t => {
   const { readTranscript } = await api();
   const loc = fixture(t, 'opencode');

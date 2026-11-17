@@ -37,6 +37,8 @@ test('items fold output to its first and last lines with a count, and expand in 
   assert.deepEqual(folded, ['$ ls' + ' '.repeat(34) + 'ok', '  line 0', '  line 1', '  +6 lines', '  line 8', '  line 9']);
   assert.equal(itemLines(item, { expanded: true }).length, 11);
   assert.deepEqual(text(itemLines({ kind: 'command', command: 'sleep 9', status: 'running' }, { ended: true }).flatMap(line => layoutLine(line, 21))), ['$ sleep 9  unfinished']);
+  // A reader's own unfinished: OpenCode's command a cancel stopped.
+  assert.deepEqual(text(itemLines({ kind: 'command', command: 'sleep 100', status: 'unfinished' }).flatMap(line => layoutLine(line, 23))), ['$ sleep 100  unfinished']);
 });
 
 test('the pane rebuilds only changed blocks and slices visible rows across blocks', () => {
