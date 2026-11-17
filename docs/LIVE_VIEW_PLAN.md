@@ -26,7 +26,7 @@ Agreed with the owner on 2026-11-15:
 | Job result with interventions | A job ends only when nothing is pending. Its result lists each turn's answer once, in order, labelled with the message it answers; an interrupted turn reads "interrupted before answering" without partial text. No answer reaches the caller twice. |
 | The user's messages | Delivered verbatim like the caller's; the execution record and the caller's early return name the sender. |
 | Native attach | Not built. |
-| UI | Shared Node core first, then a terminal UI in Ink 8, then a Claude Code pane and an MCP progress line. The web page is deferred for its own design discussion. |
+| UI | Shared Node core first, then a terminal UI in Ink 8, then a Claude Code mod: progress on each companion job's agent row and a Companions pane (the MCP progress line was dropped in Step 4). The web page is deferred for its own design discussion. |
 | Runtime | Node 26 (current LTS) required; use its features. |
 
 ## Evidence
