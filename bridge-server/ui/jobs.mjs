@@ -26,6 +26,10 @@ export function statusOf(execution, result, alive) {
   if (result) return result.outcome;
   return ACTIVE.has(execution.state) && (!execution.processes?.pid || alive(execution.processes.pid)) ? 'running' : 'unknown';
 }
+// Nothing more will be written: a result, or a record no longer active. A
+// stopping job's tree dies before its result is written (`unknown` for that
+// gap, measured on a user cancel); its result and last transcript writes follow.
+export const hasEnded = job => Boolean(job.result) || !ACTIVE.has(job.execution.state);
 
 // Records by path, parsed again only when the file changed, so an unchanged
 // record keeps its identity. Executions change while running; results are

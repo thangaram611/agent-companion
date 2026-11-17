@@ -7,7 +7,7 @@ import { followTranscript, locateTranscript } from '../../lib/transcripts.mjs';
 import { selectTurnItems } from '../../lib/work-summary.mjs';
 import { Records } from '../controller/records.mjs';
 import { pidAlive } from '../controller/process-supervisor.mjs';
-import { branchOf, recordReader, statusOf } from './jobs.mjs';
+import { branchOf, hasEnded, recordReader, statusOf } from './jobs.mjs';
 import { clean } from './rows.mjs';
 
 const HIDDEN = new Set(['usage', 'turn_end', 'preamble']);
@@ -43,7 +43,7 @@ export class JobTranscript {
     }
     if (!this.follower || (!force && this.locator.kind === 'sqlite' && now - this.polled < SQLITE_POLL_MS)) return false;
     this.polled = now;
-    if (job.status !== 'running') this.final = true;
+    if (hasEnded(job)) this.final = true;
     const read = this.follower.read();
     this.format = read.format;
     if (read.reset) this.items.clear();
@@ -106,7 +106,7 @@ export function createFollow({ dir, executionId, env = process.env, now = Date.n
         job = { provider: execution.provider, execution, result, status };
         lines.push({ job: { status, execution, result, branch } });
       }
-      const ended = status !== 'running';
+      const ended = hasEnded(job);
       let items = [];
       if (transcript.poll(job, seen === null || ended) || turnOf(execution) !== seen) {
         seen = turnOf(execution);

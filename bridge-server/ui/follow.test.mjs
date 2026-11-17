@@ -2,6 +2,7 @@ import '../../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createFollow } from './follow.mjs';
@@ -67,6 +68,28 @@ test('a finished job is read once with its result, then the follow ends', t => {
   assert.equal(turn.located, true);
   assert.equal(items[0].kind, 'user');
   assert.equal(items.at(-1).kind, 'assistant');
+});
+
+test('a stopping job whose process is gone is read until its result, then the follow ends with it', t => {
+  const f = uiFixture(t);
+  let alive = true;
+  const job = createFollow({ dir: f.states.claude, executionId: 'run-1', env: f.env, now: () => f.NOW, alive: () => alive });
+  job.tick();
+  // A cancel, as measured live: the controller kills the tree and records
+  // `stopping`, and writes the result only after verifying the tree is gone.
+  f.setExecution('run-1', () => ({ state: 'stopping', stopCause: 'user_cancel' }));
+  alive = false;
+  f.append([codexItem('turn-2', { type: 'AgentMessage', id: 'a9', content: [{ type: 'text', text: 'Stopped mid-way.' }] })]);
+  const stopping = job.tick();
+  assert.equal(stopping.ended, false);
+  assert.equal(lines(stopping)[0].job.status, 'unknown');
+  f.append([codexItem('turn-2', { type: 'AgentMessage', id: 'a10', content: [{ type: 'text', text: 'Last words.' }] })]);
+  writeFileSync(join(f.states.claude, 'results', 'run-1.json'), JSON.stringify({ owner: 'agent-run', executionId: 'run-1', generation: 1, outcome: 'interrupted', cause: 'user_cancel', finishedAt: f.NOW }));
+  f.setExecution('run-1', () => ({ state: 'closed' }));
+  const out = job.tick(), [first, second] = lines(out);
+  assert.equal(out.ended, true);
+  assert.equal(first.job.result.outcome, 'interrupted');
+  assert.deepEqual(second.items.map(item => item.text), ['Last words.'], 'the transcript is read to its end');
 });
 
 test('a job whose transcript is not found yet says so, and a missing record is an error', t => {
