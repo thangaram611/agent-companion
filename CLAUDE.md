@@ -54,7 +54,9 @@ Uncatchable bridge SIGKILL cannot run the handoff; recovery refuses to adopt a
 live or unverified tree.
 
 **No silent fallback.** Target/model/effort refusals are `TARGET_UNCONFIGURED`,
-`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`. Ownership,
+`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`.
+ACP authentication refusals are `AUTH_REQUIRED`, with the descriptor's sign-in steps;
+relay them as setup problems without retrying or switching companion. Ownership,
 history and execution refusals are separate, including `NATIVE_OWNER_REQUIRED`
 and `FOLLOWUP_UNSUPPORTED`. Both role templates relay failures without changing
 the parent's choice. Omitted target uses the configured default; omitted model

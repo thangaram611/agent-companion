@@ -100,7 +100,7 @@ test('Claude references the plugin session server by name and preserves its budg
 
 test('Claude role relays routing and unsupported-follow-up refusals and leaves failed work with the companion', () => {
   assert.deepEqual([...new Set(body.match(/\b[A-Z]+_[A-Z_]+\b/g))].sort(), [
-    'CAPABILITY_UNAVAILABLE', 'EFFORT_NOT_ALLOWED', 'FOLLOWUP_UNSUPPORTED', 'MODEL_NOT_ALLOWED', 'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
+    'AUTH_REQUIRED', 'CAPABILITY_UNAVAILABLE', 'EFFORT_NOT_ALLOWED', 'FOLLOWUP_UNSUPPORTED', 'MODEL_NOT_ALLOWED', 'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
   ]);
   assert.match(prose, /Relay a refusal verbatim and stop; never work around it/);
   assert.match(prose, /The delegated task itself stays with the companion/);

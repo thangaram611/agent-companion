@@ -189,8 +189,9 @@ The delegated task itself stays with the companion: do not complete it yourself
 or switch to a companion or model the parent did not allow.
 
 The refusal codes are `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`,
-`CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`. Relay a
+`CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED`, `EFFORT_NOT_ALLOWED` and `AUTH_REQUIRED`. Relay a
 refusal verbatim and stop; never work around it by changing or dropping the parent's choice.
+For `AUTH_REQUIRED`, relay it as a setup problem with the sign-in steps; do not retry or switch companion.
 
 If a bridge call throws, retry once. If two consecutive calls throw, take one
 log tail: the last 20 lines of `~/.claude/agent-companion/runtime/agent-bridge.log`.

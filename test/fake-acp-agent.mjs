@@ -16,6 +16,8 @@
 //   ACP_FAKE_PROTOCOL_VERSION  the protocolVersion it answers on `initialize` (1)
 //   ACP_FAKE_LOAD_SESSION      '1' → advertises and implements `session/load`
 //   ACP_FAKE_LOAD_FAIL         '1' → `session/load` answers -32602 (unknown id)
+//   ACP_FAKE_AUTH_REQUIRED     '1' → advertises Copilot login and refuses
+//                              `session/new` and `session/load` with -32000
 //   ACP_FAKE_ASK_PERMISSION    '1' → each prompt first asks
 //                              `session/request_permission` and records the answer
 //   ACP_FAKE_PERMISSION_KIND   the tool kind it asks about (`execute`)
@@ -119,6 +121,7 @@ trace({ argv: process.argv.slice(2) });
 
 const PROTOCOL_VERSION = Number(env.ACP_FAKE_PROTOCOL_VERSION || 1);
 const LOAD_SESSION = env.ACP_FAKE_LOAD_SESSION === '1';
+const AUTH_REQUIRED = env.ACP_FAKE_AUTH_REQUIRED === '1';
 
 const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
 const text = (t) => ({ type: 'text', text: t });
@@ -181,16 +184,20 @@ function handle(msg) {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: 'fake-acp-agent', title: 'Fake ACP agent', version: '1.0.0' },
         agentCapabilities: { loadSession: LOAD_SESSION, promptCapabilities: { image: false, audio: false, embeddedContext: false } },
-        authMethods: [],
+        authMethods: AUTH_REQUIRED ? [{ id: 'copilot-login', name: 'Log in with Copilot CLI',
+          description: 'Run \`copilot login\` in the terminal',
+          _meta: { 'terminal-auth': { command: '/fixture/bin/copilot', args: ['login'], label: 'Copilot Login' } } }] : [],
       });
       return;
     case 'session/new': {
+      if (AUTH_REQUIRED) { fail(-32000, 'Authentication required'); return; }
       const sessionId = 'fake-sess-' + (++sessionSeq);
       sessions.set(sessionId, { cwd: p.cwd, prompts: 0, loaded: false, model: defaultModel });
       reply({ sessionId, modes: modes(), ...modelConfig(defaultModel) });
       return;
     }
     case 'session/load': {
+      if (AUTH_REQUIRED) { fail(-32000, 'Authentication required'); return; }
       if (!LOAD_SESSION) { fail(-32601, '"Method not found": session/load'); return; }
       if (env.ACP_FAKE_LOAD_FAIL === '1' || !p.sessionId) { fail(-32602, 'Session not found: ' + p.sessionId); return; }
       // A loaded session comes back on the default model (Antigravity, measured).

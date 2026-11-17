@@ -79,6 +79,7 @@ class ProtocolConnection extends AcpConnection {
       this.effectiveEffort = thoughtLevel(this.configOptions)?.currentValue
         ?? this.descriptor.acp.reportedEffort?.({ model: this.effectiveModel, configOptions: this.configOptions });
     } catch (err) {
+      if (err.code === -32000) throw err; // Authentication is classified by openHistory.
       if (this.effort !== undefined && err.code === 'ModelSelectionMismatch') throw Object.assign(new Error(`Companion did not apply effort "${this.effort}" with model "${model}": ${err.message}`), { code: 'CAPABILITY_UNAVAILABLE' });
       if (err.code === 'ModelSelectionMismatch' || typeof err.code === 'number') throw failure('MODEL_NOT_ALLOWED', err);
       throw err; // Transport errors become HistoryUnavailable in openHistory.
@@ -174,6 +175,11 @@ export class AcpAdapter {
       }
       return { historyId: this.sessionId, effectiveModel: conn.effectiveModel, effectiveEffort: conn.effectiveEffort };
     } catch (err) {
+      if (err.code === -32000) {
+        // The native message plus the descriptor's sign-in steps is the whole explanation.
+        const native = (err.message || 'Authentication required').replace(/\.?\s*$/, '.');
+        throw Object.assign(new Error([native, ...this.descriptor.auth.nextSteps].join(' ')), { code: 'AUTH_REQUIRED' });
+      }
       throw ['MODEL_NOT_ALLOWED', 'EFFORT_NOT_ALLOWED', 'CAPABILITY_UNAVAILABLE'].includes(err.code) ? err : failure('HistoryUnavailable', err);
     }
   }

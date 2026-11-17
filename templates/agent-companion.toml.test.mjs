@@ -82,7 +82,7 @@ test('Codex role relays answers, status, metadata and orphan events without requ
 
 test('Codex role relays routing and unsupported-follow-up refusals and leaves failed work with the companion', () => {
   assert.deepEqual([...new Set(body.match(/\b[A-Z]+_[A-Z_]+\b/g))].filter((code) => code !== 'ALL_TOOLS').sort(), [
-    'CAPABILITY_UNAVAILABLE', 'EFFORT_NOT_ALLOWED', 'FOLLOWUP_UNSUPPORTED', 'MODEL_NOT_ALLOWED', 'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
+    'AUTH_REQUIRED', 'CAPABILITY_UNAVAILABLE', 'EFFORT_NOT_ALLOWED', 'FOLLOWUP_UNSUPPORTED', 'MODEL_NOT_ALLOWED', 'TARGET_UNCONFIGURED', 'TARGET_UNSUPPORTED',
   ]);
   assert.match(prose, /Relay a refusal verbatim and stop; never work around it/);
   assert.match(prose, /The delegated task itself stays with the companion/);

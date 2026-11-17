@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-11-15
+Last updated: 2026-11-17
 
 ## Goal
 
@@ -176,7 +176,7 @@ The reported `currentValue` confirms the selected model and its advertised level
 suffix supplies effective effort. Selection is reapplied after load, which forgets
 the model. The shared ACP adapter calls descriptor hooks without companion-id
 branches. ACP preserves JSON-RPC error codes to distinguish provider refusals
-(`MODEL_NOT_ALLOWED`) from transport failures (`HistoryUnavailable`); only a
+(`MODEL_NOT_ALLOWED`, or `AUTH_REQUIRED` for -32000) from transport failures (`HistoryUnavailable`); only a
 model confirmation mismatch maps to `CAPABILITY_UNAVAILABLE` when selecting effort.
 SPEC-2 does not measure pre-turn write durability for OpenCode or
 Antigravity; both paths treat selection writes as persistent, so refusal is safe
@@ -205,7 +205,8 @@ before acknowledgement returns that terminal envelope immediately.
 Provider failures use the same text path. The controller appends the provider's
 explanation after a blank line when partial assistant text exists; an identical
 explanation is not repeated. Wrapped runtime/history/delivery errors contribute
-their innermost nonempty `message` string. Explanations collapse whitespace to one
+their innermost nonempty `message` string; `AUTH_REQUIRED` carries no cause, its
+message is the native one followed by the descriptor's `auth.nextSteps`. Explanations collapse whitespace to one
 line and are capped at 500 characters, including a trailing ellipsis when truncated.
 Only message strings are copied, never error data, headers or response bodies.
 OpenCode supplies the failed turn's idle error, falling back to its assistant
@@ -378,6 +379,8 @@ use bounded `agent_wait` calls for completion. There is no hidden work queue.
 Target/model refusals include `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`,
 `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`. The child relays the failure
 without substituting a companion/model or completing the delegated work itself.
+ACP authentication refusals use `AUTH_REQUIRED`: relay them as setup problems
+with the sign-in steps; do not retry or switch companion.
 See historical substitution failure [F5](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
 Missing history fails as `history_unavailable`; unsupported cold follow-up fails
 as `FOLLOWUP_UNSUPPORTED`. Ambiguous migrated history is never guessed.
@@ -393,7 +396,7 @@ processes. The provider factories create an adapter with this interface:
 | Method / property | Contract |
 | --- | --- |
 | `start({ cwd, env, model, effort, supervisor, historyId })` | Spawn via `supervisor.spawn(argv, opts)`; return `{ runtime }`. Startup failure becomes `failed: runtime_unavailable`. |
-| `openHistory({ historyId, model, effort })` | Null id creates history; a saved id must load unchanged or throw `HistoryUnavailable`. Apply model/effort rules and return `{ historyId, effectiveModel }`, plus effective effort and `nativeRefs` where reported (Codex supplies `transcriptPath` from both start and resume). |
+| `openHistory({ historyId, model, effort })` | Null id creates history; a saved id must load unchanged or throw `HistoryUnavailable`. ACP -32000 from new/load or subsequent model/effort selection throws `AUTH_REQUIRED`: the native message and the descriptor's sign-in steps. Apply model/effort rules and return `{ historyId, effectiveModel }`, plus effective effort and `nativeRefs` where reported (Codex supplies `transcriptPath` from both start and resume). |
 | `deliver({ text, messageId })` | Send verbatim once; return `{ nativeTurnId, acknowledged?, nativeRefs?, effectiveModel?, effectiveEffort? }` on native acknowledgement; a native turn id implies acknowledgement, otherwise `acknowledged: true` and `nativeTurnId: null` are required, carrying newly reported launch metadata. Ambiguous failure throws `DeliveryUnknown`; never retry delivery. |
 | `observe({ next, onProgress, onInput })` | Resolve one native outcome (`completed`, `failed`, `interrupted`) with text, usage, native refs and cause. `next` observes an already queued native turn; `onInput` reports message lifecycle. Progress carries `lastActivityAt`, `activeCommand`, `retry`, `partialText` and optional `activity` (string or null). Transport loss throws `ProviderLost`. |
 | `interrupt({ drain } = {})` | Request native turn interruption; `drain: true` waits for the turn boundary before another prompt. Stop-time interruption acknowledges promptly. Never signal a process. |

@@ -14,8 +14,62 @@ import { getTargetById } from '../../lib/target-registry.mjs';
 import { writeTargetChecks, isModelAllowedFor } from '../../lib/state.mjs';
 import { AcpAdapter, acpProvider } from './acp.mjs';
 import { dispatch } from '../server.mjs';
+import { appendProviderError } from '../provider-error.mjs';
 
 const lines = (path) => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+
+for (const historyId of [null, 'saved-history']) for (const selection of ['session', 'model', 'effort']) {
+  test(`ACP AUTH_REQUIRED during ${historyId ? 'loaded' : 'new'} ${selection} carries the native message and descriptor steps`, async t => {
+    const descriptor = fakeAcpDescriptor();
+    descriptor.auth = { nextSteps: ['Run `fixture-acp login`.', 'Then confirm the fixture account.'] };
+    descriptor.acp.setModel = ({ sessionId, model }) => ['session/set_config_option', { sessionId, configId: 'model', value: model }];
+    const h = setup(t, { descriptor, env: { ACP_FAKE_AUTH_REQUIRED: selection === 'session' ? '1' : '0',
+      ACP_FAKE_THOUGHT_LEVELS: '["low","medium"]' } });
+    const adapter = h.controller.providers.fake.create();
+    await adapter.start({ cwd: h.dir, env: h.childEnv, supervisor: h.controller.createSupervisor({}) });
+    let cause;
+    if (selection !== 'session') {
+      // New/load succeeds on the wire; the selection request then loses auth.
+      cause = Object.assign(new Error('Authentication required'), { code: -32000 });
+      const request = adapter.connection._sendRequest.bind(adapter.connection);
+      t.mock.method(adapter.connection, '_sendRequest', async (method, params) => {
+        if (method === 'session/set_config_option') throw cause;
+        return request(method, params);
+      });
+    }
+    await assert.rejects(adapter.openHistory({ historyId,
+      ...(selection === 'model' ? { model: 'fake-model-a' } : selection === 'effort' ? { effort: 'low' } : {}) }), err => {
+      assert.equal(err.code, 'AUTH_REQUIRED');
+      const text = appendProviderError('', err);
+      assert.equal(text.split('Authentication required').length - 1, 1);
+      for (const step of descriptor.auth.nextSteps) assert.ok(text.includes(step), text);
+      return true;
+    });
+    assert.equal(h.frames(historyId ? 'session/load' : 'session/new').length, 1);
+    assert.equal(h.frames('session/prompt').length, 0);
+  });
+}
+
+test('ACP AUTH_REQUIRED controller send relays Copilot sign-in steps without retry', async t => {
+  const descriptor = getTargetById('copilot');
+  const h = setup(t, { descriptor, env: { ACP_FAKE_AUTH_REQUIRED: '1' } });
+  h.controller.providers.copilot = h.controller.providers.fake;
+  const sent = (await dispatch({ action: 'send', target: 'copilot', thread: 'child', cwd: h.dir, task: 'hello' }, { controller: h.controller })).structuredContent;
+  const result = h.records.readResult(sent.job_id);
+  const terminal = h.records.readExecution(sent.job_id).terminal;
+  t.diagnostic('AUTH_REQUIRED_TERMINAL ' + JSON.stringify({ outcome: result.outcome, error: terminal.error, text: result.text }));
+  assert.equal(result.outcome, 'failed');
+  assert.equal(terminal.error, 'AUTH_REQUIRED');
+  assert.equal(result.cause, 'provider_error');
+  assert.equal(sent.status, 'failed'); assert.equal(sent.meta.detail, 'AUTH_REQUIRED');
+  assert.equal(result.text, ['Authentication required.', ...descriptor.auth.nextSteps].join(' '));
+  assert.equal(result.text.split('Authentication required').length - 1, 1);
+  const waited = (await dispatch({ action: 'wait', job_id: sent.job_id, thread: 'child' }, { controller: h.controller })).structuredContent;
+  const status = (await dispatch({ action: 'status', job_id: sent.job_id }, { controller: h.controller })).structuredContent;
+  assert.equal(sent.content, result.text); assert.equal(waited.content, result.text); assert.equal(status.partial_text, result.text);
+  assert.equal(h.frames('session/new').length, 1); assert.equal(h.frames('session/prompt').length, 0);
+  assert.ok(result.stopEvidence.gone);
+});
 
 for (const fault of ['session-new-error', 'session-new-empty-error', 'session-new-object-error']) {
   test(`ACP session/new relays only a string message: ${fault}`, async t => {

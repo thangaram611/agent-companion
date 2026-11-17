@@ -125,6 +125,12 @@ test('both roles offer the same invoker effort and launch transparency instructi
   }
 });
 
+test('both roles relay authentication failures as setup problems without retry or substitution', () => {
+  for (const source of [md, toml]) {
+    assert.match(source, /For `AUTH_REQUIRED`, relay it as a setup problem with the sign-in steps; do not retry or switch companion\./);
+  }
+});
+
 
 test('both roles relay the same work summary and full transcript pointer', () => {
   const rule = source => source.match(/When `meta.work_summary`[\s\S]*?(?=\n\n)/)?.[0];
