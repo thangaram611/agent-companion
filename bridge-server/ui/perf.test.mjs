@@ -1,8 +1,28 @@
-// The live view's performance gate (docs/LIVE_VIEW_PLAN.md, Steps 2 and 3):
-// 10,000 transcript items appended to a running job's JSONL, then scrolling,
-// typing in its message box, resizing and expand/collapse, each timed from the
-// action to the frame Ink writes. Ink renders to a fake TTY in interactive
-// mode; keys go through Ink's stdin.
+// The live view's performance gate (docs/LIVE_VIEW_PLAN.md, Steps 2 and 3): a
+// running job's JSONL grows to 10,000 transcript items, and every action is
+// timed from the action to the frame Ink writes, once at a small transcript and
+// again at 10,000 items. Ink renders to a fake TTY in interactive mode; keys go
+// through Ink's stdin.
+//
+// The gate compares the two sizes in the same run, never milliseconds against a
+// fixed budget: GitHub's runner with coverage took about 4x this Mac's frame
+// times (append p95 39.9 ms against 8-9 ms here), so a fixed budget failed CI
+// without any regression. Median at ~10,000 items over median at ~500, measured
+// 2026-11-17 on Apple M-series, Node 26.13.1 (ranges over the runs shown):
+//
+//                                       append   single   key      type
+//   current code, plain (3)             1.0-1.2  1.6      1.6      1.6-1.7
+//   current, coverage (2)               1.1      1.5-1.6  1.5      1.5
+//   current, coverage, slow cores (2)   1.2-1.8  1.5-2.0  1.5-1.9  1.4-1.6
+//   re-read whole file per tick (2)     6.5-7.9  7.6-9.4  1.5-1.8  1.4-1.8
+//   row cache never hits (2)            3.8-4.3  5.7-6.1  6.0-6.6  5.9-6.7
+//
+// Slow cores (taskpolicy -c background) ran about 7x slower than plain, slower
+// than CI. Appending, scrolling and typing should not grow with the transcript:
+// at most STEADY times slower, which both regressions exceed on several rows.
+// Expand-all and resize touch every item, so they may grow linearly with the
+// transcript but not faster (at most the size ratio, about 20); current code
+// measured 1.1-3.5.
 import '../../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,16 +30,8 @@ import { PassThrough, Writable } from 'node:stream';
 import { codexItem, uiFixture } from '../../test/ui-fixture.mjs';
 import { run } from './app.mjs';
 
-// Milliseconds per frame. Measured 2026-11-15 on Apple M-series, Node 26.13.1,
-// five runs: append p95 8.3–9.2, max 17.4–21.4; keys p95 7.8–9.1, max 16.9–21;
-// resize (every item rewrapped) max 57–63; expand all max 37–51. The budget is
-// about three times that for slower CI runners. Re-reading the whole 17 MB file
-// on every append instead of following it measured append p95 27.1 ms: a failure.
-// Typing in the message box (one key per frame) has the key budget.
-export const BUDGET = {
-  append: { p95: 25, max: 60 }, key: { p95: 25, max: 60 }, type: { p95: 25, max: 60 }, resize: { p95: 200, max: 200 }, expand: { p95: 120, max: 200 },
-};
-const ITEMS = 10_000, BATCH = 50;
+const STEADY = 3;
+const SMALL = 500, ITEMS = 10_000, BATCH = 50;
 
 class Terminal extends Writable {
   constructor(columns, rows) { super(); Object.assign(this, { columns, rows, isTTY: true }); }
@@ -53,61 +65,88 @@ test(`performance gate: ${ITEMS} appended items, scroll, typing, resize, expand 
   const { app } = run({ model, stdout, stdin, pollMs: 1e9, interactive: true, maxFps: 1000, patchConsole: false,
     onRender() { renders++; waiter?.(); waiter = null; } });
   t.after(() => app.unmount());
-  async function frame(action) {
+  // An action that changes nothing renders nothing: fail naming it, never hang.
+  async function frame(action, label) {
     const before = renders, t0 = performance.now();
     action();
-    if (renders === before) await new Promise(resolve => { waiter = resolve; });
+    if (renders === before) await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`no frame within 10 s after ${label}`)), 10_000);
+      waiter = () => { clearTimeout(timer); resolve(); };
+    });
     await app.waitUntilRenderFlush();
     return performance.now() - t0;
   }
-  const key = sequence => frame(() => stdin.write(sequence));
+  const key = sequence => frame(() => stdin.write(sequence), JSON.stringify(sequence));
   while (model.selected !== 'claude:run-1') await key('\x1b[B');
   // Focusing the running job focuses its message box.
   await key('\t');
-  const measured = { append: [], key: [], type: [], resize: [], expand: [] };
 
-  for (let i = 0; i < ITEMS; i += BATCH) {
-    f.append(items(i, BATCH));
-    measured.append.push(await frame(() => model.tick()));
+  let appended = 0;
+  async function grow(to) {
+    const times = [];
+    for (; appended < to; appended += BATCH) {
+      f.append(items(appended, BATCH));
+      times.push(await frame(() => model.tick(), 'append'));
+    }
+    return times;
   }
-  // One item at a time once the transcript is large: the live-follow case.
-  for (let i = ITEMS; i < ITEMS + 20; i++) {
-    f.append(items(i, 1));
-    measured.append.push(await frame(() => model.tick()));
+  // Every action at the transcript's current size; leaves the message box focused and empty.
+  async function actions() {
+    const m = { single: [], key: [], type: [], expand: [], resize: [] };
+    // One item at a time: the live-follow case.
+    for (let i = 0; i < 10; i++, appended++) {
+      f.append(items(appended, 1));
+      m.single.push(await frame(() => model.tick(), 'single append'));
+    }
+    for (let i = 0; i < 30; i++) m.key.push(await key('\x1b[A'));
+    for (let i = 0; i < 10; i++) m.key.push(await key('\x1b[5~'));
+    for (let i = 0; i < 10; i++) m.key.push(await key('\x1b[6~'));
+    // Typing as a person does: characters, ctrl+j lines, backspaces and mode changes.
+    const words = 'Keep the fake server; add an idle event after the step instead. ';
+    for (let i = 0; i < 60; i++) m.type.push(await key(words[i % words.length]));
+    for (let i = 0; i < 5; i++) m.type.push(await key('\n'), await key(words[i]));
+    assert.equal(model.boxes.get('claude:run-1').draft.length, 70, 'every key reached the draft');
+    for (let i = 0; i < 70; i++) m.type.push(await key('\x7f'));
+    for (let i = 0; i < 3; i++) m.type.push(await key('\x1b[Z'));
+    for (let i = 0; i < 4; i++) m.expand.push(await key('\x0f'));
+    // Back to the list, where e and E work on the selected job and f toggles
+    // following (e stops it), then back to the job's box. The live-follow case
+    // needs following on before the transcript grows again.
+    await key('\x1b');
+    for (let i = 0; i < 12; i++) m.expand.push(await key(i % 4 === 3 ? 'E' : 'e'));
+    if (!model.detail.follow) await key('f');
+    assert.ok(model.detail.follow, 'following again');
+    await key('\t');
+    for (const [columns, rows] of [[100, 30], [200, 60], [90, 50], [150, 40]].flatMap(size => [size, size])) {
+      m.resize.push(await frame(() => stdout.resize(columns, rows), `resize ${columns}x${rows}`));
+    }
+    return m;
   }
-  assert.ok(model.detail.list.length >= ITEMS, `${model.detail.list.length} items followed`);
-  assert.match(model.render().flat().map(([text]) => text).join(''), new RegExp(`n${ITEMS + 19}\\.mjs`));
 
-  for (let i = 0; i < 100; i++) measured.key.push(await key('\x1b[A'));
-  for (let i = 0; i < 40; i++) measured.key.push(await key('\x1b[5~'));
-  for (let i = 0; i < 40; i++) measured.key.push(await key('\x1b[6~'));
+  const smallAppend = await grow(SMALL);
+  const small = { append: smallAppend, ...await actions() };
+  const smallSize = model.detail.list.length;
+  const largeAppend = await grow(ITEMS);
+  const large = { append: largeAppend.slice(-smallAppend.length), ...await actions() };
+  const largeSize = model.detail.list.length;
+  assert.ok(largeSize >= ITEMS, `${largeSize} items followed`);
+  assert.match(model.render().flat().map(([text]) => text).join(''), new RegExp(`n${appended - 1}\\.mjs`));
 
-  // Typing as a person does: characters, ctrl+j lines, backspaces and mode changes.
-  const words = 'Keep the fake server; add an idle event after the step instead. ';
-  for (let i = 0; i < 200; i++) measured.type.push(await key(words[i % words.length]));
-  for (let i = 0; i < 10; i++) measured.type.push(await key('\n'), await key(words[i]));
-  for (let i = 0; i < 20; i++) measured.type.push(await key('\x7f'));
-  for (let i = 0; i < 3; i++) measured.type.push(await key('\x1b[Z'));
-  assert.equal(model.boxes.get('claude:run-1').draft.length, 200, 'every key reached the draft');
-
-  for (const [columns, rows] of [[100, 30], [200, 60], [150, 40], [90, 50], [150, 40]].flatMap(size => [size, size])) {
-    measured.resize.push(await frame(() => stdout.resize(columns, rows)));
-  }
-  for (let i = 0; i < 4; i++) measured.expand.push(await key('\x0f'));
-  // Back to the list, where e and E work on the selected job.
-  await key('\x1b');
-  for (let i = 0; i < 20; i++) measured.expand.push(await key(i % 4 === 3 ? 'E' : 'e'));
-  for (let i = 0; i < 4; i++) measured.expand.push(await key('E'));
-
-  // Opening the same transcript cold replays it once (not a frame budget).
+  // Opening the same transcript cold replays it once (reported, not gated).
   const open = performance.now();
   const reopened = f.model({ size: { columns: 150, rows: 40 } });
   while (reopened.selected !== 'claude:run-1') reopened.key('', { downArrow: true });
   reopened.render();
-  const report = Object.fromEntries(Object.entries(measured).map(([name, times]) => [name, stats(times)]));
-  report.open = { ms: +(performance.now() - open).toFixed(1), items: reopened.detail.list.length };
+
+  const limits = { append: STEADY, single: STEADY, key: STEADY, type: STEADY, expand: largeSize / smallSize, resize: largeSize / smallSize };
+  const report = { items: { small: smallSize, large: largeSize }, open: { ms: +(performance.now() - open).toFixed(1), items: reopened.detail.list.length } };
+  for (const name of Object.keys(limits)) {
+    const before = stats(small[name]), after = stats(large[name]);
+    report[name] = { small: before, large: after, ratio: +(after.p50 / before.p50).toFixed(2), limit: +limits[name].toFixed(1) };
+  }
   t.diagnostic(JSON.stringify(report));
-  for (const [name, budget] of Object.entries(BUDGET)) {
-    assert.ok(report[name].p95 <= budget.p95 && report[name].max <= budget.max, `${name}: ${JSON.stringify(report[name])} over ${JSON.stringify(budget)}`);
+  for (const [name, { ratio, limit, small: before, large: after }] of Object.entries(report)) {
+    if (ratio === undefined) continue;
+    assert.ok(ratio <= limit, `${name}: median ${after.p50} ms at ${largeSize} items is ${ratio}x the ${before.p50} ms at ${smallSize}, over ${limit}x`);
   }
 });

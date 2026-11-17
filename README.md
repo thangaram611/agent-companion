@@ -737,8 +737,12 @@ omitting `test/` skips cross-cutting checks such as the sync-exec timeout guard
 and the runtime sandbox guard.
 
 The live view's performance gate, `bridge-server/ui/perf.test.mjs`, runs with
-the suite: 10,000 appended transcript items, scrolling, typing in the message
-box, resizing and expand/collapse under a per-frame budget recorded in
+the suite: appending, scrolling, typing in the message box, resizing and
+expand/collapse are timed at a ~500-item transcript and again at 10,000 items in
+the same run. It fails when appending, scrolling or typing gets more than three
+times slower at the larger size, or when expand-all or resize grows faster than
+the transcript, so machine speed and coverage do not decide it. Measurements are
+in the test and in
 [docs/LIVE_VIEW_PLAN.md](docs/LIVE_VIEW_PLAN.md#step-2-read-only-terminal-ui).
 Its headless snapshots are `bridge-server/ui/ui.test.mjs.snapshot`; after an
 intended change, regenerate them with `node --test --test-update-snapshots

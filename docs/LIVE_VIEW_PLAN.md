@@ -265,6 +265,16 @@ Outcome (2026-11-15, `feat/live-tui`, not merged):
   p95 25, max 60; resize 200; expand p95 120, max 200. Re-reading the whole file
   per append measured append p95 27.1 ms and fails. Ink passes; Ratatui is not
   needed.
+- Gate revised 2026-11-17: the fixed budget failed CI with no regression.
+  GitHub's runner with coverage measured append p95 39.9 ms, keys 35.9, resize
+  247 and expand 166, about four times this Mac (CI runs at 7c2e839 and 7180c3c).
+  The gate now times every action at ~500 items and again at 10,000 in the same
+  run. Appending, scrolling and typing may be at most three times slower at the
+  larger size; expand-all and resize may grow at most linearly. Large over small
+  medians: current code 1.0–2.0 across plain, coverage and slow-core runs (about
+  seven times slower than plain); re-reading the whole file per tick 6.5–9.4 on
+  appends; a row cache that never hits 3.8–6.7 on appends, keys and typing. The
+  test carries the full table.
 - Headless snapshots at 150 and 80 columns for a running, a finished and a
   failed job, and the narrow list; a manual read-only run on the owner's live
   state in a pty (alternate screen, keys, exit).
