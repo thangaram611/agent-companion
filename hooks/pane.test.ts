@@ -99,10 +99,14 @@ function follows(on: On, scripts: Record<string, { lines: unknown[]; exits?: boo
 // The drawing as plain text, one line per row, trailing spaces cut: a plain
 // Button's hotkey leads it as the terminal draws it ("1: "), a row spread to
 // both ends or with a gap keeps two spaces between its parts, and an Input is
-// its text or placeholder, then an empty line for each further row.
+// exactly its rows: the text's last lines, as the field scrolls, or empty ones.
+const field = (text: string, rows: number) => {
+  const lines = text.split('\n').slice(-rows)
+  return [...lines, ...Array(rows - lines.length).fill('')].join('\n')
+}
 async function screen(ui: { drawn: () => Promise<unknown> }): Promise<string> {
   const text = (node: any): string => typeof node === 'string' ? node
-    : node?.type === 'Input' ? (node.props.value || node.props.placeholder) + '\n'.repeat((node.props.rows ?? 1) - 1)
+    : node?.type === 'Input' ? field(node.props.value || node.props.placeholder, node.props.rows ?? 1)
     : (node?.type === 'Button' && node.props?.plain && node.props.hotkey ? `${node.props.hotkey}: ` : '')
       + (node?.children?.length ? node.children.map(text).join(node.props?.justifyContent === 'space-between' || node.props?.gap ? '  ' : '') : node?.props?.label ?? '')
   const root: any = await ui.drawn()
@@ -493,6 +497,38 @@ async function boxed($: any, on: On, fields: Record<string, unknown> = {}, optio
   await seen.clock.settle()
   return { seen, ui, last: async (n: number) => (await screen(ui)).split('\n').slice(-n) }
 }
+
+test('the box grows with its draft as the prompt does, from two rows to a third of the pane, and shrinks again', async ($, on) => {
+  const { ui } = await boxed($, on)
+  const rows = async () => (await ui.find({ key: 'message' }))?.props.rows
+  expect(await rows()).toBe(2)
+  // shift+⏎ lines: each its row.
+  await ui.input({ key: 'message', text: 'one\ntwo\nthree', kind: 'change' })
+  expect(await rows()).toBe(3)
+  // A long line wraps at the field's width: the pane's 72 columns less the 27 of its hint.
+  await ui.input({ key: 'message', text: 'x'.repeat(100), kind: 'change' })
+  expect(await rows()).toBe(3)
+  // A 14-row pane gives it 4 at most; the field scrolls past that.
+  await ui.input({ key: 'message', text: 'a\nb\nc\nd\ne\nf', kind: 'change' })
+  expect(await rows()).toBe(4)
+  expect((await screen(ui)).split('\n')).toHaveLength(14)
+  await ui.input({ key: 'message', text: 'short', kind: 'change' })
+  expect(await rows()).toBe(2)
+  await ui.unmount()
+})
+
+test("a message from you or the lead shows whole in the job's transcript; the task stays folded", async ($, on) => {
+  const items = [{ id: 'u1', kind: 'user', text: 'Do the task.\nStep one.\nStep two.' }, { id: 'u2', kind: 'user', text: 'first line\n\nlast line' }]
+  const seen = engine(on, {}, { a1: 'j1' }, START + 60_000)
+  follows(on, { j1: { lines: [{ job: { status: 'running', execution: execution('j1'), result: null, branch: null } },
+    { turn: { ids: ['u1', 'u2'], earlier: 0, labels: { u1: 'task', u2: 'you' }, taken: [], located: true, format: { version: '0.169.0', detail: 'native transcript' } }, items }] } })
+  await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: 'a1' })
+  const ui = await $.ui.mount(pane({ agentId: 'a1' }, 20))
+  await seen.clock.settle()
+  const lines = (await screen(ui)).split('\n')
+  expect(lines.slice(2, 7)).toEqual(['task   Do the task.' + ' '.repeat(43) + '+2', '', 'you    first line', '', '       last line'])
+  await ui.unmount()
+})
 
 test("the message box sends through launch-ui.sh send in the shown mode; accepted clears it, refused keeps it and says why", async ($, on) => {
   const { seen, ui, last } = await boxed($, on)

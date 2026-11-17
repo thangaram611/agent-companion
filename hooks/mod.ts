@@ -60,8 +60,21 @@ const PANE = 'companions'
 const CARDS = 9
 // The engine's "1: " before a plain Button's label.
 const HOTKEY = 3
-// The message box's text rows, between its rules.
+// The message box's text rows, between its rules: two at least, since the
+// engine takes a new line only from two, then as many as the draft wraps to,
+// up to a third of the pane, as Claude Code's prompt grows.
 const BOX_ROWS = 2
+// The field's hint while focused (2.1.326): the engine keeps the long one when
+// it leaves the field half the pane.
+const HINT = width(' ⏎ send · shift+⏎ new line'), SHORT_HINT = width(' ⏎ send')
+function boxRowsFor(draft: string, w: number, bodyRows: number) {
+  const field = Math.max(12, w - (w - HINT >= w / 2 ? HINT : SHORT_HINT))
+  // Word-wrapped as rows.mjs wraps, the cursor's cell after the last line.
+  const wrapped = draft.split('\n').reduce((n, line, i, all) => n + layoutLine({ segs: [[i === all.length - 1 ? `${line} ` : line || ' ']] }, field).length, 0)
+  return Math.min(Math.max(BOX_ROWS, wrapped), Math.max(BOX_ROWS, Math.floor(bodyRows / 3)))
+}
+// Labels whose messages the job's view shows whole.
+const WHOLE = new Set(['you', 'lead'])
 // rows.mjs's styles as theme colour keys, so the pane follows the person's theme.
 const STYLE: Record<string, { color?: string; weight?: 'bold' }> = {
   title: { weight: 'bold' }, dim: { color: 'inactive' }, faint: { color: 'subtle' },
@@ -346,7 +359,10 @@ function jobRows(a: Agent, f: Follow, now: number, w: number, rows: number): Seg
   if (!job) return [...head, [], [['waiting for the job\'s record', 'dim']]]
   const running = job.status === 'running'
   const pending = running ? pendingInputs(job.execution, f.taken).sort((x, y) => x.at - y.at).map(pendingLine) : []
-  const blocks: Block[] = jobBlocks(job, { list: f.list, labels: f.labels, located: f.turn?.located ?? false, format: f.turn?.format ?? null, now, pending })
+  // The pane opens no item, so a message from you or the lead shows whole:
+  // short, and folded it hid the lines the person wrote. The task stays folded.
+  const blocks: Block[] = jobBlocks(job, { list: f.list, labels: f.labels, located: f.turn?.located ?? false, format: f.turn?.format ?? null, now, pending,
+    expanded: id => WHOLE.has(f.labels.get(id) ?? '') })
   if (f.turn?.earlier) {
     const text = `${f.turn.earlier} earlier item${f.turn.earlier === 1 ? '' : 's'} · agent-companion ui shows them`
     const at = blocks.findIndex(block => block.key === f.list[0]?.id)
@@ -450,10 +466,11 @@ export const register: Register = on => {
       // padding or a › beside it would overflow it; its own label adds a colon.
       // Two rows, since it takes a new line only from two. The mode is on the
       // row below; Copilot takes cancel alone.
-      const rule = () => row([['─'.repeat(w), 'faint']])
+      const rule = () => row([['─'.repeat(w), 'faint']]), bodyRows = e.props.scroll.bodyRows, rows = boxRowsFor(box.draft, w, bodyRows)
       const field = box.mode
-        ? [rule(), h(Input, { key: 'message', placeholder: `Message ${name}…`, value: box.draft, rows: BOX_ROWS, submitLabel: 'send', autoFocus: true,
-              onInput: (value: string) => { box.draft = value },
+        ? [rule(), h(Input, { key: 'message', placeholder: `Message ${name}…`, value: box.draft, rows, submitLabel: 'send', autoFocus: true,
+              // Drawn again only when the draft needs another number of rows.
+              onInput: (value: string) => { box.draft = value; if (boxRowsFor(value, w, bodyRows) !== rows) redraw() },
               // Kept as sent, so a refusal leaves it in the box.
               onSubmit: (value: string) => { if (!value.trim() || box.sending) return; box.draft = value; void sendRequest($, jobId, box, box.mode!, value) } }), rule()]
         : [row([[`${name} takes no messages while it works · cancel only`, 'dim']])]
@@ -471,7 +488,7 @@ export const register: Register = on => {
       // The transcript gets what the box, its state and controls leave; the
       // box stays pinned to the bottom, as in the live view and the
       // companion's own app, however short the transcript is.
-      const spare = 2 + (box.mode ? BOX_ROWS + 2 : 1) + state.length, room = Math.max(4, e.props.scroll.bodyRows - spare)
+      const spare = 2 + (box.mode ? rows + 2 : 1) + state.length, room = Math.max(4, bodyRows - spare)
       const shown = jobRows(a, follow!, now, w, room)
       return column(...shown.map(row), ...Array.from({ length: room - shown.length }, () => row([])), ...field, ...state, controls,
         row([[focused ? 'esc returns to the chat' : 'ctrl+x tab for keys', 'faint']]))
