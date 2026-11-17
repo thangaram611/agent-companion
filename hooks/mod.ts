@@ -60,7 +60,7 @@ const PANE = 'companions'
 const CARDS = 9
 // The engine's "1: " before a plain Button's label.
 const HOTKEY = 3
-// The message box's text rows, inside its frame.
+// The message box's text rows, between its rules.
 const BOX_ROWS = 2
 // rows.mjs's styles as theme colour keys, so the pane follows the person's theme.
 const STYLE: Record<string, { color?: string; weight?: 'bold' }> = {
@@ -444,16 +444,18 @@ export const register: Register = on => {
         h(Box, { flexDirection: 'row', justifyContent: 'space-between' }, row([[focused ? 'esc returns' : 'ctrl+x tab for keys', 'faint']]), jobsButton))
       const jobId = a.jobId, modes = supportedModes(execution), name = COMPANION_NAMES[execution.provider] ?? clean(execution.provider)
       const redraw = () => $.ui.invalidate('ui.render')
-      // The box as the live view draws it (rows.mjs's boxRows): a faint round
-      // frame, a bold › (an Input's own label is drawn with a colon), the
-      // companion's modes only, its default first; Copilot takes cancel alone.
-      // Two rows, since the engine takes a new line only from two (2.1.326).
+      // The box as Claude Code draws its own prompt: a faint rule above and
+      // below, the field the pane's full width between them. The engine sizes
+      // the field from the pane's width less its hint (2.1.326), so a frame,
+      // padding or a › beside it would overflow it; its own label adds a colon.
+      // Two rows, since it takes a new line only from two. The mode is on the
+      // row below; Copilot takes cancel alone.
+      const rule = () => row([['─'.repeat(w), 'faint']])
       const field = box.mode
-        ? [h(Box, { flexDirection: 'row', borderStyle: 'round', borderColor: STYLE.faint!.color, paddingX: 1 }, ...spans([['› ', 'title']]),
-            h(Input, { key: 'message', placeholder: `Message ${name}…`, value: box.draft, rows: BOX_ROWS, submitLabel: `send · ${box.mode}`, autoFocus: true,
+        ? [rule(), h(Input, { key: 'message', placeholder: `Message ${name}…`, value: box.draft, rows: BOX_ROWS, submitLabel: 'send', autoFocus: true,
               onInput: (value: string) => { box.draft = value },
               // Kept as sent, so a refusal leaves it in the box.
-              onSubmit: (value: string) => { if (!value.trim() || box.sending) return; box.draft = value; void sendRequest($, jobId, box, box.mode!, value) } }))]
+              onSubmit: (value: string) => { if (!value.trim() || box.sending) return; box.draft = value; void sendRequest($, jobId, box, box.mode!, value) } }), rule()]
         : [row([[`${name} takes no messages while it works · cancel only`, 'dim']])]
       const state = box.sending ? [row([['◌ sending…', 'faint']])] : box.refused ? [row([[`✗ not sent: ${box.refused}`, 'bad']])] : []
       const cycle = () => { box.mode = modes[(modes.indexOf(box.mode!) + 1) % modes.length]!; redraw() }

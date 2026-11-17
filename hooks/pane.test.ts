@@ -98,12 +98,11 @@ function follows(on: On, scripts: Record<string, { lines: unknown[]; exits?: boo
 
 // The drawing as plain text, one line per row, trailing spaces cut: a plain
 // Button's hotkey leads it as the terminal draws it ("1: "), a row spread to
-// both ends or with a gap keeps two spaces between its parts, an Input is its
-// text or placeholder, and a framed Box is its rows, each further Input row empty.
+// both ends or with a gap keeps two spaces between its parts, and an Input is
+// its text or placeholder, then an empty line for each further row.
 async function screen(ui: { drawn: () => Promise<unknown> }): Promise<string> {
   const text = (node: any): string => typeof node === 'string' ? node
-    : node?.type === 'Input' ? node.props.value || node.props.placeholder
-    : node?.props?.borderStyle ? `╭─╮\n│ ${node.children.map(text).join('')} │\n${'│ │\n'.repeat((node.children.find((child: any) => child?.props?.rows)?.props.rows ?? 1) - 1)}╰─╯`
+    : node?.type === 'Input' ? (node.props.value || node.props.placeholder) + '\n'.repeat((node.props.rows ?? 1) - 1)
     : (node?.type === 'Button' && node.props?.plain && node.props.hotkey ? `${node.props.hotkey}: ` : '')
       + (node?.children?.length ? node.children.map(text).join(node.props?.justifyContent === 'space-between' || node.props?.gap ? '  ' : '') : node?.props?.label ?? '')
   const root: any = await ui.drawn()
@@ -208,10 +207,10 @@ test("the subagent in view shows its job: labels, folding, pending, the live lin
     '◌ you · queued  also check the schema  runs after this turn',
     '● running $ node --test opencode.test.mjs',
     '',
-    '╭─╮',
-    '│ › Message Codex… │',
-    '│ │',
-    '╰─╯',
+    '─'.repeat(64),
+    'Message Codex…',
+    '',
+    '─'.repeat(64),
     'mode: steer ▸  joins the running turn now  cancel job  b: ← jobs',
     'ctrl+x tab for keys',
   ].join('\n'))
@@ -220,7 +219,7 @@ test("the subagent in view shows its job: labels, folding, pending, the live lin
   await ui.redraw(pane({ agentId: 'a1' }, 40).props)
   const tall = (await screen(ui)).split('\n')
   expect(tall.length).toBe(40)
-  expect(tall.slice(-6)).toEqual(['╭─╮', '│ › Message Codex… │', '│ │', '╰─╯', 'mode: steer ▸  joins the running turn now  cancel job  b: ← jobs', 'ctrl+x tab for keys'])
+  expect(tall.slice(-6)).toEqual(['─'.repeat(64), 'Message Codex…', '', '─'.repeat(64), 'mode: steer ▸  joins the running turn now  cancel job  b: ← jobs', 'ctrl+x tab for keys'])
   expect(tall.slice(19, 34).every(line => line === '')).toBe(true)
 
   await ui.press({ key: 'jobs' })
@@ -458,7 +457,7 @@ test("keys: the first card, then a running job's box, take the ring, each switch
   // kit's refusal leaves the rest as it was.
   expect(seen.rings()).toEqual(['message'])
   await ui.redraw(pane({ agentId: 'r1' }, 12, 64, true).props)
-  expect(await ui.find({ key: 'message' })).toMatchObject({ type: 'Input', props: { autoFocus: true, rows: 2, submitLabel: 'send · steer' } })
+  expect(await ui.find({ key: 'message' })).toMatchObject({ type: 'Input', props: { autoFocus: true, rows: 2, submitLabel: 'send' } })
   expect(await ui.find({ key: 'jobs' })).toMatchObject({ props: { label: '← jobs', hotkey: 'b', plain: true, dimColor: true }, children: [] })
   expect((await ui.find({ key: 'jobs' }))?.props.autoFocus).toBeUndefined()
   expect((await screen(ui)).split('\n').at(-1)).toBe('esc returns to the chat')
@@ -497,7 +496,7 @@ async function boxed($: any, on: On, fields: Record<string, unknown> = {}, optio
 
 test("the message box sends through launch-ui.sh send in the shown mode; accepted clears it, refused keeps it and says why", async ($, on) => {
   const { seen, ui, last } = await boxed($, on)
-  expect(await last(6)).toEqual(['╭─╮', '│ › Message Codex… │', '│ │', '╰─╯', 'mode: steer ▸  joins the running turn now  cancel job  b: ← jobs', 'esc returns to the chat'])
+  expect(await last(6)).toEqual(['─'.repeat(72), 'Message Codex…', '', '─'.repeat(72), 'mode: steer ▸  joins the running turn now  cancel job  b: ← jobs', 'esc returns to the chat'])
   await ui.input({ key: 'message', text: 'use ripgrep' })
   await seen.clock.settle()
   expect(seen.sends).toEqual([[DIR, 'j1', 'steer', 'use ripgrep']])
@@ -519,10 +518,11 @@ test('a refused message keeps its draft and says why once', async ($, on) => {
 
 test("the mode cycles through the companion's own modes from its default; a bridge that does not answer is said", async ($, on) => {
   const { seen, ui, last } = await boxed($, on, { provider: 'claude', interventionModes: { default: 'queue', steer: false, queue: 'native', interrupt: true } }, { outcome: null })
-  expect((await ui.find({ key: 'message' }))?.props).toMatchObject({ placeholder: 'Message Claude Code…', submitLabel: 'send · queue' })
+  // The mode shows on the row under the box, the box's own hint leaving the field its room.
+  expect((await ui.find({ key: 'message' }))?.props).toMatchObject({ placeholder: 'Message Claude Code…', submitLabel: 'send' })
+  expect((await last(2))[0]).toBe('mode: queue ▸  runs after the current turn  cancel job  b: ← jobs')
   await ui.press({ key: 'mode' })
-  expect((await ui.find({ key: 'mode' }))?.props.label).toBe('mode: interrupt ▸')
-  expect((await ui.find({ key: 'message' }))?.props.submitLabel).toBe('send · interrupt')
+  expect((await last(2))[0]).toBe('mode: interrupt ▸  stops this turn, then sends  cancel job  b: ← jobs')
   await ui.input({ key: 'message', text: 'stop and do this' })
   await seen.clock.settle()
   expect(seen.sends).toEqual([[DIR, 'j1', 'interrupt', 'stop and do this']])
