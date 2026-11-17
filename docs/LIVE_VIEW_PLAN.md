@@ -412,6 +412,36 @@ Outcome (2026-11-15, branch `feat/interventions`):
 Measure first: whether Claude shows progress for a subagent's tool call, and
 whether the pane redraws while the main loop is busy.
 
+Measured 2026-11-17 on Claude Code 2.1.326 with a probe mod loaded into a live
+session (mod API types for that build; the probe recorded and changed nothing):
+
+- A pane redraws while the main loop is busy: a `$.clock.every(1000)` pane got
+  20 ticks during a 20 s Bash call, each followed by a redraw about 2 ms later.
+- The spawn's `agentId` is the execution owner: `agent.spawn` answered
+  `ad540b80…` for a background agent-companion subagent; that subagent's
+  `agent_send` call carried the same `agentId`, and the bridge recorded it as
+  `thread`. The `agent_send` result in the same `tool.call` hook gives the
+  `job_id`, so a mod maps agent to job without reading records.
+- The lead's at-a-glance agent list asks a `ui.render` `AgentRow` hook for each
+  subagent at spawn and about every 5 s (four asks in 15 s); a hook may replace
+  the row's `body`. That row is where an in-flight line reaches the lead's own
+  view. `ToolProgress` covers only the run-in-background hint, and MCP progress
+  text reaches only the calling loop's spinner (earlier measurement), which for
+  a subagent is its own view.
+- Panes opened unasked are placed from 144 columns (110 once the person has
+  opened one); below that they wait. The terminal surface has an `Input`
+  element; `$.ui.view({ agentId })` switches to the subagent's view.
+- `$.fs.read` reads byte ranges up to 4 MiB; `$.fs.write` has neither a mode nor
+  an atomic rename, so inbox requests go through `bridge-server/ui/inbox.mjs` in
+  a Node child (`$.process.run`), keeping one writer. `$.process.spawn` streams
+  a child's output without a permission prompt. `bridge-server/ui/rows.mjs`
+  has no imports, so a mod in this plugin can reuse its cleaning, folding and
+  wrapping.
+- Side finding: a probe job whose cwd sat inside `~/.claude` (a git repository)
+  made the worktree snapshot hash that repository: 32 loose objects (~200 KiB),
+  index and tree untouched. Expected behaviour of the snapshot; probes use a
+  cwd outside any repository the owner did not choose.
+
 Check: `claude plugin validate`; mod tests under `claude plugin test`; a manual
 live run.
 
