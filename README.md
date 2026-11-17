@@ -686,6 +686,16 @@ In a running job's message box:
 | `Esc` | Back to the list; the draft is kept |
 | `Ctrl+C` | Clear the draft; on an empty box, quit |
 
+### In Claude Code's agent list
+
+The plugin also carries a Claude Code mod, `hooks/mod.ts` (Codex ignores it).
+Each agent-companion subagent's row in the agent list under the prompt shows
+its job: the lead's title for it, the companion and model, what the companion
+is doing (the running command, responding, your queued message, retrying) and
+the elapsed time; once the job ends, its outcome and duration. The rows refresh
+every second while a job runs, from the same execution records, and the mod
+writes nothing. Other subagents' rows stay as Claude Code draws them.
+
 ## Diagnostics
 
 ```bash
@@ -753,7 +763,8 @@ README images are generated bitmaps. Their specifications live in
 prompts (Codex's `imagegen` skill produced the current set) and check every
 label before committing. CI checks only that the files exist.
 
-Validate Claude packaging with `claude plugin validate .`; Codex packaging and
+Validate Claude packaging with `claude plugin validate .` and run the mod's
+tests with `claude plugin test .`; Codex packaging and
 isolated validation commands are in [Install For Codex CLI](#install-for-codex-cli).
 
 Current live probes are listed in [probes/README.md](probes/README.md):
