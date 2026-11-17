@@ -1,10 +1,15 @@
 import '../../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { branchOf, createCallers, createJobSource } from './jobs.mjs';
+import { fileURLToPath } from 'node:url';
+import { branchOf, createCallers, createJobSource, sessionJobs } from './jobs.mjs';
+import { uiFixture } from '../../test/ui-fixture.mjs';
+
+const LAUNCH = fileURLToPath(new URL('../../hooks/launch-ui.sh', import.meta.url));
 
 function temp(t) {
   const dir = mkdtempSync(join(tmpdir(), 'ui-jobs-'));
@@ -90,4 +95,44 @@ test('branch comes from the worktree .git without running git', t => {
   write(join(dir, 'wt/.git'), `gitdir: ${join(dir, 'gitdirs/wt')}\n`);
   assert.equal(branchOf(join(dir, 'wt')), '0123456');
   assert.equal(branchOf(join(dir, 'nowhere')), null);
+});
+
+test("one Claude session's jobs for the pane: each subagent's newest, running first, capped, and the ids of the rest", t => {
+  const f = uiFixture(t);
+  // A follow-up's earlier job, sent to the same subagent days before.
+  write(join(f.states.claude, 'executions/old-0.json'), { executionId: 'old-0', owner: 'agent-old', hostSessionId: 'lead-1', provider: 'codex',
+    cwd: f.root, text: 'Earlier scenario', startedAt: f.NOW - 3 * 86_400_000, state: 'closed' });
+  write(join(f.states.claude, 'results/old-0.json'), { executionId: 'old-0', outcome: 'completed', finishedAt: f.NOW - 3 * 86_400_000 + 1000 });
+  const jobs = (sessionId, limit = 9) => sessionJobs({ dir: f.states.claude, sessionId, limit, env: f.env, alive: () => true });
+
+  const all = jobs('lead-1');
+  assert.deepEqual(all.jobs.map(job => [job.execution.executionId, job.owner, job.status, job.title]), [
+    ['op-1', 'agent-op', 'running', 'Restore spec triage'],
+    ['run-1', 'agent-run', 'running', 'Step 1b-2: digest on demand'],
+    ['old-1', 'agent-old', 'completed', 'Antigravity scenario']]);
+  assert.equal(all.jobs[2].result.outcome, 'completed');
+  assert.equal(all.jobs[0].result, null);
+  assert.deepEqual(all.older, ['old-0'], "the subagent's earlier job is an older one");
+  assert.deepEqual(jobs('lead-1', 2).jobs.map(job => job.execution.executionId), ['op-1', 'run-1']);
+  assert.deepEqual(jobs('lead-1', 2).older, ['old-1', 'old-0']);
+  // Another session's job is never listed.
+  assert.deepEqual(jobs('lead-2').jobs.map(job => job.execution.executionId), ['done-1']);
+  assert.deepEqual(jobs('nobody'), { jobs: [], older: [] });
+});
+
+test('through launch-ui.sh: jobs prints one JSON line without the UI packages and refuses bad arguments', t => {
+  const f = uiFixture(t);
+  const run = args => spawnSync('/bin/bash', [LAUNCH, 'jobs', ...args], { env: { PATH: process.env.PATH, ...f.env }, encoding: 'utf8', timeout: 20_000 });
+  const ok = run([f.states.claude, 'lead-2', '9']);
+  assert.equal(ok.status, 0, ok.stderr);
+  const lines = ok.stdout.split('\n');
+  assert.deepEqual(lines.slice(1), ['']);
+  const out = JSON.parse(lines[0]);
+  assert.deepEqual(out.jobs.map(job => [job.owner, job.title, job.status]), [['agent-done', 'Review auth middleware', 'completed']]);
+  assert.deepEqual(out.older, []);
+  for (const bad of [['relative', 'lead-2', '9'], [f.states.claude, 'lead-2'], [f.states.claude, 'lead-2', '0'], [f.states.claude, 'lead-2', '9', 'x']]) {
+    const refused = run(bad);
+    assert.equal(refused.status, 2);
+    assert.match(refused.stderr, /^usage: agent-companion jobs <state dir> <session id> <limit>/);
+  }
 });

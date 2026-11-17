@@ -1,9 +1,10 @@
 // Read-only job list for the live view: every execution in both hosts' state
 // directories, with the caller's own name for the job where the host records
-// it. Nothing here writes a record, renews a lease or signals a process; the
-// view's messages go through inbox.mjs.
+// it, and one Claude session's jobs for Claude Code's Companions pane (the
+// `jobs` entry at the end). Nothing here writes a record, renews a lease or
+// signals a process; the view's messages go through inbox.mjs.
 import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { companionHomeDir, detectHost } from '../../lib/host.mjs';
 import { locateTranscript } from '../../lib/transcripts.mjs';
@@ -75,6 +76,20 @@ export function createJobSource({ dirs = stateDirs(), env = process.env, alive =
     },
     caller: createCallers(env),
   };
+}
+
+// One Claude Code session's jobs for its Companions pane (hooks/mod.ts), which
+// has no Node and rebuilds its list from them, a resumed session included: the
+// newest job of each of the session's subagents in list() order, the first
+// `limit` with the lead's title for each, and the ids of the session's other jobs.
+export function sessionJobs({ dir, sessionId, limit, env = process.env, alive = pidAlive }) {
+  const source = createJobSource({ dirs: [{ host: 'claude', dir }], env, alive });
+  const all = source.list().filter(job => job.execution.hostSessionId === sessionId);
+  const owners = new Set();
+  const jobs = all.filter(job => !owners.has(job.execution.owner) && owners.add(job.execution.owner)).slice(0, limit)
+    .map(job => ({ owner: job.execution.owner, title: source.caller(job).title, status: job.status, execution: job.execution, result: job.result }));
+  const listed = new Set(jobs.map(job => job.execution.executionId));
+  return { jobs, older: all.flatMap(job => listed.has(job.execution.executionId) ? [] : [job.execution.executionId]) };
 }
 
 const firstLine = text => String(text ?? '').split('\n').map(line => line.trim()).find(Boolean) ?? '';
@@ -211,4 +226,19 @@ export function branchOf(cwd) {
     } catch { return null; }
   }
   return null;
+}
+
+const USAGE = `usage: agent-companion jobs <state dir> <session id> <limit>
+
+Prints one Claude Code session's companion jobs as one JSON line: the newest
+job of each of its subagents, running first, at most <limit>, and the ids of
+its older jobs. Claude Code's Companions pane runs it; it reads only.
+`;
+if (import.meta.main) {
+  const [dir, sessionId, limit, ...rest] = process.argv.slice(2);
+  if (!dir || !isAbsolute(dir) || !sessionId || !/^[1-9][0-9]*$/.test(limit ?? '') || rest.length) {
+    process.stderr.write(USAGE);
+    process.exit(2);
+  }
+  process.stdout.write(JSON.stringify(sessionJobs({ dir, sessionId, limit: Number(limit) })) + '\n');
 }

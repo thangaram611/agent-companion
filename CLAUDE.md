@@ -134,13 +134,13 @@ line, including `not_delivered` messages.
 | `lib/digest.mjs` | Read-only, on-demand execution digest from native transcript and result records. |
 | `lib/target-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
-| `bridge-server/ui/jobs.mjs` | The live view's job list from both hosts' state and caller titles from host transcripts (Claude lead session, Codex rollout and session index). |
+| `bridge-server/ui/jobs.mjs` | The live view's job list from both hosts' state and caller titles from host transcripts (Claude lead session, Codex rollout and session index), and the `jobs` entry that lists one Claude session's jobs for the pane. |
 | `bridge-server/ui/rows.mjs` | Sanitizing native text, cell widths, item folding and wrapping, a job's transcript blocks, card head and pending lines for both views, and the cached row index. |
 | `bridge-server/ui/follow.mjs` | One job's transcript follow and turn selection for both views, and the `follow` entry that streams them to the Claude pane as JSON lines. |
 | `bridge-server/ui/model.mjs` | Live-view state, keys, message boxes and frame composition; `app.mjs` is only the Ink layer and the `ui` entry point. |
 | `bridge-server/ui/inbox.mjs` | The live view's only writes: atomic 0600 inbox request files, and deleting each outcome it has read. |
 | `hooks/mod.ts` | Claude Code's mod (Codex ignores it): each agent-companion subagent's agent-list row from the bridge's records, read on a clock only while a job runs, and the Companions pane that follows the view, one `follow` child per viewed job. |
-| `hooks/launch-ui.sh`, `scripts/install-ui-launcher.mjs` | Running the live view and the pane's `follow` children with the hooks' Node and the view's dependencies; the `~/.local/bin/agent-companion` launcher. |
+| `hooks/launch-ui.sh`, `scripts/install-ui-launcher.mjs` | Running the live view and the pane's `jobs` and `follow` children with the hooks' Node and the view's dependencies; the `~/.local/bin/agent-companion` launcher. |
 
 ## Things that will bite you
 

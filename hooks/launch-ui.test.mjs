@@ -65,3 +65,11 @@ test('follow, for the Claude pane, runs without the UI packages', t => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'follow /state job-1\n');
 });
+
+test('jobs, for the Claude pane, runs without the UI packages', t => {
+  const f = fixture(t);
+  writeFileSync(path.join(f.root, 'bridge-server/ui/jobs.mjs'), `console.log('jobs', process.argv.slice(2).join(' '));\n`);
+  const result = f.run({}, ['jobs', '/state', 'session-1', '9']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'jobs /state session-1 9\n');
+});
