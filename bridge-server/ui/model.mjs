@@ -4,25 +4,16 @@
 // exactly `columns` cells wide, so the Ink layer only prints them. The only
 // writes are the box's inbox requests, through inbox.mjs; drafts stay in memory.
 import { randomUUID } from 'node:crypto';
-import { followTranscript, locateTranscript } from '../../lib/transcripts.mjs';
-import { selectTurnItems } from '../../lib/work-summary.mjs';
 import { jobModel } from '../../lib/model-name.mjs';
+import { JobTranscript } from './follow.mjs';
 import { takeOutcome, writeRequest } from './inbox.mjs';
 import { branchOf, createJobSource } from './jobs.mjs';
-import { Pane, age, boxRows, clean, clock, commandText, cut, fitSegs, itemLines, layoutLine, liveLines, outcomeLines, segsWidth, width } from './rows.mjs';
+import { Pane, boxRows, cardHead, clean, cut, fitSegs, jobBlocks, layoutLine, one, pendingInputs, pendingLine, segsWidth, width } from './rows.mjs';
 
 const DAY = 86_400_000;
 export const WIDE = 110;
 const LIST = 41;
 const HOSTS = { claude: 'Claude Code', codex: 'Codex' };
-const GLYPHS = { running: ['●', 'ok'], completed: ['✓', 'ok'], failed: ['✗', 'bad'], delivery_unknown: ['✗', 'bad'],
-  stopped: ['■', 'warn'], interrupted: ['■', 'warn'], unknown: ['?', 'warn'] };
-const HIDDEN = new Set(['usage', 'turn_end', 'preamble']);
-// One-row items sit together; anything taller gets a blank line around it.
-const COMPACT = new Set(['user', 'reasoning', 'edit', 'preamble']);
-const SQLITE_POLL_MS = 1000, LOCATE_MS = 2000;
-// Card and header fields are one line each.
-const one = text => clean(text).replace(/\s*\n\s*/g, ' ');
 const tokens = n => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
 const HELP = [['↑↓ j k', 'jobs, or transcript items when the transcript has focus'], ['⏎ ⇥ esc', 'open or focus the job; back to the list'],
   ['PgUp PgDn', 'scroll the transcript a page'], ['g G', 'transcript top; bottom and follow'], ['e E', 'expand the item; expand all'],
@@ -34,26 +25,8 @@ const NAMES = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', ant
 const MODES = { steer: 'joins the running turn now', queue: 'runs after the current turn', interrupt: 'stops this turn, then sends' };
 const supported = job => ['steer', 'queue', 'interrupt'].filter(mode => job.execution.interventionModes?.[mode]);
 const REFUSED = { state: 'the job takes no more messages', capability: 'not supported by this companion', text_too_long: 'too long', request_too_large: 'too long' };
-// A recorded message the companion has not shown yet: [state, hint].
-function pendingState({ state, mode }) {
-  if (state === 'joined') return ['joined', 'in the running turn'];
-  if (state === 'not_delivered') return ['not delivered', ''];
-  // Held by the bridge (accepted) or by the companion's own queue (delivered).
-  if (mode === 'queue') return ['queued', 'runs after this turn'];
-  if (state === 'accepted') return mode === 'steer' ? ['sending', ''] : ['interrupting', 'runs once this turn stops'];
-  return [clean(state), ''];
-}
 // Typed or pasted text: a carriage return inside it is a new line; escapes and control characters go, as in native text.
 const draftText = text => clean(text.replace(/\r\n?/g, '\n'));
-// Claude records a message that joined the running turn as a queued_command
-// attachment (measured on 2.1.325): a message, not preamble.
-const joinedMessages = new WeakMap();
-function joined(item) {
-  if (item.kind !== 'preamble' || item.attachment?.type !== 'queued_command') return item;
-  let message = joinedMessages.get(item);
-  if (!message) joinedMessages.set(item, message = { ...item, kind: 'user', text: item.attachment.prompt });
-  return message;
-}
 
 export class Model {
   constructor({ env = process.env, source = createJobSource({ env }), now = Date.now, size = { columns: 120, rows: 40 }, exit = () => {} } = {}) {
@@ -140,8 +113,8 @@ export class Model {
     if (!job) { const had = Boolean(this.detail); this.detail = null; return had; }
     let d = this.detail;
     if (d?.key !== job.key) {
-      d = this.detail = { key: job.key, job, locator: null, follower: null, located: 0, polled: 0, final: false, items: new Map(),
-        list: [], preamble: [], format: null, top: 0, follow: job.status === 'running', cursor: null,
+      d = this.detail = { key: job.key, job, transcript: new JobTranscript({ env: this.env, now: this.now }),
+        list: [], preamble: [], top: 0, follow: job.status === 'running', cursor: null,
         toggled: new Set(), expandAll: false, showPreamble: false, branch: branchOf(job.execution.cwd), pane: new Pane(),
         labels: new Map(), taken: new Set() };
       this.poll(true);
@@ -157,95 +130,18 @@ export class Model {
     return read || statusMoved;
   }
   poll(force) {
-    const d = this.detail, { job } = d, now = this.now();
-    if (d.final) return false;
-    if (!d.follower && (force || now - d.located >= LOCATE_MS)) {
-      d.located = now;
-      try {
-        d.locator = job.execution.transcript ?? locateTranscript({ companion: job.provider, historyId: job.execution.historyId,
-          nativeRefs: { ...job.execution.nativeRefs, ...job.result?.nativeRefs }, env: this.env });
-      } catch { d.locator = null; }
-      if (d.locator) d.follower = followTranscript(d.locator);
-    }
-    if (!d.follower || (!force && d.locator.kind === 'sqlite' && now - d.polled < SQLITE_POLL_MS)) return false;
-    d.polled = now;
-    // A finished job's turn no longer changes: one read after it ends.
-    if (job.status !== 'running') d.final = true;
-    const read = d.follower.read();
-    d.format = read.format;
-    if (read.reset) d.items.clear();
-    if (!read.items.length && !read.reset) return false;
-    for (const item of read.items) d.items.set(item.id, item);
+    const d = this.detail;
+    if (!d.transcript.poll(d.job, force)) return false;
     this.select();
     return true;
   }
-  select() {
-    const d = this.detail, { execution } = d.job;
-    const all = [...d.items.values()];
-    const turn = selectTurnItems(all, { companion: d.job.provider, nativeTurnId: execution.nativeTurnId,
-      nativeTurnIds: execution.nativeTurnIds, interventions: execution.interventions, startedAt: execution.startedAt });
-    const inTurn = new Set(turn);
-    // Session-wide instructions carry no turn id; another turn's preamble is not this job's.
-    d.preamble = all.filter(item => item.kind === 'preamble' && joined(item) === item && (item.turnId == null || inTurn.has(item)));
-    d.list = turn.map(joined).filter(item => !HIDDEN.has(item.kind));
-    this.label();
-  }
-  // Who wrote each user message. The first is the task; a later one takes the
-  // first unclaimed recorded message with exactly its text, whose sender names
-  // it (lead or you); anything else stays `user`.
-  label() {
-    const d = this.detail, inputs = d.job.execution.interventions ?? [];
-    d.labels = new Map(); d.taken = new Set();
-    let first = true;
-    for (const item of d.list) {
-      if (item.kind !== 'user') continue;
-      if (first) { d.labels.set(item.id, 'task'); first = false; continue; }
-      const text = clean(item.text ?? '').trim();
-      const input = inputs.find(input => !d.taken.has(input.id) && clean(input.text ?? '').trim() === text);
-      if (!input) continue;
-      d.taken.add(input.id);
-      d.labels.set(item.id, input.from === 'user' ? 'you' : 'lead');
-    }
-  }
+  select() { const d = this.detail; Object.assign(d, d.transcript.select(d.job)); }
 
   expanded(id) { const d = this.detail; return d.expandAll !== d.toggled.has(id); }
   blocks() {
-    const d = this.detail, { job } = d, ended = job.status !== 'running';
-    const cwd = job.execution.cwd, answer = job.result?.text ? clean(job.result.text).trim() : null;
-    const blocks = [];
-    if (job.result) {
-      const expanded = this.expanded('outcome');
-      blocks.push({ key: 'outcome', focus: 'outcome', source: job.result, flags: `${expanded}|${d.list.length}`,
-        lines: () => outcomeLines(job, { expanded, items: d.list.length }) });
-    }
-    // Unrecognized records show inline; this is for a missing or unreadable store.
-    if (!d.locator || d.format?.version == null) {
-      const text = !d.locator ? (ended ? 'transcript not found' : 'waiting for the transcript') : `transcript not recognized: ${d.format?.detail ?? 'not read yet'}`;
-      blocks.push({ key: 'notice', source: text, flags: '', lines: () => [{ segs: [[text, d.locator ? 'warn' : 'dim']] }, { segs: [] }] });
-    }
-    if (d.preamble.length && !d.showPreamble) {
-      const text = `preamble · ${d.preamble.length} item${d.preamble.length === 1 ? '' : 's'} · p shows`;
-      blocks.push({ key: 'preamble', focus: 'preamble', source: text, flags: '', lines: () => [{ segs: [[text, 'faint']] }, { segs: [] }] });
-    }
-    let previous = null;
-    for (const item of [...(d.showPreamble ? d.preamble : []), ...d.list]) {
-      const expanded = this.expanded(item.id), label = d.labels.get(item.id);
-      const compact = COMPACT.has(item.kind) && !expanded;
-      const gap = previous !== null && !(previous && compact);
-      blocks.push({ key: item.id, focus: item.id, source: item, flags: `${expanded}|${gap}|${ended}|${answer !== null}|${label}`,
-        lines: () => [...(gap ? [{ segs: [] }] : []), ...itemLines(item, { expanded, ended, cwd, answer, label })] });
-      previous = compact;
-    }
-    if (!ended) {
-      const now = this.now(), progress = job.execution.progress ?? {};
-      const lastText = d.list.findLast(item => item.kind === 'assistant')?.text ?? null;
-      const active = progress.activeCommand && d.list.findLast(item => item.kind === 'command' && item.status === 'running'
-        && commandText(item.command) === commandText(progress.activeCommand));
-      const activeAt = active?.at ? Date.parse(active.at) : null;
-      blocks.push({ key: 'live', source: job.execution, flags: `${activeAt == null ? '' : Math.floor((now - activeAt) / 1000)}|${lastText}`,
-        lines: () => [{ segs: [] }, ...liveLines(job, { now, lastText, activeAt })] });
-    }
-    return blocks;
+    const d = this.detail, { locator, format } = d.transcript;
+    return jobBlocks(d.job, { list: d.list, preamble: d.preamble, labels: d.labels, located: Boolean(locator), format, now: this.now(),
+      expanded: id => this.expanded(id), showPreamble: d.showPreamble });
   }
 
   // Lay out the selected job's pane and settle scroll and cursor for `height` rows.
@@ -450,13 +346,7 @@ export class Model {
     const now = this.now();
     for (const job of this.jobs.slice(this.listTop, this.listTop + fits)) {
       const bg = job.key === this.selected;
-      const [glyph, style] = GLYPHS[job.status] ?? GLYPHS.unknown;
-      const when = job.status === 'running' ? clock(now - job.startedAt) : age(now - (job.finishedAt ?? job.startedAt));
-      const whenStyle = job.status === 'running' || job.status === 'completed' ? (job.status === 'running' ? 'ok' : 'dim') : style;
-      // ' ● ' title, at least two spaces, the time, one space.
-      const name = cut(one(job.caller.title), w - 6 - width(when));
-      rows.push([[' ', 'normal', bg], [glyph, style, bg], [' ', 'normal', bg], [name, 'title', bg],
-        [' '.repeat(w - 4 - width(name) - width(when)), 'normal', bg], [when, whenStyle, bg], [' ', 'normal', bg]]);
+      rows.push(cardHead(job, job.caller.title, now, w, bg));
       rows.push(fitSegs([['   ', 'normal', bg], [cut(`${job.provider} · ${one(job.project)}`, w - 4), 'dim', bg]], w));
       rows.push([]);
     }
@@ -496,8 +386,7 @@ export class Model {
     if (job.status !== 'running') return [];
     if (!job.execution.interventionModes) return [[['messages need the updated bridge; this job started on an older one', 'dim']]];
     const box = this.box(job), room = Math.max(1, h - 3);
-    const pending = this.pending(job).map(({ label, style, text, hint }) => layoutLine({ segs: [[label, style],
-      ...(text ? [['  ' + one(text), 'normal']] : []), ...(hint ? [['  ' + hint, 'faint']] : [])], wrap: false }, w)[0]);
+    const pending = this.pending(job).map(entry => layoutLine(pendingLine(entry), w)[0]);
     let content;
     if (box.confirm) {
       content = layoutLine({ segs: [['Cancel this job?', 'bad'], [' The lead is told you cancelled it.', 'normal']],
@@ -514,12 +403,7 @@ export class Model {
   // Messages waiting between the live line and the box: recorded ones the
   // transcript does not show yet, and this view's requests the record does not hold yet.
   pending(job) {
-    const out = [], taken = this.detail.taken;
-    for (const input of job.execution.interventions ?? []) {
-      if (taken.has(input.id) || input.state === 'answered') continue;
-      const [state, hint] = pendingState(input);
-      out.push({ at: input.at, label: `${input.state === 'not_delivered' ? '✗' : '◌'} ${input.from === 'user' ? 'you' : 'lead'} · ${state}`, style: 'warn', text: input.text, hint });
-    }
+    const out = pendingInputs(job.execution, this.detail.taken);
     for (const { at, mode, text, outcome } of this.box(job).sent) {
       const [glyph, state, style] = !outcome ? ['◌', 'waiting for the bridge', 'warn']
         : outcome.status === 'not_written' ? ['✗', `not sent: ${clean(outcome.reason)}`, 'bad']

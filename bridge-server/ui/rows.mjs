@@ -112,6 +112,8 @@ export function layoutLine({ segs, right = null, indent = 0, hang = indent, wrap
 
 const FOLD_HEAD = 2, FOLD_TAIL = 2, ANSWER_LINES = 6;
 const lines = text => clean(text).replace(/^\n+|\n+$/g, '').split('\n');
+// Card and header fields are one line each.
+export const one = text => clean(text).replace(/\s*\n\s*/g, ' ');
 // Items are replaced, never mutated, on upsert: their cleaned lines are kept per object.
 const memo = new WeakMap();
 function linesOf(item, field, value = item[field]) {
@@ -198,6 +200,19 @@ export function age(ms) {
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`;
 }
 
+const GLYPHS = { running: ['●', 'ok'], completed: ['✓', 'ok'], failed: ['✗', 'bad'], delivery_unknown: ['✗', 'bad'],
+  stopped: ['■', 'warn'], interrupted: ['■', 'warn'], unknown: ['?', 'warn'] };
+// A job card's first row, exactly `w` cells: ' ● ' title, at least two
+// spaces, the time (elapsed while it runs, else how long ago it ended), one space.
+export function cardHead({ status, startedAt, finishedAt }, title, now, w, bg) {
+  const [glyph, style] = GLYPHS[status] ?? GLYPHS.unknown;
+  const when = status === 'running' ? clock(now - startedAt) : age(now - (finishedAt ?? startedAt));
+  const whenStyle = status === 'running' ? 'ok' : status === 'completed' ? 'dim' : style;
+  const name = cut(one(title), w - 6 - width(when));
+  return [[' ', 'normal', bg], [glyph, style, bg], [' ', 'normal', bg], [name, 'title', bg],
+    [' '.repeat(Math.max(0, w - 4 - width(name) - width(when))), 'normal', bg], [when, whenStyle, bg], [' ', 'normal', bg]];
+}
+
 const OUTCOME = { completed: ['✓ done in', 'ok'], failed: ['✗ failed after', 'bad'], delivery_unknown: ['✗ delivery unknown after', 'bad'],
   stopped: ['■ stopped after', 'warn'], interrupted: ['■ interrupted after', 'warn'] };
 // A finished job's outcome and duration, as one segment: ['✓ done in 0:38', 'ok'].
@@ -256,6 +271,72 @@ export function liveLines(job, { now, lastText = null, activeAt = null }) {
   if (activeAt != null) segs.push([` · ${clock(now - activeAt)}`, 'ok']);
   out.push({ segs, hang: 2 });
   return out;
+}
+
+// A recorded message the companion has not shown yet: [state, hint].
+function pendingState({ state, mode }) {
+  if (state === 'joined') return ['joined', 'in the running turn'];
+  if (state === 'not_delivered') return ['not delivered', ''];
+  // Held by the bridge (accepted) or by the companion's own queue (delivered).
+  if (mode === 'queue') return ['queued', 'runs after this turn'];
+  if (state === 'accepted') return mode === 'steer' ? ['sending', ''] : ['interrupting', 'runs once this turn stops'];
+  return [clean(state), ''];
+}
+// Recorded messages the transcript does not show yet (`taken` holds the ids it shows).
+export function pendingInputs(execution, taken) {
+  return (execution.interventions ?? []).filter(input => !taken.has(input.id) && input.state !== 'answered').map(input => {
+    const [state, hint] = pendingState(input);
+    return { at: input.at, label: `${input.state === 'not_delivered' ? '✗' : '◌'} ${input.from === 'user' ? 'you' : 'lead'} · ${state}`, style: 'warn', text: input.text, hint };
+  });
+}
+// One pending message as one row: who and its state, the text, a hint.
+export const pendingLine = ({ label, style, text, hint }) => ({ segs: [[label, style],
+  ...(text ? [['  ' + one(text), 'normal']] : []), ...(hint ? [['  ' + hint, 'faint']] : [])], wrap: false });
+
+// One-row items sit together; anything taller gets a blank line around it.
+const COMPACT = new Set(['user', 'reasoning', 'edit', 'preamble']);
+// A job's transcript as Pane blocks: the outcome once it ended, a notice while
+// its transcript is missing or unrecognized, the folded preamble, each item
+// with the label of who wrote it, and while it runs the live line, after any
+// `pending` lines. `expanded(id)` says which blocks are open.
+export function jobBlocks(job, { list, preamble = [], labels = new Map(), located, format, now, expanded = () => false, showPreamble = false, pending = [] }) {
+  const ended = job.status !== 'running';
+  const cwd = job.execution.cwd, answer = job.result?.text ? clean(job.result.text).trim() : null;
+  const blocks = [];
+  if (job.result) {
+    const open = expanded('outcome');
+    blocks.push({ key: 'outcome', focus: 'outcome', source: job.result, flags: `${open}|${list.length}`,
+      lines: () => outcomeLines(job, { expanded: open, items: list.length }) });
+  }
+  // Unrecognized records show inline; this is for a missing or unreadable store.
+  if (!located || format?.version == null) {
+    const text = !located ? (ended ? 'transcript not found' : 'waiting for the transcript') : `transcript not recognized: ${format?.detail ?? 'not read yet'}`;
+    blocks.push({ key: 'notice', source: text, flags: '', lines: () => [{ segs: [[text, located ? 'warn' : 'dim']] }, { segs: [] }] });
+  }
+  if (preamble.length && !showPreamble) {
+    const text = `preamble · ${preamble.length} item${preamble.length === 1 ? '' : 's'} · p shows`;
+    blocks.push({ key: 'preamble', focus: 'preamble', source: text, flags: '', lines: () => [{ segs: [[text, 'faint']] }, { segs: [] }] });
+  }
+  let previous = null;
+  for (const item of [...(showPreamble ? preamble : []), ...list]) {
+    const open = expanded(item.id), label = labels.get(item.id);
+    const compact = COMPACT.has(item.kind) && !open;
+    const gap = previous !== null && !(previous && compact);
+    blocks.push({ key: item.id, focus: item.id, source: item, flags: `${open}|${gap}|${ended}|${answer !== null}|${label}`,
+      lines: () => [...(gap ? [{ segs: [] }] : []), ...itemLines(item, { expanded: open, ended, cwd, answer, label })] });
+    previous = compact;
+  }
+  if (!ended) {
+    const progress = job.execution.progress ?? {};
+    const lastText = list.findLast(item => item.kind === 'assistant')?.text ?? null;
+    const active = progress.activeCommand && list.findLast(item => item.kind === 'command' && item.status === 'running'
+      && commandText(item.command) === commandText(progress.activeCommand));
+    const activeAt = active?.at ? Date.parse(active.at) : null;
+    const waiting = pending.map(line => line.segs.map(([text]) => text).join('')).join('\n');
+    blocks.push({ key: 'live', source: job.execution, flags: `${activeAt == null ? '' : Math.floor((now - activeAt) / 1000)}|${lastText}|${waiting}`,
+      lines: () => [{ segs: [] }, ...pending, ...liveLines(job, { now, lastText, activeAt })] });
+  }
+  return blocks;
 }
 
 // A faint border `w` cells wide around rows already laid out to `w - 4`.
