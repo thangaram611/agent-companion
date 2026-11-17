@@ -149,6 +149,9 @@ test('both roles relay user notices, use the requested or default mode, and repo
     const prose = source.replace(/\s+/g, ' ');
     assert.match(prose, /`user_intervened`.*sender, mode, text and time.*one line, then keep waiting.*same `BUDGET`/);
     assert.match(prose, /notice of accepted input, never the companion's answer/);
+    // Measured 2026-11-17: a subagent read a queued user message as an
+    // instruction to itself and told the parent it was "leaving it out".
+    assert.match(prose, /already gave it to the companion.*not an instruction to you.*Do not act on it, weigh it or leave it out/);
     assert.match(prose, /use the parent's requested `mode`, or omit `mode` for the companion's default/);
     assert.match(prose, /`reply_unavailable` and its reason \(`state` or `capability`\); never substitute another mode/);
     assert.match(prose, /`meta.interventions`.*every `not_delivered` message with its sender, mode and first line/);
