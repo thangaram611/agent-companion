@@ -464,6 +464,34 @@ session (mod API types for that build; the probe recorded and changed nothing):
 Check: `claude plugin validate`; mod tests under `claude plugin test`; a manual
 live run.
 
+Live run (2026-11-17, Claude Code 2.1.326, 175 columns, OpenCode free model at
+$0, driven through computer use and the owner's keys). Working: agent rows
+(live line, interrupted outcome), the pane opening by itself, the list, a card
+switching the view, the job's transcript, the box's keys and growth, steer sent
+from the pane (the lead got `user_intervened`, the companion answered), the
+mode cycle, cancel with its confirmation (`user_cancel`, the lead told), `←
+jobs`, the keys handed back to the chat. Fixed on the way: the pane never opened
+by itself (the row's clock found the job before `agent_send` answered); the box
+floated, overflowed its field and dropped newlines from view (the engine sizes
+an `Input` from the pane's width less its hint, so it now sits between rules,
+the pane's full width, growing with its draft); a cancelled job's view had no
+outcome (the follow ended in the stopping gap); OpenCode's cancel-killed command
+read as failed (now `unfinished`); messages from you or the lead are drawn whole.
+
+Open after the run:
+- A steer that joined a turn the job's stop then cut off is recorded
+  `not_delivered` (controller's turn end and `discardInterventions`), though the
+  companion read it. Plan: a terminal state for messages that reached the
+  companion's turn and got no answer, kept apart from `not_delivered`; both
+  roles relay it; README and Architecture updated.
+- `/companion` in the typeahead after viewing an agent and returning is still
+  unverified live.
+- Engine look, not ours: a card under the mouse is highlighted as the focused
+  one is, and a focused card's hotkey digit keeps its accent shade.
+- On main: `bridge-server/adapters/acp-replay.test.mjs` "recorded Copilot wire:
+  cancel" hangs to its 15 s timeout when run alone and passes after the file's
+  other tests; it timed out once in a full run.
+
 ## Risks
 
 - The native formats are private. Expect reader breakage on companion upgrades;
