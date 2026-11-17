@@ -60,6 +60,8 @@ const PANE = 'companions'
 const CARDS = 9
 // The engine's "1: " before a plain Button's label.
 const HOTKEY = 3
+// The message box's text rows, inside its frame.
+const BOX_ROWS = 2
 // rows.mjs's styles as theme colour keys, so the pane follows the person's theme.
 const STYLE: Record<string, { color?: string; weight?: 'bold' }> = {
   title: { weight: 'bold' }, dim: { color: 'inactive' }, faint: { color: 'subtle' },
@@ -76,6 +78,8 @@ let picked: string | undefined
 let older = 0, rebuilds = 0, failure: string | undefined
 // The agent in view when a site last drew, so a return to the main conversation is seen once.
 let shownAgent: string | undefined
+// The jobs whose agent_send opened the pane: an identical send to a busy job returns it again.
+const announced = new Set<string>()
 
 // A running job's message box, per job: the draft, the mode it sends in (the
 // companion's own default first), the cancel question, and the last send's
@@ -366,7 +370,9 @@ export const register: Register = on => {
   })
 
   // The bridge answers agent_send with the job it started for this subagent;
-  // a new job opens the pane, which places itself on a wide terminal.
+  // a new job opens the pane, which places itself on a wide terminal. The
+  // row's clock may have found the job already (the bridge writes its
+  // conversation record before agent_send answers), so the open goes by job.
   on('tool.call', { tool: SEND }, async ($, e, next) => {
     const ran = await next(e)
     const jobId = parse(ran.text)?.job_id
@@ -374,8 +380,9 @@ export const register: Register = on => {
       const a = agents.get(e.agentId) ?? { title: '' }
       agents.set(e.agentId, a)
       // Its subagent sent it, so that subagent runs.
-      if (a.jobId !== jobId) {
-        Object.assign(a, { jobId, execution: undefined, result: undefined, texts: undefined, endedAt: undefined, listed: true })
+      if (a.jobId !== jobId) Object.assign(a, { jobId, execution: undefined, result: undefined, texts: undefined, endedAt: undefined, listed: true })
+      if (!announced.has(jobId)) {
+        announced.add(jobId)
         void openPane($).catch(() => {})
       }
       startClock($)
@@ -437,13 +444,16 @@ export const register: Register = on => {
         h(Box, { flexDirection: 'row', justifyContent: 'space-between' }, row([[focused ? 'esc returns' : 'ctrl+x tab for keys', 'faint']]), jobsButton))
       const jobId = a.jobId, modes = supportedModes(execution), name = COMPANION_NAMES[execution.provider] ?? clean(execution.provider)
       const redraw = () => $.ui.invalidate('ui.render')
-      // The box under the live line, as in the live view: the companion's
-      // modes only, its default first; Copilot takes cancel alone.
+      // The box as the live view draws it (rows.mjs's boxRows): a faint round
+      // frame, a bold › (an Input's own label is drawn with a colon), the
+      // companion's modes only, its default first; Copilot takes cancel alone.
+      // Two rows, since the engine takes a new line only from two (2.1.326).
       const field = box.mode
-        ? [h(Input, { key: 'message', label: '›', placeholder: `Message ${name}…`, value: box.draft, rows: 2, submitLabel: `send · ${box.mode}`, autoFocus: true,
-            onInput: (value: string) => { box.draft = value },
-            // Kept as sent, so a refusal leaves it in the box.
-            onSubmit: (value: string) => { if (!value.trim() || box.sending) return; box.draft = value; void sendRequest($, jobId, box, box.mode!, value) } })]
+        ? [h(Box, { flexDirection: 'row', borderStyle: 'round', borderColor: STYLE.faint!.color, paddingX: 1 }, ...spans([['› ', 'title']]),
+            h(Input, { key: 'message', placeholder: `Message ${name}…`, value: box.draft, rows: BOX_ROWS, submitLabel: `send · ${box.mode}`, autoFocus: true,
+              onInput: (value: string) => { box.draft = value },
+              // Kept as sent, so a refusal leaves it in the box.
+              onSubmit: (value: string) => { if (!value.trim() || box.sending) return; box.draft = value; void sendRequest($, jobId, box, box.mode!, value) } }))]
         : [row([[`${name} takes no messages while it works · cancel only`, 'dim']])]
       const state = box.sending ? [row([['◌ sending…', 'faint']])] : box.refused ? [row([[`✗ not sent: ${box.refused}`, 'bad']])] : []
       const cycle = () => { box.mode = modes[(modes.indexOf(box.mode!) + 1) % modes.length]!; redraw() }
@@ -456,9 +466,12 @@ export const register: Register = on => {
             ...(box.mode ? [row([[MODE_HINTS[box.mode] ?? '', 'dim']])] : []),
             h(Button, { key: 'cancel', label: 'cancel job', plain: true, dimColor: true, onPress: () => { box.confirm = true; redraw(); ring($, 'cancel-no') } }),
             jobsButton)
-      // The transcript gets what the box, its state and controls leave.
-      const spare = 2 + (box.mode ? 3 : 1) + state.length
-      return column(...jobRows(a, follow!, now, w, Math.max(4, e.props.scroll.bodyRows - spare)).map(row), ...field, ...state, controls,
+      // The transcript gets what the box, its state and controls leave; the
+      // box stays pinned to the bottom, as in the live view and the
+      // companion's own app, however short the transcript is.
+      const spare = 2 + (box.mode ? BOX_ROWS + 2 : 1) + state.length, room = Math.max(4, e.props.scroll.bodyRows - spare)
+      const shown = jobRows(a, follow!, now, w, room)
+      return column(...shown.map(row), ...Array.from({ length: room - shown.length }, () => row([])), ...field, ...state, controls,
         row([[focused ? 'esc returns to the chat' : 'ctrl+x tab for keys', 'faint']]))
     }
     stopFollow()

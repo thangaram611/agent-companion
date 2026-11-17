@@ -98,11 +98,12 @@ function follows(on: On, scripts: Record<string, { lines: unknown[]; exits?: boo
 
 // The drawing as plain text, one line per row, trailing spaces cut: a plain
 // Button's hotkey leads it as the terminal draws it ("1: "), a row spread to
-// both ends or with a gap keeps two spaces between its parts, and an Input is
-// its label then its text or placeholder.
+// both ends or with a gap keeps two spaces between its parts, an Input is its
+// text or placeholder, and a framed Box is its rows, each further Input row empty.
 async function screen(ui: { drawn: () => Promise<unknown> }): Promise<string> {
   const text = (node: any): string => typeof node === 'string' ? node
-    : node?.type === 'Input' ? `${node.props.label} ${node.props.value || node.props.placeholder}`
+    : node?.type === 'Input' ? node.props.value || node.props.placeholder
+    : node?.props?.borderStyle ? `╭─╮\n│ ${node.children.map(text).join('')} │\n${'│ │\n'.repeat((node.children.find((child: any) => child?.props?.rows)?.props.rows ?? 1) - 1)}╰─╯`
     : (node?.type === 'Button' && node.props?.plain && node.props.hotkey ? `${node.props.hotkey}: ` : '')
       + (node?.children?.length ? node.children.map(text).join(node.props?.justifyContent === 'space-between' || node.props?.gap ? '  ' : '') : node?.props?.label ?? '')
   const root: any = await ui.drawn()
@@ -184,7 +185,7 @@ test("the subagent in view shows its job: labels, folding, pending, the live lin
 
   const reads = seen.reads
   // Tall enough for the whole turn above the message box's rows.
-  const ui = await $.ui.mount(pane({ agentId: 'a1' }, 25))
+  const ui = await $.ui.mount(pane({ agentId: 'a1' }, 26))
   await seen.clock.settle()
   expect(await screen(ui)).toBe([
     'Step 3b-2: adapters  codex · gpt-6-astra max · feat/claude-pane',
@@ -206,11 +207,21 @@ test("the subagent in view shows its job: labels, folding, pending, the live lin
     '',
     '◌ you · queued  also check the schema  runs after this turn',
     '● running $ node --test opencode.test.mjs',
-    '› Message Codex…',
+    '',
+    '╭─╮',
+    '│ › Message Codex… │',
+    '│ │',
+    '╰─╯',
     'mode: steer ▸  joins the running turn now  cancel job  b: ← jobs',
     'ctrl+x tab for keys',
   ].join('\n'))
   expect(children.map(child => child.argv)).toEqual([['bash', expect.stringMatching(/\/hooks\/launch-ui\.sh$/), 'follow', DIR, 'j1']])
+  // A short transcript leaves the box at the pane's bottom, as the live view does.
+  await ui.redraw(pane({ agentId: 'a1' }, 40).props)
+  const tall = (await screen(ui)).split('\n')
+  expect(tall.length).toBe(40)
+  expect(tall.slice(-6)).toEqual(['╭─╮', '│ › Message Codex… │', '│ │', '╰─╯', 'mode: steer ▸  joins the running turn now  cancel job  b: ← jobs', 'ctrl+x tab for keys'])
+  expect(tall.slice(19, 34).every(line => line === '')).toBe(true)
 
   await ui.press({ key: 'jobs' })
   expect(seen.views).toEqual([{}])
@@ -227,6 +238,20 @@ test("the subagent in view shows its job: labels, folding, pending, the live lin
   // Renders read no files, whatever they show.
   expect(seen.reads).toBe(reads)
   await ui.unmount()
+})
+
+test("a new job opens the pane once even when its row's clock found the job before agent_send answered", async ($, on) => {
+  const files = { [`${DIR}/conversations/a1.json`]: { executionId: 'j1' }, [`${DIR}/executions/j1.json`]: execution('j1') }
+  const seen = engine(on, files, { a1: 'j1' }, START + 1000)
+  follows(on, {})
+  // The subagent's row draws and its clock reads the conversation record the
+  // bridge writes while agent_send is still starting the job (0.9 s, measured).
+  await $.ui.render(agentRow('a1', 'Pane check'))
+  await seen.clock.advance(1000)
+  await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: 'a1' })
+  // An identical send to the busy job reattaches to it: no second open.
+  await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: 'a1' })
+  expect(seen.opens).toEqual([{ id: 'companions', title: 'Companions', backgroundColor: 'transparent' }])
 })
 
 test('an ended job opens on its outcome, and its child exits after the final read without being started again', { timeoutMs: 30_000 }, async ($, on) => {
@@ -472,7 +497,7 @@ async function boxed($: any, on: On, fields: Record<string, unknown> = {}, optio
 
 test("the message box sends through launch-ui.sh send in the shown mode; accepted clears it, refused keeps it and says why", async ($, on) => {
   const { seen, ui, last } = await boxed($, on)
-  expect(await last(3)).toEqual(['› Message Codex…', 'mode: steer ▸  joins the running turn now  cancel job  b: ← jobs', 'esc returns to the chat'])
+  expect(await last(6)).toEqual(['╭─╮', '│ › Message Codex… │', '│ │', '╰─╯', 'mode: steer ▸  joins the running turn now  cancel job  b: ← jobs', 'esc returns to the chat'])
   await ui.input({ key: 'message', text: 'use ripgrep' })
   await seen.clock.settle()
   expect(seen.sends).toEqual([[DIR, 'j1', 'steer', 'use ripgrep']])
