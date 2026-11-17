@@ -35,6 +35,10 @@ starts either way and reports `contractStatus: match|drift|unverified`, never re
 node scripts/gen-codex-app-server-contract.mjs
 ```
 
+After a Copilot CLI upgrade, re-record its ACP fixtures with
+`node probes/acp-record/record-copilot.mjs` (local Ollama, isolated homes, $0;
+see `probes/README.md`) and read the `test/fixtures/acp/copilot/` diff.
+
 `probes/` are hand-run harnesses that can spend host or companion tokens and
 write live runtime state. They are outside `node --test`; see `probes/README.md`.
 

@@ -10,6 +10,78 @@ Smoke jobs use temporary workspaces but write live execution records and runtime
 rollouts. These are not read-only checks. The `free-backends/` runner below keeps
 all companion homes, workspaces and bridge state in its own temporary directory.
 
+## `acp-record/` — Copilot ACP record and replay
+
+`acp-record/record-copilot.mjs` drives the bridge's real `AcpAdapter` and process
+supervisor through four fresh sessions: `turn-command` (`echo fixture-ok` with
+tool/output evidence), `effort` (set and confirm `thought_level: low`), `cancel`
+(interrupt after the first session update; require `cancelled`), and `signed-out`
+(no BYOK environment; require `session/new` -32000 and adapter `AUTH_REQUIRED`).
+It is hand-run, outside `node --test`. The committed fixtures were recorded
+2026-11-17 on Copilot CLI 1.0.112 with local `gpt-oss:20b`.
+
+Install Copilot CLI and Homebrew Ollama, then start Ollama manually:
+
+```sh
+brew install copilot-cli ollama
+OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+```
+
+Leave the server running. In another terminal, from the repository root:
+
+```sh
+ollama pull gpt-oss:20b
+node probes/acp-record/record-copilot.mjs
+```
+
+That command records all four scenarios. Optional positional scenario names
+select a subset. `COPILOT_BIN` may point to a particular CLI executable. The
+recorder reuses `free-backends/run.mjs`'s `checkOllama` and `companionEnv`: local
+Ollama at `http://127.0.0.1:11434`, model `gpt-oss:20b`, and **$0 provider cost**.
+It checks the pulled model but cannot detect the running server's context size;
+start it with at least 32768 as above. It never starts or stops Ollama.
+
+Every scenario has a disposable HOME, workspace, tmp, provider homes, XDG roots
+and bridge state. Only PATH and the binary override come from the operator;
+credentials, installed instructions and provider settings are not inherited.
+State environment is set before runtime imports. The recorder does not read or
+write the operator's `~/.copilot`, `~/.codex`, `~/.claude` or `~/.gemini`.
+`signed-out` removes all BYOK keys and must fail before a prompt is sent.
+
+A Node tee in `COPILOT_BIN` forwards the original stdio bytes and records both
+directions. It scrubs each frame **before writing even a temporary capture**:
+root/home/cwd/tmp/binary paths become `/fixture/...`, opaque session/tool/request
+ids are renumbered consistently, and semantic ids and model text are retained.
+Token-like text (GitHub tokens, `github_pat_`, `sk-`, Bearer credentials), or a
+remaining operator username/home path, refuses the capture. No raw traffic log
+is saved. Failed scenarios exit nonzero and leave any previous fixture intact;
+temporary homes and captures are removed. Native stderr passes through the tee
+unchanged and is discarded by the adapter; it is not recorded.
+
+Successful captures overwrite `test/fixtures/acp/copilot/<scenario>.jsonl`.
+The first line identifies `acp-replay`, companion, the first `copilot --version`
+line, ISO recording time, scenario and model (`null` for signed-out); following
+lines are `{dir: 'client'|'agent', frame}`. **Re-record after a Copilot upgrade;
+review the git diff.** Re-run the acceptance suite:
+
+```sh
+node --test bridge-server/adapters/acp-replay.test.mjs
+```
+
+The suite automatically uses those four files when present and explicitly skips
+missing live recordings. `ACP_FAKE_REPLAY=<fixture path>` switches the existing
+fake to strict method/order replay, including notifications and replies to agent
+permission/unsupported-method requests. It maps request and session ids and
+returns -32603 plus stderr on mismatch, including errors to pending prompts
+when a notification mismatches. It never skips ahead.
+
+Replay preserves recorded order, not timing, pipe chunk boundaries or tool
+effects. It checks method/order and id relationships, not arbitrary client
+parameters or permission-result contents; it cannot branch on a changed prompt
+or reproduce an unrecorded interaction. Only ACP stdout/stdin are captured:
+stderr, native session files and the older OTEL usage fallback are not replayed.
+Local BYOK recordings do not qualify GitHub-hosted authentication/model behavior.
+
 ## `free-backends/` — isolated free-backend effort checks
 
 | script | asserts |

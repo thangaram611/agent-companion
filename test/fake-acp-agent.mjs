@@ -32,6 +32,8 @@
 //                              prompt containing `sleep:<ms>` overrides it
 //   ACP_FAKE_TRACE             a file every inbound frame and every answered
 //                              permission is appended to, as JSON lines
+//   ACP_FAKE_REPLAY            path to an acp-replay JSONL capture; replaces the
+//                              scripted behavior with strict method/order replay
 //
 // Shapes follow the ACP v1 schema (agentclientprotocol/agent-client-protocol,
 // `agent-client-protocol-schema/src/v1`) and what two agents were measured to
@@ -108,6 +110,10 @@ const trace = (obj) => { if (TRACE) { try { appendFileSync(TRACE, JSON.stringify
 if (process.argv.includes('--version')) {
   process.stdout.write('fake-acp-agent 1.0.0\\n');
   process.exit(0);
+}
+if (env.ACP_FAKE_REPLAY) {
+  const { replayAcp } = await import(${JSON.stringify(new URL('./acp-replay.mjs', import.meta.url).href)});
+  process.exit(await replayAcp(env.ACP_FAKE_REPLAY));
 }
 // Copilot and Gemini are launched with --acp; Antigravity's server is launched
 // bare (--uid= on linux, as the registry entry says). Any other argv is a
@@ -300,8 +306,10 @@ async function runPrompt(msg) {
       rawOutput: allowed ? 'README.md' : { message: 'Tool "ls" was canceled by the user.' },
     }));
   }
-  out(update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'call-1', title: 'read README.md', kind: 'read', status: 'in_progress', locations: [{ path: session.cwd + '/README.md' }], rawInput: { path: 'README.md' } }));
-  out(update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'call-1', status: 'completed', rawOutput: 'The magic word is BANANA.' }));
+  // Scripted echo evidence for the recorder's command scenario; no shell runs.
+  const echo = promptText.includes('echo fixture-ok');
+  out(update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'call-1', title: echo ? 'echo fixture-ok' : 'read README.md', kind: echo ? 'execute' : 'read', status: 'in_progress', locations: [{ path: session.cwd + '/README.md' }], rawInput: echo ? { command: 'echo fixture-ok' } : { path: 'README.md' } }));
+  out(update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'call-1', status: 'completed', rawOutput: echo ? 'fixture-ok\\n' : 'The magic word is BANANA.' }));
 
   const delay = Number((/sleep:(\\d+)/.exec(promptText) || [])[1] || env.ACP_FAKE_TURN_MS || 0);
   await waitMs(delay);
