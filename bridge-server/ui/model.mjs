@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import { followTranscript, locateTranscript } from '../../lib/transcripts.mjs';
 import { selectTurnItems } from '../../lib/work-summary.mjs';
-import { modelName } from '../../lib/digest.mjs';
+import { jobModel } from '../../lib/model-name.mjs';
 import { takeOutcome, writeRequest } from './inbox.mjs';
 import { branchOf, createJobSource } from './jobs.mjs';
 import { Pane, age, boxRows, clean, clock, commandText, cut, fitSegs, itemLines, layoutLine, liveLines, outcomeLines, segsWidth, width } from './rows.mjs';
@@ -469,12 +469,9 @@ export class Model {
     const d = this.detail;
     if (!d) return [];
     const { job } = d, { execution, result } = job;
-    const progress = execution.progress ?? {};
-    const model = modelName(result?.effectiveModel ?? progress.effectiveModel ?? execution.effectiveModel ?? execution.modelOverride);
-    const effort = result?.effectiveEffort ?? progress.effectiveEffort ?? execution.effectiveEffort ?? execution.effortOverride;
     const used = result?.usage?.total_tokens;
     const parts = [HOSTS[job.host] + (job.caller.lead ? ` › ${one(job.caller.lead)}` : ''),
-      [model, effort].filter(Boolean).map(String).map(one).join(' '), used != null ? `${tokens(used)} tokens` : '', d.branch ? one(d.branch) : ''];
+      jobModel(execution, result).map(one).join(' '), used != null ? `${tokens(used)} tokens` : '', d.branch ? one(d.branch) : ''];
     const pad = ' '.repeat(margin);
     const header = [[pad + parts.filter(Boolean).join(' · '), 'dim']];
     const boxed = Boolean(this.typing);

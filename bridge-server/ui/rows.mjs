@@ -200,12 +200,16 @@ export function age(ms) {
 
 const OUTCOME = { completed: ['✓ done in', 'ok'], failed: ['✗ failed after', 'bad'], delivery_unknown: ['✗ delivery unknown after', 'bad'],
   stopped: ['■ stopped after', 'warn'], interrupted: ['■ interrupted after', 'warn'] };
+// A finished job's outcome and duration, as one segment: ['✓ done in 0:38', 'ok'].
+export function outcomeLabel({ result, execution }) {
+  const [label, style] = OUTCOME[result.outcome] ?? [`? ${result.outcome}`, 'warn'];
+  return [`${label} ${clock(result.finishedAt - execution.startedAt)}`, style];
+}
 // A finished job opens on its outcome: result line, git change list, errors, answer.
 export function outcomeLines(job, { expanded = false, items = 0 } = {}) {
   const { result, execution } = job;
   const summary = result.workSummary;
-  const [label, style] = OUTCOME[result.outcome] ?? [`? ${result.outcome}`, 'warn'];
-  const first = [[`${label} ${clock(result.finishedAt - execution.startedAt)}`, style]];
+  const first = [outcomeLabel(job)];
   if (summary) {
     const commands = summary.commands ?? [];
     const failed = commands.filter(c => !c.denied && (c.exitCode != null && c.exitCode !== 0 || c.status === 'failed')).length;
