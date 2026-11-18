@@ -121,7 +121,7 @@ test('catalog reports effort levels and permissions from the execution environme
   for (const target of catalog.targets) {
     assert.equal(target.effort.selection, true);
     if (['codex', 'opencode', 'antigravity', 'copilot'].includes(target.id)) assert.match(target.effort.description, /[Ll]evels depend on the model and are checked at send/);
-    if (target.id === 'claude') assert.equal(target.effort.description, 'Omit to inherit the companion configuration; an explicit effort overrides this conversation.');
+    assert.match(target.effort.description, /saved default, then the companion's configuration/);
     assert.deepEqual(target.effort.levels, target.id === 'claude' ? ['low', 'medium', 'high', 'xhigh', 'max'] : null);
     assert.equal(typeof target.effort.description, 'string');
     const { mode, source, risk } = probePermission(getTarget(target.id), env);

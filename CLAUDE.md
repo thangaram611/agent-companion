@@ -78,8 +78,9 @@ and Antigravity checks the loaded session's advertised model family. OpenCode
 selects a variant; Antigravity selects a model id suffix and reapplies it after
 load. In both, effort overrides any level embedded in the model string. OpenCode
 queries variants only for an effort override; inherited effort stays null. Refused effort is not saved on the conversation or written to native
-selection state. Omission inherits; no saved effort default exists. Copilot's
-spawn effort flag is removed; the option is validated before a config write.
+selection state. On a new conversation, omitted effort uses the companion's saved
+default, then native configuration. Copilot's spawn effort flag is removed;
+the option is validated before a config write.
 Local Ollama BYOK makes Copilot testable; GitHub-hosted model qualification still
 hits this account's `session/new` 403. The isolated free-backend harness is in
 `probes/free-backends/`; never use the operator's live homes for it.

@@ -1,7 +1,7 @@
 # User defaults for companion model and effort: plan
 
-Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 3 done
-(2026-11-18); steps 4 to 9 not started.
+Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 4 done
+(2026-11-18); steps 5 to 9 not started.
 
 ## Goal
 
@@ -288,6 +288,21 @@ Check: routing and conversation tests, then a live run with an isolated
 `AGENT_COMPANION_HOME`: Codex with saved `low`, one send with no effort and one
 with `medium`, confirmed from `effective_effort` and the rollout's `turn_context`.
 OpenCode gets the same run on a free model.
+
+Done 2026-11-18. Code by Codex, reviewed by Claude. A refusal of a saved effort
+appends where it came from: the static check's hint, or the terminal text the
+controller stores, so later waits and status say it too. The live run used
+`/tmp/ac-defaults-probe/scripts/effort-live.mjs`, which drives the real bridge's
+`dispatch` with isolated bridge state and the owner's own logins.
+- Codex, `gpt-6.2-astra`, saved `low`: a send with no effort ran `low`, and its
+  rollout's `turn_context` said `effort: low`. An explicit `medium` ran
+  `medium`, and its `turn_context` said `medium`.
+- OpenCode, `opencode/flint-40b-free`, saved `high`: variant `high`. An explicit
+  `low` gave variant `low`.
+- Codex with a saved `turbo` was refused before any turn: "effort "turbo" is not
+  valid for Codex model "gpt-6.2-astra". Use one of: low, …, ultra … Effort
+  "turbo" came from the saved default for codex in <settings path>. Remove the
+  saved default to omit effort, or pass an explicit effort."
 
 ### Step 5: CLI `agent-companion defaults`
 

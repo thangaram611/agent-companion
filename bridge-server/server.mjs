@@ -50,7 +50,7 @@ import { opencodeProvider } from './adapters/opencode.mjs';
 import { acpProvider } from './adapters/acp.mjs';
 
 import { log, validateAgentArgs } from './validation.mjs';
-import { BASE_DIR, readDefaultModel, migrateDefaults, migrateLegacyState, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
+import { BASE_DIR, readDefaultModel, readDefaultEffort, settingsPath, migrateDefaults, migrateLegacyState, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
 import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
 import { queuePath, runtimeDir, appendPrivateFile } from '../lib/runtime-paths.mjs';
 import { logEvent } from '../lib/log.mjs';
@@ -162,6 +162,7 @@ function iso(ts) { return ts ? new Date(ts).toISOString() : null; }
 const UNCONFIGURED_SEND_ERROR =
   'no companion target configured and none passed. Pass target on agent_send, ' +
   'or set a default with `node scripts/onboard.mjs --target <id> --set-default`.';
+const EFFORT_DESCRIPTION = "Reasoning effort override. When omitted, a new conversation uses the saved default, then the companion's configuration. A follow-up keeps its current effort.";
 
 function effortRefusal(descriptor, effort) {
   if (!descriptor || effort == null) return null;
@@ -172,6 +173,15 @@ function effortRefusal(descriptor, effort) {
     error: `effort "${effort}" is not valid for ${companion}`,
     hint: `Use one of: ${effortLevels.join(', ')}, or omit it to inherit configuration.` };
   return null;
+}
+
+function resolveEffort(descriptor, requested, env, newConversation) {
+  const saved = newConversation && requested == null ? readDefaultEffort(descriptor.id, env).effort : null;
+  const effort = requested ?? saved;
+  const savedEffortHint = saved && `Effort "${saved}" came from the saved default for ${descriptor.id} in ${settingsPath(env)}. Remove the saved default to omit effort, or pass an explicit effort.`;
+  const refusal = effortRefusal(descriptor, effort);
+  if (refusal && savedEffortHint) refusal.hint = [refusal.hint, savedEffortHint].filter(Boolean).join(' ');
+  return { effort, refusal, savedEffortHint };
 }
 
 export function resolveRouting({ target = null, model = null, effort = null } = {}, env = process.env) {
@@ -192,7 +202,8 @@ export function resolveRouting({ target = null, model = null, effort = null } = 
       error: `model "${selectedModel}" is not valid for ${companion}`,
       hint: companion === 'opencode' ? 'Use a provider/model id.' : 'Model ids must contain no whitespace.' };
   }
-  return effortRefusal(descriptor, effort) || { ok: true, resolved: { companion, model: selectedModel, effort, capabilities: descriptor.capabilities } };
+  const selection = resolveEffort(descriptor, effort, env, true);
+  return selection.refusal || { ok: true, resolved: { companion, model: selectedModel, effort: selection.effort, capabilities: descriptor.capabilities } };
 }
 
 const DIGEST_RESOURCE_SCHEME = 'agent-digest';
@@ -345,17 +356,12 @@ async function handleSend(args, active, request) {
   const conversation = args.thread && active.records.readConversation(args.thread);
   const provider = args.target || conversation?.provider || readDefaultTarget(active.env).target;
   if (!provider) return asJson({ ok: false, action: 'send', code: 'TARGET_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR });
-  const refusal = effortRefusal(getTarget(provider, active.env), args.effort);
+  const newConversation = args.thread && !conversation && Object.hasOwn(active.providers ?? {}, provider);
+  const { effort, refusal, savedEffortHint } = resolveEffort(getTarget(provider, active.env), args.effort, active.env, newConversation);
   if (refusal) return asJson({ ...refusal, action: 'send', status: refusal.code });
-  // An env or saved model default is an explicit selection for a new conversation.
-  // An existing conversation keeps its stored override. An omitted model inherits
-  // the companion's own configuration (Codex then receives no model key at all).
-  const known = Object.hasOwn(active.providers ?? {}, provider);
-  // validation.mjs normalizes an omitted model to null; both shapes mean "not chosen".
-  const configured = known && args.model == null && args.thread && !conversation
-    ? (readDefaultModel(provider, active.env).model ?? undefined) : undefined;
+  const model = args.model ?? (newConversation ? readDefaultModel(provider, active.env).model : null);
   const sent = await active.send({ owner: args.thread, provider, cwd: args.cwd, text: args.task,
-    model: args.model ?? configured, effort: args.effort ?? undefined, hostSessionId: getHostSessionId(), ...request });
+    model: model ?? undefined, effort: effort ?? undefined, savedEffortHint, hostSessionId: getHostSessionId(), ...request });
   if (sent.outcome) return asJson(terminalEnvelope(active.records.readExecution(sent.executionId), sent, 'send'));
   return asJson({ ok: true, status: 'still_running', job_id: sent.executionId, thread: args.thread,
     target: sent.target ?? provider, selected_model: sent.selectedModel ?? null, selected_effort: sent.selectedEffort ?? null,
@@ -419,8 +425,8 @@ function handleCatalog(env) {
         },
         effort: { selection: target.capabilities.effortSelection, levels: target.capabilities.effortLevels ?? null,
           description: !target.capabilities.effortSelection ? 'Effort selection is unsupported.'
-            : target.capabilities.effortLevels ? 'Omit to inherit the companion configuration; an explicit effort overrides this conversation.'
-              : 'Levels depend on the model and are checked at send. Omit to inherit the companion configuration; an explicit effort overrides this conversation.' },
+            : target.capabilities.effortLevels ? EFFORT_DESCRIPTION
+              : 'Levels depend on the model and are checked at send. ' + EFFORT_DESCRIPTION },
         permission: permission ? { mode: permission.mode, source: permission.source, risk: permission.risk } : null,
         capabilities: Object.fromEntries(['interventions', 'resume', 'cancel', 'modelSelection', 'effortSelection']
           .map((key) => [key, target.capabilities[key]])),
@@ -591,7 +597,7 @@ const AGENT_TOOLS = [
         target: TARGET_FIELD,
         task: { type: 'string', description: 'Exact text delivered to the companion, without framing or appended instructions.' },
         model: { type: 'string', description: 'Explicit model override. Omit to inherit the companion configuration.' },
-        effort: { type: 'string', description: 'Explicit reasoning effort for this conversation. Omit to inherit the companion configuration.' },
+        effort: { type: 'string', description: EFFORT_DESCRIPTION },
         cwd: {
           type: 'string',
           description: 'Required absolute target repo/worktree path. The bridge refuses to default cwd.',

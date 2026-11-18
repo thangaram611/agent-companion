@@ -132,9 +132,10 @@ per-companion configuration; with no override or configured default, the native
 configuration is inherited. Codex receives no model key in that case.
 
 `effort` is a conversation override like `model`, stored as `effortOverride` on
-conversation and execution records, with no saved default or environment knob.
-Omission retains a conversation's override, otherwise inherits native configuration;
-start/openHistory omit the key when inherited. Registry `capabilities.effortSelection`
+conversation and execution records. A new conversation uses the requested effort,
+then the companion's saved default, then native configuration. Follow-ups retain
+the override when effort is omitted. Both `start` and `openHistory` omit the key
+when inherited. Registry `capabilities.effortSelection`
 is true for all five companions. Claude has `capabilities.effortLevels` of `low`,
 `medium`, `high`, `xhigh`, `max`; its adapter passes `--effort`. Codex has null
 static levels: its adapter calls `model/list` with `includeHidden: true`, following
@@ -438,13 +439,13 @@ alone is never proof of exit.
 
 Both hosts share `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`,
 or `$AGENT_COMPANION_HOME/settings.json` with the override set. `lib/state.mjs`
-stores the target and per-companion model there. Routing applies environment
-overrides before saved defaults on the first send. The first bridge or onboarding
+stores the target and per-companion model and effort there. Environment overrides
+apply to target and model. The first bridge or onboarding
 run migrates `default-target` and `default-model*`. A value found on one host
 or agreed by both moves into the store. A disagreement leaves the setting unset,
 logs both values and preserves the files. Setup previews this migration read-only.
-Settings writes take a short-lived `settings.json.lock` and atomically replace the
-private file. Unreadable or invalid settings produce a warning and block updates.
+Settings writes atomically replace the private file. Unreadable or invalid settings
+produce a warning and block updates.
 
 `AGENT_COMPANION_HOME` overrides the state home; otherwise Claude uses
 `~/.claude/agent-companion/` and Codex uses `$CODEX_HOME/agent-companion/`

@@ -116,9 +116,10 @@ Configuration:
   120000 ms). Pending send/wait/reply/cancel calls hold the lease; status and
   catalog do not. Stop hooks write owner markers. Total execution has no
   40-minute cutoff; each wait is still bounded by the host's per-call timeout.
-- Both hosts share target and model defaults in
+- Both hosts share target, model and effort defaults in
   `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`.
   With `AGENT_COMPANION_HOME` set, the file is `$AGENT_COMPANION_HOME/settings.json`.
+  Each companion's saved effort is `companions.<id>.effort`.
   `AGENT_COMPANION_DEFAULT_TARGET` overrides its target.
 - Save a per-companion model default with
   `node scripts/onboard.mjs --target <companion> --model <id> --set-default`.
@@ -488,14 +489,14 @@ vocabulary with its own error message. On resume without a model override it sti
 reads the saved model before writing config. An unlisted model's effort can persist
 on resume before the backend validates it during the turn.
 
-Omission inherits native configuration; Copilot reports the session option's
+On a new conversation, an explicit effort wins. Omission uses the companion's
+saved effort, then its native configuration. Copilot reports the session option's
 `currentValue`, including when inherited. Its BYOK path is testable against local
 Ollama; qualification against GitHub-hosted models remains blocked by this account's
 `session/new` 403. Accepted effort
 is stored for the conversation: omitted follow-ups keep the override where cold
 follow-up is supported, and explicit effort can change after completion. Refused
-effort leaves the previous effort override or inheritance intact. There is no
-saved effort default or new environment knob.
+effort leaves the previous effort override or inheritance intact.
 
 `agent_send` returns `still_running` with a `job_id` after delivery acknowledgement.
 It includes `target`, `selected_model`, `selected_effort`, `effective_model`,

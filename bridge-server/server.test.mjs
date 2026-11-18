@@ -32,7 +32,7 @@ const EXACT_TASK = '  First line.\n\nSecond line: `quoted` — keep whitespace. 
 
 const { Records } = await import('./controller/records.mjs');
 const { claudeProvider, ClaudeAdapter } = await import('./adapters/claude.mjs');
-const { writeTargetChecks } = await import('../lib/state.mjs');
+const { writeDefaultEffort, writeTargetChecks } = await import('../lib/state.mjs');
 
 test.after(() => {
   rmSync(STATE_SANDBOX, { recursive: true, force: true });
@@ -328,6 +328,45 @@ test('a send whose omitted model was normalized to null still applies the config
     adapter.done.resolve({ outcome: 'completed', text: 'ok' });
     await h.call({ action: 'wait', job_id: sent.job_id, thread: 'claude-null', max_wait_sec: 5 });
   });
+});
+
+test('a new send uses saved effort unless requested, and a follow-up keeps its original effort', async (t) => {
+  const h = await wireFixture(t);
+  h.active.env = { ...h.active.env, AGENT_COMPANION_HOME: h.dir };
+  writeDefaultEffort('low', 'claude', h.active.env);
+  for (const [thread, effort, expected] of [['saved', null, 'low'], ['requested', 'high', 'high']]) {
+    const sent = await h.send({ target: 'claude', thread, effort });
+    assert.equal(sent.selected_effort, expected);
+    const adapter = h.adapters.at(-1);
+    assert.equal(adapter.calls[0][1].effort, expected);
+    adapter.done.resolve({ outcome: 'completed', text: 'ok' });
+    await h.call({ action: 'wait', job_id: sent.job_id, thread });
+  }
+  writeDefaultEffort('medium', 'claude', h.active.env);
+  const next = await h.send({ thread: 'saved', target: null, task: 'follow-up' });
+  assert.equal(next.selected_effort, 'low');
+  assert.equal(h.adapters.at(-1).calls[0][1].effort, 'low');
+});
+
+function assertSavedEffortHint(text, target, file) {
+  assert.match(text, new RegExp(`saved (?:effort )?default for ${target}`, 'i'));
+  assert.ok(text.includes(file), text);
+  assert.match(text, /remove the saved default/i);
+  assert.match(text, /pass an explicit effort/i);
+}
+
+test('Claude identifies a saved effort refused before startup and preserves the explicit refusal', async (t) => {
+  const h = await wireFixture(t);
+  h.active.env = { ...h.active.env, AGENT_COMPANION_HOME: h.dir };
+  const file = join(h.dir, 'settings.json');
+  writeDefaultEffort('invalid', 'claude', h.active.env);
+  const saved = await h.send({ target: 'claude' });
+  assert.equal(saved.code, 'EFFORT_NOT_ALLOWED');
+  assert.equal(saved.effort, 'invalid');
+  assertSavedEffortHint(saved.hint, 'claude', file);
+  const requested = await h.send({ target: 'claude', effort: 'invalid' });
+  assert.equal(requested.hint, 'Use one of: low, medium, high, xhigh, max, or omit it to inherit configuration.');
+  assert.equal(h.adapters.length, 0);
 });
 
 test('all five providers receive exact task text, inherit models, and reattach only identical work', async (t) => {
@@ -847,6 +886,7 @@ test('status activity uses native state or command/text fallback and clears at t
 
 test('Codex accepts effort and exposes adapter refusals through send, status and saved results', async (t) => {
   const h = codexDispatchFixture(t);
+  h.env.AGENT_COMPANION_HOME = h.dir;
   const send = (effort, thread) => h.call({ action: 'send', target: 'codex', cwd: h.dir, task: 'original', effort, thread });
   const accepted = await send('low', 'accepted');
   assert.equal(accepted.status, 'still_running');
@@ -858,11 +898,13 @@ test('Codex accepts effort and exposes adapter refusals through send, status and
     ['low', 'ignored', 'CAPABILITY_UNAVAILABLE', /did not apply effort "low"/],
   ]) {
     if (thread === 'ignored') h.env.CODEX_FAKE_IGNORE_EFFORT = '1';
+    writeDefaultEffort(effort, 'codex', h.env);
     const refused = await send(effort, thread);
     assert.equal(refused.status, 'failed');
     assert.equal(refused.action, 'send');
     assert.equal(refused.meta.detail, code);
     assert.match(refused.content, message);
+    assert.doesNotMatch(refused.content, /saved default/i);
     assert.equal(refused.meta.selected_effort, effort);
     assert.equal(refused.meta.native_refs.historyId, undefined);
     const status = await h.call({ action: 'status', job_id: refused.job_id });
@@ -872,6 +914,12 @@ test('Codex accepts effort and exposes adapter refusals through send, status and
     assert.deepEqual(waited, { ...refused, action: 'wait' });
     assert.equal(new Records({ dir: h.records.dir }).readResult(refused.job_id).text, refused.content);
     if (code === 'EFFORT_NOT_ALLOWED') t.diagnostic('EFFORT_ENVELOPE codex ' + JSON.stringify(refused));
+    const savedThread = thread + '-saved';
+    const saved = await send(undefined, savedThread);
+    assert.equal(saved.meta?.detail, code);
+    assert.match(saved.content, message);
+    assertSavedEffortHint(saved.content, 'codex', join(h.dir, 'settings.json'));
+    assert.deepEqual(await h.call({ action: 'wait', job_id: saved.job_id, thread: savedThread }), { ...saved, action: 'wait' });
   }
   assert.equal(h.frames().filter((frame) => frame.method === 'turn/start').length, 1);
 });

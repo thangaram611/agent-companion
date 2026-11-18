@@ -89,7 +89,7 @@ export class Controller {
     if (!request) return null;
     return this._close(request.a, 'owner_stop');
   }
-  async send({ owner, provider, cwd, text, model, effort, requestId, signal, hostSessionId }) {
+  async send({ owner, provider, cwd, text, model, effort, savedEffortHint, requestId, signal, hostSessionId }) {
     this._owner(owner);
     if (this.lost) throw error('bridge_loss');
     if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw error('INVALID_CWD');
@@ -118,7 +118,7 @@ export class Controller {
     const permissionMode = probePermission(getTargetById(provider), this.env)?.mode ?? null;
     const record = this.records.begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes: adapter.capabilities.interventions,
       historyId, executionId, text, hostSessionId, now: this.clock.now() }, conversation?.generation ?? 0);
-    const a = { record, adapter, held: [], requests: new Set(), waiters: new Set(), inboxRequests: new Set(), ready: deferred(), done: deferred(), remainingMs: this.graceMs, lastTick: this.clock.monotonic() };
+    const a = { record, adapter, savedEffortHint, held: [], requests: new Set(), waiters: new Set(), inboxRequests: new Set(), ready: deferred(), done: deferred(), remainingMs: this.graceMs, lastTick: this.clock.monotonic() };
     a.supervisor = this.createSupervisor({ clock: this.clock, onRecord: (processes) => { a.record.processes = processes; this._eventWrite(a); } });
     // Snapshot the marker at dispatch. An old SubagentStop must not cancel a
     // later same-child follow-up; a changed marker is a new stop observation.
@@ -276,6 +276,9 @@ export class Controller {
     if (!a.record.terminal) {
       if (terminal.cause === 'provider_error' && ['failed', 'delivery_unknown'].includes(terminal.outcome)) {
         terminal = { ...terminal, text: appendProviderError(terminal.text ?? a.record.progress?.partialText, explanation) };
+        if (a.savedEffortHint && ['EFFORT_NOT_ALLOWED', 'CAPABILITY_UNAVAILABLE'].includes(terminal.detail)) {
+          terminal.text += ' ' + a.savedEffortHint;
+        }
       }
       a.record.terminal = { ...terminal, at: this.clock.now() }; this._persist(a);
     }
