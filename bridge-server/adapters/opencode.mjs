@@ -11,6 +11,18 @@ const capabilities = Object.freeze({ followUp: true, modelSelection: true, loads
 const failure = (code, cause) => Object.assign(new Error(code, { cause }), { name: code, code });
 const outcomes = { succeeded: 'completed', interrupted: 'interrupted', failed: 'failed' };
 
+// The catalog accepts both a variant id and its reasoningEffort name.
+export function openCodeEffortVariant(entry, name, effort, preferred) {
+  const variants = entry?.variants || [];
+  const matches = v => v.settings?.reasoningEffort === effort || v.id === effort;
+  const variant = variants.find(v => v.id === preferred && matches(v)) || variants.find(matches);
+  if (variant) return variant.id;
+  const levels = [...new Set(variants.map(v => v.settings?.reasoningEffort ?? v.id))];
+  throw Object.assign(new Error(levels.length
+    ? `effort "${effort}" is not valid for OpenCode model "${name}". Use one of: ${levels.join(', ')}, or omit it to inherit configuration.`
+    : `OpenCode advertises no effort levels for model "${name}". Omit effort to inherit configuration.`), { code: 'EFFORT_NOT_ALLOWED' });
+}
+
 // Registry diagnostics own readiness. Reading their last evidence never runs
 // an auth/version probe or starts a provider. start checks the private runtime.
 export function opencodeProvider({ env = process.env } = {}) {
@@ -114,6 +126,14 @@ class OpenCodeAdapter {
   get sessionPath() { return '/session/' + encodeURIComponent(this.sessionId); }
   get locationQuery() { return '?location[directory]=' + encodeURIComponent(this.cwd); }
 
+  async defaultModel(query = '?directory=' + encodeURIComponent(this.cwd)) {
+    return (await this._request('/model/default' + query)).data?.data;
+  }
+
+  async listModels() {
+    return (await this._request('/model?directory=' + encodeURIComponent(this.cwd))).data?.data;
+  }
+
   async openHistory({ historyId, model = this.model, effort }) {
     try {
       const response = historyId == null
@@ -129,18 +149,12 @@ class OpenCodeAdapter {
         if (!parsed) throw failure('ModelNotAllowed');
         const [id, variant] = parsed.modelID.split('#');
         resolved = { providerID: parsed.providerID, id, ...(variant ? { variant } : {}) };
-      } else resolved = session.model || (await this._request('/model/default' + this.locationQuery)).data?.data;
+      } else resolved = session.model || await this.defaultModel(this.locationQuery);
       if (effort !== undefined) {
-        this.models = (await this._request('/model?directory=' + encodeURIComponent(this.cwd))).data?.data;
+        this.models = await this.listModels();
         const name = `${resolved?.providerID}/${resolved?.id}`;
-        const variants = this.models.find(m => m.providerID === resolved?.providerID && m.id === resolved?.id)?.variants || [];
-        const matches = v => v.settings?.reasoningEffort === effort || v.id === effort;
-        const variant = variants.find(v => v.id === resolved.variant && matches(v)) || variants.find(matches);
-        const levels = [...new Set(variants.map(v => v.settings?.reasoningEffort ?? v.id))];
-        if (!variant) throw Object.assign(new Error(levels.length
-          ? `effort "${effort}" is not valid for OpenCode model "${name}". Use one of: ${levels.join(', ')}, or omit it to inherit configuration.`
-          : `OpenCode advertises no effort levels for model "${name}". Omit effort to inherit configuration.`), { code: 'EFFORT_NOT_ALLOWED' });
-        resolved = { ...resolved, variant: variant.id };
+        const entry = this.models.find(m => m.providerID === resolved?.providerID && m.id === resolved?.id);
+        resolved = { ...resolved, variant: openCodeEffortVariant(entry, name, effort, resolved?.variant) };
       }
       // Treat session model writes as persistent even without a prompt.
       // Validate first so a refused level cannot alter existing history.

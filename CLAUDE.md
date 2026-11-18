@@ -129,7 +129,7 @@ line, including `not_delivered` messages.
 | `bridge-server/controller/process-supervisor.mjs` | Owned process groups, descendant census, termination and PID/birth-identity verification. |
 | `bridge-server/adapters/{codex,opencode,acp,claude}.mjs` | Provider protocols, history loading, delivery acknowledgement, native progress, usage and model selection. |
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
-| `lib/state.mjs` | Shared target/model settings and one-shot migration of legacy defaults and history. |
+| `lib/state.mjs` | Shared target, model and effort settings, atomic model/effort edits and one-shot migration of legacy defaults and history. |
 | `lib/host.mjs` | Host conventions and sandbox guard; `AGENT_COMPANION_HOST` is authoritative, `.host` is diagnostic. |
 | `lib/transcripts.mjs` and `lib/transcripts/` | Read-only native transcript location, format fingerprints, normalized in-memory items and live follow (`followTranscript`). |
 | `lib/work-summary.mjs` | Native turn selection and bounded commands, edits, errors and worktree summary projection. |
@@ -138,12 +138,13 @@ line, including `not_delivered` messages.
 | `lib/target-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
 | `bridge-server/ui/jobs.mjs` | The live view's job list from both hosts' state and caller titles from host transcripts (Claude lead session, Codex rollout and session index), and the `jobs` entry that lists one Claude session's jobs for the pane. |
+| `bridge-server/ui/defaults.mjs` | The package-free `defaults` command and shared view API for saved choices, native inheritance, validation and legacy conflict resolution. |
 | `bridge-server/ui/rows.mjs` | Sanitizing native text, cell widths, item folding and wrapping, a job's transcript blocks, card head and pending lines for both views, and the cached row index. |
 | `bridge-server/ui/follow.mjs` | One job's transcript follow and turn selection for both views, and the `follow` entry that streams them to the Claude pane as JSON lines. |
 | `bridge-server/ui/model.mjs` | Live-view state, keys, message boxes and frame composition; `app.mjs` is only the Ink layer and the `ui` entry point. |
 | `bridge-server/ui/inbox.mjs` | The views' only writes: atomic 0600 inbox request files, deleting each outcome read, and `send` (`launch-ui.sh send`) for the Claude pane's message box. |
 | `hooks/mod.ts` | Claude Code's mod (Codex ignores it): each agent-companion subagent's agent-list row from the bridge's records, read on a clock only while a job runs, and the Companions pane that follows the view, its list rebuilt by a `jobs` child, one `follow` child per shown job. |
-| `hooks/launch-ui.sh`, `scripts/install-ui-launcher.mjs` | Running the live view and the pane's `jobs` and `follow` children with the hooks' Node and the view's dependencies; the `~/.local/bin/agent-companion` launcher. |
+| `hooks/launch-ui.sh`, `scripts/install-ui-launcher.mjs` | The `~/.local/bin/agent-companion` launcher, the live view and its package-free `defaults`, `jobs`, `follow` and `send` commands. |
 
 ## Things that will bite you
 

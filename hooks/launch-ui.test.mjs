@@ -73,3 +73,14 @@ test('jobs, for the Claude pane, runs without the UI packages', t => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'jobs /state session-1 9\n');
 });
+
+test('defaults forwards the companion, edits and --json without UI packages on either host', t => {
+  const f = fixture(t);
+  writeFileSync(path.join(f.root, 'bridge-server/ui/defaults.mjs'), 'console.log(JSON.stringify(process.argv.slice(2)))');
+  for (const host of ['claude', 'codex']) {
+    const args = ['codex', 'model=inherit', '--json'];
+    const result = f.run({ AGENT_COMPANION_HOST: host }, ['defaults', ...args]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), args);
+  }
+});

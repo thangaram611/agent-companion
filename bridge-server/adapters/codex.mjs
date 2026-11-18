@@ -57,7 +57,7 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
-const validateEffort = (models, model, effort) => {
+export const validateCodexEffort = (models, model, effort) => {
   const advertised = models.find((entry) => entry.model === model);
   if (!advertised) return; // Custom providers are absent from Codex's catalog; the backend validates levels.
   const levels = advertised.supportedReasoningEfforts.map((entry) => entry.reasoningEffort);
@@ -86,7 +86,7 @@ export class CodexAdapter {
     this.done.promise.catch(() => {});
   }
 
-  async start({ cwd, env = this.env, supervisor }) {
+  async start({ cwd, env = this.env, supervisor, checkContract = true }) {
     this.cwd = cwd; this.env = env; this.supervisor = supervisor;
     this.sandbox = codexAppServerSandbox(env);
     try {
@@ -95,7 +95,7 @@ export class CodexAdapter {
       if (!installation?.ready || !installation.selected?.path || !installation.selected?.helperPath) {
         throw new Error(installation?.blocker?.message || 'Codex executable/helper pair unavailable');
       }
-      void checkCodexContract(installation, env);
+      if (checkContract) void checkCodexContract(installation, env);
       const runtime = this.runtime = await supervisor.spawn([installation.selected.path, 'app-server'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
       runtime.stdout.setEncoding('utf8');
       runtime.stdout.on('data', (chunk) => {
@@ -120,23 +120,33 @@ export class CodexAdapter {
     } catch (err) { throw failure('RuntimeUnavailable', err); }
   }
 
+  async readConfig() {
+    return (await this._call('config/read', { cwd: this.cwd })).config;
+  }
+
+  async listModels() {
+    const models = [];
+    let cursor;
+    do {
+      const page = await this._call('model/list', { includeHidden: true, ...(cursor == null ? {} : { cursor }) });
+      models.push(...page.data);
+      cursor = page.nextCursor;
+    } while (cursor != null);
+    return models;
+  }
+
   async openHistory({ historyId, model, effort }) {
     try {
       const params = { cwd: this.cwd, sandbox: this.sandbox.mode, approvalPolicy: 'never' };
       if (model !== undefined) params.model = model;
       if (historyId != null) params.threadId = historyId;
-      const models = [];
+      let models;
       if (effort !== undefined) {
-        let cursor;
-        do {
-          const page = await this._call('model/list', { includeHidden: true, ...(cursor == null ? {} : { cursor }) });
-          models.push(...page.data);
-          cursor = page.nextCursor;
-        } while (cursor != null);
+        models = await this.listModels();
         // Resume persists config without a turn, so refuse before sending it.
         if (historyId != null) {
           const selectedModel = model ?? (await this._call('thread/read', { threadId: historyId })).thread.model;
-          validateEffort(models, selectedModel, effort);
+          validateCodexEffort(models, selectedModel, effort);
         }
         params.config = { model_reasoning_effort: effort };
       }
@@ -147,7 +157,7 @@ export class CodexAdapter {
       // accepted by Codex). The controller only cold-resumes closed executions.
       if (result.thread.status?.type === 'active' || result.thread.turns?.some((turn) => turn.status === 'inProgress')) throw new Error('thread already active');
       if (effort !== undefined) {
-        if (historyId == null) validateEffort(models, result.model, effort);
+        if (historyId == null) validateCodexEffort(models, result.model, effort);
         if (result.reasoningEffort !== effort) throw Object.assign(new Error(`Codex did not apply effort "${effort}" for model "${result.model}" (reported ${JSON.stringify(result.reasoningEffort)}). Omit effort to inherit configuration.`), { code: 'CAPABILITY_UNAVAILABLE' });
       }
       this.threadId = id; this.model = model;

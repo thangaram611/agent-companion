@@ -171,6 +171,28 @@ Configuration:
 See [Architecture](docs/ARCHITECTURE.md) for protocol and lifecycle details,
 and [Diagnostics](#diagnostics) for installation problems.
 
+### Defaults
+
+```sh
+agent-companion defaults                         # list saved values, sources and inheritance
+agent-companion defaults codex --json            # inspect one companion
+agent-companion defaults codex model=gpt-6.2-astra effort=high
+agent-companion defaults codex effort=inherit    # clear effort, keep model
+agent-companion defaults codex model=inherit
+agent-companion defaults target=codex
+agent-companion defaults target=inherit
+```
+
+Set either field or both. Every form accepts `--json`. For a new conversation,
+the host's explicit choice wins, followed by the model environment override
+(model only), the saved default, then the companion's own configuration.
+Follow-ups keep the conversation’s selection.
+
+Codex and OpenCode read native defaults for the current directory without a
+turn. Claude, Copilot and Antigravity show what their last run reported and
+how long ago it ran. If the two hosts have conflicting legacy defaults, the
+listing shows both files and the command to resolve each conflict.
+
 ### Claude Code as a companion
 
 Agent Companion runs the user's installed, unmodified Claude Code binary with

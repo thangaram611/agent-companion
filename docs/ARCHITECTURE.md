@@ -440,10 +440,11 @@ alone is never proof of exit.
 Both hosts share `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`,
 or `$AGENT_COMPANION_HOME/settings.json` with the override set. `lib/state.mjs`
 stores the target and per-companion model and effort there. Environment overrides
-apply to target and model. The first bridge or onboarding
-run migrates `default-target` and `default-model*`. A value found on one host
-or agreed by both moves into the store. A disagreement leaves the setting unset,
-logs both values and preserves the files. Setup previews this migration read-only.
+apply to target and model. The first bridge, onboarding run or
+`agent-companion defaults` command migrates `default-target` and `default-model*`. A value found on one host
+or agreed by both moves into the store. A disagreement leaves the setting unset
+and preserves both files. `launch-ui.sh defaults` lists the competing values
+and paths. Setting or clearing that default resolves the conflict. Setup previews this migration read-only.
 Settings writes atomically replace the private file. Unreadable or invalid settings
 produce a warning and block updates.
 

@@ -22,6 +22,7 @@ fi
 # session's jobs through `jobs` and sends a message or cancel through `send`;
 # none imports packages.
 case "${1:-}" in
+  defaults) shift; exec "$NODE_BIN" "$ROOT/bridge-server/ui/defaults.mjs" "$@" ;;
   follow) shift; exec "$NODE_BIN" "$ROOT/bridge-server/ui/follow.mjs" "$@" ;;
   jobs) shift; exec "$NODE_BIN" "$ROOT/bridge-server/ui/jobs.mjs" "$@" ;;
   send) shift; exec "$NODE_BIN" "$ROOT/bridge-server/ui/inbox.mjs" "$@" ;;

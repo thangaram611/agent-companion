@@ -1,7 +1,7 @@
 # User defaults for companion model and effort: plan
 
-Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 4 done
-(2026-11-18); steps 5 to 9 not started.
+Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 5 done
+(2026-11-18); steps 6 to 9 not started.
 
 ## Goal
 
@@ -322,6 +322,25 @@ Check: CLI unit tests with fake app-server and OpenCode responses. A live
 read-only `agent-companion defaults` on this machine must show Codex inherit as
 `gpt-6.2-astra xhigh`. Live set and clear run with an isolated
 `AGENT_COMPANION_HOME`.
+
+Done 2026-11-18. Code by Codex, reviewed by Claude. Its first turn was cut short
+by the bridge's own `ps` census bug, since this session's bridge predates
+6200b0c, and resumed. The module is `bridge-server/ui/defaults.mjs`, with no
+package imports in its import graph (audited). `stateDirs` moved to
+`lib/host.mjs` as the one source of both hosts' state roots.
+- Live, read-only, on the owner's machine (5.4 s, `settings.json` untouched):
+  - Codex inherit `model=gpt-6.2-astra effort=xhigh (config/read)`;
+  - OpenCode inherit `opencode/hy4-flash-free` (`/model/default`);
+  - Claude and Antigravity show their last run with its age;
+  - Copilot shows "no reported run".
+  No probe process outlived the command.
+- Live, isolated home:
+  - Codex `model=gpt-6.2-astra effort=high` saved;
+  - `effort=turbo` refused with the model's levels and nothing written;
+  - a model missing from Codex's list saved and marked unverified;
+  - OpenCode effort checked against `flint-40b-free`'s variants;
+  - Copilot saved unverified;
+  - `target=` and `inherit` clears behaved.
 
 ### Step 6: Catalog
 

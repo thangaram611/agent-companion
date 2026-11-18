@@ -6,7 +6,7 @@
 import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { companionHomeDir, detectHost } from '../../lib/host.mjs';
+import { stateDirs } from '../../lib/host.mjs';
 import { locateTranscript } from '../../lib/transcripts.mjs';
 import { Records } from '../controller/records.mjs';
 import { pidAlive } from '../controller/process-supervisor.mjs';
@@ -14,11 +14,7 @@ import { pidAlive } from '../controller/process-supervisor.mjs';
 const ACTIVE = new Set(['starting', 'delivering', 'running', 'stopping', 'cleanup_pending']);
 const RETRY_MS = 30_000;
 
-// AGENT_COMPANION_HOME replaces both hosts' homes, as it does for the bridge.
-export function stateDirs(env = process.env) {
-  if (env.AGENT_COMPANION_HOME) return [{ host: detectHost(), dir: env.AGENT_COMPANION_HOME }];
-  return ['claude', 'codex'].map(host => ({ host, dir: companionHomeDir(host) }));
-}
+export { stateDirs };
 
 // A result is final. Without one, an active record whose recorded process is
 // gone (the bridge was killed before any handoff) is `unknown`, not running.
@@ -49,7 +45,7 @@ export function recordReader() {
   };
 }
 
-export function createJobSource({ dirs = stateDirs(), env = process.env, alive = pidAlive } = {}) {
+export function createJobSource({ env = process.env, dirs = stateDirs(env), alive = pidAlive } = {}) {
   const stores = dirs.map(({ host, dir }) => ({ host, dir, records: new Records({ dir, log() {} }) }));
   const read = recordReader();
   return {

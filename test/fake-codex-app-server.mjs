@@ -169,6 +169,11 @@ function handle(msg) {
     case 'fake/setTranscript': transcripts.set(p.threadId, p.items || []); reply({ ok: true }); return;
     case 'fake/setTurns': turns.set(p.threadId, p.turns || []); reply({ ok: true }); return;
     case 'fake/die': process.exit(p.code || 7); return;
+    case 'config/read':
+      if (process.env.CODEX_FAKE_CONFIG_ERROR) {
+        out({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: process.env.CODEX_FAKE_CONFIG_ERROR } });
+      } else reply({ config: JSON.parse(process.env.CODEX_FAKE_CONFIG || '{"model":null,"model_reasoning_effort":null}') });
+      return;
     case 'model/list': {
       const offset = Number(p.cursor || 0);
       reply({ data: models.slice(offset, offset + 1), nextCursor: offset + 1 < models.length ? String(offset + 1) : null });
