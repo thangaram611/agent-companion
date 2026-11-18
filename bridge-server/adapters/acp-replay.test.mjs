@@ -281,10 +281,19 @@ for (const scenario of SCENARIOS) {
       if (scenario === 'turn-command') assert.match(observed.result.text, /fixture-ok/);
       if (scenario === 'effort') assert.equal(observed.history.effectiveEffort, 'low');
       const prompt = rows.find(row => row.dir === 'client' && row.frame.method === 'session/prompt').frame;
-      const nativeUsage = rows.find(row => row.dir === 'agent' && !row.frame.method && row.frame.id === prompt.id)?.frame.result?.usage;
-      // Copilot 1.0.112 reports turn counters on every recorded prompt response,
-      // cancelled included. Require real counts: deriving the expectation from the
-      // fixture alone would let a renamed field read as null on both sides.
+      const nativeResult = rows.find(row => row.dir === 'agent' && !row.frame.method && row.frame.id === prompt.id)?.frame.result;
+      const nativeUsage = nativeResult?.usage;
+      // Copilot 1.0.113 answers a cancelled prompt with its stop reason alone,
+      // even mid-turn after a usage_update (1.0.112 still counted it): no usage
+      // is reported, none invented. A renamed field would show as an extra key.
+      if (scenario === 'cancel') {
+        assert.deepEqual(Object.keys(nativeResult), ['stopReason']);
+        assert.equal(observed.result.usage, null);
+        return;
+      }
+      // Every completed prompt response carries turn counters. Require real counts:
+      // deriving the expectation from the fixture alone would let a renamed field
+      // read as null on both sides.
       for (const field of ['input_tokens', 'output_tokens']) {
         assert.ok(Number.isInteger(observed.result.usage?.[field]) && observed.result.usage[field] > 0,
           `recorded ACP usage must yield ${field}: ${JSON.stringify(observed.result.usage)}`);

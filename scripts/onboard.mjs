@@ -34,7 +34,7 @@ import {
   probeCommand,
 } from '../lib/target-diagnostics.mjs';
 import { writeDefaultTarget, readDefaultTarget, writeTargetChecks,
-  readDefaultModel, writeDefaultModel, clearDefaultModel, isModelAllowedFor, ALLOWED_MODELS } from '../lib/state.mjs';
+  readDefaultModel, writeDefaultModel, clearDefaultModel, isModelAllowedFor } from '../lib/state.mjs';
 import { Controller } from '../bridge-server/controller/controller.mjs';
 import { codexProvider } from '../bridge-server/adapters/codex.mjs';
 import { claudeProvider } from '../bridge-server/adapters/claude.mjs';
@@ -96,9 +96,7 @@ export function planOnboard({ options, targets, configuration }) {
     }
     if (options.model !== 'inherit' && !isModelAllowedFor(t, options.model)) {
       // Mirror resolveRouting's hints without importing the MCP server during setup.
-      const hint = t === 'copilot'
-        ? `set the Copilot model to one of: ${[...ALLOWED_MODELS].join(', ')}, or omit it to inherit configuration`
-        : t === 'opencode' ? 'Use a provider/model id.' : 'Model ids must contain no whitespace.';
+      const hint = t === 'opencode' ? 'Use a provider/model id.' : 'Model ids must contain no whitespace.';
       return { kind: 'error', code: 'MODEL_NOT_ALLOWED', message: `model "${options.model}" is not valid for ${t}. ${hint}` };
     }
   }

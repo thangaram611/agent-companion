@@ -136,13 +136,19 @@ const modes = () => ({ availableModes: [{ id: 'default', name: 'Default' }, { id
 
 const modelValues = JSON.parse(env.ACP_FAKE_MODELS || '[]');
 const defaultModel = env.ACP_FAKE_DEFAULT_MODEL || modelValues[0];
-const thoughtValues = JSON.parse(env.ACP_FAKE_THOUGHT_LEVELS || 'null');
+// A list applies to every model; a model-keyed object advertises different levels after selection.
+const levels = JSON.parse(env.ACP_FAKE_THOUGHT_LEVELS || 'null');
+const levelsFor = model => Array.isArray(levels) ? levels : levels?.[model];
 let thought = 'medium';
-const modelConfig = (model) => modelValues.length || thoughtValues ? ({ configOptions: [
-  ...(modelValues.length ? [{ id: 'model', type: 'select', currentValue: model, options: modelValues.map(value => ({ value, name: value })) }] : []),
-  ...(thoughtValues ? [{ id: env.ACP_FAKE_THOUGHT_ID || 'reasoning_effort', category: 'thought_level', type: 'select',
-    currentValue: thought, options: thoughtValues.map(value => ({ value, name: value })) }] : []),
-] }) : {};
+function modelConfig(model) {
+  const configOptions = [];
+  if (model) configOptions.push({ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: model,
+    options: (modelValues.length ? modelValues : [model]).map(value => ({ value, name: value })) });
+  const thoughtValues = levelsFor(model);
+  if (thoughtValues) configOptions.push({ id: env.ACP_FAKE_THOUGHT_ID || 'reasoning_effort', category: 'thought_level', type: 'select',
+    currentValue: thought, options: thoughtValues.map(value => ({ value, name: value })) });
+  return configOptions.length ? { configOptions } : {};
+}
 let sessionSeq = 0;
 const sessions = new Map();   // sessionId -> { cwd, prompts, loaded }
 let outSeq = 0;
@@ -232,15 +238,20 @@ function handle(msg) {
     // have is -32602 naming the ones it does.
     case 'session/set_config_option': {
       if (env.ACP_FAKE_MODEL_DISCONNECT === '1') process.exit(9);
+      const session = sessions.get(p.sessionId);
+      if (!session) { fail(-32602, 'Session not found: ' + p.sessionId); return; }
+      const thoughtValues = levelsFor(session.model);
       if (thoughtValues && p.configId === (env.ACP_FAKE_THOUGHT_ID || 'reasoning_effort')) {
         thought = thoughtValues.includes(p.value) && env.ACP_FAKE_IGNORE_EFFORT !== '1' ? p.value : 'medium';
-        reply(env.ACP_FAKE_MISSING_EFFORT === '1' ? { configOptions: [] } : modelConfig(defaultModel));
+        reply(env.ACP_FAKE_MISSING_EFFORT === '1' ? { configOptions: [] } : modelConfig(session.model));
         return;
       }
       if (p.configId !== 'model') { fail(-32602, 'Unknown config option: ' + p.configId); return; }
-      const session = sessions.get(p.sessionId);
-      if (!session) { fail(-32602, 'Session not found: ' + p.sessionId); return; }
-      if (String(p.value).startsWith('not-a-model')) {
+      if (spawnFlags.includes('--acp') && env.ACP_FAKE_MODELS && !modelValues.includes(p.value)) {
+        fail(-32602, "Invalid modelId '" + p.value + "': not one of this session's models.");
+        return;
+      }
+      if (!spawnFlags.includes('--acp') && String(p.value).startsWith('not-a-model')) {
         out({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: "Model '" + p.value + "' is not available for the current authentication method.", data: { modelId: p.value, availableModels: ['fake-model-a', 'fake-model-b'] } } });
         return;
       }
@@ -249,8 +260,7 @@ function handle(msg) {
         // Selection is saved before any prompt; invalid writes would stick too.
         if (env.ACP_FAKE_MODEL_STATE) writeFileSync(env.ACP_FAKE_MODEL_STATE, session.model);
       }
-      if (modelValues.length) { reply(modelConfig(session.model)); return; }
-      reply({ configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: p.value, options: [{ value: p.value, name: p.value }] }] });
+      reply(modelConfig(session.model));
       return;
     }
     default:

@@ -95,7 +95,7 @@ The table below is the current capability contract.
 | Companion | Per-job runtime | Follow-up by cold resume | In-flight messages (default first) | Model selection | History |
 | --- | --- | --- | --- | --- | --- |
 | OpenCode 2.x | Private authenticated `opencode serve` | Saved session | Steer, queue, interrupt | `provider/model`, optional variant | Vendor-persisted session |
-| GitHub Copilot CLI | `copilot --acp` | Unsupported until qualified | Unsupported | Inherit or supported explicit model | Session id retained; cold load unqualified |
+| GitHub Copilot CLI | `copilot --acp` | Unsupported until qualified | Unsupported | Inherit or select a model advertised by the session | Session id retained; cold load unqualified |
 | Codex CLI | `codex app-server` | `thread/resume` | Steer, queue, interrupt | Inherit or explicit override | Native thread and rollouts |
 | Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Queue, interrupt (live qualification pending) | Session model after new/load | Native SQLite history |
 | Claude Code | `claude -p` | `--resume` saved session | Queue, interrupt | Inherit or explicit override | Native transcripts |
@@ -125,6 +125,9 @@ Configuration:
   `AGENT_COMPANION_OPENCODE_MODEL` and `AGENT_COMPANION_CLAUDE_MODEL` override
   saved defaults where the host passes them (Claude host). An explicit request
   overrides the default; with neither set, the companion inherits its own configuration.
+- Copilot checks a saved or requested model when it opens a session. The bridge
+  confirms the selected model before sending the task. A refusal lists the
+  models the session offered. The bundled Copilot reviewer inherits the session model.
 - OpenCode requires 2.x and uses server permissions from its configuration.
   Its private loopback password is kept in memory, never in durable records.
 - Codex defaults to `workspace-write` with network enabled. Use
@@ -486,7 +489,7 @@ model variant, and Antigravity uses an advertised model id with a level suffix.
 For OpenCode and Antigravity, effort chooses the level even if the model string
 names a different variant or suffix; selected and effective models show the result.
 Invalid levels return `EFFORT_NOT_ALLOWED` with the offered levels or an
-omit-effort hint. A selection confirmation mismatch returns
+omit-effort hint. An effort confirmation mismatch returns
 `CAPABILITY_UNAVAILABLE`; transport and history failures remain separate.
 For Codex, **levels are unverified for models outside Codex's catalog**: the bridge
 passes effort, requires matching `reasoningEffort`, and lets the backend reject bad

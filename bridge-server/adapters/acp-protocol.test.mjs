@@ -17,16 +17,17 @@ test('Antigravity effort requires an advertised family and never strips a non-le
   assert.equal(ANTIGRAVITY.acp.reportedEffort({ model: 'gemini-flash-agent', configOptions }), null);
 });
 
-test('the descriptors drive the argv: Copilot permission flags and optional model, the fake as a bare `--acp`', () => {
+test('the Copilot spawn argv carries its permission flags and model selection uses the session', () => {
   assert.deepEqual(COPILOT.acp.args({ model: 'claude-sonnet-4.6', env: {} }), [
     '--acp',
-    '--model', 'claude-sonnet-4.6',
     '--no-ask-user',
     '--allow-all-tools',
     '--allow-all-paths',
     '--allow-all-urls',
   ]);
   assert.equal(COPILOT.acp.args({}).includes('--model'), false);
+  assert.deepEqual(COPILOT.acp.setModel({ sessionId: 's1', model: 'local-model' }),
+    ['session/set_config_option', { sessionId: 's1', configId: 'model', value: 'local-model' }]);
   assert.equal(COPILOT.acp.args({}).includes('--reasoning-effort'), false);
   assert.equal(COPILOT.capabilities.effortLevels, null);
   for (const effort of ['low', 'none', 'new-provider-level']) {
@@ -67,7 +68,6 @@ test('antigravity: the descriptor — bare spawn, no usage reader, load honoured
   assert.deepEqual(ANTIGRAVITY.acp.updates, ['agent_thought_chunk', 'agent_message_chunk', 'tool_call', 'tool_call_update', 'available_commands_update', 'user_message_chunk']);
   assert.deepEqual(ANTIGRAVITY.acp.setModel({ sessionId: 's1', model: 'gemini-pro-agent' }),
     ['session/set_config_option', { sessionId: 's1', configId: 'model', value: 'gemini-pro-agent' }]);
-  assert.equal(COPILOT.acp.setModel, undefined, 'Copilot takes its model as a spawn flag, and nothing changes for it');
   assert.equal(FAKE.acp.setModel, undefined);
   assert.equal(ANTIGRAVITY.binaryEnv, 'ANTIGRAVITY_ACP_BIN');
   assert.match(ANTIGRAVITY.binaryNames[0], /agent-companion\/antigravity-acp\/current\/agy_acp_server\.par$/, 'the registry binary, never agy');

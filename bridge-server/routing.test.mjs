@@ -48,7 +48,7 @@ test('routing refusals retain the envelope without profiles or strengths', async
   const prior = process.env.CLAUDE_CODE_SESSION_ID;
   process.env.CLAUDE_CODE_SESSION_ID = 'routing-test';
   try {
-    const result = (await dispatch({ action: 'send', target: 'copilot', model: 'unknown', task: 'x', cwd: '/tmp', thread: 'routing-child' })).structuredContent;
+    const result = (await dispatch({ action: 'send', target: 'copilot', model: 'two words', task: 'x', cwd: '/tmp', thread: 'routing-child' })).structuredContent;
     assert.equal(result.ok, false);
     assert.equal(result.action, 'send');
     assert.equal(result.code, 'MODEL_NOT_ALLOWED');

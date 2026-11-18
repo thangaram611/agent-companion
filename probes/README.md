@@ -15,10 +15,13 @@ all companion homes, workspaces and bridge state in its own temporary directory.
 `acp-record/record-copilot.mjs` drives the bridge's real `AcpAdapter` and process
 supervisor through four fresh sessions: `turn-command` (`echo fixture-ok` with
 tool/output evidence), `effort` (set and confirm `thought_level: low`), `cancel`
-(interrupt after the first session update; require `cancelled`), and `signed-out`
+(interrupt once the model streams; require `cancelled`), and `signed-out`
 (no BYOK environment; require `session/new` -32000 and adapter `AUTH_REQUIRED`).
 It is hand-run, outside `node --test`. The committed fixtures were recorded
-2026-11-17 on Copilot CLI 1.0.112 with local `gpt-oss:20b`.
+2026-11-18 on Copilot CLI 1.0.113 with local `gpt-oss:20b`. Each selects the
+requested model after `session/new` and confirms `currentValue` before
+prompting. `cancel` interrupts once the model streams (its first thought or
+message chunk); 1.0.113 answers that prompt without usage counters.
 
 Install Copilot CLI and Homebrew Ollama, then start Ollama manually:
 

@@ -66,8 +66,10 @@ and `FOLLOWUP_UNSUPPORTED`. Both role templates relay failures without changing
 the parent's choice. Omitted target uses the configured default; omitted model
 inherits configuration unless the conversation already has an override. Effort is
 a conversation override too, supported by all five companions. Claude has static
-levels `low`, `medium`, `high`, `xhigh`, `max`; Copilot validates and confirms the
-session model's ACP `thought_level` option, including reporting inherited effort.
+levels `low`, `medium`, `high`, `xhigh`, `max`. Copilot sets a requested model
+after `session/new` through `session/set_config_option` and confirms `currentValue`.
+A model refusal lists the session's advertised ids. Copilot validates and confirms
+the selected model's ACP `thought_level` option, including reporting inherited effort.
 Codex catalog models, OpenCode and Antigravity validate model-specific levels before delivery.
 Codex levels are unverified for models outside Codex's catalog: it confirms the
 reported effort and lets the backend validate vocabulary during the turn. Before writing any

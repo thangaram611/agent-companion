@@ -1,7 +1,7 @@
 # User defaults for companion model and effort: plan
 
-Status: decisions agreed and step 0 measured (2026-11-18); step 1 done on
-`feat/pane-open-rule` (2026-11-18); steps 2 to 9 not started.
+Status: decisions agreed and step 0 measured (2026-11-18); steps 1 and 2 done
+(2026-11-18); steps 3 to 9 not started.
 
 ## Goal
 
@@ -235,6 +235,24 @@ catalog drops `allowed`.
 Check: ACP unit tests, a re-record of Copilot fixtures with
 `probes/acp-record/record-copilot.mjs` (local Ollama, started only for the run),
 and a stub-backend test showing a bogus model refused.
+
+Done 2026-11-18. Code by Codex, reviewed by Claude. The adapter now validates
+effort against the options the selected model returns, not the session's
+starting model. The shipped Copilot reviewer agent's `model:` pin and its guard
+test went with `ALLOWED_MODELS` (owner's decision).
+- Fixtures re-recorded on Copilot CLI 1.0.113 with `gpt-oss:20b`. Each run
+  selects the model through `session/set_config_option` and never passes
+  `--model`.
+- New fact: 1.0.113 answers a cancelled prompt with `stopReason` alone, no
+  `usage`. That held once on the first update and once mid-turn after a
+  `usage_update` and a thought chunk. 1.0.112 counted it. A cancelled Copilot
+  job therefore reports no usage, and the replay test now pins that. The
+  recorder now cancels once the model streams.
+- Real Copilot 1.0.113 through the adapter (isolated home, BYOK to an unused
+  URL, no tokens): `bogus-model` gives `MODEL_NOT_ALLOWED`, "model
+  "bogus-model" is not one of this session's models. Use one of: auto,
+  gpt-oss:20b…", with Copilot's -32602 kept as the cause. `gpt-oss:20b` is
+  applied and confirmed.
 
 ### Step 3: Shared store and one application point
 

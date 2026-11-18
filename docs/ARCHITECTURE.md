@@ -177,7 +177,7 @@ suffix supplies effective effort. Selection is reapplied after load, which forge
 the model. The shared ACP adapter calls descriptor hooks without companion-id
 branches. ACP preserves JSON-RPC error codes to distinguish provider refusals
 (`MODEL_NOT_ALLOWED`, or `AUTH_REQUIRED` for -32000) from transport failures (`HistoryUnavailable`); only a
-model confirmation mismatch maps to `CAPABILITY_UNAVAILABLE` when selecting effort.
+model confirmation mismatch maps to `CAPABILITY_UNAVAILABLE` when effort is encoded in the model id.
 SPEC-2 does not measure pre-turn write durability for OpenCode or
 Antigravity; both paths treat selection writes as persistent, so refusal is safe
 either way. Their fakes persist writes before any prompt to test this ordering.
@@ -190,7 +190,8 @@ Copilot uses this generic path, has null static `effortLevels`, and receives no
 spawn effort flag. An explicit effort without an advertised option or descriptor
 selection path refuses capability rather than silently inheriting. Antigravity
 continues using its model-suffix descriptor because it advertises no thought-level
-option. Copilot cold follow-up remains unsupported. Claude rejects off-enum effort
+option. Copilot checks effort against the options returned for the selected model.
+Copilot cold follow-up remains unsupported. Claude rejects off-enum effort
 before spawn; its CLI selection persistence is not measured here.
 
 `records.begin` records the attempted effort on the execution and retains the
@@ -206,9 +207,11 @@ Provider failures use the same text path. The controller appends the provider's
 explanation after a blank line when partial assistant text exists; an identical
 explanation is not repeated. Wrapped runtime/history/delivery errors contribute
 their innermost nonempty `message` string; `AUTH_REQUIRED` carries no cause, its
-message is the native one followed by the descriptor's `auth.nextSteps`. Explanations collapse whitespace to one
+message is the native one followed by the descriptor's `auth.nextSteps`. Native explanations collapse whitespace to one
 line and are capped at 500 characters, including a trailing ellipsis when truncated.
-Only message strings are copied, never error data, headers or response bodies.
+An ACP `MODEL_NOT_ALLOWED` with advertised model choices carries the bridge's
+full list in the reply and retains the provider error as its cause. Only message
+strings are copied, never error data, headers or response bodies.
 OpenCode supplies the failed turn's idle error, falling back to its assistant
 error, and retains that turn's latest nonempty assistant text. Codex supplies
 turn/error notification messages; ACP supplies prompt errors.
@@ -302,7 +305,7 @@ Each job owns a new process, including the HTTP and ACP providers.
 | --- | --- | --- | --- | --- | --- |
 | Codex CLI | `codex app-server` over stdio | `thread/resume` | Steer, queue, interrupt; steer accepted and confirmed are separate | Explicit override, otherwise inherited; effective model/effort recorded | Saved thread id and vendor rollouts |
 | OpenCode 2.x only | Private `opencode serve` on loopback | Saved session id | Steer, queue, interrupt | `provider/model`, optional variant; resolved model verified | Vendor-persisted session |
-| GitHub Copilot CLI | `copilot --acp` | `FOLLOWUP_UNSUPPORTED` until cold load is qualified | Unsupported | Inherited configuration or supported explicit model | Session id retained; cross-process load unqualified |
+| GitHub Copilot CLI | `copilot --acp` | `FOLLOWUP_UNSUPPORTED` until cold load is qualified | Unsupported | Inherit or select an advertised session model | Session id retained; cross-process load unqualified |
 | Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Queue, interrupt; live qualification pending | Session config option after both new and load | SQLite conversations under `~/.gemini/antigravity-acp/conversations/` |
 | Claude Code | `claude -p` stream-json over stdio | `--resume` saved session id | Queue, interrupt (`send_now`) | Explicit override, otherwise inherited | Native session id and transcripts |
 
@@ -887,8 +890,10 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   `gemini-3.7-flash-high`). So the descriptor names the request (`acp.setModel`) and the
   adapter sends it after `session/new` and again after `session/load`; an unknown id is
   refused with -32602 naming the available ones and fails the prompt, never a silent
-  fallback to the default. Copilot's descriptor has no such hook and its argv is
-  unchanged.
+  fallback to the default. On Copilot CLI 1.0.113, passing `--model bogus-model`
+  makes `session/new` advertise that id. The bridge starts Copilot without the
+  flag and uses the same `acp.setModel` hook. The session refuses unadvertised
+  ids with -32602. The bridge checks the returned `currentValue` before delivery.
 - **A codex role file accepting `mcp_servers` does not mean the child gets it.** The Codex
   subagents docs say a custom agent file may declare `mcp_servers`. Read against rust-v0.153.4
   (2026-09-09): the role parser (`codex-rs/agent-roles/src/agent_role_config.rs`) flattens the

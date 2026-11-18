@@ -164,14 +164,58 @@ test('new session then cold follow-up loads the same history in a new process an
   assert.equal(second.nativeRefs.promptRequestId, h.frames('session/prompt')[1].id);
 });
 
-test('Copilot-style follow-up is refused with FOLLOWUP_UNSUPPORTED before any process starts', async (t) => {
-  const h = setup(t, { descriptor: getTargetById('copilot'), env: { ACP_FIXTURE_USAGE: 'copilot' } });
-  const first = await h.finish(await h.send({ model: 'gpt-5' }));
+test('Copilot sets the session model before prompting and refuses cold follow-up', async (t) => {
+  const h = setup(t, { descriptor: getTargetById('copilot'), env: { ACP_FIXTURE_USAGE: 'copilot', ACP_FAKE_MODELS: '["auto","local-model"]' } });
+  const first = await h.finish(await h.send({ model: 'local-model' }));
   assert.equal(first.outcome, 'completed'); assert.equal(first.usage.input_tokens, 1234);
+  assert.equal(first.effectiveModel, 'local-model');
+  assert.equal(lines(h.trace)[0].argv.includes('--model'), false);
+  assert.deepEqual(lines(h.trace).filter(f => f.method).map(f => f.method),
+    ['initialize', 'session/new', 'session/set_config_option', 'session/prompt']);
+  assert.deepEqual(h.frames('session/set_config_option')[0].params,
+    { sessionId: first.nativeRefs.sessionId, configId: 'model', value: 'local-model' });
   await assert.rejects(h.send({ text: 'follow-up' }), { code: 'FOLLOWUP_UNSUPPORTED' });
   assert.equal(h.supervisors.length, 1); assert.equal(h.frames('session/new').length, 1);
   assert.equal(h.frames('session/load').length, 0);
-  assert.ok(lines(h.trace)[0].argv.includes('--model'));
+});
+
+for (const model of ['bogus-model', 'local-model']) test(`Copilot refuses an unavailable or unconfirmed model before delivery: ${model}`, async t => {
+  const models = ['auto', ...Array.from({ length: 50 }, (_, i) => `session-model-${i}`), 'local-model'];
+  const h = setup(t, { descriptor: getTargetById('copilot'), env: {
+    ACP_FAKE_MODELS: JSON.stringify(models), ACP_FAKE_IGNORE_MODEL: '1',
+  } });
+  h.controller.providers.copilot = h.controller.providers.fake;
+  const sent = (await dispatch({ action: 'send', target: 'copilot', thread: 'child', cwd: h.dir, task: 'hello', model },
+    { controller: h.controller })).structuredContent;
+  assert.equal(sent.status, 'failed');
+  assert.equal(sent.meta.detail, 'MODEL_NOT_ALLOWED');
+  assert.ok(sent.content.includes(`model "${model}"`));
+  assert.ok(sent.content.includes(`Use one of: ${models.join(', ')}, or omit it to inherit configuration.`));
+  assert.equal(h.frames('session/set_config_option').length, 1);
+  assert.equal(h.frames('session/prompt').length, 0);
+});
+
+test('Copilot preserves the native model refusal as the cause', async t => {
+  const h = setup(t, { descriptor: getTargetById('copilot'), env: { ACP_FAKE_MODELS: '["auto","local-model"]' } });
+  const adapter = h.controller.providers.fake.create();
+  await adapter.start({ cwd: h.dir, env: h.childEnv, supervisor: h.controller.createSupervisor({}) });
+  await assert.rejects(adapter.openHistory({ model: 'bogus-model' }), err => {
+    assert.equal(err.code, 'MODEL_NOT_ALLOWED');
+    assert.equal(err.cause.code, -32602);
+    assert.equal(err.cause.message, "Invalid modelId 'bogus-model': not one of this session's models.");
+    return true;
+  });
+});
+
+test("Copilot validates effort against the selected model's options", async t => {
+  const h = setup(t, { descriptor: getTargetById('copilot'), env: {
+    ACP_FAKE_MODELS: '["auto","local-model"]', ACP_FAKE_THOUGHT_LEVELS: '{"auto":["medium"],"local-model":["medium","high"]}',
+  } });
+  const result = await h.finish(await h.send({ model: 'local-model', effort: 'high' }));
+  assert.equal(result.effectiveModel, 'local-model');
+  assert.equal(result.effectiveEffort, 'high');
+  assert.deepEqual(h.frames('session/set_config_option').map(f => [f.params.configId, f.params.value]),
+    [['model', 'local-model'], ['reasoning_effort', 'high']]);
 });
 
 test('Copilot OTEL usage is execution-private and temporary files are removed on close', async (t) => {
@@ -210,6 +254,7 @@ for (const fault of ['refused', 'wrong-model', 'missing-model']) {
     const result = await h.send({ model: fault === 'refused' ? 'not-a-model' : 'fake-model-a' });
     assert.equal(result.outcome, 'failed');
     assert.equal(h.records.readExecution(result.executionId).terminal.error, 'MODEL_NOT_ALLOWED');
+    if (fault === 'wrong-model') assert.match(result.text, /Use one of: fake-model-a,/);
     assert.equal(h.frames('session/prompt').length, 0); assert.ok(result.stopEvidence.gone);
   });
 }
@@ -367,10 +412,12 @@ test('Antigravity rejects ignored effort, does not infer effort from an unrelate
 });
 
 for (const effort of [undefined, 'low', 'max']) test(`Copilot session effort ${effort ?? 'inherits'}`, async t => {
-  const h = setup(t, { descriptor: getTargetById('copilot'), env: { ACP_FAKE_THOUGHT_LEVELS: '["low","medium","high","xhigh","max"]' } });
+  const h = setup(t, { descriptor: getTargetById('copilot'), env: { ACP_FAKE_MODELS: '["auto","local-model"]', ACP_FAKE_THOUGHT_LEVELS: '["low","medium","high","xhigh","max"]' } });
   const result = await h.finish(await h.send({ effort }));
   const argv = lines(h.trace)[0].argv;
   assert.equal(argv.includes('--reasoning-effort'), false);
+  assert.equal(argv.includes('--model'), false);
+  assert.equal(result.effectiveModel, 'auto');
   assert.equal(result.effectiveEffort, effort ?? 'medium');
   assert.deepEqual(h.frames('session/set_config_option').map(f => f.params), effort === undefined ? [] :
     [{ sessionId: 'fake-sess-1', configId: 'reasoning_effort', value: effort }]);

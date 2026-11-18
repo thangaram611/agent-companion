@@ -287,7 +287,7 @@ test('invalid model ids fail with companion-specific bridge hints', () => {
     ['claude', 'two words', /Model ids must contain no whitespace\./],
     ['codex', 'two words', /Model ids must contain no whitespace\./],
     ['opencode', 'haiku', /Use a provider\/model id\./],
-    ['copilot', 'haiku', /set the Copilot model to one of: .*or omit it to inherit configuration/],
+    ['copilot', 'two words', /Model ids must contain no whitespace\./],
   ]) {
     const r = run(['--target', id, '--model', model, '--set-default', '--no-target-check']);
     assert.equal(r.code, 2, r.stderr);
@@ -346,7 +346,7 @@ test('human model plans explain set and clear, even without --set-default', () =
 });
 
 test('each companion uses its existing model file and keeps environment precedence', () => {
-  for (const [id, model] of [['copilot', 'gpt-5.4'], ['codex', 'gpt-5.4'],
+  for (const [id, model] of [['copilot', 'byok-model:latest'], ['codex', 'gpt-5.4'],
     ['opencode', 'anthropic/claude-haiku-4-5'], ['antigravity', 'gemini-pro-agent']]) {
     const r = run(['--target', id, '--model', model, '--set-default', '--no-target-check', '--json']);
     assert.equal(r.code, 0, r.stderr);

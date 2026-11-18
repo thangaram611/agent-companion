@@ -35,7 +35,10 @@ export async function exerciseScenario(adapter, { scenario, cwd, env, supervisor
     const notify = adapter.connection._onNotification.bind(adapter.connection);
     adapter.connection._onNotification = frame => {
       notify(frame);
-      if (!cancellation && frame.method === 'session/update' && frame.params?.sessionId === history.historyId) {
+      // Mid-turn: once the model streams. Copilot 1.0.113 stops at once, so a
+      // cancel on its first update (session_info_update) lands before any tokens.
+      if (!cancellation && frame.method === 'session/update' && frame.params?.sessionId === history.historyId
+        && ['agent_thought_chunk', 'agent_message_chunk'].includes(frame.params?.update?.sessionUpdate)) {
         cancellation = adapter.interrupt();
         cancellation.catch(() => {});
       }

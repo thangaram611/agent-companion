@@ -32,10 +32,11 @@ test('registered send and catalog expose only conversational inputs', async () =
 });
 
 test('explicit invalid models are refused for each companion', () => {
-  for (const [target, model] of [['copilot', 'unknown-model'], ['opencode', 'missing-provider'], ['codex', 'bad model'], ['antigravity', 'bad model'], ['claude', 'bad model']]) {
+  for (const [target, model] of [['copilot', 'bad model'], ['opencode', 'missing-provider'], ['codex', 'bad model'], ['antigravity', 'bad model'], ['claude', 'bad model']]) {
     const result = resolveRouting({ target, model }, {});
     assert.equal(result.ok, false);
     assert.equal(result.code, 'MODEL_NOT_ALLOWED');
+    if (target === 'copilot') assert.equal(result.hint, 'Model ids must contain no whitespace.');
   }
 });
 
@@ -64,6 +65,9 @@ test('catalog is ownerless and leaves cold and populated state/runtime directori
     assert.equal(first.targets.length, 5);
     assert.equal(first.targets.find((t) => t.id === 'codex').model.description, "inherits the companion's own configuration");
     assert.equal(first.targets.find((t) => t.id === 'antigravity').model.enumeration, 'not enumerable without a session');
+    const copilot = first.targets.find(t => t.id === 'copilot');
+    assert.equal(copilot.model.enumeration, 'not enumerable without a session');
+    assert.equal(Object.hasOwn(copilot.model, 'allowed'), false);
     const claude = first.targets.find((t) => t.id === 'claude');
     assert.equal(claude.model.model, null);
     assert.equal(claude.model.description, 'inherits the Claude Code default; any model id or alias accepted, validated by Claude Code');

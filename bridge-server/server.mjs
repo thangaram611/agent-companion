@@ -50,7 +50,7 @@ import { opencodeProvider } from './adapters/opencode.mjs';
 import { acpProvider } from './adapters/acp.mjs';
 
 import { log, validateAgentArgs } from './validation.mjs';
-import { BASE_DIR, readDefaultModel, migrateLegacyState, isModelAllowedFor, readDefaultTarget, ALLOWED_MODELS } from '../lib/state.mjs';
+import { BASE_DIR, readDefaultModel, migrateLegacyState, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
 import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
 import { queuePath, runtimeDir, appendPrivateFile } from '../lib/runtime-paths.mjs';
 import { logEvent } from '../lib/log.mjs';
@@ -190,9 +190,7 @@ export function resolveRouting({ target = null, model = null, effort = null } = 
   if (selectedModel && !isModelAllowedFor(companion, selectedModel)) {
     return { ok: false, code: 'MODEL_NOT_ALLOWED', companion, model: selectedModel,
       error: `model "${selectedModel}" is not valid for ${companion}`,
-      hint: companion === 'copilot'
-        ? `set the Copilot model to one of: ${[...ALLOWED_MODELS].join(', ')}, or omit it to inherit configuration`
-        : companion === 'opencode' ? 'Use a provider/model id.' : 'Model ids must contain no whitespace.' };
+      hint: companion === 'opencode' ? 'Use a provider/model id.' : 'Model ids must contain no whitespace.' };
   }
   return effortRefusal(descriptor, effort) || { ok: true, resolved: { companion, model: selectedModel, effort, capabilities: descriptor.capabilities } };
 }
@@ -417,9 +415,7 @@ function handleCatalog(env) {
           description: model.model ? 'configured default' : target.id === 'claude'
             ? 'inherits the Claude Code default; any model id or alias accepted, validated by Claude Code'
             : "inherits the companion's own configuration",
-          enumeration: target.id === 'copilot' ? 'documented ids; account availability not checked'
-            : target.capabilities.acp || ['codex', 'claude'].includes(target.id) ? 'not enumerable without a session' : 'not cached',
-          ...(target.id === 'copilot' ? { allowed: [...ALLOWED_MODELS] } : {}),
+          enumeration: target.capabilities.acp || ['codex', 'claude'].includes(target.id) ? 'not enumerable without a session' : 'not cached',
         },
         effort: { selection: target.capabilities.effortSelection, levels: target.capabilities.effortLevels ?? null,
           description: !target.capabilities.effortSelection ? 'Effort selection is unsupported.'

@@ -1,6 +1,7 @@
 // server.mjs must be importable from tests without attaching to stdio and
 // must expose enough seams to validate bridge behavior without a real provider.
 
+import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
