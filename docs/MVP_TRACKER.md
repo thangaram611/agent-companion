@@ -205,6 +205,23 @@ remains separate from implementation; see the release gates below.
      permission-refused tool call (the one local row, 2026-11-17, is a denial);
      the controller's native-error override is Copilot-only. The fix would make
      that override a target-registry setting instead of an id check.
+- Defaults from inside a host (deferred 2026-11-18; the CLI and the live-view
+  panel come first, see [Defaults plan](DEFAULTS_PLAN.md)):
+  1. Codex skill `agent-companion:companion`. Measured on codex-cli 0.170.0: a
+     plugin cannot add slash commands, because `commands/*.md` was not exposed on
+     install under either manifest layout. A plugin skill appears as
+     `<plugin>:<name>`, is invoked with a `$` mention or `/skills`, and the model
+     carries it out in a turn. `.codex-plugin/plugin.json`
+     `"skills": "./codex-skills/"` keeps it out of Claude. Under
+     `workspace-write`, the turn's shell cannot write the settings file (any
+     `$HOME` path outside the workspace is denied), so a save asks for
+     escalation; a show does not.
+  2. Claude `/companion` subcommands (`/companion defaults …`). The mod's
+     `command.run` receives everything typed after the name as `e.args` and
+     `CommandSpec.argumentHint` shows a hint
+     (`.claude-plugin/types/claude-code/index.d.ts:2112`). It runs with no
+     model turn and would call `launch-ui.sh defaults …` through
+     `$.process.run`. Plain `/companion` keeps opening the pane.
 - Generic ACP companions (deferred 2026-11-17): run any agent from the
   [ACP registry](https://agentclientprotocol.com/get-started/registry) (about 45,
   e.g. Gemini, Goose, Cursor, Qwen) or a local ACP command through the shared ACP
