@@ -11,8 +11,11 @@ import { jobModel } from '../lib/model-name.mjs'
 // cards, rebuilt from the records by a Node child (`launch-ui.sh jobs`) at
 // the session's start and each open, or the job of the companion subagent in
 // view, or of a card Claude Code could not view, its transcript streamed by a
-// Node child (`launch-ui.sh follow`) while it is shown. Native text reaches
-// the screen only through rows.mjs's clean.
+// Node child (`launch-ui.sh follow`) while it is shown. It opens on
+// /companion, or unasked on entering the view of a companion subagent with a
+// job; the return to the main conversation closes a pane that view opened,
+// unless the person took it since. Native text reaches the screen only
+// through rows.mjs's clean.
 
 type Agent = {
   title: string
@@ -89,10 +92,12 @@ let follow: Follow | undefined
 let picked: string | undefined
 // The last rebuild: how many of the session's jobs it left off the list, and why it failed.
 let older = 0, rebuilds = 0, failure: string | undefined
-// The agent in view when a site last drew, so a return to the main conversation is seen once.
+// The agent in view when a site last drew, so each switch of the view is seen once.
 let shownAgent: string | undefined
-// The jobs whose agent_send opened the pane: an identical send to a busy job returns it again.
-const announced = new Set<string>()
+// The pane is open because a companion subagent's view opened it, so the
+// return to the main conversation closes it. Cleared once the person takes it
+// (its keys, a press in it, /companion) and by any close.
+let viewOpened = false
 
 // A running job's message box, per job: the draft, the mode it sends in (the
 // companion's own default first), the cancel question, and the last send's
@@ -227,9 +232,27 @@ function body(a: Agent, now: number, columns: number | undefined, titleWidth: nu
 function registerCommand($: EngineInterface) {
   return $.command.register({ name: 'companion', description: "Show this session's companion jobs, or the job of the companion subagent in view" })
 }
-function sawView($: EngineInterface, agentId: string | undefined) {
-  if (shownAgent && !agentId) void registerCommand($).catch(() => {})
+// Each switch of the view, seen once by whichever site draws first: a
+// companion subagent's view opens the pane unless it is up; the return to the
+// main conversation closes the one that view opened.
+function sawView($: EngineInterface, agentId: string | undefined, paneUp = false) {
+  if (agentId === shownAgent) return
+  const left = shownAgent
   shownAgent = agentId
+  if (agentId) { if (!paneUp) void openForView($, agentId).catch(() => {}) }
+  else if (left) {
+    void registerCommand($).catch(() => {})
+    if (viewOpened) { viewOpened = false; void $.ui.close({ id: PANE }).catch(() => {}) }
+  }
+}
+// Unasked, so placed only on a wide terminal and leaving the keys with the
+// prompt; the view may have moved on while the engine listed the panes.
+async function openForView($: EngineInterface, agentId: string) {
+  if (!agents.get(agentId)?.jobId) return
+  const up = (await $.ui.panes()).some(pane => pane.id === PANE)
+  if (up || viewOpened || shownAgent !== agentId) return
+  viewOpened = true
+  await openPane($)
 }
 
 // Each open lists the session's jobs again; the person's own takes the keys.
@@ -381,14 +404,15 @@ export const register: Register = on => {
   })
   // The person's own open: placed at any width, with the keys.
   on('command.run', { command: 'companion' }, async $ => {
+    viewOpened = false
     await openPane($, true)
     return {}
   })
 
   // The bridge answers agent_send with the job it started for this subagent;
-  // a new job opens the pane, which places itself on a wide terminal. The
-  // row's clock may have found the job already (the bridge writes its
-  // conversation record before agent_send answers), so the open goes by job.
+  // the row's clock may have found it already (the bridge writes its
+  // conversation record before agent_send answers). A start opens nothing,
+  // save for a person already in that subagent's view, as entering it does.
   on('tool.call', { tool: SEND }, async ($, e, next) => {
     const ran = await next(e)
     const jobId = parse(ran.text)?.job_id
@@ -397,10 +421,7 @@ export const register: Register = on => {
       agents.set(e.agentId, a)
       // Its subagent sent it, so that subagent runs.
       if (a.jobId !== jobId) Object.assign(a, { jobId, execution: undefined, result: undefined, texts: undefined, endedAt: undefined, listed: true })
-      if (!announced.has(jobId)) {
-        announced.add(jobId)
-        void openPane($).catch(() => {})
-      }
+      if (e.agentId === shownAgent) void openForView($, e.agentId).catch(() => {})
       startClock($)
     }
     return ran
@@ -432,7 +453,9 @@ export const register: Register = on => {
   // Draws only from what the clock and the children already brought in.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Input } = $.ui.resolve(e)
-    sawView($, e.props.view?.agentId)
+    sawView($, e.props.view?.agentId, true)
+    // The person took the pane: the return to the main conversation keeps it.
+    if (e.props.isFocused) viewOpened = false
     // A module loaded under an open pane (a reload) has not listed the session's jobs yet.
     if (!rebuilds) void rebuild($)
     const now = await $.clock.now(), w = Math.max(16, e.props.bodyColumns), focused = e.props.isFocused
@@ -528,10 +551,17 @@ export const register: Register = on => {
       row([[focused ? ` ${keys} or ⏎ open a job · esc returns` : ` ctrl+x tab for keys · ${keys} or ⏎ open a job`, 'faint']]))
   })
 
+  // A press in the pane, by click as well as by key, is the person taking it.
+  on('ui.press', { component: 'Pane', requestId: PANE }, ($, e, next) => {
+    viewOpened = false
+    return next(e)
+  })
+
   // The next open starts on the list.
   on('ui.close', { id: PANE }, ($, e, next) => {
     stopFollow()
     picked = undefined
+    viewOpened = false
     return next(e)
   })
 }

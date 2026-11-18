@@ -696,9 +696,12 @@ the elapsed time; once the job ends, its outcome and duration. The rows refresh
 every second while a job runs, from the same execution records, and the mod
 writes nothing. Other subagents' rows stay as Claude Code draws them.
 
-The mod also opens a **Companions** pane when a companion job starts (on
-terminals from 144 columns; `/companion` opens it at any width and gives it
-the keys). With the main conversation in view it lists this session's jobs as
+The mod also draws a **Companions** pane. `/companion` opens it at any width
+and gives it the keys. Switching to an agent-companion subagent's view opens it
+too, on terminals from 144 columns and with the keys left at the prompt; going
+back to the main conversation closes that pane again, unless you used it in
+between (gave it the keys, pressed in it, or ran `/companion`). A job starting
+opens nothing. With the main conversation in view it lists this session's jobs as
 cards, running first, then the nine newest, the older ones counted; the list
 is read again from the execution records at the session's start and at each
 open, a resumed session included: its jobs are the ones its transcript's

@@ -1,6 +1,7 @@
 # User defaults for companion model and effort: plan
 
-Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 9 not started.
+Status: decisions agreed and step 0 measured (2026-11-18); step 1 done on
+`feat/pane-open-rule` (2026-11-18); steps 2 to 9 not started.
 
 ## Goal
 
@@ -197,6 +198,32 @@ Check: mod tests under `claude plugin test .`, covering:
 Then a live run in a restarted Claude session through the real send path: start
 a job and see no pane; enter its subagent view and see the pane; go back and see
 it close; type `/companion` and see it open.
+
+Done 2026-11-18. Two additions on the way, each with a test:
+- A person already in a companion subagent's view when its `agent_send` answers
+  sees the pane open, as entering the view does.
+- A press in the pane (a `ui.press` hook) also counts as taking it. `← jobs`
+  returns to the main conversation, so a click on it in a pane the view opened
+  would otherwise have closed that pane.
+
+The person's own close is not testable in the kit (its `$.ui` cannot raise
+`ui.close`); the live run covers it. 31 mod tests (9 new or changed, each failing
+against the old mod) and 919 node tests pass.
+
+Live run, Claude Code 2.1.327 at 1920 px, the session reloading the mod
+(`agent-companion: reloaded (6 hooks: …, ui.press, ui.close)`), an OpenCode
+`flint-40b-free` job (`sleep 150`) through the real send path, driven by clicks
+on the agent list:
+- the job started and no pane opened;
+- entering its view opened the pane on its job, the keys left at the prompt;
+- returning to main closed it;
+- entering again reopened it; a click in it gave it the keys, and returning kept
+  it, showing the list;
+- after a close with its × mark, entering reopened it and returning closed it.
+
+Not run live: typing `/companion`. Computer use cannot type into a terminal.
+That path changed by one line, which clears the view-open. A test covers it, and
+the open itself was verified live on 2026-11-17.
 
 ### Step 2: Copilot model through the session option
 

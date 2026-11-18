@@ -420,8 +420,11 @@ Decided 2026-11-17 with the owner, after the measurements below; approved as
   subagent's view (`$.ui.view`), and with an agent-companion subagent in view
   the pane shows its job like the live view's job pane: the same labels,
   folding, pending messages and input box, cancel included. Any other view
-  shows the list. Unasked it opens when a companion job starts and places only
-  on wide terminals; `/companion` opens it at any width.
+  shows the list. `/companion` opens it at any width. Changed 2026-11-18
+  (`docs/DEFAULTS_PLAN.md` step 1): a job's start no longer opens it; entering
+  an agent-companion subagent's view opens it unasked (wide terminals only, the
+  keys left at the prompt), and the return to the main conversation closes that
+  pane unless the person took it since (its keys, a press in it, `/companion`).
 - Reuse, never copy: text through `bridge-server/ui/rows.mjs`; the transcript
   from the core reader in a Node child streamed with `$.process.spawn`; inbox
   requests and outcomes through `bridge-server/ui/inbox.mjs` in a Node child.

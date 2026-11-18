@@ -35,7 +35,7 @@ type Run = { exitCode: number; stdout: string; stderr: string }
 // The engine beneath the mod: the bridge's records from memory (`reads` counts
 // them), agent_send answering each subagent's job, `launch-ui.sh jobs`
 // answering each session's list (`sessions`, or `run` in its place), the
-// session's id, the pane's open, the view (refused for `unviewable` agents),
+// session's id, the pane's opens and closes (`up` while open), the view (refused for `unviewable` agents),
 // the debug log, and the session's commands (`commands`; `registers` counts
 // the calls). The kit hands no hook of a test a plugin's $.ui.focus (2.1.326):
 // each rejects, so `rings` reads the keys the mod tried from its debug log.
@@ -43,7 +43,7 @@ function engine(on: On, files: Record<string, unknown>, jobs: Record<string, str
   { sessions = {}, unviewable = [], run, outcome = { ok: true, status: 'accepted' } }:
     { sessions?: Record<string, Listed>; unviewable?: string[]; run?: Run; outcome?: Record<string, unknown> | null } = {}) {
   mock.env(on, { HOME })
-  const seen = { reads: 0, opens: [] as unknown[], views: [] as unknown[], lists: [] as (readonly string[])[], logs: [] as { text: string }[],
+  const seen = { reads: 0, opens: [] as unknown[], closes: [] as unknown[], up: false, views: [] as unknown[], lists: [] as (readonly string[])[], logs: [] as { text: string }[],
     sends: [] as (readonly string[])[],
     commands: new Set<string>(), registers: 0, rings: () => seen.logs.flatMap(({ text }) => /ring stays off (\S+) \(/.exec(text)?.[1] ?? []) }
   on('fs.read', (_, e) => {
@@ -63,7 +63,9 @@ function engine(on: On, files: Record<string, unknown>, jobs: Record<string, str
     const listed = sessions[e.argv[4]!] ?? { jobs: [], older: [] }
     return { value: { exitCode: 0, stdout: JSON.stringify(listed) + '\n', stderr: '', ...run, isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('ui.open', (_, e) => { seen.opens.push(e); return { value: { isPlaced: true } } })
+  on('ui.open', (_, e) => { seen.opens.push(e); seen.up = true; return { value: { isPlaced: true } } })
+  on('ui.close', (_, e) => { seen.closes.push(e); seen.up = false; return { value: undefined } })
+  on('ui.panes', () => ({ value: seen.up ? [{ id: 'companions', title: 'Companions', isShown: true, isFocused: false, isPlaced: true }] : [] }))
   on('ui.view', (_, e) => {
     seen.views.push(e)
     return { value: e.agentId && unviewable.includes(e.agentId) ? { deny: 'no agent holds that id' } : {} }
@@ -128,8 +130,8 @@ test("the list: this session's jobs as cards, running first, and a card opens it
     await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: id })
     await $.ui.render(agentRow(id, title))
   }
-  // A new job opens the pane, with no background of its own.
-  expect(seen.opens).toEqual(Array(3).fill({ id: 'companions', title: 'Companions', backgroundColor: 'transparent' }))
+  // A job's start opens nothing.
+  expect(seen.opens).toEqual([])
   await seen.clock.advance(1000)
 
   const reads = seen.reads
@@ -243,18 +245,120 @@ test("the subagent in view shows its job: labels, folding, pending, the live lin
   await ui.unmount()
 })
 
-test("a new job opens the pane once even when its row's clock found the job before agent_send answered", async ($, on) => {
-  const files = { [`${DIR}/conversations/a1.json`]: { executionId: 'j1' }, [`${DIR}/executions/j1.json`]: execution('j1') }
-  const seen = engine(on, files, { a1: 'j1' }, START + 1000)
+const UNASKED = { id: 'companions', title: 'Companions', backgroundColor: 'transparent' }
+
+test("a job's start opens nothing; its subagent's view opens the pane unasked, once, and the return closes it", async ($, on) => {
+  const seen = engine(on, { [`${DIR}/executions/j1.json`]: execution('j1') }, { a1: 'j1' }, START + 1000)
   follows(on, {})
-  // The subagent's row draws and its clock reads the conversation record the
-  // bridge writes while agent_send is still starting the job (0.9 s, measured).
   await $.ui.render(agentRow('a1', 'Pane check'))
-  await seen.clock.advance(1000)
   await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: 'a1' })
-  // An identical send to the busy job reattaches to it: no second open.
+  // An identical send to the busy job reattaches to it.
   await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: 'a1' })
-  expect(seen.opens).toEqual([{ id: 'companions', title: 'Companions', backgroundColor: 'transparent' }])
+  await seen.clock.settle()
+  expect(seen.opens).toEqual([])
+
+  // The band draws again at each switch of the view, and on other redraws.
+  for (const view of [{ agentId: 'a1' }, { agentId: 'a1' }]) await $.ui.render(band(view))
+  await seen.clock.settle()
+  expect(seen.opens).toEqual([UNASKED])
+  for (const view of [{}, {}]) await $.ui.render(band(view))
+  await seen.clock.settle()
+  expect(seen.closes).toEqual([{ id: 'companions', origin: { kind: 'plugin' } }])
+
+  // Entered again, it opens again.
+  await $.ui.render(band({ agentId: 'a1' }))
+  await seen.clock.settle()
+  expect(seen.opens).toEqual([UNASKED, UNASKED])
+})
+
+// A companion subagent with a running job, its view entered: the pane opened unasked.
+async function viewed($: any, on: On) {
+  const seen = engine(on, { [`${DIR}/executions/j1.json`]: execution('j1'), [`${DIR}/executions/j2.json`]: execution('j2') }, { a1: 'j1', a2: 'j2' }, START + 1000)
+  follows(on, {})
+  on('command.run', () => ({}))
+  for (const id of ['a1', 'a2']) {
+    await $.ui.render(agentRow(id, `Pane check ${id}`))
+    await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: id })
+  }
+  await $.ui.render(band({ agentId: 'a1' }))
+  await seen.clock.settle()
+  expect(seen.opens).toEqual([UNASKED])
+  return seen
+}
+
+test('a pane the view opened stays on the return once the person gave it the keys', async ($, on) => {
+  const seen = await viewed($, on)
+  const ui = await $.ui.mount(pane({ agentId: 'a1' }))
+  // Drawn holding the keys after the person's ctrl+x tab.
+  await ui.redraw(pane({ agentId: 'a1' }, 18, 64, true).props)
+  await ui.unmount()
+  await $.ui.render(band({}))
+  await seen.clock.settle()
+  expect([seen.opens, seen.closes]).toEqual([[UNASKED], []])
+})
+
+test("a pane the view opened stays when the person presses its '← jobs', which returns to the main conversation", async ($, on) => {
+  const seen = await viewed($, on)
+  const ui = await $.ui.mount(pane({ agentId: 'a1' }))
+  await ui.press({ key: 'jobs' })
+  expect(seen.views).toEqual([{}])
+  await ui.redraw(pane({}).props)
+  await $.ui.render(band({}))
+  await seen.clock.settle()
+  expect([seen.opens, seen.closes]).toEqual([[UNASKED], []])
+  await ui.unmount()
+})
+
+test('a pane the view opened stays on the return once the person ran /companion', async ($, on) => {
+  const seen = await viewed($, on)
+  await $.command.run({ command: 'companion', args: '' } as never)
+  await $.ui.render(band({}))
+  await seen.clock.settle()
+  expect([seen.opens, seen.closes]).toEqual([[UNASKED, { ...UNASKED, focus: true }], []])
+})
+
+test("a move to another companion subagent's view keeps the pane, and the return closes it", async ($, on) => {
+  const seen = await viewed($, on)
+  const ui = await $.ui.mount(pane({ agentId: 'a1' }))
+  await ui.redraw(pane({ agentId: 'a2' }).props)
+  await $.ui.render(band({ agentId: 'a2' }))
+  await ui.unmount()
+  await $.ui.render(band({}))
+  await seen.clock.settle()
+  expect([seen.opens, seen.closes]).toEqual([[UNASKED], [{ id: 'companions', origin: { kind: 'plugin' } }]])
+})
+
+test("a pane the person opened stays as it was through a view; another subagent's view opens nothing", async ($, on) => {
+  const seen = engine(on, { [`${DIR}/executions/j1.json`]: execution('j1') }, { a1: 'j1' }, START + 1000)
+  follows(on, {})
+  on('command.run', () => ({}))
+  await $.ui.render(agentRow('a1', 'Pane check'))
+  await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: 'a1' })
+
+  // Not a companion subagent.
+  for (const view of [{ agentId: 'e1' }, {}]) await $.ui.render(band(view))
+  await seen.clock.settle()
+  expect([seen.opens, seen.closes]).toEqual([[], []])
+
+  await $.command.run({ command: 'companion', args: '' } as never)
+  for (const view of [{ agentId: 'a1' }, {}]) await $.ui.render(band(view))
+  await seen.clock.settle()
+  expect([seen.opens, seen.closes]).toEqual([[{ ...UNASKED, focus: true }], []])
+})
+
+test("a person already in a companion subagent's view as its job starts sees the pane open", async ($, on) => {
+  const seen = engine(on, { [`${DIR}/executions/j1.json`]: execution('j1') }, { a1: 'j1' }, START + 1000)
+  follows(on, {})
+  await $.ui.render(agentRow('a1', 'Pane check'))
+  await $.ui.render(band({ agentId: 'a1' }))
+  await seen.clock.settle()
+  expect(seen.opens).toEqual([])
+  await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: 'a1' })
+  await seen.clock.settle()
+  expect(seen.opens).toEqual([UNASKED])
+  await $.ui.render(band({}))
+  await seen.clock.settle()
+  expect(seen.closes).toEqual([{ id: 'companions', origin: { kind: 'plugin' } }])
 })
 
 test('an ended job opens on its outcome, and its child exits after the final read without being started again', { timeoutMs: 30_000 }, async ($, on) => {
@@ -394,7 +498,8 @@ test("a resumed session's list is rebuilt from the records for its own id, nine 
   expect(now[0]).toBe(' Companions  2 running · 22 done')
   expect(now[2]).toMatch(/^1: New probe +0:11$/)
   expect(now.at(-3)).toBe(' 15 older · agent-companion ui shows them')
-  expect(seen.lists).toHaveLength(2)
+  // Without listing the session's jobs again.
+  expect(seen.lists).toHaveLength(1)
   await ui.unmount()
 })
 
