@@ -43,6 +43,7 @@ import {
 import { fileURLToPath } from 'node:url';
 import { Controller } from './controller/controller.mjs';
 import { Records, firstLine } from './controller/records.mjs';
+import { lastRuns } from './last-runs.mjs';
 import { systemClock } from './controller/clock.mjs';
 import { codexProvider, getCodexContractStatus } from './adapters/codex.mjs';
 import { claudeProvider } from './adapters/claude.mjs';
@@ -50,7 +51,7 @@ import { opencodeProvider } from './adapters/opencode.mjs';
 import { acpProvider } from './adapters/acp.mjs';
 
 import { log, validateAgentArgs } from './validation.mjs';
-import { BASE_DIR, readDefaultModel, readDefaultEffort, settingsPath, migrateDefaults, migrateLegacyState, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
+import { BASE_DIR, readDefaultModel, readDefaultEffort, readSettings, settingsPath, migrateDefaults, migrateLegacyState, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
 import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
 import { queuePath, runtimeDir, appendPrivateFile } from '../lib/runtime-paths.mjs';
 import { logEvent } from '../lib/log.mjs';
@@ -162,7 +163,9 @@ function iso(ts) { return ts ? new Date(ts).toISOString() : null; }
 const UNCONFIGURED_SEND_ERROR =
   'no companion target configured and none passed. Pass target on agent_send, ' +
   'or set a default with `node scripts/onboard.mjs --target <id> --set-default`.';
-const EFFORT_DESCRIPTION = "Reasoning effort override. When omitted, a new conversation uses the saved default, then the companion's configuration. A follow-up keeps its current effort.";
+function effortDescription(native = "the companion's configuration") {
+  return `Reasoning effort override. When omitted, a new conversation uses the saved default, then ${native}. A follow-up keeps its current effort.`;
+}
 
 function effortRefusal(descriptor, effort) {
   if (!descriptor || effort == null) return null;
@@ -403,13 +406,32 @@ async function handleReply({ job_id, message, thread, mode }, active, request) {
     ...(response.status === 'intervention_unavailable' ? { status: 'reply_unavailable' } : {}) });
 }
 
+const nativeDefaults = {
+  codex: "the setting in ~/.codex/config.toml or a trusted project's .codex/config.toml",
+  opencode: "OpenCode's configured default model",
+  claude: 'the Claude Code account default',
+  copilot: "the account's default",
+  antigravity: "the account's default",
+};
+
+function catalogLastRun(run, field) {
+  return run ? { value: run[field], at: new Date(run.startedAt).toISOString(), age_ms: run.ageMs, host: run.host } : null;
+}
+
 function handleCatalog(env) {
   const checks = lastTargetChecks();
+  const settings = readSettings(settingsPath(env)) ?? {};
+  const defaultTarget = readDefaultTarget(env, undefined, settings);
+  const last = lastRuns(env);
   return asJson({
     ok: true, action: 'catalog',
-    default_target: defaultTargetInfo(env),
-    targets: listTargets(env).filter((t) => t.implemented).map((target) => {
-      const model = readDefaultModel(target.id, env);
+    default_target: defaultTarget,
+    targets: listTargets(env, defaultTarget.target).filter((t) => t.implemented).map((target) => {
+      const model = readDefaultModel(target.id, env, undefined, settings);
+      const saved = settings.companions?.[target.id];
+      const reports = last.get(target.id);
+      const native = nativeDefaults[target.id];
+      const modelDefault = model.source === 'env' ? 'the environment override ahead of the saved default' : 'the saved default';
       const permission = probePermission(target, env);
       const checked = checks[target.id];
       return {
@@ -418,15 +440,18 @@ function handleCatalog(env) {
         default: target.default,
         model: {
           ...model,
-          description: model.model ? 'configured default' : target.id === 'claude'
-            ? 'inherits the Claude Code default; any model id or alias accepted, validated by Claude Code'
-            : "inherits the companion's own configuration",
+          saved: saved?.model ?? null,
+          last_run: catalogLastRun(reports?.model, 'model'),
+          description: `When the model is omitted, a new conversation uses ${modelDefault}, then ${native}.` +
+            (target.id === 'claude' ? ' Claude Code validates the model id or alias.' : ''),
           enumeration: target.capabilities.acp || ['codex', 'claude'].includes(target.id) ? 'not enumerable without a session' : 'not cached',
         },
         effort: { selection: target.capabilities.effortSelection, levels: target.capabilities.effortLevels ?? null,
+          saved: saved?.effort ?? null,
+          last_run: catalogLastRun(reports?.effort, 'effort'),
           description: !target.capabilities.effortSelection ? 'Effort selection is unsupported.'
-            : target.capabilities.effortLevels ? EFFORT_DESCRIPTION
-              : 'Levels depend on the model and are checked at send. ' + EFFORT_DESCRIPTION },
+            : (target.capabilities.effortLevels ? '' : 'Levels depend on the model and are checked at send. ') +
+              effortDescription(target.id === 'opencode' ? 'the effort of ' + native : native) },
         permission: permission ? { mode: permission.mode, source: permission.source, risk: permission.risk } : null,
         capabilities: Object.fromEntries(['interventions', 'resume', 'cancel', 'modelSelection', 'effortSelection']
           .map((key) => [key, target.capabilities[key]])),
@@ -597,7 +622,7 @@ const AGENT_TOOLS = [
         target: TARGET_FIELD,
         task: { type: 'string', description: 'Exact text delivered to the companion, without framing or appended instructions.' },
         model: { type: 'string', description: 'Explicit model override. Omit to inherit the companion configuration.' },
-        effort: { type: 'string', description: EFFORT_DESCRIPTION },
+        effort: { type: 'string', description: effortDescription() },
         cwd: {
           type: 'string',
           description: 'Required absolute target repo/worktree path. The bridge refuses to default cwd.',

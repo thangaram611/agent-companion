@@ -114,12 +114,14 @@ The parent supplies plain-language requests to the subagent. The six tools are
 `agent_cancel`; their arguments are listed in [README.md](../README.md#internal-mcp-surface).
 
 `agent_catalog` takes no arguments. It reports enabled companions, the default,
-per-companion model configuration, `effort: { selection, levels, description }`,
+per-companion model configuration, effort selection and levels,
 `permission: { mode, source, risk }` (null without a permission descriptor),
-intervention/resume/cancel/model/effort-selection capabilities, readiness and the installed version seen at the last check. An
-unset model default is labelled as inheriting the companion's configuration.
-The call is ownerless and observational: no hydration, ownership change, lease
-renewal, record write or session creation. If model enumeration needs a
+intervention/resume/cancel/model/effort-selection capabilities, readiness and the installed version seen at the last check.
+Both `model` and `effort` include `saved` from `settings.json` and `last_run` from the
+newest execution across both hosts that reported that field. Either can be null.
+`last_run` contains `{ value, at, age_ms, host }`, with an ISO start time.
+`model.model` and `model.source` account for the environment override.
+The ownerless call starts no process and writes no state. If model enumeration needs a
 session, it reports "not enumerable without a session". A missing catalog entry
 alone does not prove an explicitly requested model invalid.
 

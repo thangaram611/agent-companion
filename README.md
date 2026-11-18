@@ -69,13 +69,14 @@ read-only and explain any bugs with file references." Send the next message to
 that same subagent to continue the review. The parent chooses what a good answer
 looks like; the bridge adds no instructions or required answer format.
 
-The catalog lists enabled companions, the default companion, per-companion model
-configuration, intervention/resume/cancel/model-selection capabilities, readiness and
-the installed version seen at the last check. An unset model default is reported
-as inheriting the companion's own configuration. A list that needs a session is
-reported as "not enumerable without a session". Reading the catalog starts no
-work and changes no job, ownership, lease or result state. Each target's
-`capabilities.interventions` contains `{ default, steer, queue, interrupt }`:
+The catalog lists enabled companions, the default companion, capabilities, readiness and
+the installed version seen at the last check. Each companion's `model.saved` and
+`effort.saved` show its `settings.json` values, or null. `model.model` and `model.source`
+show which bridge default applies after any model environment override. Each field's
+`last_run` gives the last reported value across both hosts, its start time, age and
+host, or null if no run reported it. The catalog starts no processes and writes no
+state. A model list that needs a session is reported as "not enumerable without a session".
+Each target's `capabilities.interventions` contains `{ default, steer, queue, interrupt }`:
 `default` is a mode or null; `steer` and `interrupt` are booleans; `queue` is
 `false`, `bridge` or `native`. These registry capabilities describe support;
 `agent_status.interventions` reports which modes are usable on a job now.
@@ -478,7 +479,7 @@ read-only. Execution and continuation belong to the subagent.
 
 | Tool | Arguments | Purpose |
 | --- | --- | --- |
-| `agent_catalog` | none | Enabled companions, default, model configuration, effort selection/levels, resolved permission (mode, source, risk), capabilities, readiness and last checked version. No job hydration, state writes or session creation. |
+| `agent_catalog` | none | Enabled companions, default target, saved and last reported model/effort, effort levels, resolved permission (mode, source, risk), capabilities, readiness and last checked version. |
 | `agent_send` | `task`, `cwd`; optional `target`, `model`, `effort`, `max_wait_sec` | Send the child's exact message to one companion. |
 | `agent_wait` | `job_id`, `max_wait_sec` | Wait for a terminal result, user intervention notice, or the budget to elapse. |
 | `agent_status` | optional `job_id`, `verbose`, `diagnostics` | Observe records and per-mode `interventions` availability; diagnostics includes cached target checks. |

@@ -1,9 +1,7 @@
 // The defaults command and its API for the live view. Only Codex and OpenCode
 // have zero-turn native reads. Neither probe opens a history or sends input.
-import { readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { aborted } from 'node:util';
-import { stateDirs } from '../../lib/host.mjs';
 import { listTargetIds, TARGET_IDS, getTargetById } from '../../lib/target-registry.mjs';
 import {
   settingsPath, previewDefaults, migrateDefaults, legacyDefaultConflicts, isModelAllowedFor,
@@ -13,38 +11,12 @@ import { CodexAdapter, validateCodexEffort } from '../adapters/codex.mjs';
 import { opencodeProvider, openCodeEffortVariant } from '../adapters/opencode.mjs';
 import { ProcessSupervisor } from '../controller/process-supervisor.mjs';
 import { bounded, systemClock } from '../controller/clock.mjs';
-import { Records } from '../controller/records.mjs';
+import { lastRuns } from '../last-runs.mjs';
 import { age, one } from './rows.mjs';
 
 const usesServer = id => id === 'codex' || id === 'opencode';
 const unavailable = reason => ({ model: null, effort: null, reason });
 const reason = err => one([err.message, err.cause?.message].filter(Boolean).join(': ')).slice(0, 300);
-
-function lastRuns(env, warnings) {
-  const latest = new Map();
-  for (const { host, dir } of stateDirs(env)) {
-    const records = new Records({ dir });
-    let files;
-    try { files = readdirSync(join(dir, 'executions')); }
-    catch (err) {
-      if (err.code !== 'ENOENT') warnings.push(host + ' execution records: ' + err.code);
-      continue;
-    }
-    for (const file of files.filter(f => f.endsWith('.json'))) {
-      let run;
-      try { run = records.readExecution(file.slice(0, -5)); }
-      catch (err) { warnings.push(host + ' execution record ' + file + ': ' + (err.code || 'invalid record')); continue; }
-      if (!run || usesServer(run.provider)) continue;
-      const model = run.terminal?.effectiveModel ?? run.progress?.effectiveModel ?? run.effectiveModel ?? null;
-      const effort = run.terminal?.effectiveEffort ?? run.progress?.effectiveEffort ?? run.effectiveEffort ?? null;
-      if ((!model && !effort) || !Number.isFinite(run.startedAt)) continue;
-      if ((latest.get(run.provider)?.startedAt ?? -Infinity) >= run.startedAt) continue;
-      latest.set(run.provider, { model, effort, source: 'last run', host, startedAt: run.startedAt,
-        ageMs: Math.max(0, Date.now() - run.startedAt) });
-    }
-  }
-  return latest;
-}
 
 async function readNative(adapter, codex, needModels) {
   let native, configError, models, catalogError;
@@ -183,7 +155,7 @@ export async function defaults(query = {}, {
   const ids = companion ? [companion] : target ? [] : listTargetIds();
   const last = ids.some(id => !usesServer(id)) ? lastRuns(env, warnings) : null;
   const natives = new Map(await Promise.all(ids.map(async id => {
-    if (!usesServer(id)) return [id, { inherit: last.get(id) ?? unavailable('no reported run') }];
+    if (!usesServer(id)) return [id, { inherit: last.get(id)?.run ?? unavailable('no reported run') }];
     try {
       const saved = settings?.companions?.[id];
       const needModels = validating || (id === 'codex' && (editing || saved?.model || saved?.effort));

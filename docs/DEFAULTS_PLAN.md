@@ -1,7 +1,7 @@
 # User defaults for companion model and effort: plan
 
-Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 5 done
-(2026-11-18); steps 6 to 9 not started.
+Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 6 done
+(2026-11-18); steps 7 to 9 not started.
 
 ## Goal
 
@@ -348,6 +348,18 @@ The per-companion `model` and `effort` gain `saved` and `last_run` (value and
 age). The description says what inherit means for each companion.
 
 Check: catalog tests, and a live catalog read through the subagent.
+
+Done 2026-11-18. Code by Codex, reviewed by Claude. One last-run reader,
+`bridge-server/last-runs.mjs`, serves the catalog and the CLI. In review, OpenCode's
+object-shaped model now goes through `lib/model-name.mjs`'s `modelName`, as every
+view names it; before that, its `last_run` model was always null. The live read
+used the new code's `dispatch` on the owner's real state, since this session's
+bridge predates the step, not through the subagent:
+- the catalog took 44 ms and wrote nothing (checked against a marker file);
+- it showed `last_run` for OpenCode (`opencode/flint-40b-free`), Codex, Claude
+  and Antigravity, with host and age;
+- Copilot shows null, having no reported run;
+- the descriptions name each companion's own source.
 
 ### Step 7: Live-view defaults panel
 

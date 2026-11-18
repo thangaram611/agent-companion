@@ -1,12 +1,16 @@
 import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync, existsSync, rmSync } from 'node:fs';
 import { validateAgentArgs } from './validation.mjs';
+import { Records } from './controller/records.mjs';
 import { callArgs, mcp, resolveRouting, dispatch, getHostSessionId, _resetForTest } from './server.mjs';
-import { BASE_DIR, writeTargetChecks, writeDefaultTarget, writeDefaultModel } from '../lib/state.mjs';
+import { BASE_DIR, writeTargetChecks, writeDefaultTarget, writeDefaultModel, writeCompanionDefaults } from '../lib/state.mjs';
+import { companionHomeDir } from '../lib/host.mjs';
 import { getTargetById } from '../lib/target-registry.mjs';
 
 test('conversational send accepts exact text and an explicit model, with no framing fields', () => {
@@ -49,8 +53,12 @@ function snapshot(path) {
       : readFileSync(path).toString('base64') };
 }
 
-test('catalog is ownerless and leaves cold and populated state/runtime directories unchanged', async () => {
+test('catalog is ownerless, spawns no process and leaves cold and populated state/runtime directories unchanged', async t => {
   _resetForTest();
+  const spawns = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'].map(name =>
+    t.mock.method(childProcess, name, () => { throw new Error('catalog invoked ' + name); }));
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const prior = process.env.CLAUDE_CODE_SESSION_ID;
   delete process.env.CLAUDE_CODE_SESSION_ID;
   const call = (sid) => mcp._requestHandlers.get('tools/call')({ method: 'tools/call', params: {
@@ -63,16 +71,19 @@ test('catalog is ownerless and leaves cold and populated state/runtime directori
     const first = (await call('catalog-owner-a')).structuredContent;
     assert.deepEqual([snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)], cold);
     assert.equal(first.targets.length, 5);
-    assert.equal(first.targets.find((t) => t.id === 'codex').model.description, "inherits the companion's own configuration");
     assert.equal(first.targets.find((t) => t.id === 'antigravity').model.enumeration, 'not enumerable without a session');
     const copilot = first.targets.find(t => t.id === 'copilot');
     assert.equal(copilot.model.enumeration, 'not enumerable without a session');
     assert.equal(Object.hasOwn(copilot.model, 'allowed'), false);
     const claude = first.targets.find((t) => t.id === 'claude');
     assert.equal(claude.model.model, null);
-    assert.equal(claude.model.description, 'inherits the Claude Code default; any model id or alias accepted, validated by Claude Code');
+    assert.match(claude.model.description, /model id or alias/i);
     assert.equal(claude.model.enumeration, 'not enumerable without a session');
     for (const target of first.targets) {
+      for (const field of [target.model, target.effort]) {
+        assert.equal(field.saved, null);
+        assert.equal(field.last_run, null);
+      }
       const capabilities = getTargetById(target.id).capabilities;
       assert.deepEqual(target.capabilities, {
         interventions: capabilities.interventions, resume: capabilities.resume, cancel: capabilities.cancel,
@@ -102,10 +113,13 @@ test('catalog is ownerless and leaves cold and populated state/runtime directori
     assert.equal(result.default_target.target, 'codex');
     const codex = result.targets.find((t) => t.id === 'codex');
     assert.equal(codex.model.model, 'gpt-5.4');
+    assert.equal(codex.model.saved, 'gpt-5.4');
+    assert.equal(codex.model.source, 'config');
     assert.equal(codex.installed_version, 'codex-cli cached');
     assert.equal(codex.readiness.checked_at, '2026-11-05T00:00:00Z');
     assert.equal(getHostSessionId(), null, 'no host adoption or ownership conflict from either caller');
     assert.deepEqual([snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)], before);
+    assert.ok(spawns.every(spawn => spawn.mock.callCount() === 0));
   } finally {
     if (prior === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = prior;
     _resetForTest();
@@ -121,10 +135,63 @@ test('catalog reports effort levels and permissions from the execution environme
   for (const target of catalog.targets) {
     assert.equal(target.effort.selection, true);
     if (['codex', 'opencode', 'antigravity', 'copilot'].includes(target.id)) assert.match(target.effort.description, /[Ll]evels depend on the model and are checked at send/);
-    assert.match(target.effort.description, /saved default, then the companion's configuration/);
+    const native = {
+      codex: /~\/\.codex\/config\.toml.*trusted project.*\.codex\/config\.toml/i,
+      opencode: /configured default model/i,
+      claude: /Claude Code account default/i,
+      copilot: /account's default/i,
+      antigravity: /account's default/i,
+    }[target.id];
+    for (const field of [target.model, target.effort]) {
+      assert.match(field.description, /omitted.*saved default/i);
+      assert.match(field.description, native);
+    }
+    assert.match(target.effort.description, /follow-up keeps.*effort/i);
     assert.deepEqual(target.effort.levels, target.id === 'claude' ? ['low', 'medium', 'high', 'xhigh', 'max'] : null);
     assert.equal(typeof target.effort.description, 'string');
     const { mode, source, risk } = probePermission(getTarget(target.id), env);
     assert.deepEqual(target.permission, { mode, source, risk });
   }
+});
+
+test('catalog reads saved defaults and each last reported field across hosts, skipping unreadable records', async t => {
+  const env = { HOME: join(BASE_DIR, 'catalog-home'), CODEX_HOME: join(BASE_DIR, 'custom-codex'),
+    AGENT_COMPANION_CODEX_MODEL: 'env-model' };
+  writeCompanionDefaults('codex', { model: 'saved-model', effort: 'medium' }, env);
+  const now = Date.UTC(2026, 10, 18);
+  t.mock.method(Date, 'now', () => now);
+  function record(host, provider, age, values) {
+    const dir = join(companionHomeDir(host, env), 'executions');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, provider + '-' + age + '.json'), JSON.stringify({ provider, startedAt: now - age, ...values }));
+  }
+  for (const id of ['codex', 'opencode', 'copilot', 'antigravity', 'claude']) {
+    record('codex', id, 3000, { effectiveModel: 'old', progress: { effectiveEffort: id === 'claude' ? null : 'high' } });
+    // OpenCode reports its model as an object, named as every view names it.
+    record('claude', id, 2000, { effectiveModel: 'initial', progress: { effectiveModel: 'working' },
+      terminal: { effectiveModel: id === 'opencode' ? { source: 'selected', providerID: 'opencode', id: 'opencode-reported', variant: 'default' } : id + '-reported' } });
+    record('codex', id, 1000, { modelOverride: 'selected-only', effortOverride: 'selected-only' });
+  }
+  const dir = join(companionHomeDir('codex', env), 'executions');
+  writeFileSync(join(dir, 'broken.json'), '{');
+  record('codex', 'codex', 0, { effectiveModel: 'inaccessible' });
+  const readExecution = Records.prototype.readExecution;
+  t.mock.method(Records.prototype, 'readExecution', function(id) {
+    if (id === 'codex-0') throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    return readExecution.call(this, id);
+  });
+  const before = snapshot(BASE_DIR);
+  const catalog = (await dispatch({ action: 'catalog' }, { controller: { env } })).structuredContent;
+  assert.equal(catalog.targets.length, 5);
+  for (const { id, model, effort } of catalog.targets) {
+    assert.deepEqual(model.last_run, { value: (id === 'opencode' ? 'opencode/' : '') + id + '-reported', at: new Date(now - 2000).toISOString(), age_ms: 2000, host: 'claude' });
+    assert.deepEqual(effort.last_run, id === 'claude' ? null
+      : { value: 'high', at: new Date(now - 3000).toISOString(), age_ms: 3000, host: 'codex' });
+  }
+  const codex = catalog.targets.find(t => t.id === 'codex');
+  assert.equal(codex.model.saved, 'saved-model');
+  assert.equal(codex.model.model, 'env-model');
+  assert.equal(codex.model.source, 'env');
+  assert.equal(codex.effort.saved, 'medium');
+  assert.deepEqual(snapshot(BASE_DIR), before);
 });
