@@ -11,11 +11,19 @@ remains separate from implementation; see the release gates below.
 - The parent delegates in plain language: task, absolute repo/worktree path and
   optional companion/model preference. The child asks for a missing path.
 - The ownerless catalog reports enabled companions, the default, model
-  configuration, capabilities, readiness and the last checked version. An open
+  configuration, each companion's saved model and effort and its last run's
+  reported values, capabilities, readiness and the last checked version. An open
   choice uses a ready companion; model omission preserves its configuration.
-- Onboarding and setup support `--target <companion> --model <id|inherit>` to
-  save or clear a per-companion model default, with previews and interactive prompts.
-  Saved defaults pin models on the Codex host, which does not forward model env knobs.
+- Defaults (2026-11-18, docs/DEFAULTS_PLAN.md): one `settings.json` for both hosts
+  holds the default companion and each companion's model and effort.
+  - A new conversation uses the host's explicit choice, then the model env knob,
+    then the saved default, then the companion's own configuration; follow-ups
+    keep theirs.
+  - `agent-companion defaults` and the live view's `d` panel list, validate, save
+    and clear them, and show what inherit resolves to.
+  - Onboarding and setup still save the target and model with
+    `--target <companion> --model <id|inherit>`.
+  - Copilot's model is selected through the session's model option.
 - The bridge passes the child's message verbatim. The child relays the answer
   and questions, with its own focused checks kept separate. Refusals and failures
   do not authorize self-completion or a silent companion/model substitution.
@@ -54,8 +62,8 @@ remains separate from implementation; see the release gates below.
 
 ## MVP Limitations
 
-- Saved effort defaults are not implemented. All five companions accept
-  conversation-level effort. Codex catalog models, OpenCode and Antigravity validate
+- All five companions accept conversation-level effort, and a saved effort
+  default applies to a new conversation when the host names none. Codex catalog models, OpenCode and Antigravity validate
   advertised levels before delivery and verify the reported selection. Levels are
   unverified for models outside Codex's catalog: start/resume confirms the reported
   effort, with vocabulary checked by the backend during the turn. Resume can persist

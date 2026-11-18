@@ -121,7 +121,8 @@ Configuration:
   `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`.
   With `AGENT_COMPANION_HOME` set, the file is `$AGENT_COMPANION_HOME/settings.json`.
   Each companion's saved effort is `companions.<id>.effort`.
-  `AGENT_COMPANION_DEFAULT_TARGET` overrides its target.
+  `AGENT_COMPANION_DEFAULT_TARGET` overrides its target. Inspect and change them
+  with `agent-companion defaults` ([Defaults](#defaults)) or the live view's `d` panel.
 - Save a per-companion model default with
   `node scripts/onboard.mjs --target <companion> --model <id> --set-default`.
   Setup accepts the same choice through

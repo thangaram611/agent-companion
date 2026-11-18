@@ -1,7 +1,7 @@
 # User defaults for companion model and effort: plan
 
-Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 7 done
-(2026-11-18); steps 8 and 9 not started.
+Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 8 done
+(2026-11-18); step 9 not started.
 
 ## Goal
 
@@ -394,6 +394,15 @@ entry).
 
 Check: a coherence pass, grepping for `ALLOWED_MODELS`, `default-model-`,
 `defaultModel:` and "no saved effort default".
+
+Done 2026-11-18. Each step updated its own docs. This pass:
+- MVP_TRACKER's current state now describes the shared store, the precedence,
+  the CLI and the panel, and Copilot's session-option model;
+- the "Saved effort defaults are not implemented" limitation is gone;
+- the registry's header comment names settings.json;
+- README Configuration points at `agent-companion defaults`.
+The remaining matches for the grepped terms describe the migration, history or
+this plan's own evidence.
 
 ### Step 9: Codex contract provenance
 
