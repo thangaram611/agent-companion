@@ -819,11 +819,10 @@ test('effort refusals precede startup and acknowledgement/status/result retain l
 
 test('mismatch hints name the bound conversation and the normalized requested companion', async (t) => {
   const h = await wireFixture(t);
-  await h.send({ target: 'claude' });
+  const first = await h.send({ target: 'claude' });
   const mismatch = await h.call(h.mod.callArgs('send', { arguments: { target: ' CODEX ', thread: 'child', task: EXACT_TASK, cwd: h.dir } }));
   assert.equal(mismatch.hint, `This conversation is bound to claude in ${h.dir}. To use codex, spawn a new agent-companion and restate the task.`);
-  const configured = await h.send({ target: null });
-  assert.match(configured.hint, /To use copilot, spawn a new agent-companion/);
+  assert.deepEqual(await h.send({ target: null }), first, 'omitting target keeps the bound provider');
   const cwd = await h.send({ target: 'claude', cwd: tmpdir() });
   assert.equal(cwd.hint, `This conversation is bound to ${h.dir}. Use that path, or spawn a new agent-companion for the other repo.`);
 });

@@ -269,12 +269,14 @@ for h in "${HOSTS[@]}"; do
   jq -r '.targets[] | "  \(.displayName): " + (if .ready then "ready" else "not ready" end), (.blockers[], .warnings[] | "    " + .message), (.nextSteps[] | "    Next: " + .)' "$PLAN_DIR/$h.json"
   if [ "$PLAN_CODE" != 0 ] && [ -t 0 ] && [ "$YES" = 0 ] \
       && jq -e '.plan.code == "ambiguous_target" or .plan.code == "no_ready_target"' "$PLAN_DIR/$h.json" >/dev/null; then
-    read -r -p "Companion for $h [opencode/copilot/codex/claude/antigravity/none]: " CHOICE
+    read -r -p "Shared default companion [opencode/copilot/codex/claude/antigravity/none]: " CHOICE
     if jq -e --arg id "$CHOICE" '.targets[$id].capabilities.modelSelection == true' "$PLAN_DIR/$h.json" >/dev/null; then
-      read -r -p "Model for $CHOICE on $h [inherit]: " MODEL_CHOICE
+      read -r -p "Default model for $CHOICE [inherit]: " MODEL_CHOICE
       [ "$MODEL_CHOICE" != inherit ] || MODEL_CHOICE=""
       [ -z "$MODEL_CHOICE" ] || ONBOARD_ARGS+=(--model "$MODEL_CHOICE")
     fi
+    TARGET="$CHOICE"
+    MODEL="$MODEL_CHOICE"
     PLAN_CODE=0
     AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" --target "$CHOICE" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
   fi
@@ -312,14 +314,11 @@ echo "  Install or refresh the live-view launcher ~/.local/bin/agent-companion (
 [ "$DO_CLAUDE" = 0 ] || echo "  Materialize the Claude agent; merge companion permissions into ~/.claude/settings.json."
 [ "$DO_CODEX" = 0 ] || echo "  Create ${CODEX_HOME:-$HOME/.codex} if needed; refresh the Codex plugin, verify MCP and agent, and remove legacy managed hooks."
 echo "  Write diagnostic install markers after each harness finishes."
-for i in "${!HOSTS[@]}"; do
-  MODEL_CHOICE="${SELECTED_MODELS[$i]}"
-  if [ "$MODEL_CHOICE" = inherit ]; then
-    echo "  Clear saved default model for ${SELECTED_TARGETS[$i]} on ${HOSTS[$i]}."
-  elif [ -n "$MODEL_CHOICE" ]; then
-    echo "  Save default model $MODEL_CHOICE for ${SELECTED_TARGETS[$i]} on ${HOSTS[$i]}."
-  fi
-done
+if [ "$MODEL" = inherit ]; then
+  echo "  Clear the shared default model for ${SELECTED_TARGETS[0]}."
+elif [ -n "$MODEL" ]; then
+  echo "  Save shared default model $MODEL for ${SELECTED_TARGETS[0]}."
+fi
 if [ "$TARGET" = copilot ] || command -v copilot >/dev/null 2>&1; then
   echo "  Install the Copilot reviewer agent if absent (preserve any existing file)."
 fi

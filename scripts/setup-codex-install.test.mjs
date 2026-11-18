@@ -467,6 +467,12 @@ function setupFixture(t) {
   writeFakeToolchain(bin);
   return {
     tmp, source, home, codexHome, bin, log, npmLog,
+    settingsFile: path.join(home, '.config', 'agent-companion', 'settings.json'),
+    settings() { return JSON.parse(readFileSync(this.settingsFile)); },
+    seedSettings(settings) {
+      mkdirSync(path.dirname(this.settingsFile), { recursive: true });
+      writeFileSync(this.settingsFile, JSON.stringify(settings));
+    },
     run(args, env = {}) {
       return runSetup(source, home, codexHome, bin, log, { FAKE_NPM_LOG: npmLog, ...env }, args);
     },
@@ -492,8 +498,8 @@ test('clean setup detects the only harness/companion, previews changes and prese
   assert.match(first.stdout, /companion: codex \(config\)/);
   assert.match(first.stdout, /Unverified: live delegation/);
   assert.match(first.stdout, /Approve.*plugin hooks/);
-  const file = path.join(f.state(), 'default-target');
-  assert.equal(readFileSync(file, 'utf8'), 'codex\n');
+  const file = f.settingsFile;
+  assert.equal(f.settings().target, 'codex');
   const time = new Date('2020-01-02T03:04:05Z');
   utimesSync(file, time, time);
   const second = f.run(['--skip-tests']);
@@ -528,7 +534,7 @@ test('preflight refuses missing harnesses, missing authentication and ambiguous 
       assert.notEqual(r.status, 0, r.stdout + r.stderr);
       assert.match(r.stdout, message);
       f.assertNoInstall();
-      assert.equal(existsSync(path.join(f.codexHome, 'agent-companion/default-target')), false);
+      assert.equal(existsSync(f.settingsFile), false);
     });
   }
 });
@@ -544,25 +550,24 @@ test('dry-run previews a clean install and --no-target-check explicitly defers a
   assert.equal(deferred.status, 0, deferred.stdout + deferred.stderr);
   assert.match(deferred.stdout, /Readiness deferred/);
   assert.match(deferred.stdout, /companion: codex \(config\); needs attention/);
-  assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'codex\n');
+  assert.equal(f.settings().target, 'codex');
 });
 
-test('both harnesses preserve independent defaults, legacy files and unrelated settings', (t) => {
+test('both harnesses preserve the shared default, legacy profiles and unrelated host settings', (t) => {
   const f = setupFixture(t);
   writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
   const profiles = '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n';
   writeFileSync(path.join(f.state(), 'profiles.json'), profiles);
-  writeFileSync(path.join(f.state(), 'default-target'), 'opencode\n');
-  writeFileSync(path.join(f.state('claude'), 'default-target'), 'codex\n');
+  f.seedSettings({ target: 'opencode' });
+  f.state('claude');
   const settings = path.join(f.home, '.claude/settings.json');
   writeFileSync(settings, JSON.stringify({ theme: 'dark', permissions: { allow: ['Bash(custom)'], deny: ['Bash(blocked)'] } }));
   const result = f.run(['--host', 'both', '--skip-tests']);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /companion: opencode \(config\); needs attention/);
-  assert.match(result.stdout, /Claude: agent and permissions installed; companion: codex/);
+  assert.match(result.stdout, /Claude: agent and permissions installed; companion: opencode/);
   assert.equal(readFileSync(path.join(f.state(), 'profiles.json'), 'utf8'), profiles);
-  assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'opencode\n');
-  assert.equal(readFileSync(path.join(f.state('claude'), 'default-target'), 'utf8'), 'codex\n');
+  assert.deepEqual(f.settings(), { target: 'opencode' });
   const saved = JSON.parse(readFileSync(settings));
   assert.equal(saved.theme, 'dark');
   assert.ok(saved.permissions.allow.includes('Bash(custom)'));
@@ -585,7 +590,7 @@ test('setup installs dependencies without emptying the target of a linked node_m
 test('partial installation reports completed stages, preserves defaults and succeeds on rerun', (t) => {
   const f = setupFixture(t);
   writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
-  for (const host of ['claude', 'codex']) writeFileSync(path.join(f.state(host), 'default-target'), 'copilot\n');
+  f.seedSettings({ target: 'copilot' });
   const args = ['--host', 'both', '--target', 'codex', '--skip-tests'];
   const failed = f.run(args, { FAKE_CODEX_BAD_MCP: '1' });
   assert.equal(failed.status, 1, failed.stdout + failed.stderr);
@@ -593,16 +598,16 @@ test('partial installation reports completed stages, preserves defaults and succ
   assert.match(failed.stdout, /Claude: agent and permissions installed/);
   assert.match(failed.stdout, /Codex: plugin installed; MCP, agent and hooks pending verification/);
   assert.match(failed.stdout, /rerun the same command/);
-  for (const host of ['claude', 'codex']) assert.equal(readFileSync(path.join(f.state(host), 'default-target'), 'utf8'), 'copilot\n');
+  assert.equal(f.settings().target, 'copilot');
   const repaired = f.run(args);
   assert.equal(repaired.status, 0, repaired.stdout + repaired.stderr);
-  for (const host of ['claude', 'codex']) assert.equal(readFileSync(path.join(f.state(host), 'default-target'), 'utf8'), 'codex\n');
+  assert.equal(f.settings().target, 'codex');
 });
 
 test('failed dependency install and user-owned agents never replace companion configuration', async (t) => {
   for (const owned of [false, true]) await t.test(owned ? 'user-owned agent' : 'npm failure', (t) => {
     const f = setupFixture(t);
-    writeFileSync(path.join(f.state(), 'default-target'), 'copilot\n');
+    f.seedSettings({ target: 'copilot' });
     const agent = path.join(f.codexHome, 'agents/agent-companion.toml');
     if (owned) {
       mkdirSync(path.dirname(agent), { recursive: true });
@@ -611,7 +616,7 @@ test('failed dependency install and user-owned agents never replace companion co
     const r = f.run(['--host', 'codex', '--target', 'codex', '--skip-tests'], owned ? {} : { FAKE_NPM_EXIT: '1' });
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stdout, owned ? /User-owned agent preserved/ : /Setup incomplete: bridge dependencies/);
-    assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'copilot\n');
+    assert.equal(f.settings().target, 'copilot');
     if (owned) { f.assertNoInstall(); assert.equal(readFileSync(agent, 'utf8'), '# user-owned\n'); }
     assert.equal(existsSync(installedPluginRoot(f.codexHome)), false);
   });
@@ -619,13 +624,13 @@ test('failed dependency install and user-owned agents never replace companion co
 
 test('readiness lost after installation is explained without replacing the previous default', (t) => {
   const f = setupFixture(t);
-  writeFileSync(path.join(f.state(), 'default-target'), 'copilot\n');
+  f.seedSettings({ target: 'copilot' });
   const r = f.run(['--host', 'codex', '--target', 'codex', '--skip-tests'], { FAKE_CODEX_AUTH_EXPIRES: '1' });
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /Setup incomplete: companion configuration/);
   assert.match(r.stdout, /Codex CLI has no configured authentication/);
   assert.match(r.stdout, /codex login/);
-  assert.equal(readFileSync(path.join(f.state(), 'default-target'), 'utf8'), 'copilot\n');
+  assert.equal(f.settings().target, 'copilot');
 });
 
 
@@ -647,7 +652,7 @@ test('setup accepts independent Claude host and companion selections without a s
   `);
   const result = f.run([...args, '--skip-tests'], { CLAUDE_BIN: claude });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.equal(readFileSync(path.join(f.state('claude'), 'default-target'), 'utf8'), 'claude\n');
+  assert.equal(f.settings().target, 'claude');
   assert.equal(existsSync(path.join(f.codexHome, 'agent-companion/default-target')), false);
   assert.match(result.stdout, /Claude: agent and permissions installed; companion: claude/);
 });
@@ -679,24 +684,28 @@ test('setup passes model to plan and apply, previews intent, and clears a saved 
     const r = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' });
     process.exit(r.status ?? 1);
   `);
-  const args = ['--host', 'codex', '--target', 'codex'];
+  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
+  const args = ['--host', 'both', '--target', 'codex'];
+  const legacy = ['claude', 'codex'].map(host => path.join(f.state(host), 'default-target'));
+  for (const file of legacy) writeFileSync(file, 'copilot\n');
   const preview = f.run([...args, '--model=gpt-5.4', '--dry-run']);
   assert.equal(preview.status, 0, preview.stdout + preview.stderr);
-  assert.match(preview.stdout.split('Intended installation changes:')[1], /model gpt-5\.4 for codex on codex/);
-  assert.equal(existsSync(path.join(f.state(), 'default-model-codex')), false);
+  assert.match(preview.stdout.split('Intended installation changes:')[1], /model gpt-5\.4 for codex/);
+  assert.equal(existsSync(path.dirname(f.settingsFile)), false);
+  for (const file of legacy) assert.equal(readFileSync(file, 'utf8'), 'copilot\n');
   f.assertNoInstall();
   for (const model of ['gpt-5.4', 'inherit']) {
     const result = f.run([...args, '--model', model, '--skip-tests']);
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    const file = path.join(f.state(), 'default-model-codex');
-    if (model === 'inherit') assert.equal(existsSync(file), false);
-    else assert.equal(readFileSync(file, 'utf8'), 'gpt-5.4\n');
+    for (const file of legacy) assert.equal(existsSync(file), false);
+    assert.equal(f.settings().target, 'codex');
+    assert.equal(f.settings().companions?.codex?.model, model === 'inherit' ? undefined : model);
   }
   const calls = readCalls(capture);
-  assert.equal(calls.length, 5);
-  assert.equal(calls.filter((args) => args.includes('--plan')).length, 3);
+  assert.equal(calls.length, 10);
+  assert.equal(calls.filter((args) => args.includes('--plan')).length, 6);
   assert.deepEqual(calls.map((args) => args[args.indexOf('--model') + 1]),
-    ['gpt-5.4', 'gpt-5.4', 'gpt-5.4', 'inherit', 'inherit']);
+    [...Array(6).fill('gpt-5.4'), ...Array(4).fill('inherit')]);
 });
 
 test('setup shell syntax is valid', () => {

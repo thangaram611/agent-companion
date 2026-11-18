@@ -112,7 +112,7 @@ test('provider readiness is cached and never spawns; model gate and capabilities
 });
 
 test('new session and cold follow-up keep history, change PID, and record changing inherited defaults', async t => {
-  const h = setup(t);
+  const h = setup(t, { AGENT_COMPANION_OPENCODE_MODEL: 'fixture/ignored' });
   const text = 'exact text\nwith quotes " and unicode π';
   const first = await h.send({ text });
   assert.equal(first.acknowledged, true);
@@ -147,7 +147,6 @@ test('new session and cold follow-up keep history, change PID, and record changi
 
 for (const [label, extra, args] of [
   ['explicit selection', {}, { model: 'fixture/chosen#fast' }],
-  ['environment default selection', { AGENT_COMPANION_OPENCODE_MODEL: 'fixture/chosen#fast' }, {}],
   ['explicit override of environment default', { AGENT_COMPANION_OPENCODE_MODEL: 'fixture/other' }, { model: 'fixture/chosen#fast' }],
 ]) test(`${label} is acknowledged before prompting and verified against execution metadata`, async t => {
   const h = setup(t, extra);
@@ -351,12 +350,18 @@ test('OpenCode effort overrides the variant named on the same send', async t => 
   assert.equal(result.effectiveEffort, 'low');
 });
 
-for (const effort of [undefined, 'low']) test(`OpenCode reapplies its environment model on resume with ${effort ?? 'inherited'} effort`, async t => {
+for (const effort of [undefined, 'low']) test(`routing keeps OpenCode's starting model on resume with ${effort ?? 'inherited'} effort`, async t => {
   const h = setup(t, { AGENT_COMPANION_OPENCODE_MODEL: 'fixture/first#high' });
-  await h.finish(await h.send({ effort }));
+  const send = async args => {
+    const { structuredContent } = await h.settle(dispatch({ action: 'send', target: 'opencode', thread: 'child',
+      cwd: h.dir, task: 'hello', ...args }, { controller: h.controller }));
+    assert.equal(structuredContent.selected_model, 'fixture/first#high');
+    return h.finish({ executionId: structuredContent.job_id });
+  };
+  await send({ effort });
   h.env.AGENT_COMPANION_OPENCODE_MODEL = 'fixture/second#high';
-  const resumed = await h.finish(await h.send({ text: 'resume' }));
-  assert.equal(resumed.effectiveModel.id, 'second');
+  const resumed = await send({});
+  assert.equal(resumed.effectiveModel.id, 'first');
   assert.equal(resumed.effectiveModel.variant, effort ? 'soft' : 'high');
   assert.equal(resumed.effectiveEffort, effort ?? null);
 });

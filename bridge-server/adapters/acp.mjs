@@ -136,7 +136,7 @@ export class AcpAdapter {
     const acp = this.descriptor.acp;
     this.connection = new ProtocolConnection(this.descriptor, env, this.log, (params) => this._activity(params));
     const conn = this.connection;
-    conn.model = model ?? acp.defaultModel?.(env);
+    conn.model = model;
     conn.effort = effort;
     this.paths = {};
     try {

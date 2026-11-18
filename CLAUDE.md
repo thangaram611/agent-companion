@@ -103,8 +103,8 @@ stream-json protocol; cold follow-up via the saved session. Codex and OpenCode
 support steer (their default), queue and interrupt. Claude and Antigravity
 support queue (their default) and interrupt; Copilot supports cancel only.
 Antigravity interventions still need live qualification. There are no transport-selection knobs. Copilot cold follow-up is refused
-until qualified; Antigravity reloads saved sessions. Per-companion model defaults
-and one-shot legacy migration belong to `lib/state.mjs`.
+until qualified; Antigravity reloads saved sessions. Routing applies model defaults only on a new conversation. Both hosts share
+`settings.json` and its one-shot migration in `lib/state.mjs`.
 
 **Interventions share one controller path.** `agent_reply` accepts an optional
 `mode`; omission uses the execution's saved `interventionModes.default`.
@@ -128,7 +128,7 @@ line, including `not_delivered` messages.
 | `bridge-server/controller/process-supervisor.mjs` | Owned process groups, descendant census, termination and PID/birth-identity verification. |
 | `bridge-server/adapters/{codex,opencode,acp,claude}.mjs` | Provider protocols, history loading, delivery acknowledgement, native progress, usage and model selection. |
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
-| `lib/state.mjs` | Default target/model configuration and one-shot migration of legacy settings/history. |
+| `lib/state.mjs` | Shared target/model settings and one-shot migration of legacy defaults and history. |
 | `lib/host.mjs` | Host conventions and sandbox guard; `AGENT_COMPANION_HOST` is authoritative, `.host` is diagnostic. |
 | `lib/transcripts.mjs` and `lib/transcripts/` | Read-only native transcript location, format fingerprints, normalized in-memory items and live follow (`followTranscript`). |
 | `lib/work-summary.mjs` | Native turn selection and bounded commands, edits, errors and worktree summary projection. |
@@ -185,8 +185,8 @@ line, including `not_delivered` messages.
   import time, so setting env in the test body is too late for static imports.
   Setting env before a dynamic `await import(...)` also works. Under `node --test`,
   state/runtime access beneath the real account home throws; the completion
-  hook exits 78. `test/runtime-sandbox-guard.test.mjs` enforces this. Runtime
-  paths and logs deliberately re-read their env per call.
+  hook exits 78. `test/runtime-sandbox-guard.test.mjs` enforces this. Shared settings, runtime
+  paths and logs re-read their env per call.
 - **Never write into the installed Codex plugin.** codex-cli 0.164 fingerprints the plugin
   bundle before running any of its hooks and rejects symlinks: a `bridge-server/node_modules`
   link there made every hook fail. On Codex, `hooks/install-deps.sh` keeps dependencies in

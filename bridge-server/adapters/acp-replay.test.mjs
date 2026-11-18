@@ -14,6 +14,7 @@ import { exerciseScenario, recordCopilot, SCENARIOS } from '../../probes/acp-rec
 import { ProcessSupervisor, pidAlive } from '../controller/process-supervisor.mjs';
 import { getTargetById } from '../../lib/target-registry.mjs';
 import { AcpAdapter } from './acp.mjs';
+import { writeDefaultModel, clearDefaultModel } from '../../lib/state.mjs';
 
 const lines = path => readFileSync(path, 'utf8').trim().split('\n').map(JSON.parse);
 const scratch = () => mkdtempSync(join(SANDBOX_HOME, 'replay-'));
@@ -75,6 +76,31 @@ function replay(t, fixture, { shiftIds = false, stderr = [] } = {}) {
   t.after(() => adapter.close());
   return { adapter, run: () => exerciseScenario(adapter, { scenario: header.scenario, cwd: dir, env, supervisor }), env, supervisor, dir };
 }
+
+test('Antigravity inherits the native model on new and loaded sessions when routing omits it', async t => {
+  writeDefaultModel('saved-for-new-conversations', 'antigravity');
+  t.after(() => clearDefaultModel('antigravity'));
+  for (const historyId of [null, 'previous']) {
+    const dir = scratch(), path = join(dir, 'inherit.jsonl');
+    // Synthetic protocol replay. Any extra config write fails the method-order check.
+    const frames = [
+      { fixture: 'acp-replay', companion: 'antigravity' },
+      { dir: 'client', frame: { id: 1, method: 'initialize' } },
+      { dir: 'agent', frame: { id: 1, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } } },
+      { dir: 'client', frame: { id: 2, method: historyId ? 'session/load' : 'session/new' } },
+      { dir: 'agent', frame: { id: 2, result: { sessionId: historyId ?? 'new',
+        configOptions: [{ id: 'model', currentValue: 'native-model' }] } } },
+    ];
+    writeFileSync(path, frames.map(frame => JSON.stringify(frame)).join('\n'));
+    const env = { ...process.env, ANTIGRAVITY_ACP_BIN: fakeAcpAgentBin(dir), ACP_FAKE_REPLAY: path };
+    const adapter = new AcpAdapter(getTargetById('antigravity'), { env, log() {} });
+    try {
+      await adapter.start({ cwd: dir, supervisor: supervisorFor(t) });
+      const history = await adapter.openHistory({ historyId });
+      assert.equal(history.effectiveModel, 'native-model');
+    } finally { await adapter.close(); }
+  }
+});
 
 test('capture scrubs paths and opaque ids while preserving semantic ids and text', () => {
   const scrub = createScrubber({ paths: [

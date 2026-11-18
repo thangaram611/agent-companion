@@ -122,11 +122,10 @@ class OpenCodeAdapter {
       let session = response.data?.data;
       if (!session?.id || (historyId != null && session.id !== historyId)) throw failure('InvalidSession');
       this.sessionId = session.id;
-      const choice = model === undefined ? String(this.env.AGENT_COMPANION_OPENCODE_MODEL || '').trim() || undefined : model;
-      this.effectiveModel = { source: choice === undefined ? 'inherited' : 'selected' };
+      this.effectiveModel = { source: model === undefined ? 'inherited' : 'selected' };
       let resolved;
-      if (choice !== undefined) {
-        const parsed = parseOpenCodeModel(choice);
+      if (model !== undefined) {
+        const parsed = parseOpenCodeModel(model);
         if (!parsed) throw failure('ModelNotAllowed');
         const [id, variant] = parsed.modelID.split('#');
         resolved = { providerID: parsed.providerID, id, ...(variant ? { variant } : {}) };
@@ -145,7 +144,7 @@ class OpenCodeAdapter {
       }
       // Treat session model writes as persistent even without a prompt.
       // Validate first so a refused level cannot alter existing history.
-      if (choice !== undefined || effort !== undefined) {
+      if (model !== undefined || effort !== undefined) {
         this.selection = resolved;
         const ack = await this._request(this.sessionPath + '/model', { method: 'POST', body: { model: this.selection } });
         if (ack.status !== 204) throw failure('ModelSelectionUnacknowledged');

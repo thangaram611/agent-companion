@@ -45,7 +45,6 @@ test('the Copilot spawn argv carries its permission flags and model selection us
 
   assert.deepEqual(FAKE.acp.args({ model: null, env: {} }), ['--acp']);
   assert.deepEqual(FAKE.acp.args({ model: 'm1', env: {} }), ['--acp', '--model', 'm1']);
-  assert.equal(FAKE.acp.defaultModel({}), null, 'no model pin means the agent\'s own default');
   assert.equal(FAKE.acp.permission({}), 'all');
   assert.equal(FAKE.acp.permission({ FAKE_ACP_POLICY: 'edit' }), 'edit');
   assert.equal(ACP_PROTOCOL_VERSION, 1);
@@ -58,7 +57,6 @@ test('antigravity: the descriptor — bare spawn, no usage reader, load honoured
   assert.deepEqual(ANTIGRAVITY.acp.rotate, []);
   assert.equal(ANTIGRAVITY.acp.clientName, 'agent-companion');
   assert.equal(ANTIGRAVITY.acp.loadSession, true, 'a session survives the server process and session/load remembers (measured)');
-  assert.equal(ANTIGRAVITY.acp.defaultModel({}), null, 'unset leaves the account\'s default model');
   assert.equal(ANTIGRAVITY.acp.permission({}), 'all');
   assert.equal(ANTIGRAVITY.acp.permission({ AGENT_COMPANION_ANTIGRAVITY_PERMISSION: 'edit' }), 'edit');
   assert.equal(ANTIGRAVITY.acp.permission({ AGENT_COMPANION_ANTIGRAVITY_PERMISSION: 'NONE' }), 'none');

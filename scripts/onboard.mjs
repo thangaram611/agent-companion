@@ -27,13 +27,12 @@ import readline from 'node:readline/promises';
 
 import { TARGET_IDS, getTargetById } from '../lib/target-registry.mjs';
 import {
-  inspectTarget,
   inspectTargets,
   targetReadinessSummary,
   memoizeProbe,
   probeCommand,
 } from '../lib/target-diagnostics.mjs';
-import { writeDefaultTarget, readDefaultTarget, writeTargetChecks,
+import { migrateDefaults, previewDefaults, writeDefaultTarget, readDefaultTarget, writeTargetChecks,
   readDefaultModel, writeDefaultModel, clearDefaultModel, isModelAllowedFor } from '../lib/state.mjs';
 import { Controller } from '../bridge-server/controller/controller.mjs';
 import { codexProvider } from '../bridge-server/adapters/codex.mjs';
@@ -141,9 +140,8 @@ export function planOnboard({ options, targets, configuration }) {
   return { kind: 'ask', candidates: readyIds };
 }
 
-function inspectConfiguration(env, run) {
-  const defaultTarget = readDefaultTarget(env);
-  const ready = defaultTarget.target ? inspectTarget(defaultTarget.target, { env, run }).ready : null;
+function inspectConfiguration(defaultTarget, targets) {
+  const ready = defaultTarget.target ? !!targets[defaultTarget.target]?.ready : null;
   const summary = defaultTarget.target
     ? `${defaultTarget.target} (${defaultTarget.source})${ready === false ? '; needs attention' : ''}`
     : 'no default; select a companion before delegating';
@@ -222,13 +220,15 @@ async function main() {
     console.error('[FAIL] --plan cannot be combined with --smoke.'); process.exit(2);
   }
 
+  const settings = options.plan ? previewDefaults({ env }) : migrateDefaults({ env });
+  const defaultTarget = readDefaultTarget(env, console.warn, settings);
   const run = memoizeProbe(probeCommand);
-  const targets = inspectTargets({ env, run });
+  const targets = inspectTargets({ env, run, configuredTarget: defaultTarget.target });
   for (const [id, report] of Object.entries(targets)) {
     report.capabilities = getTargetById(id).capabilities;
-    report.defaultModel = readDefaultModel(id, env);
+    report.defaultModel = readDefaultModel(id, env, console.warn, settings);
   }
-  const configuration = inspectConfiguration(env, run);
+  const configuration = inspectConfiguration(defaultTarget, targets);
   let plan = planOnboard({ options, targets, configuration });
   if (options.model !== undefined && plan.kind === 'error' && (!options.plan || options.listTargets || options.doctor)) {
     console.error(`[FAIL] ${plan.code}: ${plan.message}`);
@@ -246,10 +246,9 @@ async function main() {
   // --list-targets: readiness for every supported target.
   if (options.listTargets) {
     if (options.json) {
-      console.log(JSON.stringify({ defaultTarget: readDefaultTarget(env), targets }, null, 2));
+      console.log(JSON.stringify({ defaultTarget, targets }, null, 2));
     } else {
-      const def = readDefaultTarget(env);
-      console.log(`default target: ${def.target || 'unset'} (${def.source})`);
+      console.log(`default target: ${defaultTarget.target || 'unset'} (${defaultTarget.source})`);
       for (const r of Object.values(targets)) printTargetReport(r);
     }
     process.exit(0);
@@ -325,7 +324,7 @@ async function main() {
   }
 
   if (plan.writeDefault && (report.ready || options.noTargetCheck) && smoke?.passed !== false) {
-    if (readDefaultTarget({}).target !== id) {
+    if (readDefaultTarget({ ...env, AGENT_COMPANION_DEFAULT_TARGET: '' }).target !== id) {
       writeDefaultTarget(id);
       wrote = true;
     }
@@ -335,7 +334,7 @@ async function main() {
     writeTargetChecks(Object.fromEntries(Object.entries(targets).map(([id, check]) =>
       [id, { ...check, checkedAt: new Date().toISOString() }])));
   }
-  const current = inspectConfiguration(env, run);
+  const current = inspectConfiguration(readDefaultTarget(env), targets);
   const defaultModel = readDefaultModel(id, env);
   const model = { ...plan.model, current: defaultModel.model, source: defaultModel.source };
   report.defaultModel = defaultModel;

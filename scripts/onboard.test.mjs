@@ -1,6 +1,6 @@
 // Tests for scripts/onboard.mjs. Pure helpers (parseArgs/planOnboard) are
 // exercised directly; the CLI exit-code paths run in a subprocess with a
-// temp HOME so no real default-target is written.
+// temp HOME so all settings stay in the fixture.
 
 import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
@@ -113,17 +113,35 @@ function run(args, env = {}, files = {}) {
         CODEX_BIN: '/missing-codex', ANTIGRAVITY_ACP_BIN: '/missing-antigravity', CLAUDE_BIN: '/missing-claude', ...env,
       },
     });
-    const stored = Object.fromEntries([...new Set(['default-target', 'profiles.json', 'default-model', ...Object.keys(files)])].map((name) => [
+    const stored = Object.fromEntries(Object.keys(files).map(name => [
       name, existsSync(join(home, name)) ? readFileSync(join(home, name), 'utf8') : null,
     ]));
-    const models = Object.fromEntries(['claude', 'codex', 'opencode', 'antigravity'].map((id) => [
-      id, existsSync(join(home, `default-model-${id}`)) ? readFileSync(join(home, `default-model-${id}`), 'utf8') : null,
-    ]));
-    return { code: r.status, stdout: r.stdout, stderr: r.stderr, stored, models };
+    const file = join(home, 'settings.json');
+    const settings = existsSync(file) ? JSON.parse(readFileSync(file)) : {};
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr, stored, settings, hasSettings: existsSync(file) };
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
 }
+
+function saved(target, models = {}) {
+  const companions = Object.fromEntries(Object.entries(models).map(([id, model]) => [id, { model }]));
+  return { 'settings.json': JSON.stringify({ target, companions }) };
+}
+
+test('CLI previews a legacy default without consuming it, then migrates it on startup', () => {
+  const files = { 'default-target': 'copilot\n' };
+  const args = ['--target', 'none', '--yes', '--json'];
+  const preview = run(['--plan', ...args], {}, files);
+  assert.equal(preview.code, 0, preview.stderr);
+  assert.equal(JSON.parse(preview.stdout).configuration.defaultTarget.target, 'copilot');
+  assert.deepEqual(preview.stored, files);
+  assert.equal(preview.hasSettings, false);
+  const actual = run(args, {}, files);
+  assert.equal(actual.code, 0, actual.stderr);
+  assert.deepEqual(actual.settings, { target: 'copilot' });
+  assert.equal(actual.stored['default-target'], null);
+});
 
 test('CLI --list-targets --json exits 0 with target readiness', () => {
   const r = run(['--list-targets', '--json']);
@@ -151,25 +169,25 @@ test('CLI unknown target exits 2', () => {
 });
 
 test('CLI unavailable target fails without replacing an existing default', () => {
-  const r = run(['--target', 'opencode', '--set-default', '--yes', '--json'], {}, { 'default-target': 'copilot\n' });
+  const r = run(['--target', 'opencode', '--set-default', '--yes', '--json'], {}, saved('copilot'));
   assert.equal(r.code, 3, r.stderr);
   const out = JSON.parse(r.stdout);
   assert.equal(out.target, 'opencode');
   assert.equal(out.wroteDefault, false);
   assert.equal(out.report.ready, false);
-  assert.equal(r.stored['default-target'], 'copilot\n');
+  assert.equal(r.settings.target, 'copilot');
 });
 
 test('CLI explicit --no-target-check allows deferred configuration and labels it unready', () => {
   const r = run(['--target', 'opencode', '--set-default', '--no-target-check', '--yes', '--json']);
   assert.equal(r.code, 0, r.stderr);
   assert.equal(JSON.parse(r.stdout).ok, false);
-  assert.equal(r.stored['default-target'], 'opencode\n');
+  assert.equal(r.settings.target, 'opencode');
 });
 
 test('CLI plan and ordinary reruns preserve existing defaults, models and profiles', () => {
   const files = {
-    'default-target': 'copilot\n', 'default-model': 'custom-model\n',
+    ...saved('copilot', { copilot: 'custom-model' }),
     'profiles.json': '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n',
   };
   for (const args of [['--plan'], [], ['--target', 'none']]) {
@@ -192,16 +210,16 @@ test('failed smoke and read-only plans never commit a default', () => {
   try {
     for (const flags of [['--smoke'], ['--smoke', '--no-target-check'], ['--plan']]) {
       const r = run(['--target', 'codex', '--model', 'gpt-5.4', '--set-default', '--yes', '--json', ...flags],
-        { CODEX_BIN: bin }, { 'default-target': 'copilot\n', 'default-model-codex': 'previous-model\n' });
+        { CODEX_BIN: bin }, saved('copilot', { codex: 'previous-model' }));
       assert.equal(r.code, flags.includes('--plan') ? 0 : 3, r.stderr);
-      assert.equal(r.stored['default-target'], 'copilot\n');
-      assert.equal(r.models.codex, 'previous-model\n');
+      assert.equal(r.settings.target, 'copilot');
+      assert.equal(r.settings.companions.codex.model, 'previous-model');
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('plans explain an overriding environment default and never read legacy profiles', () => {
-  const files = { 'default-target': 'copilot\n', 'profiles.json': '{bad json\n' };
+  const files = { ...saved('copilot'), 'profiles.json': '{bad json\n' };
   const r = run(['--plan', '--target', 'codex', '--set-default', '--yes', '--json'], { AGENT_COMPANION_DEFAULT_TARGET: 'opencode' }, files);
   assert.equal(r.code, 2, r.stderr);
   assert.equal(JSON.parse(r.stdout).plan.code, 'env_override');
@@ -225,12 +243,12 @@ test('Claude onboarding persists a ready target without a smoke turn and rejects
   try {
     for (const loggedIn of ['1', '0']) {
       const r = run(['--host', 'claude', '--target', 'claude', '--set-default', '--yes', '--json'],
-        { CLAUDE_BIN: bin, FAKE_LOGGED_IN: loggedIn }, { 'default-target': 'copilot\n' });
+        { CLAUDE_BIN: bin, FAKE_LOGGED_IN: loggedIn }, saved('copilot'));
       assert.equal(r.code, loggedIn === '1' ? 0 : 3, r.stderr);
       const out = JSON.parse(r.stdout);
       assert.equal(out.report.authenticated, loggedIn === '1');
       assert.equal(out.report.smoke.run, false);
-      assert.equal(r.stored['default-target'], loggedIn === '1' ? 'claude\n' : 'copilot\n');
+      assert.equal(r.settings.target, loggedIn === '1' ? 'claude' : 'copilot');
       assert.equal(out.report.permission.risk, 'dangerous');
     }
     const help = run(['--help']);
@@ -252,11 +270,11 @@ test('model plans describe set, clear and preserve without writes', () => {
     const model = { requested: requested ?? null, action, current: 'sonnet', source: 'config' };
     assert.deepEqual(planOnboard({ options, targets }).model, model);
     const r = run(['--plan', '--json', '--no-target-check', ...['--target', 'claude', '--set-default'],
-      ...(requested ? ['--model', requested] : [])], {}, { 'default-model-claude': 'sonnet\n' });
+      ...(requested ? ['--model', requested] : [])], {}, saved(undefined, { claude: 'sonnet' }));
     assert.equal(r.code, 0, r.stderr);
     assert.deepEqual(JSON.parse(r.stdout).model, model);
-    assert.equal(r.models.claude, 'sonnet\n');
-    assert.equal(r.stored['default-target'], null);
+    assert.equal(r.settings.companions?.claude?.model, 'sonnet');
+    assert.equal(r.settings.target, undefined);
   }
 });
 
@@ -293,37 +311,37 @@ test('invalid model ids fail with companion-specific bridge hints', () => {
     assert.equal(r.code, 2, r.stderr);
     assert.match(r.stderr, /\[FAIL\].*MODEL_NOT_ALLOWED/);
     assert.match(r.stderr, hint);
-    assert.equal(r.stored['default-target'], null);
+    assert.equal(r.settings.target, undefined);
   }
 });
 
 test('model writes and clears share the target readiness gate, including an unchanged target', () => {
-  const files = { 'default-target': 'claude\n', 'default-model-claude': 'sonnet\n' };
+  const files = saved('claude', { claude: 'sonnet' });
   for (const model of ['haiku', 'inherit']) {
     const args = ['--target', 'claude', '--model', model, '--set-default', '--json'];
     const blocked = run(args, {}, files);
     assert.equal(blocked.code, 3, blocked.stderr);
-    assert.equal(blocked.models.claude, 'sonnet\n');
+    assert.equal(blocked.settings.companions.claude.model, 'sonnet');
     const r = run([...args, '--no-target-check'], {}, files);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(r.models.claude, model === 'inherit' ? null : 'haiku\n');
+    assert.equal(r.settings.companions?.claude?.model, model === 'inherit' ? undefined : 'haiku');
     assert.equal(JSON.parse(r.stdout).wroteDefault, false);
     assert.deepEqual(JSON.parse(r.stdout).model, {
       requested: model, action: model === 'inherit' ? 'clear' : 'set',
       current: model === 'inherit' ? null : 'haiku', source: model === 'inherit' ? 'unset' : 'config',
     });
     const preview = run(args.filter((a) => a !== '--set-default'), {}, files);
-    assert.equal(preview.models.claude, 'sonnet\n');
+    assert.equal(preview.settings.companions.claude.model, 'sonnet');
   }
   const fresh = run(['--target', 'claude', '--model', 'haiku', '--set-default', '--no-target-check']);
   assert.equal(fresh.code, 0, fresh.stderr);
-  assert.equal(fresh.stored['default-target'], 'claude\n');
-  assert.equal(fresh.models.claude, 'haiku\n');
+  assert.equal(fresh.settings.target, 'claude');
+  assert.equal(fresh.settings.companions.claude.model, 'haiku');
   assert.match(fresh.stdout, /wrote default model for claude: haiku/);
 });
 
 test('list-targets reports per-companion model and source in JSON and text', () => {
-  const files = { 'default-model-claude': 'haiku\n' };
+  const files = saved(undefined, { claude: 'haiku' });
   const r = run(['--list-targets', '--json'], {}, files);
   assert.equal(r.code, 0, r.stderr);
   const targets = JSON.parse(r.stdout).targets;
@@ -341,20 +359,20 @@ test('human model plans explain set and clear, even without --set-default', () =
     const r = run(['--target', 'claude', '--model', model, '--no-target-check']);
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, text);
-    assert.equal(r.models.claude, null);
+    assert.equal(r.settings.companions?.claude?.model, undefined);
   }
 });
 
-test('each companion uses its existing model file and keeps environment precedence', () => {
+test('each companion saves its model in shared settings and keeps environment precedence', () => {
   for (const [id, model] of [['copilot', 'byok-model:latest'], ['codex', 'gpt-5.4'],
     ['opencode', 'anthropic/claude-haiku-4-5'], ['antigravity', 'gemini-pro-agent']]) {
     const r = run(['--target', id, '--model', model, '--set-default', '--no-target-check', '--json']);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(id === 'copilot' ? r.stored['default-model'] : r.models[id], `${model}\n`);
+    assert.equal(r.settings.companions[id].model, model);
   }
   const r = run(['--target', 'claude', '--model', 'inherit', '--set-default', '--no-target-check', '--json'],
-    { AGENT_COMPANION_CLAUDE_MODEL: 'opus' }, { 'default-model-claude': 'haiku\n' });
+    { AGENT_COMPANION_CLAUDE_MODEL: 'opus' }, saved(undefined, { claude: 'haiku' }));
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(r.models.claude, null);
+  assert.equal(r.settings.companions?.claude?.model, undefined);
   assert.deepEqual(JSON.parse(r.stdout).model, { requested: 'inherit', action: 'clear', current: 'opus', source: 'env' });
 });

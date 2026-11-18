@@ -50,7 +50,7 @@ import { opencodeProvider } from './adapters/opencode.mjs';
 import { acpProvider } from './adapters/acp.mjs';
 
 import { log, validateAgentArgs } from './validation.mjs';
-import { BASE_DIR, readDefaultModel, migrateLegacyState, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
+import { BASE_DIR, readDefaultModel, migrateDefaults, migrateLegacyState, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
 import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
 import { queuePath, runtimeDir, appendPrivateFile } from '../lib/runtime-paths.mjs';
 import { logEvent } from '../lib/log.mjs';
@@ -342,17 +342,17 @@ export async function recoverController(active = controller) {
 }
 
 async function handleSend(args, active, request) {
-  const provider = args.target || readDefaultTarget(active.env).target;
+  const conversation = args.thread && active.records.readConversation(args.thread);
+  const provider = args.target || conversation?.provider || readDefaultTarget(active.env).target;
   if (!provider) return asJson({ ok: false, action: 'send', code: 'TARGET_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR });
   const refusal = effortRefusal(getTarget(provider, active.env), args.effort);
   if (refusal) return asJson({ ...refusal, action: 'send', status: refusal.code });
-  // A configured per-companion default model (the env knob or the default-model
-  // file) is an explicit selection for a NEW conversation. An existing conversation
-  // keeps its stored override, and an omitted model with nothing configured inherits
+  // An env or saved model default is an explicit selection for a new conversation.
+  // An existing conversation keeps its stored override. An omitted model inherits
   // the companion's own configuration (Codex then receives no model key at all).
   const known = Object.hasOwn(active.providers ?? {}, provider);
   // validation.mjs normalizes an omitted model to null; both shapes mean "not chosen".
-  const configured = known && args.model == null && args.thread && !active.records.readConversation(args.thread)
+  const configured = known && args.model == null && args.thread && !conversation
     ? (readDefaultModel(provider, active.env).model ?? undefined) : undefined;
   const sent = await active.send({ owner: args.thread, provider, cwd: args.cwd, text: args.task,
     model: args.model ?? configured, effort: args.effort ?? undefined, hostSessionId: getHostSessionId(), ...request });
@@ -470,6 +470,23 @@ function handleStatus({ job_id, diagnostics }, active) {
 
 // --- MCP server setup -------------------------------------------------------
 
+// Only attach stdio transport when launched as a script. Allows
+// `import('./server.mjs')` from tests without spawning a real MCP loop.
+// Resolve both sides through realpath so a symlinked argv[1] still matches
+// import.meta.url.
+const isMain = (() => {
+  try {
+    const argvReal = realpathSync(process.argv[1]);
+    const metaReal = realpathSync(fileURLToPath(import.meta.url));
+    return argvReal === metaReal;
+  } catch { return false; }
+})();
+if (isMain) {
+  migrateLegacyState({ log });
+  // A settings file the bridge cannot write leaves the old files for the next start.
+  try { migrateDefaults({ log }); } catch (err) { log('WARN', `defaults migration skipped: ${err.message}`); }
+}
+
 const mcp = new Server(
   { name: 'agent-bridge', version: '0.0.1' },
   {
@@ -483,7 +500,7 @@ const mcp = new Server(
       'agent_catalog, agent_status, agent_reply, and agent_cancel. The companion uses ' +
       'agent_send for kickoff then loops on agent_wait until terminal. ' +
       `Default target is ${defaultTargetId() || 'unset (pass target or run onboarding)'}; ` +
-      `supported targets: ${listTargets().map((t) => t.id).join(', ')}. ` +
+      `supported targets: ${listTargetIds().join(', ')}. ` +
       'Read agent_catalog for companions and models. Runtime IPC, logs, and completion ' +
       `queue live under the private directory ${runtimeDir()}.`,
   },
@@ -743,7 +760,7 @@ export async function dispatch(normalized, { controller: active = controller, re
       ? active.status({ owner: normalized.thread }) : null;
     const bound = existing?.execution;
     const hint = err.code === 'provider_mismatch'
-      ? `This conversation is bound to ${bound.provider} in ${bound.cwd}. To use ${normalized.target || readDefaultTarget(active.env).target}, spawn a new agent-companion and restate the task.`
+      ? `This conversation is bound to ${bound.provider} in ${bound.cwd}. To use ${normalized.target}, spawn a new agent-companion and restate the task.`
       : err.code === 'cwd_mismatch' ? `This conversation is bound to ${bound.cwd}. Use that path, or spawn a new agent-companion for the other repo.` : null;
     return asJson({ ok: false, action: normalized.action, code: err.code, ...(hint ? { hint } : {}),
       status: ({ execution_unknown: 'unknown_job', AMBIGUOUS_HISTORY: 'thread_ambiguous' })[err.code] || err.code,
@@ -781,22 +798,10 @@ async function exitOnBridgeLoss(code) {
   }
 }
 
-// Only attach stdio transport when launched as a script. Allows
-// `import('./server.mjs')` from tests without spawning a real MCP loop.
-// Resolve both sides through realpath so a symlinked argv[1] still matches
-// import.meta.url.
-const isMain = (() => {
-  try {
-    const argvReal = realpathSync(process.argv[1]);
-    const metaReal = realpathSync(fileURLToPath(import.meta.url));
-    return argvReal === metaReal;
-  } catch { return false; }
-})();
 if (isMain) {
   process.on('SIGINT', () => { void exitOnBridgeLoss(130); });
   process.on('SIGTERM', () => { void exitOnBridgeLoss(143); });
   process.stdin.on('end', () => { void exitOnBridgeLoss(0); });
-  migrateLegacyState({ log });
   await recoverController();
   // One-line startup log so a user troubleshooting host routing can grep
   // the private runtime bridge log for "host detected" and see what the

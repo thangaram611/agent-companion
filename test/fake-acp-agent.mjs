@@ -89,7 +89,6 @@ export function fakeAcpDescriptor({ id = 'fake-acp', loadSession = true, updates
       args: ({ model }) => ['--acp', ...(model ? ['--model', model] : [])],
       env: () => ({}),
       rotate: [],
-      defaultModel: () => null,
       loadSession,
       // `FAKE_ACP_POLICY` = all | edit | none, read at answer time like a real
       // descriptor reads its own knob.

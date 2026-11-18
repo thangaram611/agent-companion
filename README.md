@@ -116,15 +116,18 @@ Configuration:
   120000 ms). Pending send/wait/reply/cancel calls hold the lease; status and
   catalog do not. Stop hooks write owner markers. Total execution has no
   40-minute cutoff; each wait is still bounded by the host's per-call timeout.
-- `AGENT_COMPANION_DEFAULT_TARGET` overrides the `default-target` file.
+- Both hosts share target and model defaults in
+  `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`.
+  With `AGENT_COMPANION_HOME` set, the file is `$AGENT_COMPANION_HOME/settings.json`.
+  `AGENT_COMPANION_DEFAULT_TARGET` overrides its target.
 - Save a per-companion model default with
   `node scripts/onboard.mjs --target <companion> --model <id> --set-default`.
-  Select the host state with `AGENT_COMPANION_HOST=claude|codex`, or use
+  Setup accepts the same choice through
   `bash setup.sh --host <host> --target <companion> --model <id>`.
   `--model inherit` clears the saved default. `AGENT_COMPANION_CODEX_MODEL`,
   `AGENT_COMPANION_OPENCODE_MODEL` and `AGENT_COMPANION_CLAUDE_MODEL` override
   saved defaults where the host passes them (Claude host). An explicit request
-  overrides the default; with neither set, the companion inherits its own configuration.
+  overrides the default for a new conversation. Follow-ups keep their selection.
 - Copilot checks a saved or requested model when it opens a session. The bridge
   confirms the selected model before sending the task. A refusal lists the
   models the session offered. The bundled Copilot reviewer inherits the session model.
@@ -234,11 +237,8 @@ bash setup.sh --host claude --target none
 # See target readiness and next steps.
 node scripts/onboard.mjs --list-targets
 
-# Persist a default target for Codex state.
-AGENT_COMPANION_HOST=codex node scripts/onboard.mjs --target opencode --set-default
-
-# Or persist a default target for Claude state.
-AGENT_COMPANION_HOST=claude node scripts/onboard.mjs --target opencode --set-default
+# Save a default target for both hosts.
+node scripts/onboard.mjs --target opencode --set-default
 ```
 
 For a narrower install:
@@ -253,14 +253,11 @@ bash setup.sh --host claude --target copilot
 # Codex host, Claude Code companion default.
 bash setup.sh --host codex --target claude
 
-# Pin Haiku for the Claude Code companion on the Codex host.
+# Install on Codex and save Haiku as the shared Claude companion model.
 bash setup.sh --host codex --target claude --model haiku
 
-# Claude Code host, separate Claude Code companion default.
+# Install on Claude Code and select its Claude Code companion.
 bash setup.sh --host claude --target claude
-
-# Persist Claude as the default companion for Codex state.
-AGENT_COMPANION_HOST=codex node scripts/onboard.mjs --target claude --set-default
 
 # Harness/plugin surface only. Keep any existing companion configuration.
 bash setup.sh --host both --target none
@@ -304,24 +301,18 @@ For the full flag reference, run `node scripts/onboard.mjs --help`. `--plan --js
 selection and readiness without writes; `--smoke` explicitly opts into a real
 companion task that can spend quota.
 
-For standalone host-specific writes, set `AGENT_COMPANION_HOST=codex` or
-`AGENT_COMPANION_HOST=claude` on the command. `setup.sh` does this for each
-host when it delegates to onboarding.
-
 An ordinary onboarding rerun preserves existing configuration unless `--target`
 explicitly selects a change. Readiness failure leaves the default untouched;
 `--no-target-check` can defer readiness, but a failed requested smoke never
 persists a new default. Codex smoke requires a completed assistant response
 matching `ready`, not just a successful CLI exit.
 
-`AGENT_COMPANION_DEFAULT_TARGET` overrides the persisted `default-target`.
-If `agent_send` omits `target` and no default is configured, the bridge returns
-`TARGET_UNCONFIGURED`. Onboarding saves per-companion model defaults in
-`default-model` (Copilot) or `default-model-<companion>` files. The model env
-knobs listed under Configuration override these files where the host passes them.
-A request can supply an explicit model override;
-otherwise the companion uses its configuration. Legacy configuration migration
-is described in [Architecture — State](docs/ARCHITECTURE.md#state).
+A new conversation with no requested or configured target returns
+`TARGET_UNCONFIGURED`. Routing selects the requested model, the companion's
+environment override, or its saved model, in that order. An omitted selection
+inherits native configuration. On upgrade, matching per-host defaults migrate
+once. Conflicts are logged and their files are kept for inspection.
+See [Architecture — State](docs/ARCHITECTURE.md#state).
 
 ## Install For Claude Code
 
@@ -474,8 +465,8 @@ read-only. Execution and continuation belong to the subagent.
 Every send requires an absolute existing repo/worktree `cwd`. The host supplies
 conversation identity as described in
 [One agent-companion, one companion conversation](#one-agent-companion-one-companion-conversation).
-Omitting `target` uses the configured default. Omitting `model` uses the
-companion's configuration. Refusals are `TARGET_UNCONFIGURED`,
+A new conversation uses the configured defaults when the request omits them.
+A follow-up keeps the conversation’s target and model unless it names a new model. Refusals are `TARGET_UNCONFIGURED`,
 `TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`; the
 subagent relays them and stops instead of changing the request to get around them.
 

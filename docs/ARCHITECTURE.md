@@ -125,8 +125,8 @@ alone does not prove an explicitly requested model invalid.
 
 `agent_send` accepts `task` and an absolute existing `cwd`, with optional `target`,
 `model`, `effort` and `max_wait_sec`. It passes the child's exact message to the companion.
-The bridge adds no task instructions or required answer format. Omitted `target`
-uses `AGENT_COMPANION_DEFAULT_TARGET`, then the `default-target` file. If neither
+The bridge adds no task instructions or required answer format. On a new conversation,
+omitted `target` uses `AGENT_COMPANION_DEFAULT_TARGET`, then the shared settings file. If neither
 exists, the send returns `TARGET_UNCONFIGURED`. An explicit `model` overrides
 per-companion configuration; with no override or configured default, the native
 configuration is inherited. Codex receives no model key in that case.
@@ -155,9 +155,8 @@ an explicit override is checked directly. With no catalog entry, there is no
 pre-write vocabulary check: resume can persist the selection before a backend
 rejects it during `turn/start`/observation. That failure carries the backend message.
 
-OpenCode has null static levels. It resolves the explicit or environment model,
-otherwise the saved session model or native default. The environment model is
-reapplied on resume. With an effort override, it reads
+OpenCode has null static levels. It uses the model selected by routing,
+then the saved session model or native default. With an effort override, it reads
 `/api/model?directory=<cwd>` and validates the level against that model's variants
 **before** POSTing `/api/session/{id}/model`. Effort chooses the variant even when
 the model string carries a different `#variant`; selected and effective model
@@ -433,13 +432,22 @@ alone is never proof of exit.
 
 ## State
 
+Both hosts share `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`,
+or `$AGENT_COMPANION_HOME/settings.json` with the override set. `lib/state.mjs`
+stores the target and per-companion model there. Routing applies environment
+overrides before saved defaults on the first send. The first bridge or onboarding
+run migrates `default-target` and `default-model*`. A value found on one host
+or agreed by both moves into the store. A disagreement leaves the setting unset,
+logs both values and preserves the files. Setup previews this migration read-only.
+Settings writes take a short-lived `settings.json.lock` and atomically replace the
+private file. Unreadable or invalid settings produce a warning and block updates.
+
 `AGENT_COMPANION_HOME` overrides the state home; otherwise Claude uses
 `~/.claude/agent-companion/` and Codex uses `$CODEX_HOME/agent-companion/`
 (default `~/.codex/agent-companion/`).
 
 | Path | Meaning |
 | --- | --- |
-| `default-target`, `default-model`, `default-model-<companion>` | Companion/model defaults written by onboarding; reads resolve environment → file → unset. |
 | `target-checks.json` | Last explicit readiness evidence; catalog/status read it without probing. |
 | `conversations/<owner>.json` | Provider, canonical cwd, model/effort overrides, native history, generation and current execution id. |
 | `executions/<id>.json` | Request, interventionModes, interventions and turns, native references, transcript locator, start/end worktree snapshots, process identities, progress, lifecycle and writer authority. |
@@ -814,7 +822,7 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   Measured 2026-08-28. The suite sandboxes `AGENT_RUNTIME_DIR` at module level, and the
   guard is structural, not a list: `node --test` sets `NODE_TEST_CONTEXT` in every test child
   and everything a test spawns inherits it, so `lib/host.mjs`'s `refuseRealHomeUnderTest` —
-  called from `runtimeDir()`, from `state.mjs`'s `BASE_DIR` at import, and mirrored in
+  called from `runtimeDir()`, on state and shared settings paths, and mirrored in
   `hooks/drain-completions.sh` — throws on any path under the real account home
   (`os.userInfo()`, not `$HOME`; anything under `os.tmpdir()` passes). A textual guard over test sources missed four cases. That retired lifetime bug is why the real-home guard remains; heartbeats
   are not owner-lease evidence in the current controller.

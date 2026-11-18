@@ -23,6 +23,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 export const SANDBOX_HOME = mkdtempSync(join(tmpdir(), 'ac-sandbox-home-'));
+// Also isolate the default XDG path when a caller injects an env without HOME.
+process.env.HOME = SANDBOX_HOME;
 process.env.AGENT_COMPANION_HOME ??= join(SANDBOX_HOME, 'agent-companion');
 process.env.AGENT_RUNTIME_DIR ??= join(SANDBOX_HOME, 'runtime');
 test.after(() => rmSync(SANDBOX_HOME, { recursive: true, force: true }));

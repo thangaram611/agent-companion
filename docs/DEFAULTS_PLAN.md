@@ -1,7 +1,7 @@
 # User defaults for companion model and effort: plan
 
-Status: decisions agreed and step 0 measured (2026-11-18); steps 1 and 2 done
-(2026-11-18); steps 3 to 9 not started.
+Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 3 done
+(2026-11-18); steps 4 to 9 not started.
 
 ## Goal
 
@@ -264,6 +264,19 @@ and Antigravity's `defaultModel`, so routing is the only place defaults apply.
 Check: unit tests under `test/sandbox-home.mjs` for the store, migration
 (identical, conflicting, absent) and precedence, `refuseRealHomeUnderTest`
 covering the new path, Antigravity replay tests, and the full suite.
+
+Done 2026-11-18. Code by Codex, reviewed and trimmed by Claude.
+- Conflicting old values stay in their files, unread, and
+  `legacyDefaultConflicts` lists them for step 5.
+- Migration runs at bridge start, where a failure is logged and never fatal,
+  and on a real onboarding run. Previews (`onboard --plan`, `setup --dry-run`)
+  only show what would move.
+- A follow-up that names no target stays on its conversation's companion
+  instead of re-reading the default.
+- No lock on the settings file, removed in review. Readers see whole files
+  through the rename, and two migrations racing write the same content. The
+  only other writer is the person. A lock would add a stuck-lock failure and a
+  blocking wait in the bridge.
 
 ### Step 4: Effort default
 

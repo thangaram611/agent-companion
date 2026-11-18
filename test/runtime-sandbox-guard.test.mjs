@@ -16,6 +16,7 @@
 // retired codex broker's idle reaper extended per run. A textual guard over the test
 // sources was tried first; it had a directory allowlist, missed hooks that
 // reach state through node, and could be satisfied by `= ''`. This one cannot.
+import './sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -106,6 +107,18 @@ test('importing lib/state.mjs unsandboxed throws at import under test; AGENT_COM
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
+});
+
+test('settings access checks the XDG path per call even with a sandboxed state import', () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'guard-settings-'));
+  try {
+    const env = { ...baseEnv(), AGENT_COMPANION_HOME: sandbox, AGENT_COMPANION_DEFAULT_TARGET: '', XDG_CONFIG_HOME: join(REAL_HOME, '.config') };
+    for (const call of ["m.readDefaultTarget()", "m.writeDefaultModel('x')", 'm.migrateDefaults()']) {
+      const child = runNode(`const m = await import('./lib/state.mjs'); delete process.env.AGENT_COMPANION_HOME; ${call};`, env);
+      assert.notEqual(child.status, 0);
+      assert.match(child.stderr, /refusing to use the operator's real settings file/);
+    }
+  } finally { rmSync(sandbox, { recursive: true, force: true }); }
 });
 
 test('the drain-completions hook refuses the real runtime dir under test with exit 78, and writes into a sandbox', () => {

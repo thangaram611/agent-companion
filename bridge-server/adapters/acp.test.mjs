@@ -137,14 +137,9 @@ function setup(t, { descriptor = fakeAcpDescriptor(), env = {} } = {}) {
   return { dir, bin, childEnv, records, controller, adapters, supervisors, progress, logs, send, finish, frames, trace };
 }
 
-const modeled = () => {
-  const descriptor = getTargetById('antigravity');
-  return { ...descriptor, acp: { ...descriptor.acp, defaultModel: () => 'fake-model-a' } };
-};
-
 test('new session then cold follow-up loads the same history in a new process and reapplies the model', async (t) => {
-  const h = setup(t, { descriptor: modeled() });
-  const first = await h.finish(await h.send());
+  const h = setup(t, { descriptor: getTargetById('antigravity') });
+  const first = await h.finish(await h.send({ model: 'fake-model-a' }));
   const second = await h.finish(await h.send({ text: 'CONTINUATION\nexact follow-up', model: 'fake-model-b' }));
   assert.equal(first.outcome, 'completed'); assert.equal(second.outcome, 'completed');
   assert.equal(second.nativeRefs.sessionId, first.nativeRefs.sessionId);
@@ -158,7 +153,7 @@ test('new session then cold follow-up loads the same history in a new process an
     [{ type: 'text', text: 'exact text\n  with spacing' }], [{ type: 'text', text: 'CONTINUATION\nexact follow-up' }],
   ]);
   assert.equal(h.frames('initialize')[0].params.protocolVersion, 1);
-  assert.equal(h.frames('initialize')[0].params.clientInfo.name, modeled().acp.clientName);
+  assert.equal(h.frames('initialize')[0].params.clientInfo.name, getTargetById('antigravity').acp.clientName);
   assert.ok(first.stopEvidence.gone && second.stopEvidence.gone);
   assert.equal(second.usage, null); // Antigravity has no measured native usage.
   assert.equal(second.nativeRefs.promptRequestId, h.frames('session/prompt')[1].id);
@@ -226,7 +221,7 @@ test('Copilot OTEL usage is execution-private and temporary files are removed on
 });
 
 test('a refused model after load keeps the original history and never delivers another prompt', async (t) => {
-  const h = setup(t, { descriptor: modeled() });
+  const h = setup(t, { descriptor: getTargetById('antigravity') });
   const first = await h.finish(await h.send());
   const second = await h.send({ text: 'follow-up', model: 'not-a-model' });
   assert.equal(h.records.readExecution(second.executionId).terminal.error, 'MODEL_NOT_ALLOWED');
@@ -250,7 +245,7 @@ for (const options of [{ env: { ACP_FAKE_LOAD_SESSION: '0' } }, { env: { ACP_FAK
 
 for (const fault of ['refused', 'wrong-model', 'missing-model']) {
   test(`model selection surfaces MODEL_NOT_ALLOWED on ${fault}`, async (t) => {
-    const h = setup(t, { descriptor: modeled(), env: { ACP_FIXTURE_FAULT: fault } });
+    const h = setup(t, { descriptor: getTargetById('antigravity'), env: { ACP_FIXTURE_FAULT: fault } });
     const result = await h.send({ model: fault === 'refused' ? 'not-a-model' : 'fake-model-a' });
     assert.equal(result.outcome, 'failed');
     assert.equal(h.records.readExecution(result.executionId).terminal.error, 'MODEL_NOT_ALLOWED');
@@ -480,9 +475,9 @@ const input = (h, sent, mode, text) => h.controller.intervene({ executionId: sen
 const releasePrompt = (h, index) => writeFileSync(`${h.childEnv.ACP_FIXTURE_GATE}.${h.frames('session/prompt')[index].id}`, '');
 
 test('Antigravity queues on the live process and session, keeping both answers without invented turn ids', async t => {
-  const h = setup(t, { descriptor: modeled() });
+  const h = setup(t, { descriptor: getTargetById('antigravity') });
   h.childEnv.ACP_FIXTURE_GATE = join(h.dir, 'release');
-  const sent = await h.send();
+  const sent = await h.send({ model: 'fake-model-a' });
   await until(() => h.progress.some(p => p.partialText === 'ready'));
   const queued = await input(h, sent, 'queue', 'CONTINUATION\nonly this text');
   assert.equal(queued.ok, true);
@@ -510,7 +505,7 @@ test('Antigravity queues on the live process and session, keeping both answers w
 });
 
 test('Antigravity waits for the cancelled prompt response, then sends only new text on the live session', async t => {
-  const h = setup(t, { descriptor: modeled() });
+  const h = setup(t, { descriptor: getTargetById('antigravity') });
   h.childEnv.ACP_FIXTURE_GATE = join(h.dir, 'release');
   const sent = await h.send({ text: 'sleep:60000 original task' });
   assert.deepEqual(await input(h, sent, 'steer', 'unsupported'), { ok: false, status: 'intervention_unavailable', reason: 'capability' });

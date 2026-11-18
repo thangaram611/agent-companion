@@ -5,29 +5,31 @@ import { resolveRouting, dispatch, _resetForTest } from './server.mjs';
 import { clearDefaultTarget, writeDefaultTarget, writeDefaultModel, clearDefaultModel, writeTargetChecks } from '../lib/state.mjs';
 import { getTarget } from '../lib/target-registry.mjs';
 
+const env = { AGENT_COMPANION_HOME: process.env.AGENT_COMPANION_HOME };
+
 test('target routing is explicit or configured, with no silent substitute', () => {
   clearDefaultTarget();
-  assert.equal(resolveRouting({}, {}).code, 'TARGET_UNCONFIGURED');
+  assert.equal(resolveRouting({}, env).code, 'TARGET_UNCONFIGURED');
   writeDefaultTarget('copilot');
-  assert.equal(resolveRouting({}, {}).resolved.companion, 'copilot');
-  assert.equal(resolveRouting({}, { AGENT_COMPANION_DEFAULT_TARGET: 'codex' }).resolved.companion, 'codex');
-  assert.equal(resolveRouting({ target: 'opencode' }, {}).resolved.companion, 'opencode');
-  assert.equal(resolveRouting({ target: 'unsupported' }, {}).code, 'TARGET_UNSUPPORTED');
+  assert.equal(resolveRouting({}, env).resolved.companion, 'copilot');
+  assert.equal(resolveRouting({}, { ...env, AGENT_COMPANION_DEFAULT_TARGET: 'codex' }).resolved.companion, 'codex');
+  assert.equal(resolveRouting({ target: 'opencode' }, env).resolved.companion, 'opencode');
+  assert.equal(resolveRouting({ target: 'unsupported' }, env).code, 'TARGET_UNSUPPORTED');
   clearDefaultTarget();
 });
 
 test('per-companion model defaults inherit when unset and explicit overrides win', () => {
   for (const target of ['copilot', 'codex', 'opencode', 'antigravity', 'claude']) {
     clearDefaultModel(target);
-    assert.equal(resolveRouting({ target }, {}).resolved.model, null);
+    assert.equal(resolveRouting({ target }, env).resolved.model, null);
     const configured = target === 'opencode' ? 'provider/default' : 'gpt-5.4';
     writeDefaultModel(configured, target);
-    assert.equal(resolveRouting({ target }, {}).resolved.model, configured);
+    assert.equal(resolveRouting({ target }, env).resolved.model, configured);
     const model = target === 'opencode' ? 'provider/override' : 'gpt-5.3-codex';
-    assert.equal(resolveRouting({ target, model }, {}).resolved.model, model);
+    assert.equal(resolveRouting({ target, model }, env).resolved.model, model);
     clearDefaultModel(target);
   }
-  assert.equal(resolveRouting({ target: 'codex' }, { AGENT_COMPANION_CODEX_MODEL: 'gpt-5.4' }).resolved.model, 'gpt-5.4');
+  assert.equal(resolveRouting({ target: 'codex' }, { ...env, AGENT_COMPANION_CODEX_MODEL: 'gpt-5.4' }).resolved.model, 'gpt-5.4');
 });
 
 test('a model override is refused when the selected companion cannot select models', () => {
@@ -35,8 +37,8 @@ test('a model override is refused when the selected companion cannot select mode
   const previous = caps.modelSelection;
   caps.modelSelection = false;
   try {
-    assert.equal(resolveRouting({ target: 'copilot', model: 'gpt-5.4' }, {}).code, 'CAPABILITY_UNAVAILABLE');
-    assert.equal(resolveRouting({ target: 'copilot' }, {}).ok, true);
+    assert.equal(resolveRouting({ target: 'copilot', model: 'gpt-5.4' }, env).code, 'CAPABILITY_UNAVAILABLE');
+    assert.equal(resolveRouting({ target: 'copilot' }, env).ok, true);
   } finally {
     caps.modelSelection = previous;
   }
@@ -63,22 +65,22 @@ test('routing refusals retain the envelope without profiles or strengths', async
 test('effort routing advertises static CLI levels and defers model-specific levels to adapters', () => {
   assert.equal(getTarget('codex').capabilities.effortSelection, true);
   assert.equal(getTarget('codex').capabilities.effortLevels, null);
-  assert.equal(resolveRouting({ target: 'codex', effort: 'low' }, {}).resolved.effort, 'low');
+  assert.equal(resolveRouting({ target: 'codex', effort: 'low' }, env).resolved.effort, 'low');
   const levels = ['low', 'medium', 'high', 'xhigh', 'max'];
   assert.equal(getTarget('claude').capabilities.effortSelection, true);
   assert.deepEqual(getTarget('claude').capabilities.effortLevels, levels);
-  for (const effort of levels) assert.equal(resolveRouting({ target: 'claude', effort }, {}).resolved.effort, effort);
-  const invalid = resolveRouting({ target: 'claude', effort: 'minimal' }, {});
+  for (const effort of levels) assert.equal(resolveRouting({ target: 'claude', effort }, env).resolved.effort, effort);
+  const invalid = resolveRouting({ target: 'claude', effort: 'minimal' }, env);
   assert.equal(invalid.code, 'EFFORT_NOT_ALLOWED');
   assert.equal(invalid.effort, 'minimal');
   for (const level of levels) assert.ok(invalid.hint.includes(level));
   for (const target of ['opencode', 'copilot', 'antigravity']) {
     assert.equal(getTarget(target).capabilities.effortSelection, true);
-    assert.equal(resolveRouting({ target, effort: 'low' }, {}).resolved.effort, 'low');
-    assert.equal(resolveRouting({ target }, {}).resolved.effort, null);
+    assert.equal(resolveRouting({ target, effort: 'low' }, env).resolved.effort, 'low');
+    assert.equal(resolveRouting({ target }, env).resolved.effort, null);
   }
   const copilotLevels = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
   assert.equal(getTarget('copilot').capabilities.effortLevels, null);
-  for (const effort of copilotLevels) assert.equal(resolveRouting({ target: 'copilot', effort }, {}).resolved.effort, effort);
-  assert.equal(resolveRouting({ target: 'copilot', effort: 'ultra' }, {}).resolved.effort, 'ultra');
+  for (const effort of copilotLevels) assert.equal(resolveRouting({ target: 'copilot', effort }, env).resolved.effort, effort);
+  assert.equal(resolveRouting({ target: 'copilot', effort: 'ultra' }, env).resolved.effort, 'ultra');
 });
