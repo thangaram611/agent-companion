@@ -1,7 +1,7 @@
 # User defaults for companion model and effort: plan
 
-Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 8 done
-(2026-11-18); step 9 not started.
+Status: done (2026-11-18). Steps 1 to 9 are merged to main, along with the census
+fix 6200b0c found on the way.
 
 ## Goal
 
@@ -410,6 +410,11 @@ Run `node scripts/gen-codex-app-server-contract.mjs` for 0.170.0. The schema
 already matches.
 
 Check: the drift test reports `match` with no skew note.
+
+Done 2026-11-18. The generator reported "wire contract unchanged since codex-cli
+0.169.0; only the recorded provenance moved". The one-line diff is
+`codexVersion`. With the 0.169.0 pin the drift test printed the skew note;
+with 0.170.0 it prints nothing and passes.
 
 ## After merge
 
