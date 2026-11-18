@@ -1,6 +1,6 @@
 # User defaults for companion model and effort: plan
 
-Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 8 not started.
+Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 9 not started.
 
 ## Goal
 
@@ -26,6 +26,15 @@ also see what an "inherit" resolves to before a job runs.
 5. **Defaults are applied in one place, routing, for all five companions.** This
    includes removing Antigravity's own read, which the user approved despite the
    pause. It gets unit and replay tests only, no live run.
+6. **Claude's Companions pane opens only when asked or in view.** This replaces
+   the live-view plan's "Unasked it opens when a companion job starts". A job
+   starting never opens the pane. It opens when the person types `/companion`
+   (unchanged: any width, takes the keys), or when the person switches into an
+   agent-companion subagent's view. That open behaves like any unasked one: it
+   docks only on wide terminals and leaves the keys with Claude's prompt, and the
+   pane shows that subagent's job. When the person goes back to the main
+   conversation, a pane the view opened closes. It stays open if the person has
+   since focused it or opened it with `/companion`.
 
 ## Evidence (measured 2026-11-18)
 
@@ -100,6 +109,18 @@ job `be3f3720`.
   `MODEL_NOT_ALLOWED`.
 - The two host state dirs hold `default-target = codex` each and no
   `default-model*` files.
+- The pane opens unasked on the first `agent_send` answer for a new job
+  (`hooks/mod.ts:400-402`, the `announced` set exists only for this) and asked
+  on `/companion` (`mod.ts:383`, `focus: true`). Entering a subagent's view
+  never opens it today. The `AbovePrompt` render fires on every view switch
+  whether the pane is open or not, carrying `view.agentId` (`mod.ts:426-429`,
+  `sawView`). `agents.get(id).jobId` marks an agent-companion subagent whose job
+  the mod knows.
+- The mod API (`.claude-plugin/types/claude-code/index.d.ts:2857-2875`) has
+  `$.ui.open` (returns `isPlaced`; unasked opens wait on narrow terminals) and
+  `$.ui.close({ id })`. Every close raises `ui.close` with `origin` `plugin`,
+  `person` or `unload`. It can also list the plugin's open panes, with whether
+  each is shown, holds the keys, and is placed.
 - `launch-ui.sh` already dispatches `follow`, `jobs` and `send`. The live view
   has free keys (`d` and `s` are unused, `model.mjs:193-268`).
 
@@ -148,7 +169,36 @@ validates again.
 The work happens in a worktree off main. Record the full suite before step 1
 and keep it green after each step. One commit per step, each with its own check.
 
-### Step 1: Copilot model through the session option
+### Step 1: Companions pane opens only when asked or in view
+
+This is done first and does not depend on the other steps. In `hooks/mod.ts`:
+
+- Drop the open from the `agent_send` hook, and drop the `announced` set. The
+  hook still records the agent's job and starts the clock.
+- In `sawView`, entering the view of an agent whose `jobId` the mod knows opens
+  the pane unasked (no `focus`) when it is not already open, and remembers that
+  the view opened it.
+- Returning to the main conversation closes a pane the view opened, unless the
+  person has since focused it or run `/companion`. `/companion` and a focus both
+  clear the remembered view-open.
+- A `ui.close` from the person also clears it.
+
+Update `docs/LIVE_VIEW_PLAN.md:423-424` to the new rule and correct the mod's
+header comment. Implement and verify by hand, not through a subagent (standing
+rule for the mod).
+
+Check: mod tests under `claude plugin test .`, covering:
+- a job start opens nothing;
+- entering a companion subagent's view opens the pane unfocused, showing its job;
+- leaving closes it;
+- leaving after a focus or `/companion` keeps it;
+- entering a non-companion subagent's view opens nothing.
+
+Then a live run in a restarted Claude session through the real send path: start
+a job and see no pane; enter its subagent view and see the pane; go back and see
+it close; type `/companion` and see it open.
+
+### Step 2: Copilot model through the session option
 
 Copilot gets an `acp.setModel` (`session/set_config_option`, `configId: model`).
 `--model` leaves its spawn args, and `defaultModel` and `ALLOWED_MODELS` go. A
@@ -159,7 +209,7 @@ Check: ACP unit tests, a re-record of Copilot fixtures with
 `probes/acp-record/record-copilot.mjs` (local Ollama, started only for the run),
 and a stub-backend test showing a bogus model refused.
 
-### Step 2: Shared store and one application point
+### Step 3: Shared store and one application point
 
 The store and migration described above. `readDefaultModel` and
 `readDefaultTarget` read from the store. Remove the OpenCode adapter's env read
@@ -170,7 +220,7 @@ Check: unit tests under `test/sandbox-home.mjs` for the store, migration
 (identical, conflicting, absent) and precedence, `refuseRealHomeUnderTest`
 covering the new path, Antigravity replay tests, and the full suite.
 
-### Step 3: Effort default
+### Step 4: Effort default
 
 Routing applies the saved effort to a new conversation when the host gives
 none. An invalid saved effort is refused by the existing per-companion
@@ -181,7 +231,7 @@ Check: routing and conversation tests, then a live run with an isolated
 with `medium`, confirmed from `effective_effort` and the rollout's `turn_context`.
 OpenCode gets the same run on a free model.
 
-### Step 4: CLI `agent-companion defaults`
+### Step 5: CLI `agent-companion defaults`
 
 `launch-ui.sh defaults` runs one module that parses, validates, reads native
 values and prints. It reuses the adapters' protocol helpers rather than adding a
@@ -200,24 +250,24 @@ read-only `agent-companion defaults` on this machine must show Codex inherit as
 `gpt-6.2-astra xhigh`. Live set and clear run with an isolated
 `AGENT_COMPANION_HOME`.
 
-### Step 5: Catalog
+### Step 6: Catalog
 
 The per-companion `model` and `effort` gain `saved` and `last_run` (value and
 age). The description says what inherit means for each companion.
 
 Check: catalog tests, and a live catalog read through the subagent.
 
-### Step 6: Live-view defaults panel
+### Step 7: Live-view defaults panel
 
 `d` opens a panel listing each companion's saved and resolved values. Edits use
-a text field like the message box and save through step 4's functions, making
+a text field like the message box and save through step 5's functions, making
 `lib/state.mjs` the views' second write path besides `inbox.mjs`. It works on
 both hosts, because the view runs in the person's terminal.
 
 Check: UI model tests and snapshots, and a live edit in an isolated home read
 back by `agent-companion defaults`.
 
-### Step 7: Docs and backlog
+### Step 8: Docs and backlog
 
 Update README Configuration, ARCHITECTURE (state, precedence, and removal of the
 per-host default files), MVP_TRACKER (drop the effort-default limitation), and
@@ -227,7 +277,7 @@ entry).
 Check: a coherence pass, grepping for `ALLOWED_MODELS`, `default-model-`,
 `defaultModel:` and "no saved effort default".
 
-### Step 8: Codex contract provenance
+### Step 9: Codex contract provenance
 
 Run `node scripts/gen-codex-app-server-contract.mjs` for 0.170.0. The schema
 already matches.
