@@ -115,8 +115,8 @@ export function uiFixture(t) {
   const dirs = [{ host: 'claude', dir: claude }, { host: 'codex', dir: codex }];
   return {
     root, env, running, NOW, states: { claude, codex },
-    model: ({ size = { columns: 150, rows: 26 }, now = () => NOW } = {}) =>
-      new Model({ env, source: createJobSource({ dirs, env, alive: () => true }), now, size }),
+    model: ({ size = { columns: 150, rows: 26 }, now = () => NOW, defaults } = {}) =>
+      new Model({ env, source: createJobSource({ dirs, env, alive: () => true }), now, size, ...(defaults ? { defaults } : {}) }),
     append: records => appendFileSync(running, jsonl(records)),
     setExecution: (id, change) => {
       const path = join(claude, 'executions', `${id}.json`);

@@ -498,7 +498,8 @@ result resource links remain unchanged. Both host roles relay the non-empty
 lists execution and result records from both hosts' state homes, follows the
 selected job's native transcript with `followTranscript` (JSONL by appended
 bytes, SQLite by polling the row cursor) and reads caller titles from the
-hosts' own transcripts. It writes nothing, renews no lease and signals nothing;
+hosts' own transcripts. It writes only inbox requests and, from its defaults
+panel, `settings.json` through `bridge-server/ui/defaults.mjs`; it renews no lease and signals nothing;
 an active record without a result whose recorded process is gone is shown as
 `unknown`, not running.
 

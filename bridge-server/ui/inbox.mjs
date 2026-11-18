@@ -1,4 +1,5 @@
-// The live view's only writes (docs/LIVE_VIEW_PLAN.md, Step 3 inbox contract):
+// The live view's job writes (docs/LIVE_VIEW_PLAN.md, Step 3 inbox contract);
+// its defaults panel saves settings through defaults.mjs:
 // one request file per message or cancel at
 // `<host state dir>/inbox/<executionId>/<requestId>.json`, written atomically
 // with mode 0600, and the deletion of the `<requestId>.outcome.json` it has read.

@@ -53,7 +53,7 @@ exports[`failed job at 150 columns 1`] = `
                                          │
  1 older                                 │
 
- ↑↓ jobs   ⇥ focus   e expand   f follow   / filter   ? keys
+ ↑↓ jobs   ⇥ focus   e expand   f follow   / filter   d defaults   ? keys
 `;
 
 exports[`failed job at 80 columns 1`] = `
@@ -104,7 +104,7 @@ exports[`finished job at 150 columns 1`] = `
                                          │  ✎ src/auth.ts  updated
  1 older                                 │
 
- ↑↓ jobs   ⇥ focus   e expand   f follow   / filter   ? keys
+ ↑↓ jobs   ⇥ focus   e expand   f follow   / filter   d defaults   ? keys
 `;
 
 exports[`finished job at 80 columns 1`] = `
@@ -162,7 +162,7 @@ exports[`job list at 80 columns 1`] = `
 
  1 older
 
- ↑↓ jobs   ⏎ open   / filter   o older   ? keys
+ ↑↓ jobs   ⏎ open   / filter   o older   d defaults   ? keys
 `;
 
 exports[`running job at 150 columns 1`] = `
@@ -191,7 +191,7 @@ exports[`running job at 150 columns 1`] = `
                                          │  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  1 older                                 │  steer · joins the running turn now
 
- ↑↓ jobs   ⇥ focus   e expand   f follow   / filter   ? keys
+ ↑↓ jobs   ⇥ focus   e expand   f follow   / filter   d defaults   ? keys
 `;
 
 exports[`running job at 80 columns 1`] = `

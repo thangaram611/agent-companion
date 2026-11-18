@@ -1,14 +1,16 @@
 // The live view's state: which jobs are listed, which is selected, its followed
 // transcript, scroll and fold state, each running job's message box, and the
 // key map. render() composes the whole screen as rows of styled segments,
-// exactly `columns` cells wide, so the Ink layer only prints them. The only
-// writes are the box's inbox requests, through inbox.mjs; drafts stay in memory.
+// exactly `columns` cells wide, so the Ink layer only prints them. The writes
+// are the box's inbox requests, through inbox.mjs, and the defaults panel's
+// saves, through defaults.mjs; drafts stay in memory.
 import { randomUUID } from 'node:crypto';
 import { jobModel } from '../../lib/model-name.mjs';
 import { JobTranscript } from './follow.mjs';
+import { defaults as readDefaults } from './defaults.mjs';
 import { takeOutcome, writeRequest } from './inbox.mjs';
 import { branchOf, createJobSource } from './jobs.mjs';
-import { Pane, boxRows, cardHead, clean, cut, fitSegs, jobBlocks, layoutLine, one, pendingInputs, pendingLine, segsWidth, width, COMPANION_NAMES, MODE_HINTS, supportedModes } from './rows.mjs';
+import { Pane, age, boxRows, cardHead, clean, cut, fitSegs, jobBlocks, layoutLine, one, pendingInputs, pendingLine, segsWidth, width, COMPANION_NAMES, MODE_HINTS, supportedModes } from './rows.mjs';
 
 const DAY = 86_400_000;
 export const WIDE = 110;
@@ -17,7 +19,8 @@ const HOSTS = { claude: 'Claude Code', codex: 'Codex' };
 const tokens = n => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
 const HELP = [['↑↓ j k', 'jobs, or transcript items when the transcript has focus'], ['⏎ ⇥ esc', 'open or focus the job; back to the list'],
   ['PgUp PgDn', 'scroll the transcript a page'], ['g G', 'transcript top; bottom and follow'], ['e E', 'expand the item; expand all'],
-  ['p', 'show the preamble'], ['f', 'follow new transcript items'], ['/', 'filter jobs'], ['o', 'show jobs older than 24 hours'], ['q', 'quit'],
+  ['p', 'show the preamble'], ['f', 'follow new transcript items'], ['/', 'filter jobs'], ['o', 'show jobs older than 24 hours'],
+  ['d', 'defaults: each companion\'s saved and inherited model and effort'], ['q', 'quit'],
   ['', 'In a running job, the message box has the keys:'], ['typing ⏎', 'write; send in the shown mode'], ['shift+⇥ ctrl+j', 'next mode; new line'],
   ['↑↓ PgUp PgDn', 'scroll the transcript'], ['ctrl+o', 'expand or fold all outputs'], ['ctrl+x', 'cancel the job, after one confirmation'],
   ['esc', 'back to the list, keeping the draft'], ['ctrl+c', 'clear the draft; on an empty box, quit']];
@@ -28,8 +31,9 @@ const REFUSED = { state: 'the job takes no more messages', capability: 'not supp
 const draftText = text => clean(text.replace(/\r\n?/g, '\n'));
 
 export class Model {
-  constructor({ env = process.env, source = createJobSource({ env }), now = Date.now, size = { columns: 120, rows: 40 }, exit = () => {} } = {}) {
-    Object.assign(this, { env, source, now, size, exit });
+  constructor({ env = process.env, source = createJobSource({ env }), now = Date.now, size = { columns: 120, rows: 40 }, exit = () => {}, defaults = readDefaults } = {}) {
+    Object.assign(this, { env, source, now, size, exit, defaults });
+    this.panel = null;
     this.listeners = new Set();
     this.version = 0;
     this.jobs = []; this.counts = { running: 0, done: 0, older: 0 };
@@ -188,6 +192,7 @@ export class Model {
   // exitOnCtrlC off), shift+tab as key.tab with key.shift, and ctrl+j as input
   // '\n' (or 'j' with key.ctrl under the kitty protocol). Measured 2026-11-15.
   key(input, key = {}) {
+    if (this.panel) return this.panelKey(input, key);
     const typing = this.typing;
     if (typing) return this.boxKey(typing, input, key);
     if (key.ctrl && input === 'c') return this.exit();
@@ -207,6 +212,7 @@ export class Model {
     }
     if (input === 'q') return this.exit();
     if (input === '?') this.help = true;
+    else if (input === 'd') this.openPanel();
     else if (input === '/') this.editing = true;
     else if (input === 'o') { this.showOlder = !this.showOlder; this.refresh(); }
     else if (key.tab && this.wide && this.detail) this.inJob = !this.inJob;
@@ -244,7 +250,7 @@ export class Model {
   // The open running job whose box has the keys; a record without
   // interventionModes comes from an older bridge, which reads no inbox.
   get typing() {
-    const job = this.inJob && !this.help && !this.editing ? this.detail?.job : null;
+    const job = this.inJob && !this.help && !this.editing && !this.panel ? this.detail?.job : null;
     return job?.status === 'running' && job.execution.interventionModes ? job : null;
   }
   box(job) {
@@ -283,6 +289,7 @@ export class Model {
   }
   // Bracketed paste arrives whole, newlines included.
   paste(text) {
+    if (this.panel?.edit && !this.panel.busy) { this.panel.draft += one(text); return this.changed(); }
     const job = this.typing;
     if (!job || !this.box(job).mode || this.box(job).confirm) return;
     this.box(job).draft += draftText(text);
@@ -317,7 +324,8 @@ export class Model {
     const title = [[' ', 'normal'], ['agent-companion', 'title'], [`  ${this.counts.running} running · ${this.counts.done} done in 24h`, 'dim']];
     if (this.filter && !this.editing) title.push([`  /${this.filter}`, 'dim']);
     let body;
-    if (this.help) body = HELP.map(([keys, text]) => [[' ' + keys.padEnd(16), 'title'], [text, 'dim']]);
+    if (this.panel) body = this.panelRows(bodyH);
+    else if (this.help) body = HELP.map(([keys, text]) => [[' ' + keys.padEnd(16), 'title'], [text, 'dim']]);
     else if (!this.wide) body = this.inJob && this.detail ? this.paneRows(W, bodyH) : this.listRows(W, bodyH);
     else {
       const list = this.listRows(LIST, bodyH), pane = this.paneRows(W - LIST - 1, bodyH);
@@ -327,11 +335,13 @@ export class Model {
     return this.frame = rows.map(row => fitSegs(row, W));
   }
   hints() {
+    if (this.panel?.edit) return [[' ⏎ save, empty clears to inherit   esc cancel', 'faint']];
+    if (this.panel) return [[this.panel.result ? ' ↑↓ fields   ⏎ edit   esc close' : ' esc close', 'faint']];
     if (this.editing) return [[' /', 'title'], [this.filter, 'normal'], ['▌', 'faint'], ['   enter keeps   esc clears', 'faint']];
     const job = this.inJob && this.detail;
     const keys = this.wide
-      ? job ? '↑↓ items   ⇥ jobs   e expand   E all   p preamble   f follow   ? keys' : '↑↓ jobs   ⇥ focus   e expand   f follow   / filter   ? keys'
-      : job ? '↑↓ items   esc back   e expand   f follow   ? keys' : '↑↓ jobs   ⏎ open   / filter   o older   ? keys';
+      ? job ? '↑↓ items   ⇥ jobs   e expand   E all   p preamble   f follow   ? keys' : '↑↓ jobs   ⇥ focus   e expand   f follow   / filter   d defaults   ? keys'
+      : job ? '↑↓ items   esc back   e expand   f follow   ? keys' : '↑↓ jobs   ⏎ open   / filter   o older   d defaults   ? keys';
     return [[' ' + keys, 'faint']];
   }
   listRows(w, h) {
@@ -424,5 +434,100 @@ export class Model {
       if (segsWidth(segs) + (hint ? width(hint) + 2 : 0) <= w) return layoutLine({ segs, right: hint ? [[hint, 'faint']] : null, wrap: false }, w)[0];
     }
     return fitSegs(short, w);
+  }
+
+  // The defaults panel (d): the default target and each companion's model and
+  // effort, saved or what inherit resolves to, read and saved through
+  // defaults.mjs (which validates natively). Closing it aborts a read or save.
+  openPanel() {
+    const controller = new AbortController();
+    const panel = this.panel = { at: 0, edit: null, draft: '', busy: 'reading', error: null, result: null, controller };
+    this.load(panel, this.defaults({}, { env: this.env, signal: controller.signal }));
+  }
+  // A save answers for its own setting only; the rest of the panel stays as read.
+  load(panel, promise, merge = result => result) {
+    promise.then(result => {
+      if (this.panel !== panel) return;
+      Object.assign(panel, { result: merge(result), busy: null, error: null, edit: null });
+      this.changed();
+    }, err => {
+      if (this.panel !== panel) return;
+      Object.assign(panel, { busy: null, error: one(String(err?.message ?? err)) });
+      this.changed();
+    });
+  }
+  fields() {
+    const result = this.panel.result;
+    return result ? [{ setting: 'target' }, ...Object.keys(result.companions ?? {}).flatMap(id => [{ id, setting: 'model' }, { id, setting: 'effort' }])] : [];
+  }
+  saved(field) {
+    const { result } = this.panel;
+    return field.setting === 'target' ? result.target?.saved : result.companions?.[field.id]?.[field.setting]?.saved;
+  }
+  panelKey(input, key) {
+    const panel = this.panel;
+    if (key.ctrl && input === 'c') {
+      if (!panel.edit || !panel.draft) return this.exit();
+      panel.draft = '';
+    } else if (panel.edit) {
+      if (panel.busy) return;
+      if (key.escape) Object.assign(panel, { edit: null, error: null });
+      else if (key.return) this.saveField();
+      else if (key.backspace || key.delete) panel.draft = panel.draft.slice(0, /[\udc00-\udfff]$/.test(panel.draft) ? -2 : -1);
+      else if (input && !key.ctrl && !key.meta) panel.draft += one(input);
+      else return;
+    } else if (key.escape || input === 'q' || input === 'd') { panel.controller.abort(); this.panel = null; }
+    else if (!panel.result || panel.busy) return;
+    else if (key.upArrow || input === 'k') panel.at = Math.max(0, panel.at - 1);
+    else if (key.downArrow || input === 'j') panel.at = Math.min(this.fields().length - 1, panel.at + 1);
+    else if (key.return) Object.assign(panel, { edit: this.fields()[panel.at], draft: this.saved(this.fields()[panel.at]) ?? '', error: null });
+    else return;
+    this.changed();
+  }
+  saveField() {
+    const panel = this.panel, field = panel.edit, value = panel.draft.trim() || 'inherit';
+    const query = field.setting === 'target' ? { target: value } : { companion: field.id, [field.setting]: value };
+    panel.busy = 'saving'; panel.error = null;
+    this.load(panel, this.defaults(query, { env: this.env, signal: panel.controller.signal }), result => {
+      const before = panel.result, scope = field.setting === 'target' ? null : `companions.${field.id}.model`;
+      return { ...before, ...(result.target ? { target: result.target } : {}),
+        companions: { ...before.companions, ...result.companions },
+        conflicts: scope ? [...before.conflicts.filter(entry => entry.setting !== scope), ...result.conflicts] : result.conflicts,
+        warnings: [...new Set([...(before.warnings ?? []), ...(result.warnings ?? [])])] };
+    });
+  }
+  // Rows for `h` body rows: the selected field stays in view.
+  panelRows(h) {
+    const panel = this.panel, result = panel.result;
+    const rows = [[[' Defaults', 'title'], ...(result ? [[`  ${one(result.settingsFile)}`, 'dim']] : [])], []];
+    if (!result) return [...rows, [panel.busy ? [' Reading saved and native defaults…', 'dim'] : [` Could not read defaults: ${panel.error}`, 'bad']]];
+    const inherit = (row, key) => {
+      if (row.reason) return `inherit → unknown: ${one(row.reason)}`;
+      const evidence = row.host ? `${row.host} last run, ${age(row.ageMs)} ago` : row.source;
+      return `inherit → ${one(row[key] ?? 'not reported')} (${one(evidence)})`;
+    };
+    const value = (saved, resolved) => saved.source === 'env' ? `${one(saved.value)} (environment)${saved.saved ? ` · saved ${one(saved.saved)}` : ''}`
+      : saved.saved ? `${one(saved.saved)} (saved)` : resolved;
+    let at = 0, selectedRow = 0;
+    const line = (label, text) => {
+      const selected = at++ === panel.at, editing = selected && panel.edit;
+      if (selected) selectedRow = rows.length;
+      rows.push([[selected ? ' ▸ ' : '   ', selected ? 'edit' : 'normal', selected], [label.padEnd(8), 'dim', selected],
+        ...(editing ? [['› ', 'title', selected], [panel.draft, 'normal', selected], ['▌', 'normal', selected]] : [[text, 'normal', selected]])]);
+      if (editing && panel.busy) rows.push([['     ◌ saving…', 'faint']]);
+      else if (editing && panel.error) rows.push([[`     ✗ ${panel.error}`, 'bad']]);
+    };
+    const target = result.target;
+    line('target', value(target, `inherit → ${one(target.inherit ?? 'no default companion')}`));
+    for (const [id, row] of Object.entries(result.companions ?? {})) {
+      rows.push([], [[` ${id}`, 'title']]);
+      line('model', value(row.model, inherit(row.inherit, 'model')));
+      line('effort', value(row.effort, inherit(row.inherit, 'effort')));
+      if (row.validation) rows.push([[`   ${one(row.validation)}`, 'faint']]);
+    }
+    for (const entry of result.conflicts ?? []) rows.push([[` Conflict ${entry.setting}: ${entry.host} ${one(entry.value)}`, 'warn']]);
+    for (const warning of result.warnings ?? []) rows.push([[` ${one(warning)}`, 'warn']]);
+    const top = Math.max(0, Math.min(selectedRow - Math.floor(h / 2), rows.length - h));
+    return rows.slice(top, top + h);
   }
 }

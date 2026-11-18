@@ -274,6 +274,107 @@ test('a long or many-line draft wraps inside the box; every row fits and none ho
   assert.match(text, /● running \$ node --test lib\/digest.test.mjs/, 'the live line keeps a row');
 });
 
+// What bridge-server/ui/defaults.mjs answers for a full read: saved values
+// and sources, and what inherit resolves to, natively or from a last run.
+const DEFAULTS = () => ({
+  settingsFile: '/home/tester/.config/agent-companion/settings.json',
+  target: { saved: 'codex', value: 'codex', source: 'config', inherit: null },
+  companions: {
+    codex: { model: { saved: null, value: null, source: 'unset' }, effort: { saved: 'high', value: 'high', source: 'config' },
+      inherit: { model: 'gpt-6.2-astra', effort: 'xhigh', source: 'config/read' } },
+    claude: { model: { saved: null, value: null, source: 'unset' }, effort: { saved: null, value: null, source: 'unset' },
+      inherit: { model: 'claude-opus-5-5', effort: null, source: 'last run', host: 'codex', ageMs: 3 * 86_400_000 } },
+    copilot: { model: { saved: 'gpt-oss:20b', value: 'gpt-oss:20b', source: 'config' }, effort: { saved: null, value: null, source: 'unset' },
+      inherit: { model: null, effort: null, reason: 'no reported run' }, validation: 'unverified until a session runs' },
+  },
+  conflicts: [],
+});
+// A fake defaults(): records each query; a saved effort `turbo` is refused.
+function fakeDefaults() {
+  const calls = [];
+  const fn = async (query = {}) => {
+    calls.push(query);
+    if (query.effort === 'turbo') throw new Error('effort "turbo" is not valid for Codex model "gpt-6.2-astra". Use one of: low, medium, high, xhigh, max, ultra');
+    const result = DEFAULTS();
+    if (query.target) return { settingsFile: result.settingsFile, target: { ...result.target, saved: query.target === 'inherit' ? null : query.target }, conflicts: [] };
+    if (query.companion) {
+      const row = result.companions[query.companion];
+      for (const key of ['model', 'effort']) if (query[key]) row[key] = query[key] === 'inherit'
+        ? { saved: null, value: null, source: 'unset' } : { saved: query[key], value: query[key], source: 'config' };
+      return { settingsFile: result.settingsFile, companions: { [query.companion]: row }, conflicts: [] };
+    }
+    return result;
+  };
+  return Object.assign(fn, { calls });
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('d opens the defaults panel: saved values and what inherit resolves to, natively or from a last run; esc closes it', async t => {
+  const defaults = fakeDefaults();
+  const model = uiFixture(t).model({ size: { columns: 110, rows: 30 }, defaults });
+  press(model, 'd');
+  assert.match(screen(model), /Reading saved and native defaults…/);
+  await settle();
+  const text = screen(model);
+  for (const row of text.split('\n')) assert.ok(row.length <= 110, row);
+  assert.match(text, /Defaults {2}\/home\/tester\/\.config\/agent-companion\/settings\.json/);
+  assert.match(text, /target +codex \(saved\)/);
+  assert.match(text, /model +inherit → gpt-6\.2-astra \(config\/read\)/);
+  assert.match(text, /effort +high \(saved\)/);
+  assert.match(text, /model +inherit → claude-opus-5-5 \(codex last run, 3d ago\)/);
+  assert.match(text, /effort +inherit → not reported \(codex last run, 3d ago\)/);
+  assert.match(text, /model +gpt-oss:20b \(saved\)/);
+  assert.match(text, /unverified until a session runs/);
+  assert.match(text, /↑↓ fields {3}⏎ edit {3}esc close/);
+  assert.deepEqual(defaults.calls, [{}]);
+  press(model, 'escape');
+  assert.doesNotMatch(screen(model), /Defaults/);
+  assert.match(screen(model), /d defaults/);
+});
+
+test('editing a default: ⏎ edits the selected field, ⏎ saves through defaults, a refusal keeps the draft and says why, empty saves inherit', async t => {
+  const defaults = fakeDefaults();
+  const model = uiFixture(t).model({ size: { columns: 110, rows: 30 }, defaults });
+  press(model, 'd'); await settle();
+  // target, then codex model, then codex effort.
+  press(model, 'downArrow', 'downArrow', 'return');
+  assert.match(screen(model), /effort +› high▌/);
+  assert.match(screen(model), /⏎ save, empty clears to inherit {3}esc cancel/);
+  press(model, 'backspace', 'backspace', 'backspace', 'backspace');
+  type(model, 'turbo');
+  enter(model); await settle();
+  assert.deepEqual(defaults.calls.at(-1), { companion: 'codex', effort: 'turbo' });
+  assert.match(screen(model), /effort +› turbo▌/);
+  assert.match(screen(model), /✗ effort "turbo" is not valid for Codex model "gpt-6\.2-astra"/);
+  press(model, 'backspace', 'backspace', 'backspace', 'backspace', 'backspace');
+  type(model, 'max');
+  enter(model); await settle();
+  assert.deepEqual(defaults.calls.at(-1), { companion: 'codex', effort: 'max' });
+  assert.match(screen(model), /effort +max \(saved\)/);
+  assert.doesNotMatch(screen(model), /✗/);
+  // The codex model, cleared: an empty field saves inherit.
+  press(model, 'upArrow', 'return'); enter(model); await settle();
+  assert.deepEqual(defaults.calls.at(-1), { companion: 'codex', model: 'inherit' });
+  // esc leaves an edit without saving, then closes the panel.
+  press(model, 'upArrow', 'return'); type(model, 'opencode'); press(model, 'escape');
+  assert.equal(defaults.calls.length, 4);
+  assert.match(screen(model), /target +codex \(saved\)/);
+  press(model, 'escape');
+  assert.equal(model.panel, null);
+});
+
+test('d in a message box is a letter, and the panel never opens over a draft', async t => {
+  const defaults = fakeDefaults();
+  const f = uiFixture(t);
+  const model = f.model({ size: { columns: 150, rows: 26 }, defaults });
+  while (model.selected !== 'claude:run-1') press(model, 'downArrow');
+  press(model, 'tab');
+  type(model, 'add');
+  assert.match(screen(model), /› add▌/);
+  assert.equal(model.panel, null);
+  assert.deepEqual(defaults.calls, []);
+});
+
 test('job list at 80 columns', t => t.assert.snapshot(screen(uiFixture(t).model({ size: { columns: 80, rows: 26 } })), RAW));
 
 test('narrow: Enter opens the job full width, Esc returns; resizing keeps it open', t => {

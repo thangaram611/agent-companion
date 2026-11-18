@@ -671,10 +671,16 @@ it. A refusal shows once in red with its reason, and the text returns to an
 empty box. The lead learns of each message or cancel at once. Ended jobs have
 no box; a running job started by an older bridge shows a one-line hint instead.
 
-The view's only writes are those messages and cancels: one 0600 request file
+The view's job writes are those messages and cancels: one 0600 request file
 per send in the owning host's state directory, under
 `inbox/<executionId>/`, and the deletion of each outcome file it has read. It
 renews no lease and starts no work. Drafts stay in memory.
+
+`d` opens the defaults panel: the default companion and each companion's model
+and effort, saved or what inherit resolves to, as `agent-companion defaults`
+shows them. `⏎` edits the selected value and `⏎` saves it through the same
+command's checks; an empty value clears it to inherit, and a refusal keeps the
+draft and says why. Saving is the view's only other write, to `settings.json`.
 
 On the job list and on ended jobs:
 

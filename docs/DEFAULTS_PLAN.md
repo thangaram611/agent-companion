@@ -1,7 +1,7 @@
 # User defaults for companion model and effort: plan
 
-Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 6 done
-(2026-11-18); steps 7 to 9 not started.
+Status: decisions agreed and step 0 measured (2026-11-18); steps 1 to 7 done
+(2026-11-18); steps 8 and 9 not started.
 
 ## Goal
 
@@ -370,6 +370,20 @@ both hosts, because the view runs in the person's terminal.
 
 Check: UI model tests and snapshots, and a live edit in an isolated home read
 back by `agent-companion defaults`.
+
+Done 2026-11-18, built by Claude, since the TUI is never built by Codex. The panel
+is model state drawn over the body like `?`. Its reads and saves call
+`defaults()` (injectable, so tests use a fake). Closing it aborts a pending
+native read. The list's key hints gain `d defaults`; the snapshots changed only
+in that line.
+- Live: the real Ink app, keys through its stdin, the real `defaults()` with an
+  isolated `AGENT_COMPANION_HOME`.
+  - The read showed Codex inherit `gpt-6.2-astra` / `xhigh` (`config/read`) and
+    OpenCode `opencode/hy4-flash-free`.
+  - Codex effort `turbo` was refused in the panel with the model's levels.
+  - `high` was saved.
+  - `agent-companion defaults codex` in that home read back `effort: high
+    (config)`.
 
 ### Step 8: Docs and backlog
 
