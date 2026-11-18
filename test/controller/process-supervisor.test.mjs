@@ -2,6 +2,9 @@ import '../sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ProcessSupervisor, readProcessTable, pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
 import { ManualClock, until } from './helpers.mjs';
 import { fixtureSupervisor } from './fixture-table.mjs';
@@ -59,6 +62,30 @@ test('a failed census cannot be reported as verified absence', async () => {
   const evidence = await supervisor.verifyGone();
   assert.equal(evidence.gone, false);
   assert.equal(evidence.error, 'ps unavailable');
+});
+
+test('a census that fails while recording a reported pid notes the error and does not reject', async () => {
+  const root = { pid: 91001, pgid: 91001, ppid: 1, birthTime: 'root' };
+  const reported = { pid: 91002, pgid: 91002, ppid: 1, birthTime: 'later' };
+  let fail = true;
+  const supervisor = new ProcessSupervisor({ clock: new ManualClock(), record: { ...root, processes: [root] },
+    processTable: async () => { if (fail) { fail = false; throw new Error('ps timed out after 1000 ms'); } return new Map([[root.pid, root], [reported.pid, reported]]); } });
+  assert.equal(await supervisor.recordDescendant(reported.pid), false);
+  assert.equal(supervisor.serialize().censusError, 'ps timed out after 1000 ms');
+  assert.equal(await supervisor.recordDescendant(reported.pid), true);
+  assert.ok(supervisor.serialize().processes.some((p) => p.pid === reported.pid));
+});
+
+test('a failed ps says whether it timed out or exited, with its first stderr line', { timeout: 10_000 }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'fake-ps-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = process.env.PATH;
+  t.after(() => { process.env.PATH = path; });
+  process.env.PATH = `${dir}:${path}`;
+  writeFileSync(join(dir, 'ps'), '#!/bin/sh\necho "ps: sysctl: Operation not permitted" >&2\nexit 1\n', { mode: 0o755 });
+  await assert.rejects(readProcessTable(), { message: 'ps failed (exit 1): ps: sysctl: Operation not permitted' });
+  writeFileSync(join(dir, 'ps'), '#!/bin/sh\nexec sleep 5\n', { mode: 0o755 });
+  await assert.rejects(readProcessTable(), { message: 'ps timed out after 1000 ms' });
 });
 
 test('two-second census and reported escaped descendants retain birth identities after reparenting', async () => {

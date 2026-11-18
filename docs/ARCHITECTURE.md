@@ -422,6 +422,10 @@ Each execution gets its own supervisor: `spawn`, `recordDescendant`, `census`,
 `terminate` and `verifyGone`. It records pid/pgid, samples descendants every 2 s,
 and includes protocol-reported command pids, adopting one only when the process
 it names is not older than the root (a reported pid is evidence, not identity).
+A `ps` that fails or exceeds its 1 s cap while recording a reported pid is noted
+as `censusError`, as the periodic census notes its own, and never ends the job.
+Codex retries that pid on its next report. Before 2026-11-18 such a failure
+failed three healthy Codex jobs as `ProviderLost`.
 A previous execution still running elsewhere or never verified gone refuses the next send
 with `previous_execution_unverified`. Closure attempts native interrupt
 and protocol close with bounded waits, then SIGTERM to the group and recorded

@@ -6,9 +6,15 @@ import { systemClock, delay } from './clock.mjs';
 export function readProcessTable(clock = systemClock) {
   return new Promise((resolve, reject) => {
     let timedOut = false;
-    const child = execFile('ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat='], { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+    const child = execFile('ps', ['-axo', 'pid=,ppid=,pgid=,lstart=,stat='], { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
       clock.clearTimeout(timer);
-      if (err || timedOut) return reject(err || new Error('ps_timeout'));
+      // Say which failure it was: the kill below also reaches here as an error.
+      if (timedOut) return reject(new Error('ps timed out after 1000 ms'));
+      if (err) {
+        const how = err.signal ? `signal ${err.signal}` : typeof err.code === 'number' ? `exit ${err.code}` : err.code;
+        const detail = String(stderr || '').trim().split('\n')[0];
+        return reject(new Error(`ps failed (${how})${detail ? `: ${detail}` : ''}`, { cause: err }));
+      }
       const rows = new Map();
       for (const line of stdout.split('\n').filter((line) => line.trim())) {
         const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\w+\s+\w+\s+\d+\s+[\d:]+\s+\d+)\s+(\S+)\s*$/);
@@ -80,7 +86,12 @@ export class ProcessSupervisor {
   recordDescendant(pid) {
     if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid || this.sealed) throw new Error('invalid descendant');
     return this._track(async () => {
-      const row = (await this.processTable()).get(pid);
+      // A reported pid is cleanup evidence, not the provider's health: a census
+      // that fails here is noted, as the two-second census notes its own.
+      let table;
+      try { table = await this.processTable(); }
+      catch (err) { this.record.censusError = err.message; this._publish(); return false; }
+      const row = table.get(pid);
       if (!row) return false;
       // A provider-reported pid is evidence, not identity. Measured 2026-11-09:
       // Codex reported process_id 1129 for a command and that pid belonged to a

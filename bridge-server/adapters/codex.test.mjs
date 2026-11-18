@@ -277,6 +277,22 @@ test('interrupt uses the active turn, reports interrupted and removes the real p
   assert.deepEqual(h.trace().find((m) => m.method === 'turn/interrupt').params, { threadId: 'T1', turnId: 'TURN1' });
 });
 
+test('a census that fails while recording a reported command pid keeps the job running, and the next report records it', async (t) => {
+  const h = setup(t, { tree: true }); const sent = await h.send();
+  const supervisor = h.supervisors[0], pid = supervisor.fixture.commandPid;
+  const table = supervisor.processTable;
+  let failures = 1;
+  supervisor.processTable = async () => { if (failures) { failures--; throw new Error('ps timed out after 1000 ms'); } return table(); };
+  const started = note('item/started', { threadId: 'T1', turnId: 'TURN1', item: threadItem('commandExecution', { id: 'cmd', command: 'fixture command', processId: String(pid) }) });
+  await h.emit(started);
+  await until(() => supervisor.serialize().censusError);
+  await h.emit(note('item/commandExecution/terminalInteraction', { threadId: 'T1', turnId: 'TURN1', itemId: 'cmd', processId: String(pid), stdin: '' }));
+  await until(() => supervisor.serialize().processes.some((p) => p.pid === pid));
+  await h.emit(terminal());
+  const result = await h.wait(sent.executionId);
+  assert.equal(result.outcome, 'completed');
+});
+
 test('interrupt accepts no-active-turn but propagates an active-turn mismatch', async (t) => {
   for (const fault of ['no-active', 'wrong-turn']) {
     const h = setup(t, { fault }); const sent = await h.send();

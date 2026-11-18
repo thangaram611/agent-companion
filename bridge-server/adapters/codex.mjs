@@ -298,7 +298,9 @@ export class CodexAdapter {
     const pid = Number(value);
     if (Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid && !this.descendants.has(pid)) {
       this.descendants.add(pid);
-      void Promise.resolve().then(() => this.supervisor.recordDescendant(pid)).catch((err) => this._lost(err));
+      // Not recorded (no census, or no such process yet): the pid's next report tries again.
+      void Promise.resolve().then(() => this.supervisor.recordDescendant(pid))
+        .then((recorded) => { if (!recorded) this.descendants.delete(pid); }, (err) => this._lost(err));
     }
   }
 
