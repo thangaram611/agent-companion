@@ -95,6 +95,10 @@ remains separate from implementation; see the release gates below.
 - Usage is present only when reported by the provider. Antigravity 1.1.1 reports
   none. New execution/result records have no one-hour expiry; delivery-queue TTLs
   and rotating logs do not make a complete adoption/cost history.
+- Silence never ends a job (decision 12). A job whose subagent ended with no stop
+  signal (Esc between waits) finishes its current turn; if that turn hangs, it runs
+  until you cancel it or the host session ends. The views show `owner away`. Count
+  occurrences before adding any cap; a cap would be an explicit setting, off by default.
 - Claude reports cost only for fresh history; resumed native cost includes the
   conversation total. Tokens are per turn. User hooks and plugins load in the
   child; slow hooks can push startup past the 10 s protocol delivery bound.
@@ -213,10 +217,14 @@ remains separate from implementation; see the release gates below.
   3. Confirm the Claude companion child inherits `CLAUDE_CODE_RETRY_WATCHDOG`.
   4. Measure Esc on a subagent between waits: does `$.agent.list()` report
      `killed` or SubagentStop fire? If so, write a stop marker from it.
-  5. Check the Claude adapter's wait for a queued input's final lifecycle event
+  5. Vigil must count a running delegated job as work so a closed Mac stays awake
+     for it; measured 2026-11-19 as only sometimes. Tracked in vigil's ROADMAP Open.
+  6. Check the Claude adapter's wait for a queued input's final lifecycle event
      (`bridge-server/adapters/claude.mjs` ~116) for an unbounded wait.
 - Study codex-plugin-cc's design (app-server wrapper, rescue subagent, resume)
   for improvements; the user runs it as a trial later, not now.
+- Regenerate `assets/readme/architecture.png`: the image still says `lease`; its
+  prompt in `assets/readme/PROMPTS.md` now says `owner attachment`.
 - Qualify Codex desktop as the third host and finish operator-only TUI rows.
 - Resolve Copilot account access, then qualify cold history loading before
   enabling follow-up; a capability advertisement is insufficient.

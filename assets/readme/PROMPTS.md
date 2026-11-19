@@ -32,7 +32,7 @@ Left-to-right diagram of the shipped design, boxes in this order:
 1. `Harness (Claude Code / Codex CLI)`
 2. `agent-companion subagent`
 3. `agent-bridge (MCP, session scope)`
-4. `Controller: one per answer`, containing `process group`, `lease`,
+4. `Controller: one per answer`, containing `process group`, `owner attachment`,
    `immutable result`
 5. `Cold companion runtime`, containing `Codex app-server`, `OpenCode server`,
    `ACP: Antigravity, Copilot`

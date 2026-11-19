@@ -26,7 +26,7 @@ Both measured cancellation only during pending calls, SubagentStop at completion
 no host cleanup of descendants and a 1320 s per-call wall unaffected by progress.
 Claude `/clear` preserved the bridge on 2.1.318. These passive fixtures do not
 qualify shipped cleanup; controller tests and current probes cover that separately.
-See [Architecture](ARCHITECTURE.md#host-budgets) for leases, stop markers and
+See [Architecture](ARCHITECTURE.md#host-budgets) for owner attachment, stop markers and
 remaining operator/desktop gates.
 
 ## 0. Host and process constraints
