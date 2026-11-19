@@ -59,8 +59,8 @@ test('both hosts ship the same capability knobs, with the same values', () => {
   const claude = claudeEnv();
   const codex = codexEnv();
 
-  assert.deepEqual(capabilityKeys(claude), ['AGENT_COMPANION_OWNER_GRACE_MS'],
-    'Both hosts configure the owner attachment grace');
+  assert.deepEqual(capabilityKeys(claude), [],
+    'Neither host sets a capability knob; adding one means adding it to both');
   assert.deepEqual(capabilityKeys(claude), capabilityKeys(codex),
     'a knob set for one host and not the other gives the two an unequal feature set — '
     + 'set it in both templates, or neither');

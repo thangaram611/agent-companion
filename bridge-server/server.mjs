@@ -11,14 +11,15 @@
 //
 // `send` enqueues the task and returns `status=still_running` with the job_id
 // after delivery acknowledgement. An identical in-flight send reattaches to
-// the same execution. Bounded waits hold the owner's lease until they return.
+// the same execution. Bounded waits attach the owner until they return.
 //
 // Each wait is below the host's per-call wall: both 2026-11-05 host reports
 // measured cancellation at 1320 s with or without progress. Claude configures
 // sibling timeout (ms), Codex tool_timeout_sec (s); child MCP_TOOL_TIMEOUT env
 // does not configure either host. clampWaitSec caps at 1200 s, default 480 s.
-// The owner lease covers gaps between bounded calls, not total answer duration.
-// See probes/host-qualification/{claude,codex}/REPORT-2026-11-05.md.
+// A gap between bounded calls never ends a job: only stop evidence, a cancel,
+// bridge loss or the native turn's end does. Status shows how long the owner
+// has been detached. See probes/host-qualification/{claude,codex}/REPORT-2026-11-05.md.
 //
 // Completion surfacing: each terminal/alert event is appended to a JSONL queue
 // file with `consumed:false`; the drain script (invoked from host lifecycle
@@ -311,7 +312,7 @@ function terminalEnvelope(execution, result, action = 'wait') {
     selected_effort: result.selectedEffort ?? null, effective_effort: result.effectiveEffort ?? null, native_refs: result.nativeRefs ?? {},
     stop_evidence: evidence ? { gone: evidence.gone, signals: evidence.signals?.length ?? 0,
       survivors: evidence.survivors?.length ?? 0, cleanup_ms: evidence.cleanupMs ?? null,
-      detection_delay_ms: evidence.detectionDelayMs ?? null, protocol: evidence.protocol ?? [] } : null,
+      protocol: evidence.protocol ?? [] } : null,
     digest_uri: digestResourceUri(result.executionId),
     ...(result.interventions?.length ? { interventions: result.interventions.map(({ from, mode, state, text }) =>
       ({ from, mode, state, first_line: firstLine(text) })) } : {}),
@@ -469,10 +470,11 @@ function handleCatalog(env) {
 
 function handleStatus({ job_id, diagnostics }, active) {
   const project = (view) => {
-    const { execution: e, result: r, lease, state } = view;
+    const { execution: e, result: r, attachment, state } = view;
     return { ok: true, action: 'status', job_id: e.executionId, thread: e.owner, target: e.provider, cwd: e.cwd,
       status: r ? executionStatus(r) : state, native_turn_state: e.terminal?.outcome ?? e.state,
-      started_at: iso(e.startedAt), terminal_at: iso(r?.finishedAt), lease,
+      started_at: iso(e.startedAt), terminal_at: iso(r?.finishedAt),
+      owner_attached: attachment?.attached ?? null, owner_detached_at: iso(attachment?.detachedAt),
       last_native_activity: e.progress?.lastActivityAt ?? null, active_command: e.progress?.activeCommand ?? null,
       activity: r || e.terminal ? null : e.progress?.activity !== undefined ? e.progress.activity
         : e.progress?.activeCommand ? `running ${e.progress.activeCommand}` : e.progress?.partialText ? 'responding' : null,

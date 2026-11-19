@@ -47,9 +47,9 @@ write live runtime state. They are outside `node --test`; see `probes/README.md`
 **One controller owns each execution.** Each job starts a cold provider runtime
 in its own process group and loops over native turns while accepted input remains.
 The controller owns the process tree, native history
-reference, lease and terminal result. Pending send/wait/reply/cancel calls hold
-the owner's lease; gaps consume its grace. Stop markers supply explicit owner-stop
-evidence. On SIGINT, SIGTERM or stdin EOF, the bridge hands the recorded tree to
+reference, owner attachment and terminal result. Pending send/wait/reply/cancel
+calls attach the owner; silence never ends a job. Stop markers supply explicit
+owner-stop evidence. On SIGINT, SIGTERM or stdin EOF, the bridge hands the recorded tree to
 `scripts/cleanup-watcher.mjs`, which terminates it and saves a fenced result.
 In-flight survival across bridge replacement is deliberately given up. Native
 history remains; a later message to the same native child resumes it cold.
@@ -96,7 +96,7 @@ Codex requires `_meta["x-codex-turn-metadata"].thread_source: subagent` and uses
 its `thread_id`. A fresh spawn starts independent work. An identical busy send
 reattaches; different text, model or effort returns `thread_busy`, and provider/cwd
 mismatches fail explicitly. Catalog and status are ownerless observers: they
-neither start work nor renew leases nor write execution state.
+neither start work nor attach the owner nor write execution state.
 
 **Capabilities are provider facts.** Codex uses app-server, OpenCode uses its
 2.x HTTP server, and Copilot/Antigravity use ACP. Claude Code uses its own `-p`
@@ -110,8 +110,8 @@ until qualified; Antigravity reloads saved sessions. Routing applies model defau
 **Interventions share one controller path.** `agent_reply` accepts an optional
 `mode`; omission uses the execution's saved `interventionModes.default`.
 Status reports per-mode `interventions` availability. The user's atomic, private
-`inbox/<executionId>/<requestId>.json` requests are read on the tick after owner
-stop/lease checks, without extending the lease. Outcomes are private atomic
+`inbox/<executionId>/<requestId>.json` requests are read on the tick after the owner
+stop check, without attaching the owner. Outcomes are private atomic
 files; close removes that execution's inbox. An accepted user message wakes
 `agent_wait` with `user_intervened`, never an answer; durable notice receipts
 prevent repeats, including after a wait gap. Both roles relay it and keep waiting.
@@ -124,8 +124,8 @@ line, including `not_delivered` messages.
 | Module | Owns |
 | --- | --- |
 | `bridge-server/server.mjs` | MCP attribution, envelopes, resource routing, completion publication and bridge-loss handoff. |
-| `bridge-server/controller/controller.mjs` | Native turn loop, interventions, inbox consumption, caller notices, owner requests, leases, stop observations and result decisions. |
-| `bridge-server/controller/records.mjs` | Atomic conversation/execution/lease/result records, inbox I/O and cleanup, notice receipts, generation and writer fencing, immutable results. |
+| `bridge-server/controller/controller.mjs` | Native turn loop, interventions, inbox consumption, caller notices, owner requests and attachment, stop observations and result decisions. |
+| `bridge-server/controller/records.mjs` | Atomic conversation/execution/attachment/result records, inbox I/O and cleanup, notice receipts, generation and writer fencing, immutable results. |
 | `bridge-server/controller/process-supervisor.mjs` | Owned process groups, descendant census, termination and PID/birth-identity verification. |
 | `bridge-server/adapters/{codex,opencode,acp,claude}.mjs` | Provider protocols, history loading, delivery acknowledgement, native progress, usage and model selection. |
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
@@ -159,13 +159,16 @@ line, including `not_delivered` messages.
   or without progress. Waits cap at 1200 s (default 480); parent messages become
   visible between waits. `env: { MCP_TOOL_TIMEOUT }` does not configure the host.
   See the dated host reports below and Architecture's host budgets.
-- **The owner lease covers gaps, not total answer duration.**
-  `AGENT_COMPANION_OWNER_GRACE_MS` defaults to 120000. Status/catalog do not
-  renew it. The old 40-minute execution cutoffs and their knobs are gone.
+- **Silence never ends a job.** A quiet owner may be thinking or retrying offline
+  for hours (Claude's retry watchdog), which no gap can tell from a stopped one.
+  A job ends on a stop marker, an attributed cancel, bridge loss, a user cancel
+  or its native turn's end; status shows `owner_detached_at`. The 120 s owner
+  grace, its env knob and the 40-minute cutoffs are gone.
 - **Stop markers are advisory evidence.** `hooks/stop-owner.sh` writes
   `stops/<owner>.json` for Claude TaskStop and both hosts' SubagentStop. A changed
   marker closes that owner's execution on the next controller tick; an old
-  marker cannot cancel a later follow-up. The lease is the missing-signal fallback.
+  marker cannot cancel a later follow-up. A stop with no signal (Esc between
+  waits) lets the job finish its current turn.
 - **Claude plugin tools are namespaced.** The installer qualifies the source
   reference to `plugin:agent-companion:agent-bridge` and tools to
   `mcp__plugin_agent-companion_agent-bridge__*`; the identity hook matches these

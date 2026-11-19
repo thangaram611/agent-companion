@@ -30,7 +30,7 @@ function setup(t, interventions = { default: 'steer', steer: true, queue: 'bridg
     async interrupt() { calls.push(['interrupt']); turn.resolve({ outcome: 'interrupted', text: 'partial must disappear' }); },
     async close() { calls.push(['close']); },
   };
-  const controller = new Controller({ clock, records, env: { AGENT_COMPANION_OWNER_GRACE_MS: '3000' },
+  const controller = new Controller({ clock, records, env: {},
     snapshot: async () => ({ available: false, reason: 'test' }),
     providers: { fake: { enabled: true, ready: true, create: () => adapter } },
     createSupervisor: () => ({ async terminate() { return { gone: true }; }, async quiesce() {}, async census() {},
@@ -65,14 +65,14 @@ for (const steer of [false, true]) for (const queue of [false, 'native', 'bridge
   });
 }
 
-for (const mode of ['steer', 'queue', 'interrupt']) test(`${mode} refuses unavailable states without writing or renewing`, async t => {
+for (const mode of ['steer', 'queue', 'interrupt']) test(`${mode} refuses unavailable states without writing or attaching`, async t => {
   const h = setup(t), { executionId } = await h.send(), a = h.controller.live.get(executionId);
   for (const fields of [{ record: { state: 'starting' } }, { record: { state: 'delivering' } }, { record: { terminal: {} } },
     { stopping: true }, { closed: true }, { handedOff: true }]) {
-    const old = { ...a, record: { ...a.record } }, lease = h.records.readLease(executionId);
+    const old = { ...a, record: { ...a.record } }, attachment = h.records.readAttachment(executionId);
     Object.assign(a, { ...fields, record: { ...a.record, ...fields.record } });
     assert.deepEqual(await h.input(executionId, mode), { ok: false, status: 'intervention_unavailable', reason: 'state' });
-    assert.deepEqual(h.records.readLease(executionId), lease);
+    assert.deepEqual(h.records.readAttachment(executionId), attachment);
     Object.assign(a, old);
   }
   await h.finish(); await h.result(executionId);
@@ -91,7 +91,7 @@ function inbox(h, executionId, requestId, fields = {}) {
 
 for (const mode of ['steer', 'queue', 'interrupt']) test(`inbox ${mode}: tick accepts, records, acknowledges privately and removes request`, async t => {
   const h = setup(t), { executionId } = await h.send();
-  const lease = h.records.readLease(executionId);
+  const attachment = h.records.readAttachment(executionId);
   const request = inbox(h, executionId, 'request', { mode });
   await h.clock.advance(1000);
   const [input] = h.records.readExecution(executionId).interventions;
@@ -102,7 +102,7 @@ for (const mode of ['steer', 'queue', 'interrupt']) test(`inbox ${mode}: tick ac
   assert.equal(statSync(request.outcomePath).mode & 0o777, 0o600);
   assert.equal(existsSync(request.path), false);
   assert.deepEqual(readdirSync(request.dir), ['request.outcome.json']);
-  assert.deepEqual(h.records.readLease(executionId), lease, 'inbox input does not renew attachment');
+  assert.deepEqual(h.records.readAttachment(executionId), attachment, 'inbox input does not attach the owner');
   await h.clock.advance(1000);
   assert.equal(h.records.readExecution(executionId).interventions.length, 1, 'outcomes are never replayed');
   await h.controller.cancel({ owner: 'child', executionId });
@@ -135,17 +135,16 @@ for (const kind of ['ended', 'unsupported', 'json', 'symlink', 'large file', 'lo
   });
 }
 
-test('stop markers and lease expiry take precedence over inbox delivery; close removes outstanding requests and outcomes', async t => {
-  for (const stop of ['marker', 'lease', 'completed']) {
+test('stop markers take precedence over inbox delivery; close removes outstanding requests and outcomes', async t => {
+  for (const stop of ['marker', 'completed']) {
     const h = setup(t), { executionId } = await h.send();
     const request = inbox(h, executionId, 'pending');
     writeFileSync(join(request.dir, 'old.outcome.json'), '{}');
     if (stop === 'marker') h.records._write('stops', 'child', { t: h.clock.now(), source: 'SubagentStop' });
-    if (stop === 'lease') h.controller.live.get(executionId).remainingMs = 1;
     if (stop === 'completed') await h.finish();
     else await h.clock.advance(1000);
     const result = await h.result(executionId);
-    assert.equal(result.cause, { marker: 'owner_stop', lease: 'owner_lease_expired', completed: 'native_complete' }[stop]);
+    assert.equal(result.cause, { marker: 'owner_stop', completed: 'native_complete' }[stop]);
     assert.equal(result.interventions.length, 0);
     assert.equal(existsSync(request.dir), false);
   }
@@ -212,11 +211,12 @@ test('user notices accepted before a wait are ordered, persisted, owner-bound an
 
 test('collecting an earlier notice is an owner wait; an aborted wait still cancels the job', async t => {
   const h = setup(t), { executionId } = await h.send();
+  const sentAt = h.records.readAttachment(executionId).detachedAt;
   await h.clock.advance(2000);
   await h.input(executionId, 'queue');
-  assert.equal(h.controller.live.get(executionId).remainingMs, 1000);
+  assert.equal(h.records.readAttachment(executionId).detachedAt, sentAt, 'user input does not attach the owner');
   assert.equal((await h.controller.wait({ owner: 'child', executionId })).status, 'user_intervened');
-  assert.equal(h.controller.live.get(executionId).remainingMs, 3000);
+  assert.equal(h.records.readAttachment(executionId).detachedAt, h.clock.now(), 'collecting the notice is an owner request');
   await h.input(executionId, 'queue');
   const abort = new AbortController(); abort.abort();
   const result = await h.controller.wait({ owner: 'child', executionId, signal: abort.signal });
@@ -283,23 +283,24 @@ test('bridge turns without native ids retain separate answers', async t => {
   assert.match(result.text, /Task\n\nfirst/); assert.match(result.text, /queued.*\n\nsecond/);
 });
 
-test('steer joins its turn, preserves the legacy reply entry and caller lease handling', async t => {
+test('steer joins its turn, preserves the legacy reply entry and caller attachment handling', async t => {
   const h = setup(t), { executionId } = await h.send();
   await h.clock.advance(2000);
   const reply = await h.controller.steer({ owner: 'child', executionId, text: 'change course' });
-  assert.equal(reply.ok, true); assert.equal(h.controller.live.get(executionId).remainingMs, 3000);
+  assert.equal(reply.ok, true); assert.equal(h.records.readAttachment(executionId).detachedAt, h.clock.now());
   await h.finish(); const result = await h.result(executionId);
   assert.deepEqual(result.turns[0].messages, [executionId, result.interventions[0].id]);
   assert.equal(result.text, 'answer');
   assert.deepEqual(await h.controller.steer({ owner: 'child', executionId, text: 'too late' }), { ok: false, status: 'reply_unavailable', reason: 'state' });
 });
 
-test('user intervention does not extend the lease; held input is lost on expiry', async t => {
+test('user intervention does not attach the owner; held input is not delivered after an owner stop', async t => {
   const h = setup(t), { executionId } = await h.send();
-  await h.clock.advance(2000); const lease = h.records.readLease(executionId);
-  await h.input(executionId, 'queue'); assert.deepEqual(h.records.readLease(executionId), lease);
+  await h.clock.advance(2000); const attachment = h.records.readAttachment(executionId);
+  await h.input(executionId, 'queue'); assert.deepEqual(h.records.readAttachment(executionId), attachment);
+  h.records._write('stops', 'child', { t: h.clock.now(), source: 'SubagentStop' });
   await h.clock.advance(1000); const result = await h.result(executionId);
-  assert.equal(result.cause, 'owner_lease_expired'); assert.equal(result.interventions[0].state, 'not_delivered');
+  assert.equal(result.cause, 'owner_stop'); assert.equal(result.interventions[0].state, 'not_delivered');
 });
 
 for (const queue of ['bridge', 'native']) test(`${queue} pending input behind a failed turn is not delivered`, async t => {

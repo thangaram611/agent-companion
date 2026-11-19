@@ -17,8 +17,7 @@
       "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/launch-agent-bridge.sh"],
       "timeout": 1320000,
       "env": {
-        "AGENT_COMPANION_HOST": "claude",
-        "AGENT_COMPANION_OWNER_GRACE_MS": "120000"
+        "AGENT_COMPANION_HOST": "claude"
       }
     }
   },

@@ -140,7 +140,7 @@ fi
 
 # Historical compatibility heartbeat. The retired broker/daemon design used
 # these mtimes to postpone idle disposal. The shipped controller does not read
-# them: only pending owner requests and the attachment grace establish a lease.
+# them: only pending owner requests attach the owner, and silence ends nothing.
 # Keep the existing best-effort file write here; removing it is behavior work.
 # The warm-directory path uses builtins and must not block completion delivery.
 [ -d "$HEARTBEAT_DIR" ] || mkdir -p "$HEARTBEAT_DIR" 2>/dev/null || true

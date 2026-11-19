@@ -1,7 +1,7 @@
 import '../sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, symlinkSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { SANDBOX_HOME } from '../sandbox-home.mjs';
 import { Controller } from '../../bridge-server/controller/controller.mjs';
@@ -90,19 +90,57 @@ test('lost acknowledgement becomes delivery_unknown with no resend', async () =>
   assert.equal((await h.done(result.executionId)).outcome, 'delivery_unknown');
 });
 
-test('missed terminal event expires the owner lease honestly and preserves partial text', async () => {
+test('a quiet owner is never closed for silence: its job runs to native completion and status shows since when it is detached', async () => {
+  // An owner retrying offline (Claude's retry watchdog waits up to ~6 h) makes
+  // no bridge call, exactly like one stopped without a signal. Silence proves
+  // neither, so only stop evidence or the native turn may end the job.
+  const h = setup(); const sent = await h.send();
+  const detachedAt = h.clock.now();
+  for (let minute = 0; minute < 6 * 60; minute++) await h.clock.advance(60_000);
+  assert.equal(h.records.readResult(sent.executionId), null);
+  const view = h.controller.status({ executionId: sent.executionId });
+  assert.equal(view.attachment.attached, false);
+  assert.equal(view.attachment.detachedAt, detachedAt);
+  const result = await h.finish(sent.executionId);
+  assert.equal(result.cause, 'native_complete');
+  assert.equal(h.controller.status({ executionId: sent.executionId }).attachment.detachedAt, null);
+});
+
+test('missed terminal event stays open until cancelled and preserves partial text', async () => {
   const h = setup();
   const sent = await h.send();
   h.adapters[0].progress({ lastActivityAt: h.clock.now(), partialText: 'partial answer', retry: { attempt: 2 } });
-  await h.clock.advance(119_000);
+  await h.clock.advance(3_600_000);
   assert.equal(h.records.readResult(sent.executionId), null);
-  await h.clock.advance(1000);
-  const result = await h.done(sent.executionId);
+  const result = await h.controller.cancel({ owner: 'child', executionId: sent.executionId });
   assert.equal(result.outcome, 'stopped');
-  assert.equal(result.cause, 'owner_lease_expired');
+  assert.equal(result.cause, 'owner_stop');
   assert.equal(result.text, 'partial answer');
   assert.equal(result.stopEvidence.gone, true);
-  assert.equal(result.stopEvidence.detectionDelayMs, 120_000);
+  assert.equal('detectionDelayMs' in result.stopEvidence, false);
+});
+
+test('a failed attachment write blocks neither the request nor its cancel', async () => {
+  const h = setup(); const sent = await h.send();
+  h.records.writeAttachment = () => { throw Object.assign(new Error('RECORD_BUSY'), { code: 'RECORD_BUSY' }); };
+  const abort = new AbortController();
+  const waiting = h.controller.wait({ owner: 'child', executionId: sent.executionId, requestId: 'busy-wait', signal: abort.signal, timeoutMs: 10_000 });
+  abort.abort();
+  const result = await waiting;
+  assert.equal(result.cause, 'owner_stop');
+  assert.equal(h.controller.requests.has('busy-wait'), false);
+});
+
+test('status reports a handed-off or finished job as detached, with or without an attachment record', async () => {
+  const h = setup();
+  const lost = await h.send({ owner: 'lost' });
+  const pending = h.controller.wait({ owner: 'lost', executionId: lost.executionId, timeoutMs: 10_000 });
+  assert.equal(h.controller.status({ executionId: lost.executionId }).attachment.attached, true);
+  await h.controller.bridgeLost(); await h.clock.advance(10_000); await pending;
+  assert.equal(h.controller.status({ executionId: lost.executionId }).attachment.attached, false);
+  const h2 = setup(); const done = await h2.send(); await h2.finish(done.executionId);
+  rmSync(join(h2.dir, 'attachments'), { recursive: true, force: true }); // a job finished before attachment records existed
+  assert.deepEqual(h2.controller.status({ executionId: done.executionId }).attachment, { attached: false, requestIds: [], detachedAt: null });
 });
 
 test('status-only second bridge writes nothing, renews nothing and refuses overlapping execution', async () => {
@@ -116,8 +154,7 @@ test('status-only second bridge writes nothing, renews nothing and refuses overl
   assert.deepEqual(disk(h.dir), before);
   await assert.rejects(observer.send({ owner: 'child', provider: 'fake', cwd: h.dir, text: 'new' }), { code: 'previous_execution_unverified' });
   assert.deepEqual(disk(h.dir), before);
-  await h.clock.advance(120_000);
-  assert.equal((await h.done(sent.executionId)).cause, 'owner_lease_expired');
+  assert.equal((await h.finish(sent.executionId)).cause, 'native_complete');
 });
 
 test('cancelled pending owner request closes only its execution', async () => {
@@ -179,28 +216,17 @@ test('two same-provider executions: closing one leaves the other untouched', asy
   await h.finish(two.executionId, undefined, h.adapters[1]);
 });
 
-test('pending owner attachment renews grace; observers and other children cannot attach', async () => {
-  const h = setup({ env: { AGENT_COMPANION_OWNER_GRACE_MS: '3000' } }); const sent = await h.send();
+test('pending owner requests attach the owner; observers and other children cannot attach', async () => {
+  const h = setup(); const sent = await h.send();
   await h.clock.advance(2000);
   assert.throws(() => h.controller.beginRequest({ owner: 'other', executionId: sent.executionId, kind: 'wait' }), { code: 'execution_unknown' });
   assert.throws(() => h.controller.beginRequest({ owner: 'child', executionId: sent.executionId, kind: 'status' }), { code: 'invalid_owner_request' });
   const wait = h.controller.wait({ owner: 'child', executionId: sent.executionId, timeoutMs: 10_000 });
+  assert.deepEqual(h.controller.status({ executionId: sent.executionId }).attachment.attached, true);
   await h.clock.advance(10_000); await wait;
-  assert.equal(h.records.readResult(sent.executionId), null);
-  await h.clock.advance(2999); assert.equal(h.records.readResult(sent.executionId), null);
-  await h.clock.advance(1001);
-  assert.equal((await h.done(sent.executionId)).cause, 'owner_lease_expired');
-});
-
-test('wall clock jumps and suspend gaps do not consume unobserved owner grace', async () => {
-  const h = setup({ env: { AGENT_COMPANION_OWNER_GRACE_MS: '3000' } }); const sent = await h.send();
-  h.clock.wall += 86_400_000;
-  await h.clock.suspend(3_600_000);
-  assert.equal(h.records.readResult(sent.executionId), null);
-  await h.clock.advance(2000); assert.equal(h.records.readResult(sent.executionId), null);
-  h.clock.wall -= 172_800_000;
-  await h.clock.advance(1000);
-  assert.equal((await h.done(sent.executionId)).cause, 'owner_lease_expired');
+  const detached = h.controller.status({ executionId: sent.executionId }).attachment;
+  assert.equal(detached.attached, false); assert.equal(detached.detachedAt, h.clock.now());
+  assert.equal((await h.finish(sent.executionId)).cause, 'native_complete');
 });
 
 test('retry progress stays nonterminal and fresh activity is persisted as provider activity', async () => {
@@ -384,7 +410,7 @@ test('explicit adapter refusal codes survive history and observe failures', asyn
   }
 });
 
-test('watcher terminal result releases the observed attachment without rewriting the lease', async () => {
+test('watcher terminal result releases the observed attachment without rewriting the record', async () => {
   const h = setup(); const sent = await h.send();
   h.controller.beginRequest({ owner: 'child', executionId: sent.executionId, requestId: 'pending', kind: 'wait' });
   await h.controller.bridgeLost();
@@ -393,8 +419,8 @@ test('watcher terminal result releases the observed attachment without rewriting
     outcome: 'stopped', cause: 'bridge_loss', stopEvidence: { gone: true } }, 'watcher');
   const before = disk(h.dir);
   const view = h.controller.status({ executionId: sent.executionId });
-  assert.equal(view.lease.attached, false);
-  assert.equal(view.lease.remainingMs, null);
+  assert.equal(view.attachment.attached, false);
+  assert.equal(view.attachment.detachedAt, null);
   assert.deepEqual(disk(h.dir), before);
 });
 

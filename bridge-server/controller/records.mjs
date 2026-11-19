@@ -52,7 +52,7 @@ export class Records {
   }
   readConversation(owner) { return this.read('conversations', owner); }
   readExecution(id) { return this.read('executions', id); }
-  readLease(id) { return this.read('leases', id); }
+  readAttachment(id) { return this.read('attachments', id); }
   readResult(id) { return this.read('results', id); }
   inboxPath(executionId) { return join(this.dir, 'inbox', segment(executionId)); }
   readInbox(executionId) {
@@ -218,10 +218,10 @@ export class Records {
       this._write('executions', record.executionId, record); return true;
     });
   }
-  writeLease(record) {
+  writeAttachment(record) {
     return this._locked(record.owner, () => {
       if (!this._fenced(record)) return false;
-      this._write('leases', record.executionId, record); return true;
+      this._write('attachments', record.executionId, record); return true;
     });
   }
   writeResult(record, writer = 'controller') {

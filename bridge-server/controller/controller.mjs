@@ -40,8 +40,6 @@ export class Controller {
     this.onResult = onResult;
     this.live = new Map();
     this.requests = new Map();
-    this.graceMs = Number(env.AGENT_COMPANION_OWNER_GRACE_MS ?? 120_000);
-    if (!Number.isFinite(this.graceMs) || this.graceMs < 0) throw error('invalid_owner_grace');
   }
   _owner(owner) { if (!owner) throw error('NATIVE_OWNER_REQUIRED'); }
   _persist(a) {
@@ -51,11 +49,16 @@ export class Controller {
     try { this._persist(a); return true; }
     catch (err) { void Promise.resolve().then(() => this._abandon(a, err)); }
   }
-  _lease(a) {
+  // Attachment is shown, never enforced: a detached owner may be thinking or
+  // retrying offline for hours, which silence cannot tell from a stopped one.
+  // The record is for display, so a failed write (RECORD_BUSY) must never
+  // block a request or its cancel.
+  _attachment(a) {
     if (a.handedOff || a.closed) return;
-    this.records.writeLease({ owner: a.record.owner, executionId: a.record.executionId, generation: a.record.generation,
-      attached: a.requests.size > 0, requestIds: [...a.requests], graceMs: this.graceMs,
-      deadline: a.requests.size ? null : this.clock.now() + a.remainingMs, remainingMs: a.remainingMs });
+    try {
+      this.records.writeAttachment({ owner: a.record.owner, executionId: a.record.executionId, generation: a.record.generation,
+        attached: a.requests.size > 0, requestIds: [...a.requests], detachedAt: a.requests.size ? null : a.detachedAt ?? null });
+    } catch {}
   }
   // Also usable around a host's owner-bound operation. Only these four kinds
   // constitute attachment; catalog/status never call this method.
@@ -68,9 +71,7 @@ export class Controller {
     const abort = () => { void this.cancelRequest(requestId); };
     this.requests.set(requestId, { a, signal, abort });
     a.requests.add(requestId);
-    a.remainingMs = this.graceMs;
-    a.lastTick = this.clock.monotonic();
-    this._lease(a);
+    this._attachment(a);
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     return requestId;
@@ -81,8 +82,8 @@ export class Controller {
     const { a, signal, abort } = request;
     signal?.removeEventListener('abort', abort);
     this.requests.delete(requestId); a.requests.delete(requestId);
-    if (!a.requests.size) { a.remainingMs = this.graceMs; a.lastTick = this.clock.monotonic(); a.detachedAt = a.lastTick; }
-    this._lease(a);
+    if (!a.requests.size) a.detachedAt = this.clock.now();
+    this._attachment(a);
   }
   async cancelRequest(requestId) {
     const request = this.requests.get(requestId);
@@ -118,7 +119,7 @@ export class Controller {
     const permissionMode = probePermission(getTargetById(provider), this.env)?.mode ?? null;
     const record = this.records.begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes: adapter.capabilities.interventions,
       historyId, executionId, text, hostSessionId, now: this.clock.now() }, conversation?.generation ?? 0);
-    const a = { record, adapter, savedEffortHint, held: [], requests: new Set(), waiters: new Set(), inboxRequests: new Set(), ready: deferred(), done: deferred(), remainingMs: this.graceMs, lastTick: this.clock.monotonic() };
+    const a = { record, adapter, savedEffortHint, held: [], requests: new Set(), waiters: new Set(), inboxRequests: new Set(), ready: deferred(), done: deferred() };
     a.supervisor = this.createSupervisor({ clock: this.clock, onRecord: (processes) => { a.record.processes = processes; this._eventWrite(a); } });
     // Snapshot the marker at dispatch. An old SubagentStop must not cancel a
     // later same-child follow-up; a changed marker is a new stop observation.
@@ -295,16 +296,6 @@ export class Controller {
     if (a.stopping || a.closed || a.handedOff) return;
     const marker = this.records.readStop(a.record.owner);
     if (marker && JSON.stringify(marker) !== a.stopMarker) { void this._close(a, 'owner_stop'); return; }
-    const now = this.clock.monotonic();
-    const elapsed = now - a.lastTick; a.lastTick = now;
-    // A long scheduling gap can be suspend or event-loop starvation. Neither
-    // proves owner loss. Pause the grace across it; wall-clock jumps never
-    // expire a lease. Ordinary scheduled awake ticks consume the grace.
-    if (!a.requests.size) {
-      if (elapsed >= 0 && elapsed <= 2 * TICK_MS) a.remainingMs -= elapsed;
-      else this._lease(a);
-      if (a.remainingMs <= 0) { void this._close(a, 'owner_lease_expired'); return; }
-    }
     this._inbox(a);
   }
   _inbox(a) {
@@ -400,8 +391,7 @@ export class Controller {
     if (a.handedOff) return a.done.promise;
     if (a.turn && a.record.interventions.length) this._recordTurn(a, { outcome: 'interrupted' });
     discardInterventions(a.record);
-    a.record.cleanup = { ...cleanup, protocol, detectionDelayMs: cause === 'owner_lease_expired' ? a.stopDecidedMono - a.detachedAt : 0,
-      cleanupMs: this.clock.monotonic() - a.stopDecidedMono };
+    a.record.cleanup = { ...cleanup, protocol, cleanupMs: this.clock.monotonic() - a.stopDecidedMono };
     const { summary: workSummary, nativeError } = await this._workSummary(a, cleanup);
     if (a.handedOff) return a.done.promise;
     let terminal = a.record.terminal;
@@ -423,8 +413,6 @@ export class Controller {
     };
     if (!this.records.writeResult(result)) throw error('writer_fenced');
     a.record.state = cleanup.gone ? 'closed' : 'unknown'; this._persist(a);
-    this.records.writeLease({ owner: a.record.owner, executionId: a.record.executionId, generation: a.record.generation,
-      attached: false, requestIds: [], deadline: null, closedAt: this.clock.now() });
     a.closed = true;
     for (const id of [...a.requests]) this.endRequest(id);
     const saved = this.records.readResult(a.record.executionId);
@@ -539,13 +527,14 @@ export class Controller {
     if (!execution) return null;
     const result = this.records.readResult(executionId);
     const live = this.live.get(executionId);
-    const savedLease = this.records.readLease(executionId);
-    const lease = savedLease && (result
-      ? { ...savedLease, attached: false, requestIds: [], deadline: null, remainingMs: null }
-      : { ...savedLease, remainingMs: live ? live.remainingMs : savedLease.deadline == null ? null : Math.max(0, savedLease.deadline - this.clock.now()) });
+    // A result or a watcher handoff ends attachment even when the saved record
+    // predates it (handoff stops attachment writes) or never existed.
+    const saved = this.records.readAttachment(executionId);
+    const attachment = result || execution.writer === 'watcher'
+      ? { ...saved, attached: false, requestIds: [], detachedAt: null } : saved;
     const interventions = { default: execution.interventionModes?.default ?? null,
       ...Object.fromEntries(['steer', 'queue', 'interrupt'].map(mode => [mode, !result && interventionUnavailable(live, mode) === null])) };
-    return { execution, result, lease, interventions,
+    return { execution, result, attachment, interventions,
       state: result?.stopEvidence?.gone || execution.cleanup?.gone ? 'closed' : live ? execution.state : 'unknown' };
   }
   // Explicit startup reconciliation, never invoked by an observer. It never

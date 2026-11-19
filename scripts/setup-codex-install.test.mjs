@@ -186,7 +186,6 @@ if (args.join(' ') === 'mcp list --json') {
       args: ['hooks/launch-agent-bridge.sh'],
       env: {
         AGENT_COMPANION_HOST: 'codex',
-        AGENT_COMPANION_OWNER_GRACE_MS: '120000',
       },
       env_vars: [],
       cwd,
@@ -326,7 +325,6 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
       cwd: '.',
       env: {
         AGENT_COMPANION_HOST: 'codex',
-        AGENT_COMPANION_OWNER_GRACE_MS: '120000',
       },
       default_tools_approval_mode: 'approve',
       startup_timeout_sec: 120,

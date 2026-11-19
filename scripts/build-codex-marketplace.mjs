@@ -115,7 +115,6 @@ if (bridge?.command !== '/bin/bash'
     || bridge.args[0] !== 'hooks/launch-agent-bridge.sh'
     || bridge?.cwd !== '.'
     || bridge?.env?.AGENT_COMPANION_HOST !== 'codex'
-    || bridge?.env?.AGENT_COMPANION_OWNER_GRACE_MS !== '120000'
     || bridge?.default_tools_approval_mode !== 'approve'
     || bridge?.startup_timeout_sec !== 120
     || bridge?.tool_timeout_sec !== 1320) {

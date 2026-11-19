@@ -113,10 +113,11 @@ to the same native child resumes cold. An unavailable history fails explicitly.
 
 Configuration:
 
-- `AGENT_COMPANION_OWNER_GRACE_MS` controls the owner attachment grace (default
-  120000 ms). Pending send/wait/reply/cancel calls hold the lease; status and
-  catalog do not. Stop hooks write owner markers. Total execution has no
-  40-minute cutoff; each wait is still bounded by the host's per-call timeout.
+- Silence never ends a job: a subagent may be thinking or waiting out a network
+  outage for hours with no call open. A job ends on a stop marker (written by
+  the stop hooks), a cancel, bridge loss or its native turn's end. Status shows
+  `owner_attached` and `owner_detached_at`. Total execution has no cutoff; each
+  wait is still bounded by the host's per-call timeout.
 - Both hosts share target, model and effort defaults in
   `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`.
   With `AGENT_COMPANION_HOME` set, the file is `$AGENT_COMPANION_HOME/settings.json`.
@@ -560,14 +561,14 @@ waiting. User cancel is a normal terminal result with cause `user_cancel`.
 User requests use the owning host's state inbox:
 `inbox/<executionId>/<requestId>.json`, written atomically with mode 0600, holding
 `{ requestId, executionId, mode, text, at }`. Cancel uses mode `cancel` and no text.
-The controller reads live executions' inboxes on its tick, after owner stop and
-lease checks. Only regular files are read, at most 64 KiB of JSON and 8000 text
+The controller reads live executions' inboxes on its tick, after the owner stop
+check. Only regular files are read, at most 64 KiB of JSON and 8000 text
 characters. It writes `<requestId>.outcome.json` atomically with mode 0600:
 `{ requestId, ok, status, reason?, interventionId? }`, then removes the request.
 The view removes outcomes after reading; execution close removes the whole inbox,
 including requests left behind. Rejected input reports its reason; input for an
-execution not live in that bridge reports `state`. User input never renews the
-owner lease. The saved execution's `interventionModes` snapshots its adapter's
+execution not live in that bridge reports `state`. User input never attaches
+the owner. The saved execution's `interventionModes` snapshots its adapter's
 capabilities for the view.
 
 Terminal envelope statuses are `completed`, `failed` and `cancelled`; durable
@@ -611,7 +612,7 @@ Per-host state lives under:
 ```
 
 `AGENT_COMPANION_HOME` overrides the state home; `CODEX_HOME` relocates Codex.
-`conversations/`, `executions/`, `leases/` and immutable `results/` hold ownership,
+`conversations/`, `executions/`, `attachments/` and immutable `results/` hold ownership,
 history references, progress and verified cleanup evidence. `stops/` carries
 advisory owner-stop markers; `completions/` holds per-execution publication
 receipts. `inbox/` holds user requests and outcomes; `intervention-notices/` holds
@@ -629,7 +630,7 @@ and that turn's transcript items in order. Preamble is collapsed to a count;
 each item's output is capped at about 2 KB, with the native transcript path for
 the rest. Running reads include the in-flight progress line. Missing or
 unrecognized transcripts are explicitly labelled. Resources are listed from
-execution records. Reads write nothing and never renew the owner's lease.
+execution records. Reads write nothing and never attach the owner.
 Existing files under `runtime/digests/` are left alone and are no longer written.
 
 Results carry `workSummary`, exposed as `meta.work_summary` on terminal envelopes.
@@ -675,7 +676,7 @@ no box; a running job started by an older bridge shows a one-line hint instead.
 The view's job writes are those messages and cancels: one 0600 request file
 per send in the owning host's state directory, under
 `inbox/<executionId>/`, and the deletion of each outcome file it has read. It
-renews no lease and starts no work. Drafts stay in memory.
+attaches no owner and starts no work. Drafts stay in memory.
 
 `d` opens the defaults panel: the default companion and each companion's model
 and effort, saved or what inherit resolves to, as `agent-companion defaults`
@@ -771,7 +772,7 @@ Catalog's Codex entry and `agent_status` expose the advisory contract status as
 `contractStatus: match|drift|unverified` (the shipped field name). The adapter
 checks the schema once per bridge when Codex starts; catalog/status do not run
 that probe. Diagnostics on status reads cached target checks. Execution status
-includes lease, last native activity, active command, retry state, partial text,
+includes owner attachment, last native activity, active command, retry state, partial text,
 selected/effective model, native refs and stop evidence.
 
 Install markers:
@@ -838,8 +839,8 @@ harnesses. Live probes spend quota and are separate from the root test suite.
   the host-supplied native child owner; catalog and status are ownerless reads.
 - One controller owns each execution and one cold provider process group per
   answer. Provider processes and protocol connections are never shared by children.
-- Pending owner calls hold a lease; gaps consume configurable grace. Stop markers
-  and attributed cancellation close the owner. Observers cannot renew its lease.
+- Pending owner calls attach the owner; silence never ends a job. Stop markers
+  and attributed cancellation close the owner. Observers cannot attach it.
 - Bridge loss hands recorded trees to the cleanup watcher. It terminates and
   verifies them, keeps native history and writes a fenced immutable result.
   A replacement never adopts live work; subsequent answers cold-resume history.

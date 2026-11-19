@@ -40,7 +40,7 @@ flowchart TD
   Bridge --> Controller[Execution controller]
   Controller --> Adapter[Provider protocol adapter]
   Adapter --> Provider[Per-execution provider process group]
-  Controller --> Records[Conversation / execution / lease / result records]
+  Controller --> Records[Conversation / execution / attachment / result records]
   Bridge -->|SIGINT / SIGTERM / EOF| Watcher[Cleanup watcher]
   Watcher -->|terminate and verify recorded tree| Provider
   Watcher -->|fenced terminal result| Records
@@ -74,7 +74,7 @@ that reference to `[plugin:agent-companion:agent-bridge]` and its tool names to
 namespace as well as the bare `mcp__agent-bridge__*` session name. See the
 [plugin MCP naming contract](https://code.claude.com/docs/en/mcp#plugin-provided-mcp-servers).
 The Claude plugin server keeps sibling `timeout: 1320000` (milliseconds);
-Codex keeps `tool_timeout_sec: 1320`. Both set the owner grace to 120000 ms.
+Codex keeps `tool_timeout_sec: 1320`.
 Both manifests select their host explicitly for the shared shell launcher,
 which resolves Node and waits for dependency readiness. Settings take effect
 on the next session. No root `.mcp.json` is needed.
@@ -98,7 +98,7 @@ TaskStop PreToolUse supplies `tool_input.task_id`; SubagentStop supplies
 `agent_id`. The 2026-11-05 Codex identity payloads also identify the child
 thread as `agent_id` (their `session_id` is the parent). Missing child identity
 produces no marker and a diagnostic, never a guessed owner. Markers are evidence
-for the controller, not cleanup or lease renewal.
+for the controller, not cleanup or attachment.
 
 SIGINT, SIGTERM and stdin EOF share one awaited `onBridgeLoss()` hook, guarded
 against duplicate or racing loss events before exit. The registered controller calls `bridgeLost()`, hands each recorded tree to
@@ -251,8 +251,8 @@ not own the live execution. Catalog reports the registry's
 `intervene({ executionId, from: 'caller'|'user', mode, text })` records the sender,
 mode, text, acceptance time and delivery state before reaching the adapter.
 Record mutations take the conversation lock; native writes are serialized on
-the execution's input chain. Caller input requires its native owner and holds
-the owner lease; user input never renews it. Unsupported modes and unavailable
+the execution's input chain. Caller input requires its native owner and attaches
+the owner; user input never does. Unsupported modes and unavailable
 states are refused before recording input.
 
 After each native result, the controller settles accepted writes and continues
@@ -270,7 +270,7 @@ The user writes an atomic mode-0600 request to the owning host's state directory
 `inbox/<executionId>/<requestId>.json`, containing
 `{ requestId, executionId, mode, text, at }`. Mode is steer, queue, interrupt or
 cancel; cancel omits text. On each live execution's tick, the controller checks
-stop markers and lease expiry before processing its inbox. It reads regular
+stop markers before processing its inbox. It reads regular
 files only, without following symlinks, bounded to 64 KiB of JSON and 8000 text
 characters. Request identity, mode and timestamp are checked. Bad input returns
 a reason such as `invalid_file`, `invalid_request`, `request_too_large` or
@@ -363,7 +363,7 @@ Tokens come from per-turn `result.usage`; cumulative `modelUsage` is not used.
 writes the child's `agent_id` into `thread`, clearing it for a root caller.
 Codex requires `thread_source: subagent` and uses its `thread_id`. Send, wait,
 reply and cancel without that owner fail with `NATIVE_OWNER_REQUIRED`.
-Catalog and status are ownerless reads; neither renews a lease nor changes records.
+Catalog and status are ownerless reads; neither attaches the owner nor changes records.
 The parent session id scopes completion delivery, not companion continuity.
 
 The first send requires an absolute existing directory and records its canonical
@@ -394,7 +394,7 @@ runtime and is never automatically resent.
 
 ## Companion Adapter Contract
 
-The controller owns processes, leases, records and results. Adapters implement
+The controller owns processes, owner attachment, records and results. Adapters implement
 only the provider protocol; they never write durable execution state or kill
 processes. The provider factories create an adapter with this interface:
 
@@ -434,7 +434,7 @@ with `previous_execution_unverified`. Closure attempts native interrupt
 and protocol close with bounded waits, then SIGTERM to the group and recorded
 pids, SIGKILL to survivors after 2 s, and absence verification by pid plus birth
 identity. The cleanup target is at most 5 s on an awake machine after the close
-decision; lease detection delay is reported separately. A signal acknowledgement
+decision. A signal acknowledgement
 alone is never proof of exit.
 
 ## State
@@ -459,7 +459,7 @@ produce a warning and block updates.
 | `target-checks.json` | Last explicit readiness evidence; catalog/status read it without probing. |
 | `conversations/<owner>.json` | Provider, canonical cwd, model/effort overrides, native history, generation and current execution id. |
 | `executions/<id>.json` | Request, interventionModes, interventions and turns, native references, transcript locator, start/end worktree snapshots, process identities, progress, lifecycle and writer authority. |
-| `leases/<id>.json` | Attached owner requests and remaining grace. |
+| `attachments/<id>.json` | Attached owner requests, or since when the owner is detached; display only. |
 | `results/<id>.json` | Immutable outcome, text/usage, work summary, native refs, selected/effective model and effort, stop cause and cleanup evidence. |
 | `locks/<owner>.lock` | Exclusive record mutation lock; crash leftovers fail closed as `RECORD_BUSY`. |
 | `stops/<owner>.json` | Advisory TaskStop/SubagentStop marker. Its snapshot at dispatch prevents an old stop from cancelling new work. |
@@ -499,7 +499,7 @@ lists execution and result records from both hosts' state homes, follows the
 selected job's native transcript with `followTranscript` (JSONL by appended
 bytes, SQLite by polling the row cursor) and reads caller titles from the
 hosts' own transcripts. It writes only inbox requests and, from its defaults
-panel, `settings.json` through `bridge-server/ui/defaults.mjs`; it renews no lease and signals nothing;
+panel, `settings.json` through `bridge-server/ui/defaults.mjs`; it attaches no owner and signals nothing;
 an active record without a result whose recorded process is gone is shown as
 `unknown`, not running.
 
@@ -547,14 +547,13 @@ every 10 s (Claude 132 frames; Codex 131). Claude requested 1980 s and Codex
 and caps at 1200 s, leaving 120 s below the configured wall. Parent messages
 reach a busy child between waits. Choose shorter waits when response latency matters.
 
-Owner send/wait/reply/cancel requests hold attachment while pending. When the
-last returns, `AGENT_COMPANION_OWNER_GRACE_MS` defaults to 120000 (120 s).
-Only a new owner request renews it. The controller uses monotonic awake ticks,
-pausing grace across long scheduling gaps rather than treating suspend as owner
-loss. A changed stop marker or attributed request cancellation closes the owner
-immediately; the lease handles missing signals. The old 40-minute execution
-cutoffs and their environment knobs are removed. Protocol startup/delivery
-bounds remain separate from total answer duration.
+Owner send/wait/reply/cancel requests attach the owner while pending; when the
+last returns, the attachment record notes `detachedAt` for display. Silence never
+closes a job (see Negative Results, owner silence). A changed stop marker or
+attributed request cancellation closes the owner immediately; a stop that gives
+no signal (Esc between waits) lets the job finish its current turn. The 120 s
+owner grace, the old 40-minute execution cutoffs and their environment knobs are
+removed. Protocol startup/delivery bounds remain separate from total answer duration.
 
 ## Negative Results
 
@@ -567,6 +566,23 @@ The `plan_path`, profile-selection, exec, broker and daemon measurements below
 are historical evidence for designs retired on 2026-11-05. They are not current
 components or survival guarantees. Implementation-specific entries are labelled;
 full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION.md).
+
+**Owner silence (2026-11-19, Claude Code 2.1.328, codex-cli 0.170.0)**
+
+- **A quiet owner is not a gone owner.** The removed 120 s owner grace closed a
+  job whose subagent made no bridge call for 120 s. With
+  `CLAUDE_CODE_RETRY_WATCHDOG=1`, a Claude subagent waiting out a network outage
+  stays alive for hours with no call open. Through an outage proxy the default
+  gave up after ~3 min (10 retries, backoff capped near 35 s) with
+  `ERR_PROXY_TUNNEL`; the watchdog survived 8 min and answered 23 s after the
+  network returned. Live gaps between bridge calls were median 2.2 s, p99
+  14.2 s, max 14 s (448 gaps), with no `owner_lease_expired` in 300 executions,
+  so the timer could only misfire on a healthy owner or catch a stop no host
+  signalled. A job now ends on stop evidence, a cancel, bridge loss or its turn.
+- **Transcript growth is not a cross-host liveness signal.** A Claude subagent
+  writes an `api-request` record per retry attempt to its own transcript, but a
+  Codex rollout stayed silent for a whole 7.7 min outage (`codex exec`), so
+  renewing on growth would protect one host only.
 
 **Codex effort selection (2026-11-12, codex-cli 0.167.1)**
 
@@ -667,7 +683,8 @@ The [Claude report](../probes/host-qualification/claude/REPORT-2026-11-05.md) an
 
 - A stop during a pending request is attributable; a stop between dispatch and
   wait or between waits gives no cancellation signal. Normal completion gives
-  SubagentStop only. Stop markers and the owner lease fill these gaps.
+  SubagentStop only. Stop markers fill these gaps; a stop that gives no signal
+  lets the job finish its turn.
 - Neither host terminates provider descendants. Claude graceful exit gives
   SIGINT (~235 ms before exit); Codex gives SIGTERM. Parent SIGKILL gives EOF
   without SessionEnd. A surviving sibling connection remains usable.
@@ -803,8 +820,8 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   or working files. Changes from any writer are included. An index hash alone
   does not identify its mutator; see the incident's git-command and stat-cache
   evidence in [`RELIABILITY_REMEDIATION.md` F4](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
-- **Status is not attachment or recovery.** It reads records without renewing
-  the lease, writing a result, publishing a completion or spawning a provider.
+- **Status is not attachment or recovery.** It reads records without attaching
+  the owner, writing a result, publishing a completion or spawning a provider.
   Cleanup signals only recorded process identities for one execution; siblings
   of the same provider have independent process groups and connections.
 - **Historical (retired design): "No thread id" does not mean "broadcast".** Read against
@@ -834,7 +851,7 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   called from `runtimeDir()`, on state and shared settings paths, and mirrored in
   `hooks/drain-completions.sh` — throws on any path under the real account home
   (`os.userInfo()`, not `$HOME`; anything under `os.tmpdir()` passes). A textual guard over test sources missed four cases. That retired lifetime bug is why the real-home guard remains; heartbeats
-  are not owner-lease evidence in the current controller.
+  are not owner evidence in the current controller.
 - **Auto-accepting an approval defeats the sandbox.** The adapter pins `never`;
   the read-only write experiment is in
   [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#sandbox-and-configuration).

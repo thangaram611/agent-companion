@@ -8,8 +8,8 @@ import { codexDispatchFixture, diskSnapshot, terminalRows } from './controller/c
 import { until } from './controller/helpers.mjs';
 import { note } from './codex-wire-frames.mjs';
 
-// Phase 3 mapping: a wait budget is not an execution timeout. Only owner lease
-// expiry closes work, and a stopped result requires verified process absence.
+// Phase 3 mapping: a wait budget is not an execution timeout. Silence never
+// closes work: a cancel does, and a stopped result requires verified process absence.
 test('CONTRACT: timeout must stop work or avoid claiming process termination', async (t) => {
   const h = codexDispatchFixture(t);
   const { job_id } = await h.send();
@@ -22,11 +22,13 @@ test('CONTRACT: timeout must stop work or avoid claiming process termination', a
   assert.doesNotMatch(JSON.stringify(response), /terminated|stopped/);
   assert.equal(h.records.readResult(job_id), null);
   assert.equal((await h.active.live.get(job_id).supervisor.verifyGone()).gone, false);
-  await h.clock.advance(3000);
-  await until(() => h.records.readResult(job_id), 'lease cleanup');
+  await h.clock.advance(3_600_000);
+  assert.equal(h.records.readResult(job_id), null, 'an hour of owner silence closes nothing');
+  await h.call({ action: 'cancel', thread: 'child', job_id });
+  await until(() => h.records.readResult(job_id), 'cancel cleanup');
   const result = h.records.readResult(job_id);
   assert.equal(result.outcome, 'stopped');
-  assert.equal(result.cause, 'owner_lease_expired');
+  assert.equal(result.cause, 'owner_stop');
   assert.equal(result.stopEvidence.gone, true);
   assert.deepEqual(result.stopEvidence.survivors, []);
   const terminal = await h.call({ action: 'wait', thread: 'child', job_id });
@@ -92,17 +94,17 @@ test('CONTRACT: a recovered native answer must remain observable after a retryab
 });
 
 // Phase 3 mapping: a second controller reads the shared records but neither
-// adopts the runtime nor renews the owner's lease nor writes a digest.
+// adopts the runtime nor attaches the owner nor writes a digest.
 test('CONTRACT: a status-only second bridge must not recover a live owner job', async (t) => {
   const h = codexDispatchFixture(t);
   const { job_id } = await h.send();
   const second = new Controller({ records: new Records({ dir: h.records.dir }), clock: h.clock });
   const before = diskSnapshot();
-  const lease = h.records.readLease(job_id);
+  const attachment = h.records.readAttachment(job_id);
   const status = await h.call({ action: 'status', job_id }, {}, second);
   assert.equal(status.status, 'unknown');
   assert.deepEqual(diskSnapshot(), before);
-  assert.deepEqual(second.records.readLease(job_id), lease);
+  assert.deepEqual(second.records.readAttachment(job_id), attachment);
   assert.equal(second.live.size, 0);
   assert.equal(second.requests.size, 0);
   assert.equal(h.active.live.size, 1);

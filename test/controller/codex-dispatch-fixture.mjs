@@ -26,7 +26,7 @@ if (process.argv[2] === 'app-server') {
 }
 `);
   const trace = join(dir, 'trace.jsonl');
-  const env = { ...process.env, CODEX_BIN: bin, CODEX_FAKE_TRACE: trace, AGENT_COMPANION_OWNER_GRACE_MS: '3000' };
+  const env = { ...process.env, CODEX_BIN: bin, CODEX_FAKE_TRACE: trace };
   writeTargetChecks({ codex: { ready: true } });
   const records = new Records({ dir: join(dir, 'records'), log: () => {} });
   const clock = new ManualClock();

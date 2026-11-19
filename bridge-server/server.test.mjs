@@ -395,12 +395,12 @@ test('starting requests retain cwd and hold attachment through acknowledgement',
   await until(() => h.adapters.length === 1);
   const e = h.records.listExecutions()[0];
   assert.equal(e.cwd, h.dir);
-  assert.equal(h.records.readLease(e.executionId).attached, true);
+  assert.equal(h.records.readAttachment(e.executionId).attached, true);
   assert.equal((await h.send({ model: 'changed' })).status, 'thread_busy');
   const retry = h.send({}, { requestId: 'retry-request' });
   gate.resolve();
   assert.deepEqual(await retry, await sending);
-  assert.equal(h.records.readLease(e.executionId).attached, false);
+  assert.equal(h.records.readAttachment(e.executionId).attached, false);
 });
 
 test('wait progress, read-only status, digest resources and immutable terminal queue projection', async (t) => {
@@ -416,7 +416,7 @@ test('wait progress, read-only status, digest resources and immutable terminal q
     for (let i = 0; i < 3; i++) {
       const status = await h.call({ action: 'status', job_id: id, verbose: true, diagnostics: true });
       assert.equal(status.status, 'running'); assert.equal(status.thread, 'child');
-      assert.equal(status.lease.attached, false); assert.ok(status.lease.remainingMs > 0);
+      assert.equal(status.owner_attached, false); assert.equal(typeof status.owner_detached_at, 'string'); assert.equal('lease' in status, false);
       assert.equal(status.native_turn_state, 'running'); assert.equal(status.last_native_activity, progress.lastActivityAt);
       assert.equal(status.active_command, 'build'); assert.deepEqual(status.retry, { attempt: 2 });
       assert.equal(status.partial_text, 'partial answer');
@@ -481,7 +481,7 @@ test('cancel and cancelled owner requests close only their own execution', async
   const abort = new AbortController();
   const waiting = h.call({ action: 'wait', job_id: one.job_id, thread: 'child', max_wait_sec: 30 }, { requestId: 'wait-request', signal: abort.signal });
   await until(() => h.active.requests.has('wait-request'));
-  assert.equal(h.records.readLease(one.job_id).attached, true);
+  assert.equal(h.records.readAttachment(one.job_id).attached, true);
   abort.abort();
   const stopped = await waiting;
   assert.equal(stopped.status, 'cancelled'); assert.equal(stopped.meta.cause, 'owner_stop');
@@ -610,14 +610,14 @@ await cleanupExecution({ records, execution: records.readExecution(process.argv[
 
 import { codexDispatchFixture } from '../test/controller/codex-dispatch-fixture.mjs';
 
-test('controller reply steers the acknowledged native turn and confirms injection while holding the owner lease', async (t) => {
+test('controller reply steers the acknowledged native turn and confirms injection while attaching the owner', async (t) => {
   const h = codexDispatchFixture(t);
   const { job_id } = await h.send();
   assert.equal((await h.call({ action: 'status', job_id })).interventions.steer, true);
   const reply = h.call({ action: 'reply', thread: 'child', job_id, message: 'use ripgrep' }, { requestId: 'steer-request' });
   await until(() => h.frames().some((f) => f.method === 'turn/steer'), 'native steer');
-  assert.deepEqual(h.records.readLease(job_id).requestIds, ['steer-request']);
-  await h.clock.advance(4000); // Exceeds detached grace; reply still owns it.
+  assert.deepEqual(h.records.readAttachment(job_id).requestIds, ['steer-request']);
+  await h.clock.advance(4000);
   assert.equal(h.records.readResult(job_id), null);
   await h.emit(job_id, [note('item/completed', { threadId: 'T1', turnId: 'TURN1',
     item: threadItem('userMessage', { id: 'steer', content: [{ type: 'text', text: 'use ripgrep' }] }) })]);
@@ -628,7 +628,7 @@ test('controller reply steers the acknowledged native turn and confirms injectio
   assert.equal(response.nativeTurnId, 'TURN1');
   assert.equal(response.job_id, job_id);
   assert.equal(h.active.requests.size, 0);
-  assert.equal(h.records.readLease(job_id).attached, false);
+  assert.equal(h.records.readAttachment(job_id).attached, false);
   assert.deepEqual(h.frames().filter((f) => f.method === 'turn/steer').map((f) => f.params), [
     { threadId: 'T1', expectedTurnId: 'TURN1', input: [{ type: 'text', text: 'use ripgrep' }] },
   ]);
@@ -647,7 +647,7 @@ test('controller reply reports acknowledgement without claiming unobserved injec
   assert.equal(response.accepted, true);
   assert.equal(response.confirmed, false);
   assert.equal((await h.call({ action: 'status', job_id })).interventions.steer, true);
-  assert.equal(h.records.readLease(job_id).attached, false);
+  assert.equal(h.records.readAttachment(job_id).attached, false);
 });
 
 test('controller reply refuses completed, foreign, missing and unowned executions without a new native turn', async (t) => {

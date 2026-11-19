@@ -28,8 +28,7 @@
       ],
       "cwd": ".",
       "env": {
-        "AGENT_COMPANION_HOST": "codex",
-        "AGENT_COMPANION_OWNER_GRACE_MS": "120000"
+        "AGENT_COMPANION_HOST": "codex"
       },
       "default_tools_approval_mode": "approve",
       "startup_timeout_sec": 120,

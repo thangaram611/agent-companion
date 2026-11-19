@@ -28,7 +28,7 @@ the bridge does not enforce independent judgment.
 The [Claude 2.1.318](../probes/host-qualification/claude/REPORT-2026-11-05.md) and
 [Codex 0.166.0](../probes/host-qualification/codex/REPORT-2026-11-05.md) host reports
 fix the signal/timeout assumptions: pending calls can be cancelled, gaps need
-leases/markers, and progress does not extend the 1320 s per-call wall. They do
+stop markers (the gap lease was removed on 2026-11-19), and progress does not extend the 1320 s per-call wall. They do
 not qualify cleanup. Desktop, operator TUI rows, installed-form acceptance and
 Copilot cold load remain explicit [release gates](RELEASE_READINESS.md#release-gates).
 

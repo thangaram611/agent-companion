@@ -109,7 +109,6 @@ function validateMarketplaceTree(marketplaceRoot) {
   assert(manifest.mcpServers?.['agent-bridge']?.args?.length === 1 && manifest.mcpServers['agent-bridge'].args[0] === 'hooks/launch-agent-bridge.sh', 'plugin MCP launcher arguments mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.cwd === '.', 'plugin MCP launcher cwd mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.env?.AGENT_COMPANION_HOST === 'codex', 'plugin MCP host mismatch');
-  assert(manifest.mcpServers?.['agent-bridge']?.env?.AGENT_COMPANION_OWNER_GRACE_MS === '120000', 'plugin MCP owner grace mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.default_tools_approval_mode === 'approve', 'plugin MCP approval mode mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.startup_timeout_sec === 120, 'plugin MCP startup timeout mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.tool_timeout_sec === 1320, 'plugin MCP tool timeout mismatch');
@@ -213,7 +212,6 @@ function main() {
   assert(bridge.transport?.command === '/bin/bash', 'installed agent-bridge launcher command mismatch');
   assert(bridge.transport?.args?.length === 1 && bridge.transport.args[0] === 'hooks/launch-agent-bridge.sh', 'installed agent-bridge launcher arguments mismatch');
   assert(bridge.transport?.env?.AGENT_COMPANION_HOST === 'codex', 'installed agent-bridge host environment mismatch');
-  assert(bridge.transport?.env?.AGENT_COMPANION_OWNER_GRACE_MS === '120000', 'installed agent-bridge owner grace mismatch');
   assert(Array.isArray(bridge.transport?.env_vars) && bridge.transport.env_vars.length === 0, 'installed agent-bridge must not inherit host environment variables');
   assert(realpathSync(bridge.transport?.cwd) === realpathSync(addPlugin.installedPath), 'installed agent-bridge cwd is not the plugin root');
   assert(bridge.startup_timeout_sec === 120, 'installed agent-bridge startup timeout mismatch');

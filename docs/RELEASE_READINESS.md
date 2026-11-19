@@ -197,7 +197,7 @@ Manual smoke gates before a public tag (real delegations spend model tokens):
 11. Across Claude Code, Codex CLI and Codex desktop, qualify two parents, siblings,
     repeated status observers, startup/active-turn/bridge-replacement races,
     every stop/loss trigger, and suspend/wake. Record instruction/result accounting,
-    lease detection delay separately from cleanup time, and process absence.
+    stop detection separately from cleanup time, and process absence.
     Operator-only TUI actions and desktop cannot be inferred from headless CLI rows.
 12. Migrate quiescent legacy state, preserve history/results and refuse ambiguous
     mappings. Verify installed artifacts and hooks, including Claude's plugin

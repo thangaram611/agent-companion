@@ -38,8 +38,9 @@ remains separate from implementation; see the release gates below.
   a different request returns `thread_busy`. Wait, cancel, or use `agent_reply`
   when the job's `interventions` reports the requested mode available.
 
-- One controller owns each answer's process group, lease and immutable result.
-  Stop hooks and attributed cancellation close owned work; bridge loss hands its
+- One controller owns each answer's process group, owner attachment and immutable
+  result. Silence never ends a job: stop hooks and attributed cancellation close
+  owned work; bridge loss hands its
   tree to the cleanup watcher. Native history survives for a cold follow-up.
 - CLI host measurements are recorded in the
   [Claude 2.1.318 report](../probes/host-qualification/claude/REPORT-2026-11-05.md)
@@ -186,8 +187,38 @@ remains separate from implementation; see the release gates below.
     Build release artifacts from the reviewed commit; version metadata alone
     does not establish that the release gates pass.
 
+11. **Direction, 2026-11-19.** The USP: any agent talks to any other agent
+    natively, from whichever host the owner starts in. About 20% of 300 recent
+    jobs used something OpenAI's codex-plugin-cc lacks (follow-ups to a thread
+    other than the repo's latest, non-Codex companions, Codex as host). The claim
+    is only as true as the qualified host × companion pairs; Copilot follow-up and
+    Antigravity are known gaps. agent-companion stays TypeScript in its own repo:
+    no merge with vigil, no Rust rewrite, no pause feature. No new work on
+    Claude-host steering, Copilot or Antigravity until records show use. The next
+    milestone is walk-away reliability.
+
+12. **Silence never ends a job (2026-11-19).** The 120 s owner grace killed healthy
+    owners waiting out an outage under Claude's retry watchdog. Codex and Fable
+    differentials both chose stop-on-evidence only; the user agreed. A stop with
+    no signal (Esc between waits) lets the job finish its turn; status shows
+    `owner_detached_at` and the user can cancel. Evidence: ARCHITECTURE Negative
+    Results, owner silence.
+
 ## Next Backlog
 
+- Walk-away reliability (decision 11), in order:
+  1. Show "owner not attached for N min" in the live view and the Companions
+     pane, and replace the mod's own 120 s "should have closed" bound.
+  2. Outage through the bridge, 8 and 50 min, Codex companion first (`codex exec`
+     waited for the network; app-server through the adapter is unmeasured).
+  3. Suspend/wake mid-`agent_wait`, including a cancel right after wake.
+  4. Confirm the Claude companion child inherits `CLAUDE_CODE_RETRY_WATCHDOG`.
+  5. Measure Esc on a subagent between waits: does `$.agent.list()` report
+     `killed` or SubagentStop fire? If so, write a stop marker from it.
+  6. Check the Claude adapter's wait for a queued input's final lifecycle event
+     (`bridge-server/adapters/claude.mjs` ~116) for an unbounded wait.
+- Study codex-plugin-cc's design (app-server wrapper, rescue subagent, resume)
+  for improvements; the user runs it as a trial later, not now.
 - Qualify Codex desktop as the third host and finish operator-only TUI rows.
 - Resolve Copilot account access, then qualify cold history loading before
   enabling follow-up; a capability advertisement is insufficient.
