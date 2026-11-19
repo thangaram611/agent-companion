@@ -58,15 +58,16 @@ export function createJobSource({ env = process.env, dirs = stateDirs(env), aliv
         for (const name of names) {
           if (!name.endsWith('.json') || name.startsWith('.')) continue;
           const id = name.slice(0, -5);
-          let execution, result;
+          let execution, result, attachment;
           try {
             execution = read(records.path('executions', id));
             result = execution && read(records.path('results', id), true);
+            attachment = execution && !result ? read(records.path('attachments', id)) : null;
           } catch { continue; }
           if (!execution?.executionId) continue;
           const status = statusOf(execution, result, alive);
           // `dir` is the owning host's state dir, where the job's inbox lives.
-          jobs.push({ key: `${host}:${id}`, host, dir, execution, result, status, provider: execution.provider,
+          jobs.push({ key: `${host}:${id}`, host, dir, execution, result, attachment, status, provider: execution.provider,
             project: execution.cwd ? basename(execution.cwd) : '', startedAt: execution.startedAt,
             finishedAt: result?.finishedAt ?? null });
         }
@@ -89,7 +90,7 @@ export function sessionJobs({ dir, sessionId, limit, env = process.env, alive = 
   const all = source.list().filter(job => job.execution.hostSessionId === sessionId || spawned.has(job.execution.owner));
   const owners = new Set();
   const jobs = all.filter(job => !owners.has(job.execution.owner) && owners.add(job.execution.owner)).slice(0, limit)
-    .map(job => ({ owner: job.execution.owner, title: source.caller(job).title, status: job.status, execution: job.execution, result: job.result }));
+    .map(job => ({ owner: job.execution.owner, title: source.caller(job).title, status: job.status, execution: job.execution, result: job.result, attachment: job.attachment }));
   const listed = new Set(jobs.map(job => job.execution.executionId));
   return { jobs, older: all.flatMap(job => listed.has(job.execution.executionId) ? [] : [job.execution.executionId]) };
 }

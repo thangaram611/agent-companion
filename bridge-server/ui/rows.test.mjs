@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Pane, clean, cut, itemLines, jobBlocks, layoutLine, segsWidth, width } from './rows.mjs';
+import { Pane, clean, cut, itemLines, jobBlocks, layoutLine, liveLines, segsWidth, width } from './rows.mjs';
 
 const text = rows => rows.map(row => row.map(([t]) => t).join(''));
 
@@ -68,4 +68,14 @@ test("an unrecognized transcript's notice is clean: the reader's detail can quot
   const job = { status: 'running', execution: { executionId: 'j', provider: 'codex', startedAt: 0, progress: {} } };
   const [notice] = jobBlocks(job, { list: [], located: true, format: { version: null, detail: 'evil\x1b]0;title\x07\x1b[31m: bad' }, now: 0 });
   assert.deepEqual(notice.lines()[0].segs, [['transcript not recognized: evil: bad', 'warn']]);
+});
+
+test('the live line shows how long the owner has been away after a minute, never while attached', () => {
+  const now = 1_800_000_000_000, execution = { state: 'running', progress: { activeCommand: ['npm', 'test'] } };
+  const line = attachment => liveLines({ execution, attachment }, { now }).at(-1).segs.map(([t]) => t).join('');
+  assert.equal(line({ attached: false, detachedAt: now - 12 * 60_000 }), '● running $ npm test · owner away 12m');
+  assert.equal(line({ attached: false, detachedAt: now - 30_000 }), '● running $ npm test');
+  assert.equal(line({ attached: true, detachedAt: null }), '● running $ npm test');
+  assert.equal(line({ attached: false, detachedAt: now + 60_000 }), '● running $ npm test', 'a clock correction shows nothing');
+  assert.equal(line(undefined), '● running $ npm test');
 });

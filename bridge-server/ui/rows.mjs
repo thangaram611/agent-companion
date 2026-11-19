@@ -258,6 +258,10 @@ export function outcomeLines(job, { expanded = false, items = 0 } = {}) {
   return out;
 }
 
+// Display only: silence never ends a job, but an owner detached this long is
+// worth showing beside cancel. Healthy gaps between owner calls measured ≤14 s.
+const AWAY_SHOWN_MS = 60_000;
+
 // The in-flight line, once, as the transcript's last line; a reply still being
 // written (OpenCode stores text only when a step completes) comes just before it.
 export function liveLines(job, { now, lastText = null, activeAt = null }) {
@@ -269,6 +273,8 @@ export function liveLines(job, { now, lastText = null, activeAt = null }) {
     : progress.activity ? clean(progress.activity) : partial ? 'responding' : job.execution.state === 'running' ? 'working' : clean(job.execution.state);
   const segs = [[`● ${doing}`, 'ok']];
   if (progress.retry) segs.push([` · retrying${progress.retry.attempt ? ` (attempt ${progress.retry.attempt})` : ''}`, 'warn']);
+  const away = job.attachment?.attached === false && job.attachment.detachedAt != null ? now - job.attachment.detachedAt : -1;
+  if (away >= AWAY_SHOWN_MS) segs.push([` · owner away ${age(away)}`, 'warn']);
   if (activeAt != null) segs.push([` · ${clock(now - activeAt)}`, 'ok']);
   out.push({ segs, hang: 2 });
   return out;

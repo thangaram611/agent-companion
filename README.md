@@ -717,8 +717,11 @@ In a running job's message box:
 The plugin also carries a Claude Code mod, `hooks/mod.ts` (Codex ignores it).
 Each agent-companion subagent's row in the agent list under the prompt shows
 its job: the lead's title for it, the companion and model, what the companion
-is doing (the running command, responding, your queued message, retrying) and
-the elapsed time; once the job ends, its outcome and duration. The rows refresh
+is doing (the running command, responding, your queued message, retrying),
+`owner away 12m` once its subagent has made no bridge call for a minute, and
+the elapsed time; once the job ends, its outcome and duration. The live view and
+the Companions pane show the same line; a job whose subagent ended with no stop
+signal stays listed as running until it finishes its turn or you cancel it. The rows refresh
 every second while a job runs, from the same execution records, and the mod
 writes nothing. Other subagents' rows stay as Claude Code draws them.
 

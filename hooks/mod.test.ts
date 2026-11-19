@@ -90,6 +90,28 @@ test('a job started before the mod loaded is found through its conversation reco
   await ui.unmount()
 })
 
+test('a job whose subagent ended without a stop signal keeps its row, shows the owner away and is followed to its end', async ($, on) => {
+  // Silence never ends a job: the bridge lets it finish its turn, so the row
+  // must not give up after the subagent ends (the old 120 s rule did).
+  const files: Record<string, unknown> = {
+    [`${DIR}/conversations/a7.json`]: { owner: 'a7', executionId: 'j7' },
+    [`${DIR}/executions/j7.json`]: execution('j7', { owner: 'a7', progress: { activeCommand: ['npm', 'test'] } }),
+    [`${DIR}/attachments/j7.json`]: { owner: 'a7', executionId: 'j7', attached: false, requestIds: [], detachedAt: START },
+  }
+  const { clock, seen } = setup(on, files, START + 1000)
+  await $.ui.render(row('a7', { description: 'Long tests' }))
+  await clock.advance(1000)
+  await $.ui.render(row('a7', { description: 'Long tests', status: 'killed' }))
+  await clock.advance(300_000)
+  await $.ui.render(row('a7', { description: 'Long tests', status: 'killed' }))
+  expect(plain(seen.at(-1))).toBe('Long tests  codex · running $ npm test · owner away 5m · 5:02')
+
+  files[`${DIR}/results/j7.json`] = { executionId: 'j7', outcome: 'completed', finishedAt: START + 302_000 }
+  await clock.advance(1000)
+  await $.ui.render(row('a7', { description: 'Long tests', status: 'killed' }))
+  expect(plain(seen.at(-1))).toBe('Long tests  codex · ✓ done in 5:02')
+})
+
 test("the person's queued message replaces the live line, and a failure shows in red", async ($, on) => {
   const files: Record<string, unknown> = {
     [`${DIR}/conversations/a3.json`]: { owner: 'a3', executionId: 'j3' },

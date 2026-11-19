@@ -23,8 +23,11 @@ type Agent = {
   jobId?: string
   execution?: any
   result?: any
+  attachment?: any
   texts?: string
   looked?: boolean
+  // A list rebuild found no result and no process: its record is not read again.
+  gone?: boolean
   // On the list: its job started under the mod, or the last rebuild listed it.
   listed?: boolean
 }
@@ -37,7 +40,7 @@ type Follow = {
   stopped?: boolean
   ended?: boolean
   failure?: string
-  job?: { status: string; execution: any; result: any; branch: string | null }
+  job?: { status: string; execution: any; result: any; attachment?: any; branch: string | null }
   turn?: Turn
   items: Map<string, any>
   list: any[]
@@ -51,10 +54,6 @@ const SEND = /^mcp__(plugin_agent-companion_)?agent-bridge__agent_send$/
 const isId = (id: unknown): id is string => typeof id === 'string' && /^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(id)
 const ENDED = new Set(['completed', 'failed', 'killed'])
 const TICK_MS = 1000
-// Once a subagent has ended, its job closes within the owner grace
-// (AGENT_COMPANION_OWNER_GRACE_MS, 120 s); a record still open after that has
-// lost its bridge, and its row goes back to the engine's.
-const GRACE_MS = 120_000
 // The terminal's own palette, so its theme carries the colour; 39 ends the
 // colour alone, leaving the engine's dim or bold for the row.
 const SGR: Record<string, string> = { ok: '32', warn: '33', bad: '31' }
@@ -146,14 +145,15 @@ function parse(text: string | undefined) {
 
 // What the clock still reads for an agent: the conversation naming its job
 // (while it runs, or once after it ended), then the job's records until the
-// result, or until the grace after the subagent ended.
-function due(a: Agent, now: number) {
+// result. A subagent that ended with no stop signal leaves its job to finish
+// its turn, so silence never stops the reading; a rebuild that found the job gone does.
+function due(a: Agent) {
   if (a.result) return null
   if (!a.jobId) return a.endedAt == null || !a.looked ? 'conversation' : null
-  return a.endedAt == null || now - a.endedAt < GRACE_MS ? 'job' : null
+  return a.gone ? null : 'job'
 }
-// A card's status: the result's outcome, else running until its grace ran out.
-const statusOf = (a: Agent, now: number) => a.result?.outcome ?? (due(a, now) ? 'running' : 'unknown')
+// A card's status: the result's outcome, else running until a rebuild found it gone.
+const statusOf = (a: Agent) => a.result?.outcome ?? (due(a) ? 'running' : 'unknown')
 
 function startClock($: EngineInterface) {
   timer ??= $.clock.every(TICK_MS, () => void tick($))
@@ -165,7 +165,7 @@ async function tick($: EngineInterface) {
   const now = await $.clock.now(), base = await stateDir($)
   let pending = false, redraw = false
   for (const [id, a] of agents) {
-    const need = due(a, now)
+    const need = due(a)
     if (!need) continue
     pending = true
     if (need === 'conversation') {
@@ -176,8 +176,9 @@ async function tick($: EngineInterface) {
     }
     const execution = await readText($, `${base}/executions/${a.jobId}.json`)
     const result = await readText($, `${base}/results/${a.jobId}.json`)
-    if (execution + result !== a.texts) {
-      Object.assign(a, { texts: execution + result, execution: parse(execution) ?? a.execution, result: parse(result) })
+    const attachment = result ? '' : await readText($, `${base}/attachments/${a.jobId}.json`)
+    if (execution + result + attachment !== a.texts) {
+      Object.assign(a, { texts: execution + result + attachment, execution: parse(execution) ?? a.execution, result: parse(result), attachment: parse(attachment) })
       redraw = true
     }
     if (a.execution && !a.result) redraw = true
@@ -194,10 +195,10 @@ function queued(execution: any) {
 }
 // What a running job is doing, as the agent row and the card say it: the
 // person's queued messages, or the live view's in-flight line less its bullet.
-function doing(execution: any, now: number): Seg[] {
+function doing(execution: any, attachment: any, now: number): Seg[] {
   const waiting = queued(execution)
   if (waiting) return [[`◌ your ${waiting === 1 ? 'message' : `${waiting} messages`} queued`, 'warn']]
-  const [[head, style], ...rest] = liveLines({ execution }, { now }).at(-1)!.segs as [Seg, ...Seg[]]
+  const [[head, style], ...rest] = liveLines({ execution, attachment }, { now }).at(-1)!.segs as [Seg, ...Seg[]]
   return [[head.slice(2), style], ...rest]
 }
 // The model, less its provider prefix when that repeats the companion (opencode/flint-40b-free).
@@ -218,7 +219,7 @@ function body(a: Agent, now: number, columns: number | undefined, titleWidth: nu
   } else {
     const model = modelText(execution)
     if (model) segs.push([` · ${model}`])
-    segs.push([' · '], ...doing(execution, now), [` · ${clock(now - execution.startedAt)}`])
+    segs.push([' · '], ...doing(execution, a.attachment, now), [` · ${clock(now - execution.startedAt)}`])
   }
   return fitSegs(segs, columns ?? segsWidth(segs))
     .map(([text, style]) => style && SGR[style] ? `\x1b[${SGR[style]}m${text}\x1b[39m` : text).join('').trimEnd()
@@ -296,9 +297,9 @@ async function rebuild($: EngineInterface) {
       a.title ||= clean(job.title)
       // A newer job the mod saw start stands.
       if (a.jobId && a.jobId !== jobId && !(a.execution?.startedAt < job.execution.startedAt)) continue
-      Object.assign(a, { jobId, execution: job.execution, result: job.result, texts: undefined })
-      // No result and no process: its subagent ended unseen, so its record is not read again.
-      if (job.status !== 'running' && !job.result) a.endedAt ??= 0
+      // No result and no process: the job is gone, so its record is not read again.
+      Object.assign(a, { jobId, execution: job.execution, result: job.result, attachment: job.attachment, texts: undefined,
+        gone: job.status !== 'running' && !job.result })
     }
     for (const [id, a] of agents) a.listed = owners.has(id) || (a.listed && !old.has(a.jobId))
     older = old.size
@@ -357,9 +358,9 @@ function take(f: Follow, message: any) {
 }
 
 // This session's jobs, running first, then the rest by when they ended.
-function cards(now: number) {
+function cards() {
   const at = (c: { status: string; a: Agent }) => c.status === 'running' ? Infinity : c.a.result?.finishedAt ?? c.a.execution.startedAt
-  return [...agents].flatMap(([id, a]) => a.listed && a.jobId && a.execution ? [{ id, a, status: statusOf(a, now) }] : [])
+  return [...agents].flatMap(([id, a]) => a.listed && a.jobId && a.execution ? [{ id, a, status: statusOf(a) }] : [])
     .sort((x, y) => at(y) - at(x) || y.a.execution.startedAt - x.a.execution.startedAt)
 }
 const titleOf = (a: Agent) => a.title || (clean(a.execution?.text ?? '').split('\n')[0] ?? '')
@@ -367,7 +368,7 @@ const titleOf = (a: Agent) => a.title || (clean(a.execution?.text ?? '').split('
 // then what it is doing or how it ended, the glyph not repeated.
 function cardLine({ a, status }: { a: Agent; status: string }, glyph: Seg, now: number): Seg[] {
   const line: Seg[] = [[' '.repeat(HOTKEY)], glyph, [` ${clean(a.execution.provider)} · `, 'dim']]
-  if (status === 'running') return [...line, ...doing(a.execution, now).map(([text, style]): Seg => [text, style === 'ok' ? 'dim' : style])]
+  if (status === 'running') return [...line, ...doing(a.execution, a.attachment, now).map(([text, style]): Seg => [text, style === 'ok' ? 'dim' : style])]
   if (status === 'unknown') return [...line, ['no result', 'warn']]
   const [text, style] = outcomeLabel({ execution: a.execution, result: a.result })
   return [...line, [text.slice(2), status === 'completed' ? 'dim' : style]]
@@ -376,7 +377,7 @@ function cardLine({ a, status }: { a: Agent; status: string }, glyph: Seg, now: 
 // The viewed job's rows, exactly what fits in `rows`: a running job follows
 // its live line, an ended one opens on its outcome.
 function jobRows(a: Agent, f: Follow, now: number, w: number, rows: number): Seg[][] {
-  const job = f.job ?? (a.execution && { status: statusOf(a, now), execution: a.execution, result: a.result ?? null, branch: null })
+  const job = f.job ?? (a.execution && { status: statusOf(a), execution: a.execution, result: a.result ?? null, attachment: a.attachment, branch: null })
   const about = job ? [clean(job.execution.provider), modelText(job.execution, job.result), clean(job.branch ?? '')].filter(Boolean).join(' · ') : ''
   const head = layoutLine({ segs: [[titleOf(a), 'title'], ...(about ? [[`  ${about}`, 'dim'] as Seg] : [])], wrap: false }, w)
   if (!job) return [...head, [], [['waiting for the job\'s record', 'dim']]]
@@ -420,7 +421,7 @@ export const register: Register = on => {
       const a = agents.get(e.agentId) ?? { title: '' }
       agents.set(e.agentId, a)
       // Its subagent sent it, so that subagent runs.
-      if (a.jobId !== jobId) Object.assign(a, { jobId, execution: undefined, result: undefined, texts: undefined, endedAt: undefined, listed: true })
+      if (a.jobId !== jobId) Object.assign(a, { jobId, execution: undefined, result: undefined, attachment: undefined, texts: undefined, endedAt: undefined, gone: false, listed: true })
       if (e.agentId === shownAgent) void openForView($, e.agentId).catch(() => {})
       startClock($)
     }
@@ -435,8 +436,8 @@ export const register: Register = on => {
     a.title = clean(description)
     // A resumed subagent runs again under the same id.
     a.endedAt = ENDED.has(status) ? a.endedAt ?? now : undefined
-    if (due(a, now)) startClock($)
-    if (!a.execution || (!a.result && !due(a, now))) return next(e)
+    if (due(a)) startClock($)
+    if (!a.execution || (!a.result && !due(a))) return next(e)
     // Titles line up across this list's companion rows, within a third of the row.
     const titles = rowIds.flatMap(row => agents.get(row)?.execution ? [width(agents.get(row)!.title)] : [])
     const titleWidth = Math.min(Math.max(width(a.title), ...titles), columns ? Math.floor(columns / 3) : Infinity)
@@ -472,11 +473,11 @@ export const register: Register = on => {
       const back = async () => {
         if (inView?.jobId) await $.ui.view({})
         else { picked = undefined; $.ui.invalidate('ui.render') }
-        const first = cards(await $.clock.now())[0]
+        const first = cards()[0]
         if (first) ring($, first.id)
       }
       // The job as jobRows draws it: the child's record, else the clock's.
-      const status = follow?.job?.status ?? (a.execution ? statusOf(a, now) : null), execution = follow?.job?.execution ?? a.execution
+      const status = follow?.job?.status ?? (a.execution ? statusOf(a) : null), execution = follow?.job?.execution ?? a.execution
       const box = status === 'running' && execution?.interventionModes ? boxOf(a.jobId, execution) : null
       const jobsButton = h(Button, { key: 'jobs', label: '← jobs', plain: true, dimColor: true, hotkey: 'b', ...(box ? {} : { autoFocus: true as const }), onPress: back })
       if (!box) return column(...jobRows(a, follow!, now, w, e.props.scroll.bodyRows).map(row),
@@ -528,9 +529,9 @@ export const register: Register = on => {
       }
       // A running job that takes messages opens with the keys in its box.
       const opened = agents.get(agentId)
-      ring($, opened?.execution && statusOf(opened, await $.clock.now()) === 'running' && supportedModes(opened.execution).length ? 'message' : 'jobs')
+      ring($, opened?.execution && statusOf(opened) === 'running' && supportedModes(opened.execution).length ? 'message' : 'jobs')
     }
-    const list = cards(now), shown = list.slice(0, CARDS), more = older + list.length - shown.length
+    const list = cards(), shown = list.slice(0, CARDS), more = older + list.length - shown.length
     const running = list.filter(c => c.status === 'running').length
     const title = row([[' '], ['Companions', 'title'], [`  ${running} running · ${list.length - running + older} done`, 'dim']])
     const failed = failure ? [row([[` earlier jobs not read: ${failure}`, 'warn']])] : []

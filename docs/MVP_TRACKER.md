@@ -207,15 +207,13 @@ remains separate from implementation; see the release gates below.
 ## Next Backlog
 
 - Walk-away reliability (decision 11), in order:
-  1. Show "owner not attached for N min" in the live view and the Companions
-     pane, and replace the mod's own 120 s "should have closed" bound.
-  2. Outage through the bridge, 8 and 50 min, Codex companion first (`codex exec`
+  1. Outage through the bridge, 8 and 50 min, Codex companion first (`codex exec`
      waited for the network; app-server through the adapter is unmeasured).
-  3. Suspend/wake mid-`agent_wait`, including a cancel right after wake.
-  4. Confirm the Claude companion child inherits `CLAUDE_CODE_RETRY_WATCHDOG`.
-  5. Measure Esc on a subagent between waits: does `$.agent.list()` report
+  2. Suspend/wake mid-`agent_wait`, including a cancel right after wake.
+  3. Confirm the Claude companion child inherits `CLAUDE_CODE_RETRY_WATCHDOG`.
+  4. Measure Esc on a subagent between waits: does `$.agent.list()` report
      `killed` or SubagentStop fire? If so, write a stop marker from it.
-  6. Check the Claude adapter's wait for a queued input's final lifecycle event
+  5. Check the Claude adapter's wait for a queued input's final lifecycle event
      (`bridge-server/adapters/claude.mjs` ~116) for an unbounded wait.
 - Study codex-plugin-cc's design (app-server wrapper, rescue subagent, resume)
   for improvements; the user runs it as a trial later, not now.
