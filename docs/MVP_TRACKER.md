@@ -221,6 +221,16 @@ remains separate from implementation; see the release gates below.
      for it; measured 2026-11-19 as only sometimes. Tracked in vigil's ROADMAP Open.
   6. Check the Claude adapter's wait for a queued input's final lifecycle event
      (`bridge-server/adapters/claude.mjs` ~116) for an unbounded wait.
+- Code Mode and browser parameters for companions (`code_mode`, `browser` on
+  `agent_send`): researched and decided 2026-11-20, then parked to see whether
+  Claude Code ships a browser for Code Mode. Decisions, measurements, open
+  decisions and steps are in the [Code Mode plan](CODE_MODE_PLAN.md); run its
+  re-verify list before building.
+- A completion drain with no process per tool call: under a Code Mode host the
+  bash drain is spawned for every call inside a script (15 ms alone, about
+  28 ms inside Claude Code, measured 2026-11-20). An `mcp_tool` hook into the
+  running bridge would avoid the spawn on Claude; unmeasured, and Codex has no
+  such hook type.
 - Study codex-plugin-cc's design (app-server wrapper, rescue subagent, resume)
   for improvements; the user runs it as a trial later, not now.
 - Regenerate `assets/readme/architecture.png`: the image still says `lease`; its
