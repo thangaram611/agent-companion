@@ -8,6 +8,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/name-thread.sh\"",
+            "onFailure": "block",
             "timeout": 5
           }
         ]
@@ -18,6 +19,7 @@
           {
             "type": "command",
             "command": "AGENT_COMPANION_HOST=claude bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-owner.sh\"",
+            "onFailure": "continue",
             "timeout": 5
           }
         ]

@@ -81,7 +81,8 @@ on the next session. No root `.mcp.json` is needed.
 
 Claude's PreToolUse hook overwrites `thread` on every owner-bound call with
 `agent_id`, or clears it when absent, removing any model-supplied identity.
-A failed rewrite denies the call. Codex's owner comes only from
+Claude sets `onFailure: "block"` so a failed or timed-out rewrite denies the call.
+Codex's owner comes only from
 `_meta['x-codex-turn-metadata'].thread_id` when `thread_source === 'subagent'`;
 root (`user`) and missing metadata are refused. Codex still inherits MCP
 authority from its parent and exposes `mcp__agent_bridge__*` through deferred
@@ -94,7 +95,8 @@ Stop hooks write advisory `stops/<owner>.json` under the bridge state directory:
 `~/.codex/agent-companion`). The atomic, private marker shape is
 `{owner, source: 'TaskStop'|'SubagentStop', t, session_id}`; `t` is Unix epoch
 milliseconds and an unavailable session id is `null`. Claude's parent-side
-TaskStop PreToolUse supplies `tool_input.task_id`; SubagentStop supplies
+TaskStop PreToolUse supplies `tool_input.task_id` and uses `onFailure: "continue"`
+so the stop proceeds if the hook fails or times out. SubagentStop supplies
 `agent_id`. The 2026-11-05 Codex identity payloads also identify the child
 thread as `agent_id` (their `session_id` is the parent). Missing child identity
 produces no marker and a diagnostic, never a guessed owner. Markers are evidence

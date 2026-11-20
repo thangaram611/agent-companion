@@ -54,6 +54,7 @@ for (const [host, manifest, rootVar, installer] of [
 // server, so the hook is what carries it to the bridge as the thread name.
 test('claude overwrites thread for every owner tool and clears fabricated root identities', () => {
   const [group] = JSON.parse(readFileSync(join(HERE, 'hooks.json'), 'utf8')).hooks.PreToolUse;
+  assert.equal(group.hooks[0].onFailure, 'block');
   const matcher = new RegExp(group.matcher);
   for (const prefix of ['mcp__agent-bridge__', 'mcp__plugin_agent-companion_agent-bridge__']) {
     for (const action of ['send', 'wait', 'reply', 'cancel']) assert.ok(matcher.test(`${prefix}agent_${action}`));
@@ -108,6 +109,7 @@ for (const host of ['claude', 'codex']) {
         ? manifest.hooks[event].find((g) => g.matcher === 'TaskStop')
         : manifest.hooks[event][0];
       assert.ok(group, `${event} must be registered`);
+      if (event === 'PreToolUse') assert.equal(group.hooks[0].onFailure, 'continue');
       const result = spawnSync('/bin/bash', ['-c', group.hooks[0].command], {
         env: { ...env, ...extra }, input: JSON.stringify({ hook_event_name: event, session_id: 'parent-session', ...payload }), encoding: 'utf8', timeout: 10_000,
       });

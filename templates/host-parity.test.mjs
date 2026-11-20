@@ -96,6 +96,14 @@ test('each plugin identifies its host for the shared launcher', () => {
   assert.equal(claudeEnv().AGENT_COMPANION_HOST, 'claude');
 });
 
+test('only Claude registers the PreToolUse failure policies', () => {
+  const hooks = file => JSON.parse(readFileSync(join(HERE, '..', 'hooks', file), 'utf8')).hooks;
+  assert.deepEqual(hooks('hooks.json').PreToolUse.flatMap(group => group.hooks.map(h => h.onFailure)), ['block', 'continue']);
+  for (const groups of Object.values(hooks('hooks-codex.json'))) {
+    for (const { hooks } of groups) assert.ok(hooks.every(h => !Object.hasOwn(h, 'onFailure')));
+  }
+});
+
 test('both hosts describe the same five companions and Claude follow-up limits', () => {
   const claudeDescription = md.match(/^description: \|\n([\s\S]*?)^model:/m)[1];
   const codexDescription = toml.match(/^description\s*=\s*"""([\s\S]*?)"""/m)[1];

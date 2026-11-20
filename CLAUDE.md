@@ -164,7 +164,9 @@ line, including `not_delivered` messages.
   A job ends on a stop marker, an attributed cancel, bridge loss, a user cancel
   or its native turn's end; status shows `owner_detached_at`. The 120 s owner
   grace, its env knob and the 40-minute cutoffs are gone.
-- **Stop markers are advisory evidence.** `hooks/stop-owner.sh` writes
+- **Stop markers are advisory evidence.** Claude's TaskStop hook uses
+  `onFailure: "continue"` so a failed or timed-out marker write lets the stop proceed.
+  `hooks/stop-owner.sh` writes
   `stops/<owner>.json` for Claude TaskStop and both hosts' SubagentStop. A changed
   marker closes that owner's execution on the next controller tick; an old
   marker cannot cancel a later follow-up. A stop with no signal (Esc between
@@ -172,7 +174,8 @@ line, including `not_delivered` messages.
 - **Claude plugin tools are namespaced.** The installer qualifies the source
   reference to `plugin:agent-companion:agent-bridge` and tools to
   `mcp__plugin_agent-companion_agent-bridge__*`; the identity hook matches these
-  as well as bare session tool names.
+  as well as bare session tool names. Its PreToolUse handler uses
+  `onFailure: "block"` so a failed or timed-out identity rewrite denies the call.
 - **The live view lives in `bridge-server/ui/` for its imports.** ESM finds `ink`
   and `react` by walking up to `bridge-server/node_modules` (Claude's link); on
   Codex, `hooks/resolve-codex-deps.mjs` relocates bare package imports only from
