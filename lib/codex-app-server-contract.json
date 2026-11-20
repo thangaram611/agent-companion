@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.170.0",
+  "codexVersion": "0.171.0",
   "clientRequests": [
     {
       "method": "account/gatewayOAuth/cancel",
@@ -350,6 +350,13 @@
       "paramsRequired": true,
       "required": [
         "settings"
+      ]
+    },
+    {
+      "method": "modelProvider/default/set",
+      "paramsRequired": true,
+      "required": [
+        "providerId"
       ]
     },
     {
@@ -771,7 +778,8 @@
       "optional": false,
       "params": {
         "authMode": "enum:apikey|chatgpt|chatgptAuthTokens|headers|agentIdentity|personalAccessToken|bedrockApiKey|bedrockAccessKeys?",
-        "planType": "enum:free|go|plus|pro|prolite|promax|team|self_serve_business_prolite|self_serve_business_usage_based|business|ent26|enterprise_cbp_automation|enterprise_cbp_usage_based|enterprise|edu|edu_plus|edu_pro|sci|sci_plus|unknown?"
+        "planType": "enum:free|go|plus|pro|prolite|promax|team|self_serve_business_prolite|self_serve_business_usage_based|business|ent26|enterprise_cbp_automation|enterprise_cbp_usage_based|enterprise|edu|edu_plus|edu_pro|sci|sci_plus|unknown?",
+        "reason": "enum:workspaceRoutingReady|unknown?"
       }
     },
     {
@@ -1131,6 +1139,7 @@
       "key": "params.threadId",
       "optional": true,
       "params": {
+        "environmentId": "string?",
         "error": "string?",
         "failureReason": "enum:reauthenticationRequired?",
         "name": "string",
@@ -1531,6 +1540,16 @@
       }
     },
     {
+      "method": "thread/search/partial",
+      "routing": "global",
+      "key": null,
+      "optional": false,
+      "params": {
+        "data": "ThreadSearchResult[]",
+        "requestId": "any"
+      }
+    },
+    {
       "method": "thread/section/changed",
       "routing": "threadId",
       "key": "params.threadId",
@@ -1839,6 +1858,7 @@
       "appContext": "McpToolCallAppContext?",
       "arguments": "any",
       "durationMs": "integer?",
+      "environmentId": "string?",
       "error": "McpToolCallError?",
       "id": "string",
       "mcpAppResourceUri": "string?",
@@ -2137,9 +2157,16 @@
         "type": "enum:inlineVisualization"
       }
     ],
+    "ThreadRealtimeFrameChannels": {
+      "voice_transcript": "ThreadRealtimeVoiceTranscript"
+    },
     "ThreadRealtimeItem": [
       {
         "type": "enum:realtimeSessionStarted"
+      },
+      {
+        "channels": "ThreadRealtimeFrameChannels",
+        "type": "enum:frame"
       },
       {
         "role": "enum:user|assistant",
@@ -2155,8 +2182,27 @@
       {
         "outcome": "enum:ended|failed",
         "type": "enum:realtimeSessionClosed"
+      },
+      {
+        "handoff_id": "string",
+        "input": "string",
+        "input_item_id": "string",
+        "mode": "enum:start|steer",
+        "source_event_ids": "string[]",
+        "turn_id": "string",
+        "type": "enum:turnInputAccepted"
+      },
+      {
+        "input": "string",
+        "input_item_id": "string",
+        "source_event_ids": "string[]",
+        "type": "enum:sessionEndInputSaved"
       }
     ],
+    "ThreadRealtimeVoiceTranscript": {
+      "role": "enum:user|assistant",
+      "text": "string"
+    },
     "ThreadSettings": {
       "activePermissionProfile": "ActivePermissionProfile?",
       "approvalPolicy": "AskForApproval",
