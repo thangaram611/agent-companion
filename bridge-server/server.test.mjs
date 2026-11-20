@@ -6,8 +6,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
@@ -461,6 +462,112 @@ test('wait progress, read-only status, digest resources and immutable terminal q
   }));
 });
 
+async function withQueuedResult(t, checkDelivery) {
+  const h = await wireFixture(t);
+  const session = 'completion-delivery-session';
+  const owner = 'child';
+  await withEnv('CLAUDE_CODE_SESSION_ID', session, () => withQueue(async (queue) => {
+    h.mod._resetForTest();
+    h.active.env = { ...process.env, CODEX_HOME: h.dir };
+    const { job_id } = await h.send({ thread: owner });
+    const wait = request => h.call({ action: 'wait', job_id, thread: owner, max_wait_sec: 1 }, request);
+    const cancel = () => h.call({ action: 'cancel', job_id, thread: owner });
+    assert.equal((await wait()).status, 'still_running');
+
+    const answer = `Terminal answer for delivery test ${job_id}.`;
+    h.adapters[0].done.resolve({ outcome: 'completed', text: answer, usage: { input_tokens: 13, output_tokens: 7 } });
+    await until(() => h.records.readResult(job_id), 'terminal result between waits');
+    const row = readQueue(queue).find(row => row.jobId === job_id);
+    assert.ok(row, 'expected a queued completion for the finished job');
+    assert.equal(row.consumed, false);
+    assert.equal(row.claudeSessionId, session);
+
+    const status = await h.call({ action: 'status', job_id });
+    assert.equal(status.partial_text, answer);
+    assert.equal(existsSync(row.receiptPath), false, 'status leaves the result available for delivery');
+
+    const drain = async (fields = {}, env = {}) => {
+      const script = fileURLToPath(new URL('../hooks/drain-completions.sh', import.meta.url));
+      const run = promisify(execFile)('bash', [script], {
+        env: { ...process.env, AGENT_COMPANION_HOST: 'claude', AGENT_QUEUE_PATH: queue,
+          AGENT_RUNTIME_DIR: RUNTIME_SANDBOX, AGENT_HEARTBEAT_DIR: join(RUNTIME_SANDBOX, 'heartbeats'), ...env },
+        // Bound fixture I/O under full-suite contention. The manifests own the host deadline.
+        encoding: 'utf8', timeout: 30_000,
+      });
+      run.child.stdin.end(JSON.stringify({ hook_event_name: 'PostToolUse', session_id: session, ...fields }));
+      const { stdout, stderr } = await run;
+      assert.equal(stderr, '');
+      return stdout.trim() ? JSON.parse(stdout).hookSpecificOutput.additionalContext : '';
+    };
+    await checkDelivery({ wait, cancel, drain, answer, owner, queue, row, resultPath: h.records.path('results', job_id) });
+  }));
+}
+
+for (const context of ['session', 'owner subagent']) {
+  test(`completion delivery: ${context} drain before agent_wait delivers the terminal text once`, async t => {
+    await withQueuedResult(t, async ({ wait, cancel, drain, answer, owner, row, resultPath }) => {
+      const injected = await drain(context === 'owner subagent' ? { agent_id: owner } : {});
+      const response = await wait();
+      const hookCopies = injected.split(answer).length - 1;
+      const waitCopies = (response.content ?? '').split(answer).length - 1;
+      assert.equal(hookCopies + waitCopies, 1, `terminal text copies: PostToolUse=${hookCopies}, agent_wait=${waitCopies}`);
+      assert.equal(hookCopies, 1);
+      assert.equal(response.status, 'completed');
+      assert.match(response.content, /already delivered to this session by the completion hook/i);
+      assert.equal(response.content.split('\n').length, 1);
+      assert.ok(response.content.includes(resultPath));
+      assert.equal(response.meta.result_path, resultPath);
+      assert.equal(JSON.parse(readFileSync(resultPath, 'utf8')).text, answer);
+      assert.deepEqual(response.meta, { ...row.meta, delivered_by: 'hook', result_path: resultPath });
+      assert.equal(response.meta.digest_uri, `agent-digest://${row.jobId}`);
+      assert.deepEqual(await cancel(), { ...response, action: 'cancel' });
+      assert.equal(statSync(row.receiptPath).mode & 0o777, 0o600);
+      assert.equal(statSync(dirname(row.receiptPath)).mode & 0o777, 0o700);
+    });
+  });
+}
+
+test('completion delivery: agent_wait before the drain returns the terminal text and the drain is silent', async t => {
+  await withQueuedResult(t, async ({ wait, drain, answer }) => {
+    const first = await wait();
+    assert.equal(first.content, answer);
+    assert.equal(await drain(), '');
+    assert.deepEqual(await wait(), first);
+  });
+});
+
+test('completion delivery: an aborted wait leaves the result available to the hook', async t => {
+  await withQueuedResult(t, async ({ wait, drain, answer, row }) => {
+    await wait({ signal: AbortSignal.abort() });
+    assert.equal(existsSync(row.receiptPath), false);
+    assert.ok((await drain()).includes(answer));
+  });
+});
+
+test('completion delivery: terminal cancel claims for the owner', async t => {
+  await withQueuedResult(t, async ({ wait, cancel, drain, answer, row }) => {
+    const result = await cancel();
+    assert.equal(result.content, answer);
+    assert.equal(statSync(row.receiptPath).mode & 0o777, 0o600);
+    assert.equal(await drain(), '');
+    assert.deepEqual(await wait(), { ...result, action: 'wait' });
+  });
+});
+
+test('completion delivery: owner and drain competing for the same queue snapshot have one winner', async t => {
+  await withQueuedResult(t, async ({ wait, drain, answer, queue, row }) => {
+    const draining = drain({}, { DEBUG_DRAIN_DELAY: '1' });
+    // The hook now owns a snapshot that an owner cannot mark consumed.
+    const snapshotTaken = () => readdirSync(dirname(queue)).some(name => name.startsWith('completions.jsonl.drain.'));
+    const [injected, result] = await Promise.all([draining, (async () => {
+      await until(snapshotTaken, 'drain move-aside');
+      return wait();
+    })()]);
+    assert.equal(Number(injected.includes(answer)) + Number(result.content === answer), 1);
+    assert.ok(existsSync(row.receiptPath));
+  });
+});
+
 for (const [outcome, status] of [['failed', 'failed'], ['interrupted', 'cancelled'], ['stopped', 'cancelled'], ['delivery_unknown', 'failed']]) {
   test(`durable ${outcome} results map to ${status} without rewriting their text`, async (t) => {
     const h = await wireFixture(t);
@@ -485,6 +592,7 @@ test('cancel and cancelled owner requests close only their own execution', async
   abort.abort();
   const stopped = await waiting;
   assert.equal(stopped.status, 'cancelled'); assert.equal(stopped.meta.cause, 'owner_stop');
+  assert.equal(existsSync(terminalRows(one.job_id)[0].receiptPath), false, 'aborted in-flight wait leaves delivery unclaimed');
   assert.equal((await h.call({ action: 'status', job_id: sibling.job_id })).status, 'running');
   const cancel = await h.call({ action: 'cancel', job_id: sibling.job_id, thread: 'sibling' });
   assert.equal(cancel.action, 'cancel'); assert.equal(cancel.status, 'cancelled'); assert.equal(cancel.meta.stop_evidence.gone, true);
@@ -608,7 +716,7 @@ await cleanupExecution({ records, execution: records.readExecution(process.argv[
   assert.equal(Object.hasOwn(trace.find((x) => x.method === 'turn/start').params, 'model'), false);
 });
 
-import { codexDispatchFixture } from '../test/controller/codex-dispatch-fixture.mjs';
+import { codexDispatchFixture, terminalRows } from '../test/controller/codex-dispatch-fixture.mjs';
 
 test('controller reply steers the acknowledged native turn and confirms injection while attaching the owner', async (t) => {
   const h = codexDispatchFixture(t);
@@ -902,6 +1010,7 @@ test('Codex accepts effort and exposes adapter refusals through send, status and
     const refused = await send(effort, thread);
     assert.equal(refused.status, 'failed');
     assert.equal(refused.action, 'send');
+    assert.equal(readFileSync(terminalRows(refused.job_id)[0].receiptPath, 'utf8'), 'owner\n', 'terminal send claimed before any wait');
     assert.equal(refused.meta.detail, code);
     assert.match(refused.content, message);
     assert.doesNotMatch(refused.content, /saved default/i);

@@ -1,5 +1,6 @@
 // drain-completions.sh integration tests via shell-out.
 
+import '../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
@@ -126,6 +127,37 @@ test('drain filters by session, TTL, consumed state, and tagging without mutatin
   } finally {
     rmSync(missing.dir, { recursive: true, force: true });
   }
+});
+
+test('drain claims each receipt once and also injects a legacy row without a receipt path', t => {
+  const { path, dir } = makeQueueFile([]);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const base = { ts: Date.now(), claudeSessionId: 'sid-A', kind: 'terminal' };
+  const receiptPath = join(dir, 'receipt with\tspaces\nand newlines');
+  const job = { ...base, receiptPath, jobId: 'new', content: 'receipted answer' };
+  const legacy = { ...base, jobId: 'legacy', content: 'legacy answer' };
+  writeFileSync(path, [job, legacy, job].map(row => JSON.stringify(row)).join('\n') + '\n');
+  const output = runDrain({ queuePath: path, payload: { session_id: 'sid-A' } });
+  assert.equal(JSON.parse(output).hookSpecificOutput.additionalContext,
+    '## agent `new` — **terminal**\n\nreceipted answer\n\n---\n\n## agent `legacy` — **terminal**\n\nlegacy answer');
+  assert.equal(statSync(receiptPath).mode & 0o777, 0o600);
+  assert.deepEqual(readQueueRows(path), []);
+});
+
+test('drain skips a row whose receipt an owner holds and injects one whose receipt cannot be created', t => {
+  const { path, dir } = makeQueueFile([]);
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const base = { ts: Date.now(), claudeSessionId: 'sid-A', kind: 'terminal' };
+  const held = join(dir, 'held.delivery');
+  writeFileSync(held, 'owner\n');
+  writeFileSync(path, [
+    { ...base, jobId: 'held', content: 'owner has it', receiptPath: held },
+    { ...base, jobId: 'gone', content: 'state dir gone', receiptPath: join(dir, 'missing', 'gone.delivery') },
+  ].map(row => JSON.stringify(row)).join('\n') + '\n');
+  const output = runDrain({ queuePath: path, payload: { session_id: 'sid-A' } });
+  assert.equal(JSON.parse(output).hookSpecificOutput.additionalContext, '## agent `gone` — **terminal**\n\nstate dir gone');
+  assert.equal(readFileSync(held, 'utf8'), 'owner\n');
+  assert.deepEqual(readQueueRows(path), []);
 });
 
 test('concurrent drains for different sessions do not double-deliver or lose unrelated rows', async () => {

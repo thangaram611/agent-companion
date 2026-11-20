@@ -468,8 +468,18 @@ produce a warning and block updates.
 | `inbox/<id>/<requestId>.json`, `<requestId>.outcome.json` | User input and controller receipt; requests are removed after outcomes, read outcomes by the view, the directory at execution close. |
 | `intervention-notices/<id>.json` | Reported user intervention ids, claimed by owner waits under the conversation lock. |
 | `completions/<id>.json` | Publication receipt keyed by execution id. |
-| `runtime/completions.jsonl` | Hook delivery queue; terminal wait consumes the execution's entries. |
+| `results/<id>.json.delivery` | Exclusive delivery receipt. The hook creates an empty file. An owner writes `owner`. |
+| `runtime/completions.jsonl` | Session-tagged queue. Each terminal row carries its absolute delivery receipt path. |
 | `runtime/agent-bridge.log`, `daemon.log` | Bridge and structured event logs; the latter is a retained filename, not a running service. |
+
+A terminal send, wait or cancel and the session's completion hook claim the
+same receipt. The first claimant delivers the text. An already-aborted owner
+request leaves the receipt available. After owner delivery, repeated owner calls
+return the full result and the drain drops the row. After hook delivery, owner
+calls preserve status, metadata and digest URI, set `meta.delivered_by` to
+`hook`, and point to the immutable result in the response text and `meta.result_path`.
+Status reads the result without claiming it. Rows without a receipt path use
+the queue's consumed flag.
 
 `onboard.mjs --target <companion> --model <id|inherit> --set-default` saves or
 clears that companion's model default after the target passes readiness/smoke
@@ -511,8 +521,8 @@ a temporary file, stages there and writes a tree; it never changes the real inde
 HEAD, refs or working files. Loose objects remain for git gc. After terminating the
 provider tree, the controller takes the end snapshot and reads the native transcript.
 It records a locator after acknowledgement, retrying at terminal if none was found.
-`workSummary` on the immutable result is exposed as `meta.work_summary` by terminal
-envelopes; the companion answer remains `content`. Commands (20), deduplicated
+Terminal envelopes expose the immutable result's `workSummary` as `meta.work_summary`,
+including after hook delivery. Commands (20), deduplicated
 edits (50), errors (20) and diff files (50) have omitted counts. Binary diff entries
 have `binary: true` and null line counts. The diff includes changes by any writer
 between snapshots and excludes ignored files. Read/snapshot failures produce

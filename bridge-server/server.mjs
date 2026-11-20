@@ -21,11 +21,9 @@
 // bridge loss or the native turn's end does. Status shows how long the owner
 // has been detached. See probes/host-qualification/{claude,codex}/REPORT-2026-11-05.md.
 //
-// Completion surfacing: each terminal/alert event is appended to a JSONL queue
-// file with `consumed:false`; the drain script (invoked from host lifecycle
-// hooks) filters out `consumed:true` and injects unconsumed orphans
-// into the subagent's context. Wait-terminal responses mark the job's entries
-// consumed so the subagent never sees the same event twice.
+// A terminal send, wait or cancel and the session's completion hook compete for
+// one exclusive delivery receipt. The winner returns the text. Later owner calls
+// replay an owner delivery or point to the saved result after a hook delivery.
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -42,6 +40,7 @@ import {
   renameSync, existsSync, realpathSync, unlinkSync,
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import { Controller } from './controller/controller.mjs';
 import { Records, firstLine } from './controller/records.mjs';
 import { lastRuns } from './last-runs.mjs';
@@ -54,7 +53,7 @@ import { acpProvider } from './adapters/acp.mjs';
 import { log, validateAgentArgs } from './validation.mjs';
 import { BASE_DIR, readDefaultModel, readDefaultEffort, readSettings, settingsPath, migrateDefaults, migrateLegacyState, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
 import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
-import { queuePath, runtimeDir, appendPrivateFile } from '../lib/runtime-paths.mjs';
+import { queuePath, runtimeDir, appendPrivateFile, writePrivateFile } from '../lib/runtime-paths.mjs';
 import { logEvent } from '../lib/log.mjs';
 import { renderDigest } from '../lib/digest.mjs';
 import { defaultTargetInfo, defaultTargetId, getTarget, listTargets, listTargetIds } from '../lib/target-registry.mjs';
@@ -321,18 +320,41 @@ function terminalEnvelope(execution, result, action = 'wait') {
     content: result.text ?? '', meta };
 }
 
-function publishResult(records, execution, result) {
-  // The immutable per-execution receipt survives queue draining and bridge
-  // restarts. Publication is serialized with the same conversation lock as
-  // controller writes; status never invokes this writer.
-  records._locked(execution.owner, () => {
-    if (records.read('completions', execution.executionId)) return;
-    const envelope = terminalEnvelope(execution, result);
-    appendPrivateFile(getQueuePath(), JSON.stringify({ ts: result.finishedAt, consumed: false,
-      claudeSessionId: execution.hostSessionId ?? null, kind: 'terminal', jobId: execution.executionId,
-      content: envelope.content, meta: envelope.meta }) + '\n');
-    records._write('completions', execution.executionId, { executionId: execution.executionId });
+function publishResult(records, execution, result, ownerRequest) {
+  const id = execution.executionId;
+  const resultPath = resolve(records.path('results', id));
+  const receiptPath = resultPath + '.delivery';
+  return records._locked(execution.owner, () => {
+    if (!records.read('completions', id)) {
+      const envelope = terminalEnvelope(execution, result);
+      appendPrivateFile(getQueuePath(), JSON.stringify({ ts: result.finishedAt, consumed: false, receiptPath,
+        claudeSessionId: execution.hostSessionId ?? null, kind: 'terminal', jobId: id,
+        content: envelope.content, meta: envelope.meta }) + '\n');
+      records._write('completions', id, { executionId: id });
+    }
+    if (!ownerRequest || ownerRequest.signal?.aborted) return;
+
+    // The hook creates an empty receipt. The lock serializes owner calls, so
+    // another owner cannot see our exclusive create before its write completes.
+    try { writePrivateFile(receiptPath, 'owner\n', 'wx'); }
+    catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      if (readFileSync(receiptPath, 'utf8') === '') return resultPath;
+      return;
+    }
+    markQueueConsumed(id); // Also suppress queue rows written without a receipt path.
   });
+}
+
+function ownerTerminalResponse(records, execution, result, action, request) {
+  const envelope = terminalEnvelope(execution, result, action);
+  const path = publishResult(records, execution, result, request);
+  if (path) {
+    envelope.content = `This result was already delivered to this session by the completion hook. Read ${JSON.stringify(path)} for the full text.`;
+    envelope.meta.delivered_by = 'hook';
+    envelope.meta.result_path = path;
+  }
+  return asJson(envelope);
 }
 
 export function createBridgeController({ env = process.env, records = new Records({ dir: BASE_DIR }), ...options } = {}) {
@@ -366,7 +388,7 @@ async function handleSend(args, active, request) {
   const model = args.model ?? (newConversation ? readDefaultModel(provider, active.env).model : null);
   const sent = await active.send({ owner: args.thread, provider, cwd: args.cwd, text: args.task,
     model: model ?? undefined, effort: effort ?? undefined, savedEffortHint, hostSessionId: getHostSessionId(), ...request });
-  if (sent.outcome) return asJson(terminalEnvelope(active.records.readExecution(sent.executionId), sent, 'send'));
+  if (sent.outcome) return ownerTerminalResponse(active.records, active.records.readExecution(sent.executionId), sent, 'send', request);
   return asJson({ ok: true, status: 'still_running', job_id: sent.executionId, thread: args.thread,
     target: sent.target ?? provider, selected_model: sent.selectedModel ?? null, selected_effort: sent.selectedEffort ?? null,
     effective_model: sent.effectiveModel ?? null, effective_effort: sent.effectiveEffort ?? null, permission_mode: sent.permissionMode ?? null });
@@ -387,18 +409,14 @@ async function handleWait(args, active, request) {
     job_id: args.job_id, intervention: response.intervention });
   const view = active.status({ executionId: args.job_id });
   if (!view.result) return asJson(runningEnvelope(view, 'wait'));
-  publishResult(active.records, view.execution, view.result);
-  markQueueConsumed(args.job_id);
-  return asJson(terminalEnvelope(view.execution, view.result));
+  return ownerTerminalResponse(active.records, view.execution, view.result, 'wait', request);
 }
 
 async function handleCancel(args, active, request) {
   await active.cancel({ owner: args.thread, executionId: args.job_id, ...request });
   const view = active.status({ executionId: args.job_id });
   if (!view.result) return asJson(runningEnvelope(view, 'cancel'));
-  publishResult(active.records, view.execution, view.result);
-  markQueueConsumed(args.job_id);
-  return asJson(terminalEnvelope(view.execution, view.result, 'cancel'));
+  return ownerTerminalResponse(active.records, view.execution, view.result, 'cancel', request);
 }
 
 async function handleReply({ job_id, message, thread, mode }, active, request) {

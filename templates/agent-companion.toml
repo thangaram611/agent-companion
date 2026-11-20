@@ -196,6 +196,10 @@ If drain hooks (SessionStart, UserPromptSubmit or PostToolUse) injected orphan
 events, include them as-is above your answer under the heading
 `## Orphan events surfaced during this turn`.
 
+When a wait or cancel returns `meta.delivered_by` set to `hook`, report the
+status, say the result was already delivered to the session, and give
+`meta.result_path`. Do not ask the companion again.
+
 # When it fails
 
 Report the actual terminal state (`failed`, `timeout`, `cancelled`, `stuck`,

@@ -140,11 +140,14 @@ test('both roles relay authentication failures as setup problems without retry o
 });
 
 
-test('both roles relay the same work summary and full transcript pointer', () => {
+test('both roles relay the same work summary, full transcript pointer and hook delivery notice', () => {
   const rule = source => source.match(/When `meta.work_summary`[\s\S]*?(?=\n\n)/)?.[0];
   assert.ok(rule(md), 'Claude work summary relay rule');
   assert.ok(rule(toml), 'Codex work summary relay rule');
   assert.equal(rule(md), rule(toml));
+  for (const source of [md, toml]) {
+    assert.match(source.replace(/\s+/g, ' '), /wait or cancel.*`meta.delivered_by`.*already delivered to the session.*`meta.result_path`.*Do not ask the companion again\./);
+  }
 });
 
 test('both roles relay user notices, use the requested or default mode, and report undelivered input identically', () => {

@@ -171,6 +171,11 @@ line, including `not_delivered` messages.
   marker closes that owner's execution on the next controller tick; an old
   marker cannot cancel a later follow-up. A stop with no signal (Esc between
   waits) lets the job finish its current turn.
+- **A result is delivered once.** A terminal send, wait or cancel and the drain
+  hook race to create `results/<id>.json.delivery`; the first one delivers the
+  text. After a hook delivery an owner call returns the status with a one-line
+  note and `meta.result_path` in place of the text; after an owner delivery the
+  owner's repeated calls return the text again. Status never claims.
 - **Claude plugin tools are namespaced.** The installer qualifies the source
   reference to `plugin:agent-companion:agent-bridge` and tools to
   `mcp__plugin_agent-companion_agent-bridge__*`; the identity hook matches these

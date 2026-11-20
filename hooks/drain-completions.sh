@@ -1,13 +1,12 @@
 #!/bin/bash
-# drain-completions.sh — surface this Claude Code session's agent-job completions
-# into its own context.
+# drain-completions.sh — surface this host session's agent-job completions.
 #
 # Fires on PostToolUse (any tool), UserPromptSubmit, and SessionStart — the
 # manifests set no SessionStart matcher, so that means every source (startup,
 # resume, clear, compact), not startup alone. Each
-# bridge writes events tagged with its Claude Code session id; this drain only
-# delivers and only retains rows whose tag matches the firing session, dropping
-# stale and untagged rows by TTL. Move-aside pattern (rename queue → process
+# bridge tags events with its host session id. The drain claims fresh matching
+# completions, retains other sessions' fresh rows and drops stale or untagged
+# rows. Move-aside pattern (rename queue → process
 # snapshot → append kept rows back) ensures concurrent bridge appends during
 # the drain are not overwritten — they land in the freshly-created queue file
 # whose contents the drain never touches. mkdir-lock serializes concurrent
@@ -255,7 +254,7 @@ ALERT_CUTOFF=$((NOW_MS - ALERT_TTL_MS))
 TERMINAL_CUTOFF=$((NOW_MS - TERMINAL_TTL_MS))
 
 # Three partitions in one jq pass over the snapshot's array form:
-#   .deliver — rows belonging to this session, fresh, unconsumed → injected
+#   .deliver — rows belonging to this session, fresh, unconsumed → eligible to claim
 #   .keep    — rows belonging to other sessions, fresh, unconsumed → retained
 #   (everything else dropped: untagged, own-already-consumed, any-stale-past-TTL)
 PARTITIONS=$("$JQ_BIN" -Rrn \
@@ -282,6 +281,31 @@ PARTITIONS=$("$JQ_BIN" -Rrn \
   }
 ' < "$DRAIN")
 
+# Only the exclusive creator may inject a receipted row. An empty receipt
+# identifies the hook from the instant of creation. NUL delimiters carry
+# literal paths (including tabs and newlines) and each row travels as JSON.
+OUTPUT=$(
+  set -o pipefail
+  "$JQ_BIN" -j '.deliver[] | (.receiptPath // ""), "\u0000", @json, "\u0000"' <<< "$PARTITIONS" | (
+    set -C
+    while IFS= read -r -d '' receipt && IFS= read -r -d '' row; do
+      # Skip a row whose receipt another claimant holds. A receipt that cannot
+      # be created at all is delivered as a row without one is.
+      if [ -n "$receipt" ] && ! { : > "$receipt"; } 2>/dev/null && [ -e "$receipt" ]; then continue; fi
+      printf '%s\n' "$row"
+    done
+  ) | "$JQ_BIN" -s --slurpfile event <(printf '%s' "$PAYLOAD") '
+      select(length > 0) | {
+        hookSpecificOutput: {
+          hookEventName: ($event[0].hook_event_name // "PostToolUse"),
+          additionalContext: map(
+            "## \(.meta.target // "agent") `\(.jobId // "?")` — **\(.meta.status // .kind // "unknown")**\n\n" +
+            (.content // "")
+          ) | join("\n\n---\n\n")
+        }
+      }'
+)
+
 # Append kept rows back to $QUEUE (which may have been recreated by concurrent
 # appenders since the rename). printf >> uses O_APPEND; per-line writes for
 # JSONL rows in this codebase (terminal envelopes ~1-5 KB) are atomic on POSIX
@@ -292,27 +316,5 @@ if [ -n "$KEEP_LINES" ]; then
 fi
 
 rm -f "$DRAIN"
-
-# Build the injection content from the deliver partition (snapshot-derived).
-CONTENT=$(printf '%s' "$PARTITIONS" | "$JQ_BIN" -r '
-  .deliver |
-  map(
-    "## \(.meta.target // "agent") `\(.jobId // "?")` — **\(.meta.status // .kind // "unknown")**\n\n" +
-    (.content // "")
-  ) | join("\n\n---\n\n")
-')
-
-if [ -z "$CONTENT" ]; then exit 0; fi
-
-# Derived here, not at the top: it has exactly one reader (the emit below), so
-# computing it earlier was a jq pipeline of pure dead work on every fire that
-# delivered nothing — which is nearly all of them.
-HOOK_EVENT=$(printf '%s' "$PAYLOAD" | "$JQ_BIN" -r '.hook_event_name // "PostToolUse"')
-
-"$JQ_BIN" -n --arg ctx "$CONTENT" --arg evt "$HOOK_EVENT" '{
-  hookSpecificOutput: {
-    hookEventName: $evt,
-    additionalContext: $ctx
-  }
-}'
+[ -z "$OUTPUT" ] || printf '%s\n' "$OUTPUT"
 exit 0
