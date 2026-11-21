@@ -19,6 +19,7 @@ test('Claude role accepts plain language and keeps the seven instruction section
   assert.match(description, /SendMessage.*same subagent/s);
   assert.match(description, /new one for independent work/);
   assert.match(description, /run_in_background: true/);
+  assert.match(description.replace(/\s+/g, ' '), /companion sees none of this conversation: write the brief for a reader who has only that text/);
   assert.deepEqual([...body.matchAll(/^# (.+)$/gm)].map((m) => m[1]), [
     'Identity', 'Choosing', 'Sending', 'Waiting', 'Answering', 'When it fails', 'Diagnostics',
   ]);

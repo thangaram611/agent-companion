@@ -1,6 +1,6 @@
 # MVP Tracker
 
-Last updated: 2026-11-15
+Last updated: 2026-11-21
 
 Current direction: active development of the approved conversational redesign.
 The shipped controller owns one cold provider runtime per execution. Qualification
@@ -233,6 +233,41 @@ remains separate from implementation; see the release gates below.
   such hook type.
 - Study codex-plugin-cc's design (app-server wrapper, rescue subagent, resume)
   for improvements; the user runs it as a trial later, not now.
+- Vercel Board (read 2026-11-21: `@vercel/board` 0.50, experimental, launched
+  2026-11-18; [docs](https://vercel.com/docs/board), [repo](https://github.com/vercel/board)).
+  It is a hosted message store: agents post in threads, claim tasks for a
+  renewable time limit and wait on one ordered event log by cursor. It starts
+  and supervises no agent. Parked; nothing here is committed work. The user is
+  interested in two of its ideas as possible later improvements:
+  1. Agents talking many-to-many. Today every exchange is lead → subagent →
+     companion. The candidate is Board as a third host, not a store of our own:
+     a foreground worker claims a task, runs it through the controller, renews
+     the claim from the controller process (a process, not a model, so decision
+     12 holds), posts the result and work summary to the thread, and turns
+     thread replies into inbox requests. Spike at $0 before any design: a local
+     `npx @vercel/board serve` board (SQLite under `.board/`, nothing leaves the
+     machine), isolated homes, a free OpenCode model, one task end to end.
+     Re-read the API first; its 0.x releases break often.
+  2. The thread as the job record. One append-only event log per execution,
+     read by cursor, might replace `intervention-notices/`, the completion
+     queue's consumed flags and inbox outcomes; that is unverified against the
+     code. `results/<id>.json.delivery` is a claim between two deliverers, not a
+     cursor, and would stay. No defect drives this. Size it against
+     `records.mjs`, `controller.mjs` and `server.mjs` before touching them.
+
+  Not adopted, each for a measured reason: a claim the model must keep renewing
+  (Board's lease; our removed 120 s owner grace, decision 12); identity the agent
+  names itself with `--as` (ours comes from the host, see Negative Results: the
+  host session id does not identify the caller); a `blocked` state (0 of 344
+  completed answers ended in a question by a last-line check, and the Codex
+  adapter refuses `item/tool/requestUserInput`); watchers and schedules (they
+  need an always-on store). Measured the same day over 367 executions from
+  2026-11-06 in both state homes: 344 completed, 13 provider errors, 1 bridge
+  loss; 109 ran alongside another job of the same lead session (10 of 38
+  sessions, 5 with four or more); 63 of 237 conversations had follow-ups.
+  Whether a lead loses its plan when its session ends or compacts is unmeasured;
+  count that before building job groups. Adopted: both roles now tell the parent
+  to write the brief for a reader who has none of its conversation.
 - Regenerate `assets/readme/architecture.png`: the image still says `lease`; its
   prompt in `assets/readme/PROMPTS.md` now says `owner attachment`.
 - Qualify Codex desktop as the third host and finish operator-only TUI rows.

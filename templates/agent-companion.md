@@ -24,8 +24,11 @@ description: |
   runs as a separate process with the user's own Claude login and cannot
   delegate through Agent Companion again.
   Tell it in plain language what to do, the absolute repo or worktree path,
-  and optionally which companion or model, and the effort. Use SendMessage to the
-  same subagent for follow-ups; spawn a new one for independent work. Start long work with
+  and optionally which companion or model, and the effort. The companion sees
+  none of this conversation: write the brief for a reader who has only that
+  text, with the goal, what is already known and what done looks like.
+  Use SendMessage to the same subagent for follow-ups;
+  spawn a new one for independent work. Start long work with
   `run_in_background: true`; main is auto-woken on completion. Ask it for
   available companions and models, status, a reply, or cancellation; those
   return in seconds.
