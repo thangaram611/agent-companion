@@ -110,7 +110,7 @@ function run(args, env = {}, files = {}) {
         AGENT_RUNTIME_DIR: join(home, 'runtime'), PATH: '/usr/bin:/bin',
         NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
         OPENCODE_BIN: '/missing-opencode', COPILOT_BIN: '/missing-copilot',
-        CODEX_BIN: '/missing-codex', ANTIGRAVITY_ACP_BIN: '/missing-antigravity', CLAUDE_BIN: '/missing-claude', ...env,
+        CODEX_BIN: '/missing-codex', ANTIGRAVITY_BIN: '/missing-antigravity', CLAUDE_BIN: '/missing-claude', ...env,
       },
     });
     const stored = Object.fromEntries(Object.keys(files).map(name => [
@@ -151,6 +151,7 @@ test('CLI --list-targets --json exits 0 with target readiness', () => {
   assert.ok(out.targets.copilot);
   assert.ok(out.targets.codex);
   assert.ok(out.targets.claude);
+  assert.deepEqual(out.targets.antigravity.nextSteps, ['brew install --cask antigravity-cli']);
   assert.equal(Object.keys(out.targets).length, 5);
   assert.equal(out.defaultTarget.target, null);
 });
@@ -365,7 +366,7 @@ test('human model plans explain set and clear, even without --set-default', () =
 
 test('each companion saves its model in shared settings and keeps environment precedence', () => {
   for (const [id, model] of [['copilot', 'byok-model:latest'], ['codex', 'gpt-5.4'],
-    ['opencode', 'anthropic/claude-haiku-4-5'], ['antigravity', 'gemini-pro-agent']]) {
+    ['opencode', 'anthropic/claude-haiku-4-5'], ['antigravity', 'gemini-3.8-flash']]) {
     const r = run(['--target', id, '--model', model, '--set-default', '--no-target-check', '--json']);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.settings.companions[id].model, model);

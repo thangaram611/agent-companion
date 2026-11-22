@@ -50,11 +50,11 @@ for (const historyId of [null, 'saved-history']) for (const selection of ['sessi
   });
 }
 
-test('ACP AUTH_REQUIRED controller send relays Copilot sign-in steps without retry', async t => {
-  const descriptor = getTargetById('copilot');
+for (const target of ['copilot', 'antigravity']) test(`ACP AUTH_REQUIRED controller send relays ${target} sign-in steps without retry`, async t => {
+  const descriptor = getTargetById(target);
   const h = setup(t, { descriptor, env: { ACP_FAKE_AUTH_REQUIRED: '1' } });
-  h.controller.providers.copilot = h.controller.providers.fake;
-  const sent = (await dispatch({ action: 'send', target: 'copilot', thread: 'child', cwd: h.dir, task: 'hello' }, { controller: h.controller })).structuredContent;
+  h.controller.providers[target] = h.controller.providers.fake;
+  const sent = (await dispatch({ action: 'send', target, thread: 'child', cwd: h.dir, task: 'hello' }, { controller: h.controller })).structuredContent;
   const result = h.records.readResult(sent.job_id);
   const terminal = h.records.readExecution(sent.job_id).terminal;
   t.diagnostic('AUTH_REQUIRED_TERMINAL ' + JSON.stringify({ outcome: result.outcome, error: terminal.error, text: result.text }));
@@ -139,13 +139,13 @@ function setup(t, { descriptor = fakeAcpDescriptor(), env = {} } = {}) {
 
 test('new session then cold follow-up loads the same history in a new process and reapplies the model', async (t) => {
   const h = setup(t, { descriptor: getTargetById('antigravity') });
-  const first = await h.finish(await h.send({ model: 'fake-model-a' }));
-  const second = await h.finish(await h.send({ text: 'CONTINUATION\nexact follow-up', model: 'fake-model-b' }));
+  const first = await h.finish(await h.send({ model: 'gemini-3.8-flash' }));
+  const second = await h.finish(await h.send({ text: 'CONTINUATION\nexact follow-up', model: 'claude-sonnet-4-6' }));
   assert.equal(first.outcome, 'completed'); assert.equal(second.outcome, 'completed');
   assert.equal(second.nativeRefs.sessionId, first.nativeRefs.sessionId);
   assert.notEqual(h.supervisors[0].serialize().pid, h.supervisors[1].serialize().pid);
   assert.equal(second.text, 'continued'); // Replayed "earlier answer" is excluded.
-  assert.equal(first.effectiveModel, 'fake-model-a'); assert.equal(second.effectiveModel, 'fake-model-b');
+  assert.equal(first.effectiveModel, 'gemini-3.8-flash'); assert.equal(second.effectiveModel, 'claude-sonnet-4-6');
   const methods = lines(h.trace).filter((f) => f.method).map((f) => f.method);
   assert.deepEqual(methods, ['initialize', 'session/new', 'session/set_config_option', 'session/prompt',
     'initialize', 'session/load', 'session/set_config_option', 'session/prompt']);
@@ -155,7 +155,8 @@ test('new session then cold follow-up loads the same history in a new process an
   assert.equal(h.frames('initialize')[0].params.protocolVersion, 1);
   assert.equal(h.frames('initialize')[0].params.clientInfo.name, getTargetById('antigravity').acp.clientName);
   assert.ok(first.stopEvidence.gone && second.stopEvidence.gone);
-  assert.equal(second.usage, null); // Antigravity has no measured native usage.
+  assert.deepEqual(second.usage, { source: 'antigravity-acp', input_tokens: 18021, output_tokens: 88,
+    cached_input_tokens: 6842, cache_write_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 18109 });
   assert.equal(second.nativeRefs.promptRequestId, h.frames('session/prompt')[1].id);
 });
 
@@ -223,7 +224,7 @@ test('Copilot OTEL usage is execution-private and temporary files are removed on
 test('a refused model after load keeps the original history and never delivers another prompt', async (t) => {
   const h = setup(t, { descriptor: getTargetById('antigravity') });
   const first = await h.finish(await h.send());
-  const second = await h.send({ text: 'follow-up', model: 'not-a-model' });
+  const second = await h.send({ text: 'follow-up', model: 'gemini-9-nope' });
   assert.equal(h.records.readExecution(second.executionId).terminal.error, 'MODEL_NOT_ALLOWED');
   assert.equal(h.records.readConversation('child').historyId, first.nativeRefs.historyId);
   assert.equal(h.frames('session/new').length, 1); assert.equal(h.frames('session/load').length, 1);
@@ -246,10 +247,10 @@ for (const options of [{ env: { ACP_FAKE_LOAD_SESSION: '0' } }, { env: { ACP_FAK
 for (const fault of ['refused', 'wrong-model', 'missing-model']) {
   test(`model selection surfaces MODEL_NOT_ALLOWED on ${fault}`, async (t) => {
     const h = setup(t, { descriptor: getTargetById('antigravity'), env: { ACP_FIXTURE_FAULT: fault } });
-    const result = await h.send({ model: fault === 'refused' ? 'not-a-model' : 'fake-model-a' });
+    const result = await h.send({ model: fault === 'refused' ? 'gemini-9-nope' : 'gemini-3.8-flash' });
     assert.equal(result.outcome, 'failed');
     assert.equal(h.records.readExecution(result.executionId).terminal.error, 'MODEL_NOT_ALLOWED');
-    if (fault === 'wrong-model') assert.match(result.text, /Use one of: fake-model-a,/);
+    if (fault === 'wrong-model') assert.match(result.text, /Use one of: gemini-3.8-flash,/);
     assert.equal(h.frames('session/prompt').length, 0); assert.ok(result.stopEvidence.gone);
   });
 }
@@ -347,7 +348,7 @@ test('inherited model is reported only when the native session reports one', asy
 test('provider factories use cached readiness without spawning and expose qualified capabilities', () => {
   writeTargetChecks({ antigravity: { ready: true }, copilot: { ready: false } });
   for (const [id, loadsHistory] of [['antigravity', true], ['copilot', false]]) {
-    const provider = acpProvider(id, { env: { PATH: '', COPILOT_BIN: '/missing', ANTIGRAVITY_ACP_BIN: '/missing' } });
+    const provider = acpProvider(id, { env: { PATH: '', COPILOT_BIN: '/missing', ANTIGRAVITY_BIN: '/missing' } });
     assert.equal(provider.enabled, true); assert.equal(provider.ready, loadsHistory);
     assert.equal(provider.modelAllowed('test-model'), isModelAllowedFor(id, 'test-model'));
     const { capabilities } = provider.create();
@@ -358,52 +359,70 @@ test('provider factories use cached readiness without spawning and expose qualif
   assert.throws(() => acpProvider('codex'), /ACP/);
 });
 
-const agyModels = ['gemini-3.8-flash-high', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-low', 'gemini-pro-agent'];
-const agySetup = t => {
-  const h = setup(t, { descriptor: getTargetById('antigravity'), env: { ACP_FAKE_MODELS: JSON.stringify(agyModels) } });
-  h.childEnv.ACP_FAKE_MODEL_STATE = join(h.dir, 'model-state');
-  h.controller.providers.antigravity = h.controller.providers.fake;
-  h.send = (args = {}) => h.controller.send({ owner: 'child', provider: 'antigravity', cwd: h.dir, text: 'test', ...args });
-  return h;
-};
-
-test('Antigravity inherits reported effort and reapplies selected effort as a model on cold load', async t => {
-  const h = agySetup(t);
-  assert.equal((await h.finish(await h.send())).effectiveEffort, 'high');
+test('Antigravity inherits thought_level and reapplies the saved override after cold load', async t => {
+  const h = setup(t, { descriptor: getTargetById('antigravity') });
+  const inherited = await h.finish(await h.send());
+  assert.equal(inherited.effectiveModel, 'gemini-3.8-flash');
+  assert.equal(inherited.effectiveEffort, 'high');
   assert.equal(h.frames('session/set_config_option').length, 0);
-  const first = await h.send({ model: 'gemini-3.8-flash-high', effort: 'low' });
-  assert.equal(first.effectiveModel, 'gemini-3.8-flash-low'); assert.equal(first.effectiveEffort, 'low');
-  await h.finish(first);
+  const first = await h.finish(await h.send({ model: 'gemini-3.8-flash', effort: 'low' }));
   const next = await h.finish(await h.send({ text: 'again' }));
-  assert.equal(next.selectedEffort, 'low'); assert.equal(next.effectiveEffort, 'low');
-  assert.ok(h.frames('session/set_config_option').every(f => f.params.value === 'gemini-3.8-flash-low'));
+  for (const result of [first, next]) {
+    assert.equal(result.effectiveModel, 'gemini-3.8-flash');
+    assert.equal(result.effectiveEffort, 'low');
+  }
+  assert.equal(h.frames('session/load').length, 2);
+  assert.deepEqual(h.frames('session/set_config_option').map(f => [f.params.configId, f.params.value]),
+    [['model', 'gemini-3.8-flash'], ['thought_level', 'low'], ['model', 'gemini-3.8-flash'], ['thought_level', 'low']]);
 });
 
-for (const model of [undefined, 'gemini-3.8-flash-medium', 'gemini-pro-agent']) {
-  test(`Antigravity refuses effort before session config writes: ${model ?? 'current model'}`, async t => {
-    const h = agySetup(t);
-    await h.finish(await h.send({ model: 'gemini-3.8-flash-high' }));
-    const before = readFileSync(h.childEnv.ACP_FAKE_MODEL_STATE, 'utf8');
-    const writes = h.frames('session/set_config_option').length;
-    const refused = (await dispatch({ action: 'send', target: 'antigravity', thread: 'child', cwd: h.dir, task: 'refuse',
-      effort: 'ultra', ...(model ? { model } : {}) }, { controller: h.controller })).structuredContent;
-    assert.equal(refused.status, 'failed'); assert.equal(refused.meta.detail, 'EFFORT_NOT_ALLOWED');
-    assert.match(refused.content, model === 'gemini-pro-agent' ? /[Oo]mit effort/ : /high, medium, low/);
-    assert.equal(h.frames('session/set_config_option').length, writes);
-    assert.equal(h.frames('session/prompt').length, 1);
-    assert.equal(readFileSync(h.childEnv.ACP_FAKE_MODEL_STATE, 'utf8'), before);
-    if (!model) t.diagnostic('EFFORT_ENVELOPE antigravity ' + JSON.stringify(refused));
+for (const effort of ['ultra', 'low']) test(`Antigravity effort refusal for ${effort} stops before delivery`, async t => {
+  // ultra is absent from the advertised levels. Also exercise a native -32602 after validation.
+  const h = setup(t, { descriptor: getTargetById('antigravity'), env: { ACP_FAKE_REFUSE_EFFORT: '1' } });
+  const result = await h.send({ effort });
+  assert.equal(result.detail, 'EFFORT_NOT_ALLOWED');
+  assert.match(result.text, effort === 'ultra' ? /low, medium, high/ : /Thinking level "low" is not offered/);
+  assert.equal(h.frames('session/set_config_option').length, effort === 'ultra' ? 0 : 1);
+  assert.equal(h.frames('session/prompt').length, 0);
+  assert.equal(h.records.readConversation('child').effortOverride, undefined);
+});
+
+for (const replay of ['empty', 'other-session']) test(`Antigravity refuses cold load with ${replay} replay before config or prompt`, async t => {
+  const h = setup(t, { descriptor: getTargetById('antigravity'), env: { ACP_FAKE_LOAD_REPLAY: replay } });
+  const first = await h.finish(await h.send());
+  const next = await h.finish(await h.send({ model: 'gemini-3.8-flash', effort: 'low', text: 'follow-up' }));
+  assert.equal(h.records.readExecution(next.executionId).terminal.error, 'HistoryUnavailable');
+  assert.equal(h.records.readConversation('child').historyId, first.nativeRefs.historyId);
+  assert.equal(h.frames('session/new').length, 1);
+  assert.equal(h.frames('session/load').length, 1);
+  assert.equal(h.frames('session/set_config_option').length, 0);
+  assert.equal(h.frames('session/prompt').length, 1);
+});
+
+test('ACP accepts empty replay for a load-capable descriptor that does not require it', async t => {
+  const h = setup(t, { env: { ACP_FAKE_LOAD_REPLAY: 'empty' } });
+  await h.finish(await h.send());
+  assert.equal((await h.finish(await h.send({ text: 'follow-up' }))).outcome, 'completed');
+});
+
+for (const [policy, kind, decision] of [['all', 'execute', undefined], ['edit', 'edit', 'allow'],
+  ['edit', 'execute', 'deny'], ['none', 'edit', 'deny']]) {
+  test(`Antigravity ${policy} policy handles a parent ${kind}`, async t => {
+    const h = setup(t, { descriptor: getTargetById('antigravity'), env: {
+      AGENT_COMPANION_ANTIGRAVITY_PERMISSION: policy, ACP_FAKE_ASK_PERMISSION: '1', ACP_FAKE_PERMISSION_KIND: kind } });
+    const result = await h.finish(await h.send());
+    const frames = lines(h.trace);
+    assert.deepEqual(frames[0].argv, policy === 'all' ? ['acp', '--dangerously-skip-permissions'] : ['acp']);
+    assert.equal(frames.find(f => f.permissionAnswer)?.permissionAnswer.outcome.optionId, decision);
+    assert.equal(result.outcome, 'completed');
+    assert.equal(result.text, decision === 'deny' ? '' : 'ready');
   });
 }
 
-test('Antigravity rejects ignored effort, does not infer effort from an unrelated model suffix', async t => {
-  const h = agySetup(t);
-  assert.equal((await h.finish(await h.send({ model: 'gemini-pro-agent' }))).effectiveEffort ?? null, null);
-  h.childEnv.ACP_FAKE_IGNORE_MODEL = '1';
-  const refused = await h.send({ model: 'gemini-3.8-flash', effort: 'low' });
-  assert.equal(refused.detail, 'CAPABILITY_UNAVAILABLE');
-  assert.match(refused.text, /did not apply/);
-  assert.equal(h.frames('session/prompt').length, 1);
+test('Antigravity omits turn usage when only context occupancy is reported', async t => {
+  const h = setup(t, { descriptor: getTargetById('antigravity'), env: { ACP_FAKE_USAGE: 'none' } });
+  const result = await h.finish(await h.send());
+  assert.equal(result.usage, null);
 });
 
 for (const effort of [undefined, 'low', 'max']) test(`Copilot session effort ${effort ?? 'inherits'}`, async t => {
@@ -449,9 +468,9 @@ test('generic ACP thought_level uses the advertised id on new and load', async t
 
 
 for (const effort of [undefined, 'low']) test(`Antigravity config connection loss with ${effort ?? 'no'} effort remains HistoryUnavailable`, async t => {
-  const h = agySetup(t);
+  const h = setup(t, { descriptor: getTargetById('antigravity') });
   h.childEnv.ACP_FAKE_MODEL_DISCONNECT = '1';
-  const failed = await h.send({ model: 'gemini-3.8-flash-high', effort });
+  const failed = await h.send({ model: 'gemini-3.8-flash', effort });
   assert.equal(failed.detail, 'history_unavailable');
   assert.equal(h.records.readExecution(failed.executionId).terminal.error, 'HistoryUnavailable');
   assert.equal(h.frames('session/set_config_option').length, 1);
@@ -477,7 +496,7 @@ const releasePrompt = (h, index) => writeFileSync(`${h.childEnv.ACP_FIXTURE_GATE
 test('Antigravity queues on the live process and session, keeping both answers without invented turn ids', async t => {
   const h = setup(t, { descriptor: getTargetById('antigravity') });
   h.childEnv.ACP_FIXTURE_GATE = join(h.dir, 'release');
-  const sent = await h.send({ model: 'fake-model-a' });
+  const sent = await h.send({ model: 'gemini-3.8-flash' });
   await until(() => h.progress.some(p => p.partialText === 'ready'));
   const queued = await input(h, sent, 'queue', 'CONTINUATION\nonly this text');
   assert.equal(queued.ok, true);
@@ -493,7 +512,7 @@ test('Antigravity queues on the live process and session, keeping both answers w
   const result = await h.finish(sent);
   assert.deepEqual(result.turns.map(t => [t.nativeTurnId, t.text]), [[null, 'ready'], [null, 'continued']]);
   assert.deepEqual(result.turns.map(t => t.messages), [[sent.executionId], [queued.id]]);
-  assert.deepEqual(result.nativeTurnIds, []); assert.equal(result.usage, null);
+  assert.deepEqual(result.nativeTurnIds, []); assert.equal(result.usage.total_tokens, 2 * 18109);
   assert.equal(result.interventions[0].state, 'answered');
   assert.deepEqual(h.frames('session/prompt').map(f => f.params), [
     { sessionId: 'fake-sess-1', prompt: [{ type: 'text', text: 'exact text\n  with spacing' }] },
@@ -517,7 +536,8 @@ test('Antigravity waits for the cancelled prompt response, then sends only new t
   releasePrompt(h, 1);
   const result = await h.finish(sent);
   assert.deepEqual(result.turns.map(t => [t.outcome, t.text]), [['interrupted', 'interrupted before answering'], ['completed', 'continued']]);
-  assert.deepEqual(result.nativeTurnIds, []); assert.equal(result.usage, null);
+  assert.deepEqual(result.nativeTurnIds, []); assert.deepEqual(result.turns.map(t => t.usage.total_tokens), [8931, 18109]);
+  assert.equal(result.usage.total_tokens, 8931 + 18109);
   assert.equal(result.interventions[0].state, 'answered');
   assert.deepEqual(h.frames('session/prompt')[1].params, { sessionId: 'fake-sess-1', prompt: [{ type: 'text', text: 'CONTINUATION\nnew text alone' }] });
   assert.equal(h.frames('session/load').length, 0); assert.equal(h.frames('session/new').length, 1);

@@ -43,13 +43,17 @@ class ProtocolConnection extends AcpConnection {
   _sendRequest(method, params) {
     if (!this.isAlive()) return Promise.reject(failure('ProviderLost'));
     const id = ++this.requestId;
+    if (method === 'session/load' && this.descriptor.acp.loadRequiresReplay) this.awaitingReplayFor = params.sessionId;
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(id, { reject, resolve: (result) => {
+        // Check at the response frame. A later update in the same stdout chunk is not replay.
+        if (method === 'session/load' && this.awaitingReplayFor === params.sessionId) {
+          return reject(new Error('The companion replayed no history for the requested session.'));
+        }
         if (['session/new', 'session/load'].includes(method)) {
           this.configOptions = result?.configOptions;
           this.effectiveModel = reportedModel(result);
-          this.effectiveEffort = thoughtLevel(this.configOptions)?.currentValue
-            ?? this.descriptor.acp.reportedEffort?.({ model: this.effectiveModel, configOptions: this.configOptions });
+          this.effectiveEffort = thoughtLevel(this.configOptions)?.currentValue;
         }
         resolve(result);
       } });
@@ -60,17 +64,17 @@ class ProtocolConnection extends AcpConnection {
   }
   _onNotification(msg) {
     super._onNotification(msg);
-    if (msg.method === 'session/update') this.activity(msg.params);
+    if (msg.method === 'session/update') {
+      if (msg.params?.sessionId === this.awaitingReplayFor) this.awaitingReplayFor = null;
+      this.activity(msg.params);
+    }
   }
   _onAgentRequest(msg) {
     super._onAgentRequest(msg);
     if (msg.method === 'session/request_permission') this.activity(msg.params);
   }
   async _applySessionModel(sessionId) {
-    const effortInModel = this.effort !== undefined && this.descriptor.acp.selectEffort && !thoughtLevel(this.configOptions);
-    const model = effortInModel
-      ? this.descriptor.acp.selectEffort({ model: this.model ?? this.effectiveModel, effort: this.effort, configOptions: this.configOptions })
-      : this.model;
+    const model = this.model;
     let returnedOption;
     if (model && this.descriptor.acp.setModel) try {
       const [method, params] = this.descriptor.acp.setModel({ sessionId, model });
@@ -79,11 +83,9 @@ class ProtocolConnection extends AcpConnection {
       if (returnedOption?.currentValue !== model) throw failure('ModelSelectionMismatch');
       this.effectiveModel = model;
       this.configOptions = result.configOptions;
-      this.effectiveEffort = thoughtLevel(this.configOptions)?.currentValue
-        ?? this.descriptor.acp.reportedEffort?.({ model: this.effectiveModel, configOptions: this.configOptions });
+      this.effectiveEffort = thoughtLevel(this.configOptions)?.currentValue;
     } catch (err) {
       if (err.code === -32000) throw err; // Authentication is classified by openHistory.
-      if (effortInModel && err.code === 'ModelSelectionMismatch') throw Object.assign(new Error(`Companion did not apply effort "${this.effort}" with model "${model}": ${err.message}`), { code: 'CAPABILITY_UNAVAILABLE' });
       if (err.code === 'ModelSelectionMismatch' || typeof err.code === 'number') {
         const values = optionValues(returnedOption?.options?.length ? returnedOption : modelOption(this.configOptions));
         if (!values.length) throw failure('MODEL_NOT_ALLOWED', err);
@@ -94,7 +96,13 @@ class ProtocolConnection extends AcpConnection {
     }
     const option = this._validateThoughtLevel();
     if (option && this.effort !== undefined) {
-      const result = await this._sendRequest('session/set_config_option', { sessionId, configId: option.id, value: this.effort });
+      let result;
+      try {
+        result = await this._sendRequest('session/set_config_option', { sessionId, configId: option.id, value: this.effort });
+      } catch (err) {
+        if (err.code === -32602) throw failure('EFFORT_NOT_ALLOWED', err);
+        throw err;
+      }
       const confirmed = result?.configOptions?.find(entry => entry.id === option.id)?.currentValue;
       if (confirmed !== this.effort) throw Object.assign(new Error(`Companion did not confirm effort "${this.effort}" (reported ${JSON.stringify(confirmed) ?? 'nothing'}). Omit effort to inherit configuration.`), { code: 'CAPABILITY_UNAVAILABLE' });
       this.configOptions = result.configOptions;
@@ -107,7 +115,7 @@ class ProtocolConnection extends AcpConnection {
       if (option) {
         const levels = optionValues(option);
         if (!levels.includes(this.effort)) throw Object.assign(new Error(`effort "${this.effort}" is not valid for this session's model. Use one of: ${levels.join(', ')}, or omit it to inherit configuration.`), { code: 'EFFORT_NOT_ALLOWED' });
-      } else if (!this.descriptor.acp.selectEffort) {
+      } else {
         throw Object.assign(new Error('Companion advertises no thought_level option. Omit effort to inherit configuration.'), { code: 'CAPABILITY_UNAVAILABLE' });
       }
     }

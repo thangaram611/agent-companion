@@ -367,14 +367,7 @@ export class AcpConnection {
     return result.sessionId;
   }
 
-  // The model, where the agent takes it per session rather than as a spawn
-  // flag — the descriptor's `acp.setModel` names the request (Antigravity's
-  // `session/set_config_option`, measured 2026-09-11 on agy_acp_server 1.1.1).
-  // Sent after `session/new` AND after `session/load`, because a loaded
-  // session comes back on the agent's default model (measured). No pin, or
-  // no hook, sends nothing. An agent that refuses the id (-32602, naming the
-  // ids it has) fails the session and the prompt with it: never a silent
-  // fallback to the default.
+  // Apply session model overrides after new or load using the descriptor's request.
   async _applySessionModel(sessionId) {
     const setModel = this.descriptor.acp.setModel;
     if (typeof setModel !== 'function' || !this.model) return;
@@ -385,8 +378,8 @@ export class AcpConnection {
 
   // `session/load`: the agent replays the session's history as
   // `session/update` notifications and answers only when it is done. Nothing
-  // collects for this session yet, so the replay is dropped on the floor —
-  // which is exactly right: it is history, not this prompt's output.
+  // collects reply text yet. On agy 1.5.13 (2026-11-22), replay before the
+  // response is the evidence that this id had history.
   async loadSession(sessionId, cwd) {
     const result = await this._sendRequest('session/load', { sessionId, cwd, mcpServers: [] }, SPAWN_INIT_TIMEOUT_MS);
     this.log('INFO', 'session/load ok:', { sessionId });

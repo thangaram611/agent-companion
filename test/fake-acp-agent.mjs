@@ -7,11 +7,8 @@
 // would quietly stop agreeing.
 //
 // Driven through a companion's `binaryEnv` (`FAKE_ACP_BIN` for its own
-// descriptor, `COPILOT_BIN` for Copilot's, `ANTIGRAVITY_ACP_BIN` for
-// Antigravity's), the
-// idiom bridge-server/adapters/codex.test.mjs uses for its fake codex. It never
-// runs a model and never spends a token. Everything it does is scripted from
-// its environment, so a test orders it around before the spawn:
+// descriptor, `COPILOT_BIN` for Copilot's, `ANTIGRAVITY_BIN` for
+// Antigravity's). Each test controls the fake through its environment:
 //
 //   ACP_FAKE_PROTOCOL_VERSION  the protocolVersion it answers on `initialize` (1)
 //   ACP_FAKE_LOAD_SESSION      '1' → advertises and implements `session/load`
@@ -23,8 +20,7 @@
 //   ACP_FAKE_PERMISSION_KIND   the tool kind it asks about (`execute`)
 //   ACP_FAKE_ASK_FS            '1' → each prompt first asks `fs/read_text_file`,
 //                              a capability the ACP client does not declare
-//   ACP_FAKE_UNKNOWN_UPDATE    '1' → also emits `usage_update` and `notice`, two
-//                              v1 kinds no descriptor here declares
+//   ACP_FAKE_UNKNOWN_UPDATE    '1' → emits `usage_update` and `notice`, undeclared by the neutral fake
 //   ACP_FAKE_USAGE             `quota` (Gemini's `_meta.quota`, the default),
 //                              `standard` (the unstable `usage` field) or `none`
 //   ACP_FAKE_TEXT              the reply text (`ready`)
@@ -35,18 +31,13 @@
 //   ACP_FAKE_REPLAY            path to an acp-replay JSONL capture; replaces the
 //                              scripted behavior with strict method/order replay
 //
-// Shapes follow the ACP v1 schema (agentclientprotocol/agent-client-protocol,
-// `agent-client-protocol-schema/src/v1`) and what two agents were measured to
-// send on 2026-09-11 — Gemini CLI 0.59.0 (`_meta.quota.token_count` on the
-// prompt response, `-32601 "Method not found"` for an unknown notification on
-// stderr, a `cancelled` stop reason when `session/cancel` lands mid-turn) and
-// Google's agy_acp_server 1.1.1 (`session/set_config_option` for the model,
-// `-32602` naming the available ids for an unknown one, and a loaded session
-// that comes back on the default model).
+// Gemini CLI 0.59.0 supplied the quota and cancellation shapes (2026-09-11).
+// The agy acp 1.5.13 fixture contains the measured session options, permission
+// choices, and prompt counters from 2026-11-22 without account or session ids.
 //
 // `fakeAcpDescriptor` below is the fake's own companion descriptor, the
 // neutral descriptor the suites drive the ACP adapter with; Antigravity's
-// real descriptor is driven through the same fake via `ANTIGRAVITY_ACP_BIN`.
+// real descriptor is driven through the same fake via `ANTIGRAVITY_BIN`.
 // It carries an `acp` block exactly as a real descriptor in
 // lib/target-registry.mjs does, so a suite that passes against it is a suite
 // the next real companion inherits.
@@ -100,7 +91,7 @@ export function fakeAcpDescriptor({ id = 'fake-acp', loadSession = true, updates
 }
 
 export const FAKE_ACP_AGENT = `
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 
 const env = process.env;
 const TRACE = env.ACP_FAKE_TRACE || '';
@@ -114,11 +105,10 @@ if (env.ACP_FAKE_REPLAY) {
   const { replayAcp } = await import(${JSON.stringify(new URL('./acp-replay.mjs', import.meta.url).href)});
   process.exit(await replayAcp(env.ACP_FAKE_REPLAY));
 }
-// Copilot and Gemini are launched with --acp; Antigravity's server is launched
-// bare (--uid= on linux, as the registry entry says). Any other argv is a
-// wrong spawn and exits loudly. (No backticks here: this is inside a template.)
 const spawnFlags = process.argv.slice(2);
-if (spawnFlags.length && !spawnFlags.includes('--acp') && !spawnFlags.every((f) => f.startsWith('--uid='))) {
+const agy = spawnFlags[0] === 'acp'
+  ? JSON.parse(readFileSync(new URL(${JSON.stringify(new URL('./fixtures/antigravity-acp-agent.json', import.meta.url).href)}), 'utf8')) : null;
+if (!agy && !spawnFlags.includes('--acp')) {
   process.stderr.write('fake acp agent: unexpected argv ' + JSON.stringify(spawnFlags) + '\\n');
   process.exit(2);
 }
@@ -149,7 +139,12 @@ function modelConfig(model) {
   return configOptions.length ? { configOptions } : {};
 }
 let sessionSeq = 0;
-const sessions = new Map();   // sessionId -> { cwd, prompts, loaded }
+const sessions = new Map();
+function openSession(sessionId, cwd, loaded) {
+  const config = agy ? structuredClone(agy.session) : { modes: modes(), ...modelConfig(defaultModel) };
+  sessions.set(sessionId, { cwd, prompts: 0, model: defaultModel, configOptions: config.configOptions });
+  return loaded && !agy ? config : { sessionId, ...config };
+}
 let outSeq = 0;
 const pendingClient = new Map(); // agent -> client request id -> resolve
 const ask = (method, params) => new Promise((resolve) => {
@@ -191,7 +186,7 @@ function handle(msg) {
   const p = msg.params || {};
   switch (msg.method) {
     case 'initialize':
-      reply({
+      reply(agy ? agy.initialize : {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: 'fake-acp-agent', title: 'Fake ACP agent', version: '1.0.0' },
         agentCapabilities: { loadSession: LOAD_SESSION, promptCapabilities: { image: false, audio: false, embeddedContext: false } },
@@ -203,21 +198,21 @@ function handle(msg) {
     case 'session/new': {
       if (AUTH_REQUIRED) { fail(-32000, 'Authentication required'); return; }
       const sessionId = 'fake-sess-' + (++sessionSeq);
-      sessions.set(sessionId, { cwd: p.cwd, prompts: 0, loaded: false, model: defaultModel });
-      reply({ sessionId, modes: modes(), ...modelConfig(defaultModel) });
+      reply(openSession(sessionId, p.cwd, false));
       return;
     }
     case 'session/load': {
       if (AUTH_REQUIRED) { fail(-32000, 'Authentication required'); return; }
       if (!LOAD_SESSION) { fail(-32601, '"Method not found": session/load'); return; }
       if (env.ACP_FAKE_LOAD_FAIL === '1' || !p.sessionId) { fail(-32602, 'Session not found: ' + p.sessionId); return; }
-      // A loaded session comes back on the default model (Antigravity, measured).
-      sessions.set(p.sessionId, { cwd: p.cwd, prompts: 0, loaded: true, model: defaultModel });
       // History replay, as the spec requires BEFORE the response: the client
       // must not mistake it for a live turn.
-      out(update(p.sessionId, { sessionUpdate: 'user_message_chunk', content: text('earlier question') }));
-      out(update(p.sessionId, { sessionUpdate: 'agent_message_chunk', content: text('earlier answer') }));
-      reply({ modes: modes(), ...modelConfig(defaultModel) });
+      if (env.ACP_FAKE_LOAD_REPLAY !== 'empty') {
+        const id = env.ACP_FAKE_LOAD_REPLAY === 'other-session' ? 'unrelated-session' : p.sessionId;
+        out(update(id, { sessionUpdate: 'user_message_chunk', content: text('earlier question') }));
+        out(update(id, { sessionUpdate: 'agent_message_chunk', content: text('earlier answer') }));
+      }
+      reply(openSession(p.sessionId, p.cwd, true));
       return;
     }
     case 'session/prompt':
@@ -232,13 +227,23 @@ function handle(msg) {
     case 'session/set_mode':
       reply({});
       return;
-    // The model as a session config option (Antigravity's shape): the answer
-    // echoes the option with its new current value; an id the agent does not
-    // have is -32602 naming the ones it does.
     case 'session/set_config_option': {
       if (env.ACP_FAKE_MODEL_DISCONNECT === '1') process.exit(9);
       const session = sessions.get(p.sessionId);
       if (!session) { fail(-32602, 'Session not found: ' + p.sessionId); return; }
+      if (agy) {
+        const { configOptions } = session;
+        const option = configOptions.find(o => o.id === p.configId);
+        if (!option?.options.some(o => o.value === p.value) || env.ACP_FAKE_REFUSE_EFFORT === '1' && p.configId === 'thought_level') {
+          fail(-32602, p.configId === 'model' ? 'Unknown model ID: ' + p.value :
+            'Thinking level "' + p.value + '" is not offered for model "Gemini 3.8 Flash"');
+          return;
+        }
+        option.currentValue = p.value;
+        reply({ configOptions });
+        out(update(p.sessionId, { sessionUpdate: 'config_option_update', configOptions }));
+        return;
+      }
       const thoughtValues = levelsFor(session.model);
       if (thoughtValues && p.configId === (env.ACP_FAKE_THOUGHT_ID || 'reasoning_effort')) {
         thought = thoughtValues.includes(p.value) && env.ACP_FAKE_IGNORE_EFFORT !== '1' ? p.value : 'medium';
@@ -246,19 +251,11 @@ function handle(msg) {
         return;
       }
       if (p.configId !== 'model') { fail(-32602, 'Unknown config option: ' + p.configId); return; }
-      if (spawnFlags.includes('--acp') && env.ACP_FAKE_MODELS && !modelValues.includes(p.value)) {
+      if (env.ACP_FAKE_MODELS && !modelValues.includes(p.value)) {
         fail(-32602, "Invalid modelId '" + p.value + "': not one of this session's models.");
         return;
       }
-      if (!spawnFlags.includes('--acp') && String(p.value).startsWith('not-a-model')) {
-        out({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: "Model '" + p.value + "' is not available for the current authentication method.", data: { modelId: p.value, availableModels: ['fake-model-a', 'fake-model-b'] } } });
-        return;
-      }
-      if (env.ACP_FAKE_IGNORE_MODEL !== '1') {
-        session.model = p.value;
-        // Selection is saved before any prompt; invalid writes would stick too.
-        if (env.ACP_FAKE_MODEL_STATE) writeFileSync(env.ACP_FAKE_MODEL_STATE, session.model);
-      }
+      if (env.ACP_FAKE_IGNORE_MODEL !== '1') session.model = p.value;
       reply(modelConfig(session.model));
       return;
     }
@@ -271,7 +268,11 @@ async function runPrompt(msg) {
   const p = msg.params || {};
   const sessionId = p.sessionId;
   const session = sessions.get(sessionId);
-  const done = (result) => { running.delete(sessionId); out({ jsonrpc: '2.0', id: msg.id, result }); };
+  const done = (result) => {
+    running.delete(sessionId);
+    if (agy && env.ACP_FAKE_USAGE !== 'none') result.usage = (result.stopReason === 'cancelled' ? agy.cancelled : agy.prompt).usage;
+    out({ jsonrpc: '2.0', id: msg.id, result });
+  };
   if (!session) { out({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: 'Session not found: ' + sessionId } }); return; }
   if (running.has(sessionId)) { out({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: 'a prompt is already running on ' + sessionId } }); return; }
   const promptText = (p.prompt || []).map((b) => (typeof b?.text === 'string' ? b.text : '')).join('');
@@ -286,6 +287,7 @@ async function runPrompt(msg) {
   session.prompts += 1;
 
   out(update(sessionId, { sessionUpdate: 'agent_thought_chunk', content: text('thinking') }));
+  if (agy) out(update(sessionId, { sessionUpdate: 'usage_update', used: 10, size: 1000 }));
   if (env.ACP_FAKE_UNKNOWN_UPDATE === '1') {
     out(update(sessionId, { sessionUpdate: 'usage_update', used: 10, size: 1000 }));
     out(update(sessionId, { sessionUpdate: 'notice', text: 'fyi' }));
@@ -294,12 +296,12 @@ async function runPrompt(msg) {
     const answer = await ask('fs/read_text_file', { sessionId, path: session.cwd + '/README.md' });
     trace({ fsAnswer: answer.result ?? answer.error });
   }
-  if (env.ACP_FAKE_ASK_PERMISSION === '1') {
+  if (env.ACP_FAKE_ASK_PERMISSION === '1' && !spawnFlags.includes('--dangerously-skip-permissions')) {
     const kind = env.ACP_FAKE_PERMISSION_KIND || 'execute';
     const answer = await ask('session/request_permission', {
       sessionId,
       toolCall: { toolCallId: 'call-perm-1', title: 'run \`ls\`', kind, status: 'pending', rawInput: { command: 'ls' } },
-      options: [
+      options: agy ? agy.permissionOptions : [
         { optionId: 'proceed_always', name: 'Allow for this session', kind: 'allow_always' },
         { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
         { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
@@ -307,13 +309,14 @@ async function runPrompt(msg) {
     });
     trace({ permissionAnswer: answer.result ?? answer.error });
     const outcome = answer.result?.outcome;
-    const allowed = outcome?.outcome === 'selected' && String(outcome.optionId).startsWith('proceed');
+    const allowed = outcome?.outcome === 'selected' && (outcome.optionId === 'allow' || String(outcome.optionId).startsWith('proceed'));
     out(update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'call-perm-1', title: 'run \`ls\`', kind, status: 'in_progress', rawInput: { command: 'ls' } }));
     out(update(sessionId, {
       sessionUpdate: 'tool_call_update', toolCallId: 'call-perm-1',
       status: allowed ? 'completed' : 'failed',
       rawOutput: allowed ? 'README.md' : { message: 'Tool "ls" was canceled by the user.' },
     }));
+    if (agy && !allowed) { done({ stopReason: 'end_turn' }); return; }
   }
   // Scripted echo evidence for the recorder's command scenario; no shell runs.
   const echo = promptText.includes('echo fixture-ok');
@@ -327,7 +330,7 @@ async function runPrompt(msg) {
   const reply = promptText.startsWith('CONTINUATION') ? 'continued' : (env.ACP_FAKE_TEXT || 'ready');
   out(update(sessionId, { sessionUpdate: 'agent_message_chunk', content: text(reply) }));
   const result = { stopReason: 'end_turn' };
-  const usageMode = env.ACP_FAKE_USAGE || 'quota';
+  const usageMode = env.ACP_FAKE_USAGE || (agy ? 'agy' : 'quota');
   if (usageMode === 'quota') {
     result._meta = { quota: {
       token_count: { input_tokens: 1234, output_tokens: 56 },

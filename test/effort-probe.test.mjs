@@ -4,8 +4,8 @@ import { runEffortProbe } from '../probes/smoke/effort.mjs';
 
 function fixture(target, { acceptInvalid = false, effectiveEffort, effectiveModel } = {}) {
   const calls = [], reports = [], executions = new Map();
-  let turns = 0;
-  const models = { claude: 'claude-haiku-4-5', codex: 'gpt-fixture', opencode: { providerID: 'fixture', id: 'model', variant: 'soft' }, antigravity: 'gemini-flash-low', copilot: null };
+  let turns = 0, selectedModel;
+  const models = { claude: 'claude-haiku-4-5', codex: 'gpt-fixture', opencode: { providerID: 'fixture', id: 'model', variant: 'soft' }, antigravity: 'gpt-oss-120b-medium', copilot: null };
   const bridge = {
     async tool(name, args, owner) {
       calls.push({ name, args, owner });
@@ -13,6 +13,7 @@ function fixture(target, { acceptInvalid = false, effectiveEffort, effectiveMode
       if (name === 'agent_cancel') return { ok: true };
       if (args.effort?.startsWith('__')) return acceptInvalid ? { status: 'still_running', job_id: 'bad' } :
         { status: 'failed', content: 'Use one of: high, low, medium, or omit effort.', meta: { detail: 'EFFORT_NOT_ALLOWED' } };
+      selectedModel = args.model ?? selectedModel;
       const job_id = `job-${++turns}`;
       executions.set(job_id, { historyId: 'history', processes: { pid: turns } });
       return { ok: true, status: 'still_running', job_id, selected_effort: 'low' };
@@ -20,6 +21,7 @@ function fixture(target, { acceptInvalid = false, effectiveEffort, effectiveMode
     async wait(job_id) {
       return { ok: true, status: 'completed', job_id, content: 'OK', meta: { selected_effort: 'low',
         effective_effort: effectiveEffort ?? (target === 'claude' ? null : 'low'),
+        selected_model: selectedModel,
         effective_model: effectiveModel ?? models[target], stop_evidence: { gone: true } } };
     },
   };
@@ -28,7 +30,7 @@ function fixture(target, { acceptInvalid = false, effectiveEffort, effectiveMode
 
 for (const target of ['claude', 'codex', 'opencode', 'antigravity', 'copilot']) test(`effort probe ${target}: refusal, lowest level, truthful reports and cold follow-up scope`, async () => {
   const h = fixture(target);
-  await runEffortProbe(h);
+  await runEffortProbe({ ...h, model: target === 'antigravity' ? 'gpt-oss-120b-medium' : undefined });
   const sends = h.calls.filter(c => c.name === 'agent_send');
   assert.equal(sends[1].args.effort, 'low');
   assert.equal(sends[1].args.task, 'Reply with exactly: OK');

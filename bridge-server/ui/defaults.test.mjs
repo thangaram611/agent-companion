@@ -28,7 +28,7 @@ function fixture(t) {
   writeFileSync(join(root, 'codex-code-mode-host'), '#!/bin/sh\nexit 1\n', { mode: 0o700 });
   const forbidden = join(root, 'unexpected-runtime.mjs');
   writeFileSync(forbidden, '#!' + process.execPath + "\nimport { writeFileSync } from 'node:fs'; writeFileSync(process.env.HOME + '/unexpected-start', '1'); process.exit(1);\n", { mode: 0o700 });
-  Object.assign(env, { CLAUDE_BIN: forbidden, COPILOT_BIN: forbidden, ANTIGRAVITY_ACP_BIN: forbidden });
+  Object.assign(env, { CLAUDE_BIN: forbidden, COPILOT_BIN: forbidden, ANTIGRAVITY_BIN: forbidden });
   writeFileSync(env.OPENCODE_BIN, '#!' + process.execPath + '\nawait import(' + JSON.stringify(openCodeFake) + ');\n', { mode: 0o700 });
   appendFileSync(env.CODEX_BIN, `
 if (process.argv[2] === 'app-server') historyFs.writeFileSync(process.env.CODEX_FAKE_TRACE + '.home', process.env.CODEX_HOME);

@@ -72,9 +72,6 @@ export async function runEffortProbe({ bridge, target, model, cwd, owner, record
         if (target === 'opencode') {
           assert.equal(`${effective.providerID}/${effective.id}`, model.split('#')[0]);
           assert.equal(typeof effective.variant, 'string');
-        } else if (target === 'antigravity') {
-          const family = model.replace(new RegExp(`-(${order.join('|')})$`), '');
-          assert.equal(effective, `${family}-${effort}`);
         } else if (target === 'claude' && ['haiku', 'sonnet', 'opus'].includes(model)) {
           assert.ok(effective.includes(model), 'reported model must match the selected alias');
         } else if (effective != null) assert.equal(effective, model);

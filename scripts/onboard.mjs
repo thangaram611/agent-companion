@@ -5,7 +5,7 @@
 // one place that selects today's target id, explains how to get it ready, and
 // (with --set-default) persists the choice and optional per-companion model. It never prompts for or stores
 // provider secrets — auth is delegated to the vendor tools (`opencode` /connect,
-// `copilot login`, `scripts/install-antigravity-acp.mjs --login`).
+// `copilot login`, `agy acp --login`).
 //
 // Usage:
 //   node scripts/onboard.mjs --host claude|codex|both --target opencode|copilot|codex|claude|antigravity|auto|none [--model <id|inherit>] [--set-default] [--yes] [--json]

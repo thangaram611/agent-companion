@@ -1,52 +1,210 @@
 {
-  "id": "antigravity-acp",
-  "name": "Google Antigravity",
-  "version": "1.4.3",
-  "description": "Google\u2019s AI coding agent",
-  "website": "https://antigravity.google/docs/ide/extensions",
-  "authors": [
-    "Google LLC"
-  ],
-  "license": "proprietary",
-  "license_url": "https://antigravity.google/terms",
-  "distribution": {
-    "binary": {
-      "darwin-aarch64": {
-        "archive": "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.4.3-darwin-arm64.zip",
-        "cmd": "./agy_acp_server.par",
-        "sha256": "c57db0a9b8b712daa9c3c17cdb990a61842ea569f279e8bd79d7aa85a303b20b"
+  "initialize": {
+    "protocolVersion": 1,
+    "agentInfo": {
+      "name": "Antigravity ACP Server",
+      "version": "1.5.13"
+    },
+    "agentCapabilities": {
+      "loadSession": true,
+      "load_session": true,
+      "promptCapabilities": {
+        "image": true,
+        "audio": false,
+        "embeddedContext": true
       },
-      "darwin-x86_64": {
-        "archive": "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.4.3-darwin-x86_64.zip",
-        "cmd": "./agy_acp_server.par",
-        "sha256": "9392dbbdad7f0663dbfb5a0bf641297b0cf80d2ee9cd2d49a616bbbc7378731d"
+      "sessionCapabilities": {
+        "resume": {},
+        "close": {},
+        "load": {},
+        "list": {},
+        "additionalDirectories": {}
       },
-      "linux-x86_64": {
-        "archive": "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.3-linux-x86_64.zip",
-        "cmd": "./agy_acp_server.par",
-        "args": [
-          "--uid="
-        ],
-        "sha256": "0634ce5306ba92c932945455e7a83fda78e2d99c33fa8aa6ee0566206a382714"
+      "session_capabilities": {
+        "resume": {},
+        "close": {},
+        "load": {},
+        "list": {},
+        "additionalDirectories": {}
       },
-      "linux-aarch64": {
-        "archive": "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.3-linux-arm64.zip",
-        "cmd": "./agy_acp_server.par",
-        "args": [
-          "--uid="
-        ],
-        "sha256": "05c153443b0b1175151c760eeddea538950bc9843e317d54786a1f03670182bc"
+      "auth": {
+        "logout": {}
       },
-      "windows-x86_64": {
-        "archive": "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.4.3-windows-x86_64.zip",
-        "cmd": "./agy_acp_server.exe",
-        "sha256": "54c2e16378d9a4952e1da70e355f3c33c4f284308d6de48ab3e6e34a127bd325"
-      },
-      "windows-aarch64": {
-        "archive": "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.4.3-windows-arm64.zip",
-        "cmd": "./agy_acp_server.exe",
-        "sha256": "fcd46431ad33d3b510ce0b98fe7b43d095bd8b3f1c363ee2d57faa7ee981c7bb"
+      "_meta": {
+        "antigravity": {
+          "tier": true,
+          "systemPrompt": {
+            "append": true
+          }
+        }
       }
+    }
+  },
+  "session": {
+    "models": {
+      "availableModels": [
+        {
+          "modelId": "gemini-3.8-flash-high",
+          "name": "Gemini 3.8 Flash (High)"
+        },
+        {
+          "modelId": "gemini-3.8-flash-medium",
+          "name": "Gemini 3.8 Flash (Medium)"
+        },
+        {
+          "modelId": "gemini-3.8-flash-low",
+          "name": "Gemini 3.8 Flash (Low)"
+        },
+        {
+          "modelId": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6 (Thinking)"
+        },
+        {
+          "modelId": "claude-opus-4-6-thinking",
+          "name": "Claude Opus 4.6 (Thinking)"
+        },
+        {
+          "modelId": "gpt-oss-120b-medium",
+          "name": "GPT-OSS 120B (Medium)"
+        }
+      ],
+      "currentModelId": "gemini-3.8-flash-high"
+    },
+    "modes": {
+      "currentModeId": "default",
+      "availableModes": [
+        {
+          "id": "default",
+          "name": "Default",
+          "description": "Ask before edits and commands, per your permission settings."
+        },
+        {
+          "id": "accept-edits",
+          "name": "Accept edits",
+          "description": "Approve file edits in the workspace without asking."
+        },
+        {
+          "id": "auto",
+          "name": "Auto",
+          "description": "Approve edits and safe commands; ask before irreversible actions."
+        },
+        {
+          "id": "plan",
+          "name": "Plan",
+          "description": "Plan carefully before executing a task."
+        }
+      ]
+    },
+    "configOptions": [
+      {
+        "id": "model",
+        "name": "Model",
+        "category": "model",
+        "type": "select",
+        "currentValue": "gemini-3.8-flash",
+        "options": [
+          {
+            "value": "gemini-3.8-flash",
+            "name": "Gemini 3.8 Flash"
+          },
+          {
+            "value": "claude-sonnet-4-6",
+            "name": "Claude Sonnet 4.6 (Thinking)"
+          },
+          {
+            "value": "claude-opus-4-6-thinking",
+            "name": "Claude Opus 4.6 (Thinking)"
+          },
+          {
+            "value": "gpt-oss-120b-medium",
+            "name": "GPT-OSS 120B (Medium)"
+          }
+        ]
+      },
+      {
+        "id": "thought_level",
+        "name": "Thinking Level",
+        "category": "thought_level",
+        "type": "select",
+        "currentValue": "high",
+        "options": [
+          {
+            "value": "low",
+            "name": "Low"
+          },
+          {
+            "value": "medium",
+            "name": "Medium"
+          },
+          {
+            "value": "high",
+            "name": "High"
+          }
+        ]
+      },
+      {
+        "id": "mode",
+        "name": "Mode",
+        "category": "mode",
+        "type": "select",
+        "currentValue": "default",
+        "options": [
+          {
+            "value": "default",
+            "name": "Default",
+            "description": "Ask before edits and commands, per your permission settings."
+          },
+          {
+            "value": "accept-edits",
+            "name": "Accept edits",
+            "description": "Approve file edits in the workspace without asking."
+          },
+          {
+            "value": "auto",
+            "name": "Auto",
+            "description": "Approve edits and safe commands; ask before irreversible actions."
+          },
+          {
+            "value": "plan",
+            "name": "Plan",
+            "description": "Plan carefully before executing a task."
+          }
+        ]
+      }
+    ]
+  },
+  "permissionOptions": [
+    {
+      "optionId": "allow",
+      "name": "Allow",
+      "kind": "allow_once"
+    },
+    {
+      "optionId": "deny",
+      "name": "Deny",
+      "kind": "reject_once"
+    }
+  ],
+  "prompt": {
+    "stopReason": "end_turn",
+    "usage": {
+      "inputTokens": 11179,
+      "outputTokens": 88,
+      "cachedReadTokens": 6842,
+      "cachedWriteTokens": 0,
+      "thoughtTokens": 0,
+      "totalTokens": 18109
+    }
+  },
+  "cancelled": {
+    "stopReason": "cancelled",
+    "usage": {
+      "inputTokens": 8885,
+      "outputTokens": 46,
+      "cachedReadTokens": 0,
+      "cachedWriteTokens": 0,
+      "thoughtTokens": 0,
+      "totalTokens": 8931
     }
   }
 }

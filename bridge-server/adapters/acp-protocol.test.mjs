@@ -3,20 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { getTargetById } from '../../lib/target-registry.mjs';
 import { fakeAcpDescriptor } from '../../test/fake-acp-agent.mjs';
-import { AcpConnection, ACP_PROTOCOL_VERSION } from './acp-protocol.mjs';
+import { ACP_PROTOCOL_VERSION } from './acp-protocol.mjs';
 const FAKE = fakeAcpDescriptor();
 const COPILOT = getTargetById('copilot');
 const ANTIGRAVITY = getTargetById('antigravity');
-test('Antigravity effort requires an advertised family and never strips a non-level suffix', () => {
-  const configOptions = [{ id: 'model', options: ['gemini-flash-low', 'gemini-flash-high', 'gemini-flash-agent']
-    .map(value => ({ value })) }];
-  const select = model => ANTIGRAVITY.acp.selectEffort({ model, effort: 'low', configOptions });
-  assert.equal(select('gemini-flash-high'), 'gemini-flash-low');
-  assert.equal(select('gemini-flash'), 'gemini-flash-low');
-  assert.throws(() => select('gemini-flash-agent'), { code: 'EFFORT_NOT_ALLOWED' });
-  assert.equal(ANTIGRAVITY.acp.reportedEffort({ model: 'gemini-flash-agent', configOptions }), null);
-});
-
 test('the Copilot spawn argv carries its permission flags and model selection uses the session', () => {
   assert.deepEqual(COPILOT.acp.args({ model: 'claude-sonnet-4.6', env: {} }), [
     '--acp',
@@ -50,25 +40,19 @@ test('the Copilot spawn argv carries its permission flags and model selection us
   assert.equal(ACP_PROTOCOL_VERSION, 1);
 });
 
-test('antigravity: the descriptor — bare spawn, no usage reader, load honoured, the permission knob, and the model as a session config option', () => {
-  assert.deepEqual(ANTIGRAVITY.acp.args({ model: 'gemini-pro-agent', env: {} }), process.platform === 'linux' ? ['--uid='] : [],
-    'the registry entry\'s own args: nothing on macOS, `--uid=` on linux — the model is not a flag');
-  assert.deepEqual(ANTIGRAVITY.acp.env({ env: {}, paths: {} }), {});
-  assert.deepEqual(ANTIGRAVITY.acp.rotate, []);
-  assert.equal(ANTIGRAVITY.acp.clientName, 'agent-companion');
-  assert.equal(ANTIGRAVITY.acp.loadSession, true, 'a session survives the server process and session/load remembers (measured)');
-  assert.equal(ANTIGRAVITY.acp.permission({}), 'all');
-  assert.equal(ANTIGRAVITY.acp.permission({ AGENT_COMPANION_ANTIGRAVITY_PERMISSION: 'edit' }), 'edit');
-  assert.equal(ANTIGRAVITY.acp.permission({ AGENT_COMPANION_ANTIGRAVITY_PERMISSION: 'NONE' }), 'none');
-  assert.equal(ANTIGRAVITY.acp.permission({ AGENT_COMPANION_ANTIGRAVITY_PERMISSION: 'yolo' }), 'all', 'an unrecognised policy is the default, never a guess');
-  assert.equal(ANTIGRAVITY.acp.usage({ result: { stopReason: 'end_turn', _meta: { quota: { token_count: { input_tokens: 1, output_tokens: 1 } } } } }), null,
-    'nothing on the ACP surface carries usage (measured): even a shape another agent uses is not read');
-  assert.deepEqual(ANTIGRAVITY.acp.updates, ['agent_thought_chunk', 'agent_message_chunk', 'tool_call', 'tool_call_update', 'available_commands_update', 'user_message_chunk']);
-  assert.deepEqual(ANTIGRAVITY.acp.setModel({ sessionId: 's1', model: 'gemini-pro-agent' }),
-    ['session/set_config_option', { sessionId: 's1', configId: 'model', value: 'gemini-pro-agent' }]);
-  assert.equal(FAKE.acp.setModel, undefined);
-  assert.equal(ANTIGRAVITY.binaryEnv, 'ANTIGRAVITY_ACP_BIN');
-  assert.match(ANTIGRAVITY.binaryNames[0], /agent-companion\/antigravity-acp\/current\/agy_acp_server\.par$/, 'the registry binary, never agy');
-  assert.equal(ANTIGRAVITY.capabilities.modelSelection, true);
+test('Antigravity launches agy acp with native permission bypass only for resolved all', () => {
+  assert.equal(ANTIGRAVITY.binaryEnv, 'ANTIGRAVITY_BIN');
+  assert.deepEqual(ANTIGRAVITY.binaryNames, ['agy']);
+  for (const [raw, policy] of [[undefined, 'all'], ['ALL', 'all'], [' edit ', 'edit'], ['NONE', 'none'], ['invalid', 'all']]) {
+    const env = { AGENT_COMPANION_ANTIGRAVITY_PERMISSION: raw };
+    assert.equal(ANTIGRAVITY.acp.permission(env), policy);
+    assert.deepEqual(ANTIGRAVITY.acp.args({ model: 'gemini-3.8-flash', env }),
+      policy === 'all' ? ['acp', '--dangerously-skip-permissions'] : ['acp']);
+  }
 });
 
+test('Antigravity declares the measured update kinds for turns and load replay', () => {
+  assert.deepEqual(new Set(ANTIGRAVITY.acp.updates), new Set(['agent_thought_chunk', 'agent_message_chunk',
+    'tool_call', 'tool_call_update', 'available_commands_update', 'user_message_chunk',
+    'usage_update', 'session_info_update', 'config_option_update']));
+});

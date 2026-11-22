@@ -87,12 +87,15 @@ test('Antigravity inherits the native model on new and loaded sessions when rout
       { fixture: 'acp-replay', companion: 'antigravity' },
       { dir: 'client', frame: { id: 1, method: 'initialize' } },
       { dir: 'agent', frame: { id: 1, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } } },
-      { dir: 'client', frame: { id: 2, method: historyId ? 'session/load' : 'session/new' } },
+      { dir: 'client', frame: { id: 2, method: historyId ? 'session/load' : 'session/new',
+        params: historyId ? { sessionId: historyId } : {} } },
+      ...(historyId ? [{ dir: 'agent', frame: { method: 'session/update', params: { sessionId: historyId,
+        update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'previous question' } } } } }] : []),
       { dir: 'agent', frame: { id: 2, result: { sessionId: historyId ?? 'new',
         configOptions: [{ id: 'model', currentValue: 'native-model' }] } } },
     ];
     writeFileSync(path, frames.map(frame => JSON.stringify(frame)).join('\n'));
-    const env = { ...process.env, ANTIGRAVITY_ACP_BIN: fakeAcpAgentBin(dir), ACP_FAKE_REPLAY: path };
+    const env = { ...process.env, ANTIGRAVITY_BIN: fakeAcpAgentBin(dir), ACP_FAKE_REPLAY: path };
     const adapter = new AcpAdapter(getTargetById('antigravity'), { env, log() {} });
     try {
       await adapter.start({ cwd: dir, supervisor: supervisorFor(t) });

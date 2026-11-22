@@ -1,5 +1,5 @@
 // Real Antigravity ACP through per-execution runtimes. Requires a signed-in
-// server and a currently available model id as argv[2]. Spends five turns.
+// agy CLI (1.5+) and a currently available model id as argv[2]. Spends five turns.
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,7 +24,8 @@ try {
   const first = await bridge.wait(firstId, owner);
   assert.equal(first.status, 'completed', JSON.stringify(first));
   assert.match(first.content, /BANANA/i);
-  assert.equal(first.meta.usage ?? null, null); // No fabricated usage counters.
+  assert.equal(first.meta.usage.source, 'antigravity-acp');
+  assert.ok(first.meta.usage.input_tokens > 0 && first.meta.usage.output_tokens > 0);
   assert.equal(first.meta.stop_evidence.gone, true);
   assert.match(await bridge.readResource(first.meta.digest_uri), /BANANA/i);
 

@@ -239,7 +239,7 @@ function runSetup(sourceRoot, home, codexHome, binDir, logPath, extraEnv = {}, a
       CODEX_HOME: codexHome,
       AGENT_RUNTIME_DIR: path.join(home, 'runtime'),
       OPENCODE_BIN: '/missing-opencode', COPILOT_BIN: '/missing-copilot',
-      ANTIGRAVITY_ACP_BIN: '/missing-antigravity', CLAUDE_BIN: '/missing-claude',
+      ANTIGRAVITY_BIN: '/missing-antigravity', CLAUDE_BIN: '/missing-claude',
       FAKE_CODEX_LOG: logPath,
       PATH: [binDir, '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(path.delimiter),
       ...extraEnv,
@@ -543,6 +543,7 @@ test('dry-run previews a clean install and --no-target-check explicitly defers a
   assert.equal(preview.status, 0, preview.stdout + preview.stderr);
   assert.match(preview.stdout, /Plan \(codex\): set default companion to codex/);
   assert.match(preview.stdout, /Preview only/);
+  assert.match(preview.stdout, /Next: brew install --cask antigravity-cli/);
   f.assertNoInstall();
   const deferred = f.run(['--host', 'codex', '--target', 'codex', '--no-target-check', '--skip-tests'], { FAKE_CODEX_AUTH_FAIL: '1' });
   assert.equal(deferred.status, 0, deferred.stdout + deferred.stderr);
