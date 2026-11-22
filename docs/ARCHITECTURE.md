@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-11-17
+Last updated: 2026-11-22
 
 ## Goal
 
@@ -172,31 +172,25 @@ Only `ModelSelectionUnacknowledged` and `ModelSelectionMismatch` become
 `CAPABILITY_UNAVAILABLE` for effort selection; HTTP, transport and session errors
 remain `HistoryUnavailable`.
 
-Antigravity also has null static levels. Its descriptor derives the family and
-levels from the session's advertised model options. It validates **before**
-`session/set_config_option`, after new/load has returned the current options.
-Effort chooses the level regardless of the suffix in the requested model id.
-The reported `currentValue` confirms the selected model and its advertised level
-suffix supplies effective effort. Selection is reapplied after load, which forgets
-the model. The shared ACP adapter calls descriptor hooks without companion-id
-branches. ACP preserves JSON-RPC error codes to distinguish provider refusals
-(`MODEL_NOT_ALLOWED`, or `AUTH_REQUIRED` for -32000) from transport failures (`HistoryUnavailable`); only a
-model confirmation mismatch maps to `CAPABILITY_UNAVAILABLE` when effort is encoded in the model id.
-SPEC-2 does not measure pre-turn write durability for OpenCode or
-Antigravity; both paths treat selection writes as persistent, so refusal is safe
-either way. Their fakes persist writes before any prompt to test this ordering.
+Copilot and Antigravity select the session's `model` option and check its
+`currentValue`. A refused or unconfirmed model returns `MODEL_NOT_ALLOWED`.
+Both have null static effort levels. The adapter reads the selected model's
+`thought_level` option, validates the requested level against its offered values,
+then writes it with `session/set_config_option`. A missing option or a
+`currentValue` mismatch returns `CAPABILITY_UNAVAILABLE`. Inherited effort also
+comes from `currentValue`. ACP preserves -32000 as `AUTH_REQUIRED` and reports
+transport failures during session setup as `HistoryUnavailable`.
 
-ACP sessions advertising a config option with category `thought_level` use its
-offered values and id. Effort is validated before a config write, applied through
-`session/set_config_option`, and the returned `currentValue` must match or the
-adapter refuses `CAPABILITY_UNAVAILABLE`. Inheritance also reports `currentValue`.
-Copilot uses this generic path, has null static `effortLevels`, and receives no
-spawn effort flag. An explicit effort without an advertised option or descriptor
-selection path refuses capability rather than silently inheriting. Antigravity
-continues using its model-suffix descriptor because it advertises no thought-level
-option. Copilot checks effort against the options returned for the selected model.
-Copilot cold follow-up remains unsupported. Claude rejects off-enum effort
-before spawn; its CLI selection persistence is not measured here.
+Antigravity's model list depends on the account. Measured 2026-11-22 on agy
+1.5.13, macOS, this account offered `gemini-3.8-flash`, `claude-sonnet-4-6`,
+`claude-opus-4-6-thinking` and `gpt-oss-120b-medium` in the `model` option.
+The separate `models.availableModels` list still had suffixed Gemini ids.
+The adapter uses the session options. Gemini 3.8 Flash offered `low`, `medium`
+and `high` as thought levels. A reload reset effort to the default, so the
+adapter reapplies both overrides after each load.
+Copilot receives no spawn effort flag. Its cold follow-up remains unsupported.
+Claude rejects off-enum effort before spawn. Its CLI selection persistence
+was not measured here.
 
 `records.begin` records the attempted effort on the execution and retains the
 conversation's previous effort. The controller saves the new override only after
@@ -310,7 +304,7 @@ Each job owns a new process, including the HTTP and ACP providers.
 | Codex CLI | `codex app-server` over stdio | `thread/resume` | Steer, queue, interrupt; steer accepted and confirmed are separate | Explicit override, otherwise inherited; effective model/effort recorded | Saved thread id and vendor rollouts |
 | OpenCode 2.x only | Private `opencode serve` on loopback | Saved session id | Steer, queue, interrupt | `provider/model`, optional variant; resolved model verified | Vendor-persisted session |
 | GitHub Copilot CLI | `copilot --acp` | `FOLLOWUP_UNSUPPORTED` until cold load is qualified | Unsupported | Inherit or select an advertised session model | Session id retained; cross-process load unqualified |
-| Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Queue, interrupt; live qualification pending | Session config option after both new and load | SQLite conversations under `~/.gemini/antigravity-acp/conversations/` |
+| Google Antigravity | `agy acp` over stdio | `session/load` with history replay | Steer (default), queue, interrupt | `model` and `thought_level` after new and load | SQLite under `~/.gemini/antigravity-cli/conversations/` |
 | Claude Code | `claude -p` stream-json over stdio | `--resume` saved session id | Queue, interrupt (`send_now`) | Explicit override, otherwise inherited | Native session id and transcripts |
 
 OpenCode validates the 2.x authenticated `/api` contract and runtime pid. Its
@@ -331,11 +325,16 @@ bridge; catalog's Codex entry and status expose `contractStatus` as
 `match|drift|unverified`. A version-only change is not schema drift.
 
 ACP pins protocol v1. The descriptor supplies argv, permissions, usage and model
-rules; the adapter handles `session/request_permission` itself. Antigravity
-reapplies an explicit model after each history load and verifies acknowledgement.
-Copilot's advertised load capability alone is insufficient: cold follow-up remains
-refused pending account resolution and qualification. ACP does not simulate steer
-by cancelling and re-prompting. Usage is absent when the provider reports none.
+rules. The adapter handles `session/request_permission` itself. Copilot cold
+follow-up remains refused pending account resolution and qualification.
+
+Antigravity steers with a second `session/prompt` on the running session. The CLI
+answers the first prompt with `end_turn` at once and continues the work under the
+new prompt. The bridge sums usage from both responses into the same turn. Queue
+waits for the turn to finish. Interrupt sends `session/cancel`, then the bridge
+prompts with the new text. All three were measured 2026-11-22 on agy 1.5.13,
+macOS. A fixed-choice question arrives as plain reply text and ends the turn.
+The parent answers with a follow-up.
 
 Claude Code pins a UUID with `--session-id` for fresh history and uses `--resume`
 for saved history. Each user message also has a UUID, returned as `nativeTurnId`
@@ -409,7 +408,7 @@ processes. The provider factories create an adapter with this interface:
 | `interrupt({ drain } = {})` | Request native turn interruption; `drain: true` waits for the turn boundary before another prompt. Stop-time interruption acknowledges promptly. Never signal a process. |
 | `close()` | Close protocol channels; process termination belongs to the supervisor. |
 | `capabilities` | `{ followUp, modelSelection, loadsHistory, interventions }`; `interventions` references the target registry's `{ default, steer, queue, interrupt }`, with queue `false`, `bridge` or `native`. Unsupported history load refuses follow-up. |
-| `steer({ text, id })` | Supported by Codex and OpenCode; Codex reports acceptance separately from observed confirmation. |
+| `steer({ text, id })` | Supported by Codex, OpenCode and Antigravity. Codex reports acceptance separately from observed confirmation. |
 | `intervene(input)`, `hasPendingInput()` | Native queue/interrupt delivery and pending-turn observation, used for Claude. Other supported queues are held by the controller. |
 
 The one startup exception is Claude: `start` receives the saved `historyId` so it
@@ -417,8 +416,9 @@ can choose `--session-id` versus `--resume` at spawn. Other adapters ignore that
 argument. Claude's `openHistory` checks that a saved transcript exists; delivery
 then checks the session id from init. Init cannot be awaited before sending input.
 
-ACP's prompt response is terminal, so an earlier native session update or
-permission request supplies its delivery acknowledgement. ACP has no native turn id:
+Copilot can acknowledge ACP delivery with a session update or permission request.
+For Antigravity the adapter writes a receipt request immediately after each
+prompt. The response proves the CLI read past the prompt. ACP has no native turn id:
 its JSON-RPC prompt id is retained as `nativeRefs.promptRequestId`. Retryable provider
 errors remain progress. Usage uses `lib/usage.mjs`'s shared counters and optional
 model/cost fields; absent usage is never invented as zero.
@@ -530,10 +530,20 @@ unavailable sections. Unverified cleanup produces no end snapshot. The bridge-lo
 watcher does not compute a summary.
 
 Codex, Claude and OpenCode items are selected by the acknowledged native turn id;
-Copilot uses the whole execution-private session; Antigravity uses item creation
-times at or after execution start. Only Copilot's measured false completion is
-corrected: a native error item changes a completed outcome to `failed`, with
-`provider_error`, its native error type and an appended native error message.
+Copilot uses the whole execution-private session. Antigravity uses item creation
+times at or after execution start. Its live view, work summary and digest read
+`~/.gemini/antigravity-cli/conversations/<sessionId>.db`, a SQLite database
+keyed by `cascade_id` with protobuf step payloads. Step 14 is user input, 15 a
+planner response, 132 any tool, 17 an error and 101 a system message. Status 2
+means running, 3 done, 6 cancelled, 7 failed, 8 generating and 9 waiting for
+approval. A subagent's commands and edits live in its own conversation. The
+parent job's work summary reads only the parent's transcript for those items.
+
+For any companion, a native error marked as ending the turn changes a completed
+outcome to `failed` with cause `provider_error` and the native error type and
+message. On agy a corrupt image returned `end_turn` with
+`INVALID_ARGUMENT (code 400)` as reply text and a final error step. An error
+retried before an answer stays in the work summary and the turn stays completed.
 
 Claude keeps its own transcripts under `~/.claude/projects` (or
 `CLAUDE_CONFIG_DIR/projects`). The bridge stores only the native session id as
@@ -578,6 +588,46 @@ The `plan_path`, profile-selection, exec, broker and daemon measurements below
 are historical evidence for designs retired on 2026-11-05. They are not current
 components or survival guarantees. Implementation-specific entries are labelled;
 full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION.md).
+
+**Antigravity ACP (measured 2026-11-22 on agy 1.5.13, macOS)**
+
+- **Answering permission requests cannot keep a run unattended.** In the
+  default session mode a subagent waited for tool approval, but its
+  `session/request_permission` never reached the client. The bridge's default
+  policy, `all`, launches `agy acp --dangerously-skip-permissions`. With `edit`
+  or `none`, the bridge answers the parent's requests with `allow` or `deny`.
+  A denied call ends the turn with no reply text. Diagnostics mark both
+  policies unready for unattended work because a child can wait indefinitely.
+- **`end_turn` can arrive while work is running.** A command that outlasted
+  its model-chosen `WaitMsBeforeAsync` (3–10 s) went to the background. A
+  subagent launch did the same. The prompt returned a placeholder, then the
+  real answer streamed later with no prompt open and no response frame.
+  The model can instead poll the command inside the prompt and end normally
+  with full usage (measured at the default thinking level).
+  At `end_turn`, check for a command still running, a background task still
+  running, or a subagent that has not reported back. If any remain, keep the
+  turn open. Otherwise end normally.
+  A non-daemon `execute` call stays open until completed, failed or cancelled.
+  A native subagent stays open until its report appears in the parent's
+  messages directory or its record is marked killed. A child can still be
+  `ALIVE` after reporting. Neither an `IsDaemon` command nor a pending
+  `ask_question` holds the turn. Once nothing is open, a `usage_update` with
+  no subsequent tool call ends the turn after 3 s of quiet. A reply that ends
+  as text with no usage update, as an upstream error does, ends the turn after
+  120 s of quiet. Silence with no reply text never ends it: the agent may be
+  retrying upstream. Interrupt sends `session/cancel` and ends the turn. The
+  CLI killed the command without a reply.
+- **A successful `session/load` can open an empty session.** A fresh process
+  replayed known history before answering the load. An unknown id also
+  succeeded, with zero replayed updates. The adapter requires at least one
+  update for the requested id before the response or returns `HistoryUnavailable`.
+  `session/resume` worked but replayed nothing. The bridge uses `session/load`.
+- **The first session update cannot prove prompt delivery.** Setup updates can
+  cross the prompt write. The wire then stayed silent until first model output,
+  normally 2–4 s, or 70 s while Google retried "No capacity available". After
+  each prompt the adapter writes `_agent_companion/received`. The CLI answered
+  "Method not found" immediately while the prompt ran, proving it read past
+  the prompt. The adapter can still acknowledge earlier on a same-session update.
 
 **Owner silence (2026-11-19, Claude Code 2.1.328, codex-cli 0.170.0)**
 
@@ -637,6 +687,8 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
   `session/load` forgets the selected model. Reapply after load, validating the
   family and level before any config-option write. Pre-turn durability was not
   measured; the ordering protects native history if the write persists.
+  **Superseded 2026-11-22:** agy 1.5.13 offers a separate `thought_level`
+  option. The adapter no longer derives effort from a model id suffix.
 - **Copilot's CLI enum is not its model's effort support (1.0.109, 2026-11-12).**
   Local Ollama BYOK bypassed the account's GitHub-hosted `session/new` 403. The
   session advertised thought levels `low|medium|high|xhigh|max`. Both spawn
@@ -904,7 +956,12 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   reports turn tokens under the response's `_meta.quota.token_count`, not an
   update. Google's agy_acp_server 1.1.1 reports neither: its response is only
   `{stopReason}` and internal usage frames appear on stderr, which the bridge
-  does not parse (measured 2026-09-11). Antigravity jobs carry no `usage`.
+  does not parse (measured 2026-09-11). Antigravity jobs carried no `usage`.
+  **Superseded 2026-11-22:** on agy 1.5.13, `usage_update` reports context
+  occupancy. Prompt responses report input, output, cache read, cache write,
+  thought and total tokens. The bridge includes cache reads in input.
+  Work continuing after `end_turn` has no further prompt
+  counters, so the bridge marks usage partial. The corrupt-image turn had no usage.
 - **An agent advertising `loadSession: true` does not mean its sessions survive its
   process.** Copilot CLI 1.0.83 advertises it (measured) and its sessions are
   process-local (github/copilot-cli#1767). Which is why `session/load` is a
@@ -912,6 +969,8 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   the advertisement alone: Copilot false; the fake agent's descriptor true; Antigravity
   true, and measured to mean it — a fresh `agy_acp_server.par` process loads the id,
   replays twelve updates of history and answers the follow-up from memory.
+  **Superseded 2026-11-22:** `agy acp` replays its own saved histories. A load
+  with no replay is refused, including a follow-up to an old `.par` conversation.
 - **A v2 `initialize` request is answered with `protocolVersion: 1`.** By both agents
   measured (Copilot 1.0.83, Gemini 0.59.0; the spec says an agent answers with the
   latest version it supports), so a client cannot probe for v2 support by asking — and
@@ -919,6 +978,7 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   agy_acp_server 1.1.1 does the opposite: it answers 1 when asked 1 and 2 when asked 2
   (measured 2026-09-11), so a forum report that it "negotiates protocolVersion 2" was
   the client asking for 2. Either way the pin holds at the handshake.
+  **Superseded 2026-11-22:** agy 1.5.13 answers version 1 when asked for 1 or 2.
 - **Antigravity's CLI and ACP server are different products.** Measured 2026-09-11:
   `agy` has no ACP mode; the registry's `antigravity-acp` launches Google's signed
   `agy_acp_server.par`, which is the second ACP companion. The Gemini CLI comparison
@@ -927,8 +987,8 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   authentication and terms evidence belongs in `docs/MVP_TRACKER.md` item 8.
   **Superseded 2026-11-17:** Homebrew `agy` 1.5.9 has an `acp` subcommand, and
   Google's ACP page registers `agy acp` for every client except Android Studio.
-  The move to it is decided and paused (tracker decision 8); until then the
-  1.1.1 measurements above describe the shipped runtime.
+  **Superseded 2026-11-22:** the companion now launches Homebrew `agy acp`
+  (tracker decision 8). The CLI has its own login and conversation store.
 - **A model is not always a spawn flag.** Google's agy_acp_server 1.1.1 takes the model
   as a session config option (`session/set_config_option`, id `model`; `session/set_model`
   answers too) and a `session/load`ed session comes back on the default model (measured
@@ -940,6 +1000,8 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   makes `session/new` advertise that id. The bridge starts Copilot without the
   flag and uses the same `acp.setModel` hook. The session refuses unadvertised
   ids with -32602. The bridge checks the returned `currentValue` before delivery.
+  **Superseded 2026-11-22:** agy 1.5.13 takes the model and
+  effort as separate session options. The bridge reapplies both after a load.
 - **A codex role file accepting `mcp_servers` does not mean the child gets it.** The Codex
   subagents docs say a custom agent file may declare `mcp_servers`. Read against rust-v0.153.4
   (2026-09-09): the role parser (`codex-rs/agent-roles/src/agent_role_config.rs`) flattens the

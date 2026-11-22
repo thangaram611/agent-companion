@@ -72,7 +72,7 @@ real runtime. It is no longer a release gate; current probes are listed in `prob
 - ACP: qualify protocol and transport changes before changing the v1 pin or
   cold-runtime lifecycle. Agent-advertised session loading is insufficient;
   verify that the vendor's sessions survive its process.
-- Antigravity: recheck Google's client-access terms and the registry server's
+- Antigravity: recheck Google's client-access terms and the `agy acp` runtime's
   model, permission, usage and session-loading behaviour before an upgrade.
 - Usage: record paired findings and durations while available. The retention
   limits in [MVP Limitations](MVP_TRACKER.md#mvp-limitations) prevent the retained records and

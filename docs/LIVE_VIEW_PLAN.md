@@ -43,14 +43,16 @@ Measured in isolated homes unless noted. Spike artefacts are under `/tmp`
 | Claude Code 2.1.325 | `$CLAUDE_CONFIG_DIR/projects/<dir>/<sessionId>.jsonl` | JSONL; `user`, `assistant`, `system`, `attachment` and bookkeeping records | Yes, per message: measured for an interactive session (read-only) and for the bridge's non-bare `-p` companion in an isolated home | The adapter already scans for it (`claudeTranscriptExists`) | Message records carry `version` (e.g. `2.1.325`); bookkeeping records do not |
 | Copilot 1.0.112 | `$COPILOT_HOME/session-state/<sessionId>/events.jsonl` | JSONL; `user.message`, `assistant.turn_start/end`, `assistant.message` (whole, no deltas), `tool.execution_start` (with the command) and `tool.execution_complete` (exit code, output), `session.usage_record` | Yes, at event boundaries: a running tool is on disk from its start; text lands when the message completes | Directory name equals the ACP session id (measured) | `session.start` carries `version: 1`, `producer`, `copilotVersion` |
 | OpenCode 2.3.0 | `opencode.db` (`OPENCODE_DB` or XDG data) | SQLite; `session_v2`, `session_message` rows ordered by `seq`, JSON `data`; types `user`, `assistant` (with `content`), `idle`, `model-switched`, `agent-switched` | Rows are created when a step starts and updated when it completes (1–3 s later); updates in between were not observed | Session id | Latest `migration.id` |
-| Antigravity 1.1.1 | `$GEMINI_HOME/antigravity-acp/conversations/<sessionId>.db` | SQLite (WAL); `steps(idx, step_type, status, step_format, step_payload…)`; payloads are protobuf with no published schema | Yes, per step: a running command is on disk with status 2 and flips to 3 when done (measured on a live bridge job, the operator's real home) | File name equals the bridge's history id, the ACP session id (measured) | `step_format`, and the field numbers below |
+| Antigravity 1.1.1 (superseded) | `$GEMINI_HOME/antigravity-acp/conversations/<sessionId>.db` | SQLite (WAL); `steps(idx, step_type, status, step_format, step_payload…)`; payloads are protobuf with no published schema | Yes, per step: a running command is on disk with status 2 and flips to 3 when done (measured on a live bridge job, the operator's real home) | File name equals the bridge's history id, the ACP session id (measured) | `step_format`, and the field numbers below |
 
-Antigravity is the weak link: its steps are undocumented protobuf. A schema-less
+The following decoder measurements describe the retired 1.1.1 server. For the
+CLI store and step types measured 2026-11-22 on agy 1.5.13, macOS, see
+[Architecture](ARCHITECTURE.md#state). A schema-less
 wire decode read everything needed from a live job: step type 14 is user input
 (text at field 19.2); 15 is the model's reply (text at 20.1, model id at 5.24.8,
 tool calls at 20.7 with id, name and JSON arguments); 21 is a command (command
 line at 28.23, output at 28.21, cwd at 28.2). Status 2 is running and 3 is done.
-These field numbers are the reader's fixture; any unknown step type or missing
+These field numbers were the reader's fixture; any unknown step type or missing
 field yields "format unrecognized", never a guess.
 
 ### Interventions
@@ -60,7 +62,7 @@ field yields "format unrecognized", never a guess.
 | Codex | Steer: `Enter` submits immediately, `Tab` queues (`codex-rs/tui/src/bottom_pane/chat_composer.rs` at rust-v0.169.0; `steer` feature graduated) | `turn/steer`; spike: mid-turn input restarted generation inside the same turn | `turn/interrupt`, then `turn/start` on the same thread | Existing |
 | Claude Code | Queue. A message written during a tool call joined the same turn after the tool finished, as "The user sent a new message while you were working"; written during final text it ran as the next turn | Effectively, at tool boundaries | `interrupt` with `send_now: true` started a new turn on the same session | Existing; `cancel_async_message` drops a queued message |
 | OpenCode | Steer: a prompt sent mid-turn is acknowledged `delivery: "steer"` and reaches the model between steps of the same run | Measured (2.3.0) | Abort, then a prompt with only the new text: measured | Existing |
-| Antigravity | ACP runs one prompt at a time: queue | No | `session/cancel`, then load and prompt | Existing |
+| Antigravity (agy 1.5.13) | Steer | Second `session/prompt` mid-turn | `session/cancel`, then prompt on the same session | Existing |
 | Copilot | Follow-up is refused (`FOLLOWUP_UNSUPPORTED`) | No | No | Existing |
 
 Step 3's measurements (2026-11-15; Claude 2.1.325, Codex 0.169.0, OpenCode
@@ -92,7 +94,8 @@ Step 3's measurements (2026-11-15; Claude 2.1.325, Codex 0.169.0, OpenCode
   speaking WebSocket (measured: `101 Switching Protocols` on `/rpc`). OpenCode:
   `opencode --server <url> --session <id>` with `OPENCODE_PASSWORD` attached and
   steered; its input was visible to the bridge as `session.inbox.enqueued`.
-  Claude only attaches `--bg` sessions. Copilot and Antigravity have none.
+  Claude only attaches `--bg` sessions. Copilot and the retired Antigravity
+  1.1.1 server had none in this measurement.
   Neither working option has a read-only mode.
 - **A bridge-written event log.** It would duplicate the transcript.
 - **MCP progress as the main view.** It is one line. Claude shows the message in
@@ -176,8 +179,9 @@ Outcome (2026-11-15):
 - Verified through the real bridge in isolated homes for Codex, Claude,
   OpenCode and Copilot: work summaries, the git diff-stat in a git worktree, and
   `agent-digest://` rendered on demand with no `runtime/digests/` written.
-- Not captured: an Antigravity provider failure; OpenCode row updates between a
-  step's start and completion.
+- Not captured in this step: an Antigravity provider failure (reproduced on
+  2026-11-22 with a corrupt image), or OpenCode row updates between a step's
+  start and completion.
 - For Step 2: an incremental JSONL read re-parses the whole file to keep tool
   joins and turn ids right, then returns only new items. The 10,000-line gate
   must include that cost.
@@ -316,8 +320,8 @@ Design (decided 2026-11-15, after the measurements above):
   `turn/start`), interrupt (`turn/interrupt` then `turn/start`). Claude queue
   (written at once; Claude decides same or next turn), interrupt (`send_now`).
   OpenCode steer (mid-turn prompt), queue, interrupt (abort then prompt).
-  Antigravity queue and interrupt (`session/cancel` then prompt), to qualify
-  live. Copilot cancel only.
+  Antigravity steer (mid-turn prompt), queue and interrupt (`session/cancel`
+  then prompt), all measured live on agy 1.5.13. Copilot cancel only.
 - The user's path is an inbox file (0600) in the owning host's state, read on
   the controller tick like stop markers. Messages are accepted only while the
   job runs and the owner has not stopped; otherwise the inbox entry is refused

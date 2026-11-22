@@ -30,7 +30,7 @@ calls, instead of asking for each call. Claude Code calls it Code Mode
    | Codex | Already native; accepted and reported, nothing switched | Keep Codex's own browser tools | Remove them for the run if a per-run switch exists |
    | OpenCode | Already native (`execute`); accepted and reported | Its docs tie the built-in `browser` namespace to the desktop app, so chrome-devtools-mcp | Deny the `browser` catalog |
    | Copilot | `CAPABILITY_UNAVAILABLE` | chrome-devtools-mcp through ACP `mcpServers` | Nothing to remove |
-   | Antigravity | Refused while its work is paused | Refused while paused | Unchanged |
+   | Antigravity | Unexamined in this plan | Unexamined in this plan | Unchanged |
 
 3. **The external browser is chrome-devtools-mcp**, started with `--headless
    --isolated --no-usage-statistics --no-performance-crux` and
@@ -209,7 +209,7 @@ Hooks were passed inline with `--settings`.
   Code Mode work in progress. Off by default in every build`. Not run live.
 - **Copilot.** No code-mode strings in the binary. The ACP adapter sends
   `mcpServers: []` on `session/new` and `session/load` today.
-- **Antigravity.** Not examined; its work is paused.
+- **Antigravity.** Not examined during the pause. Work resumed on 2026-11-22.
 
 ### Browsers
 

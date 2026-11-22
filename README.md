@@ -98,7 +98,7 @@ The table below is the current capability contract.
 | OpenCode 2.x | Private authenticated `opencode serve` | Saved session | Steer, queue, interrupt | `provider/model`, optional variant | Vendor-persisted session |
 | GitHub Copilot CLI | `copilot --acp` | Unsupported until qualified | Unsupported | Inherit or select a model advertised by the session | Session id retained; cold load unqualified |
 | Codex CLI | `codex app-server` | `thread/resume` | Steer, queue, interrupt | Inherit or explicit override | Native thread and rollouts |
-| Google Antigravity | `agy_acp_server.par` over ACP | `session/load` | Queue, interrupt (live qualification pending) | Session model after new/load | Native SQLite history |
+| Google Antigravity | `agy acp` over stdio | `session/load` with history replay | Steer, queue, interrupt | Session model and thought level after new/load | Native SQLite history |
 | Claude Code | `claude -p` | `--resume` saved session | Queue, interrupt | Inherit or explicit override | Native transcripts |
 
 All support send, wait, status and cancel. Every job starts in a new process;
@@ -156,20 +156,24 @@ Configuration:
   Codex does not forward the shell environment to the bridge, so on the Codex
   host use a saved default to pin a model across conversations. These model env
   knobs take no effect there; explicit per-request model choices still work.
-- Install and sign in to Antigravity with
-  `node scripts/install-antigravity-acp.mjs --login`. It verifies Google's
-  signature on macOS and installs under
-  `~/.local/share/agent-companion/antigravity-acp/`;
-  `ANTIGRAVITY_ACP_BIN` overrides the binary. Credentials remain with the
-  server under `~/.gemini/antigravity-acp/` and the login keychain.
-  `AGENT_COMPANION_ANTIGRAVITY_PERMISSION=all|edit|none` controls permission
-  answers (default `all`). Use the real project cwd: its sandbox resolves
-  symlinks. Model selection is reapplied after each history load. Google's
-  FAQ names Claude Code among third-party software that must not use an
-  Antigravity login, and calls wrapping `agy` in third-party agents unsupported
-  on consumer plans; suspension or termination of the account is the stated
-  risk, and it is the account holder's. The
-  account/terms assessment remains [tracker item 8](docs/MVP_TRACKER.md).
+- Install Antigravity with `brew install --cask antigravity-cli`. Sign in with
+  `agy acp --login` in a terminal or start one interactive `agy` session.
+  Without a login, `session/new` returns -32000 "Authentication required" and
+  the bridge reports `AUTH_REQUIRED`. Set `ANTIGRAVITY_BIN` to override `agy`.
+  It replaces `ANTIGRAVITY_ACP_BIN`. The CLI keeps its default profile and
+  conversations under `~/.gemini/antigravity-cli/`. On macOS, sign-in leaves
+  a keychain item with service `gemini` and account `antigravity`.
+  The old `.par` installer, `scripts/install-antigravity-acp.mjs`, was removed.
+  Sign in again after migrating. Start a new conversation because the CLI
+  cannot continue histories in `~/.gemini/antigravity-acp/`.
+- `AGENT_COMPANION_ANTIGRAVITY_PERMISSION` defaults to `all`, which launches
+  `agy acp --dangerously-skip-permissions`. With `edit` or `none`, the bridge
+  answers the parent agent's requests, but a subagent can wait indefinitely
+  for an approval the bridge never receives. Diagnostics mark both policies
+  unready for unattended work. Google's FAQ names Claude Code among third-party
+  software that must not use an Antigravity login. It calls wrapping `agy` in
+  third-party agents unsupported on consumer plans. The account holder accepts
+  the risk of suspension or termination. See [tracker item 8](docs/MVP_TRACKER.md).
 
 See [Architecture](docs/ARCHITECTURE.md) for protocol and lifecycle details,
 and [Diagnostics](#diagnostics) for installation problems.
@@ -229,10 +233,8 @@ See the [release gates](docs/RELEASE_READINESS.md#release-gates).
 - At least one companion runtime:
   - OpenCode on `PATH`, or `OPENCODE_BIN=/absolute/path/to/opencode`.
   - GitHub Copilot CLI on `PATH`, or `COPILOT_BIN=/absolute/path/to/copilot`.
-  - Google's Antigravity ACP server, installed by
-    `node scripts/install-antigravity-acp.mjs` (or
-    `ANTIGRAVITY_ACP_BIN=/absolute/path/to/agy_acp_server.par`) and signed in
-    with `--login`.
+  - Antigravity CLI on `PATH`, or `ANTIGRAVITY_BIN=/absolute/path/to/agy`,
+    signed in with `agy acp --login`.
   - Codex CLI on `PATH`, or `CODEX_BIN=/absolute/path/to/codex`, authenticated
     via `codex login` (ChatGPT plan) or an API key.
   - Claude Code `claude` on `PATH`, or `CLAUDE_BIN=/absolute/path/to/claude`,
@@ -244,7 +246,8 @@ See the [release gates](docs/RELEASE_READINESS.md#release-gates).
 OpenCode authentication and provider setup stays inside OpenCode. Copilot
 authentication stays inside Copilot CLI. Codex authentication stays inside
 Codex CLI. Claude authentication stays inside Claude Code. Antigravity
-authentication stays inside Google's ACP server and the login keychain. Agent Companion does not ask for or store provider secrets.
+authentication stays inside Google's CLI. Agent Companion does not ask for or
+store provider secrets.
 
 ## Fast Path
 
@@ -498,13 +501,12 @@ subagent relays them and stops instead of changing the request to get around the
 
 Name effort naturally, for example "use Claude with low effort". All five
 companions accept `effort`. Claude accepts `low`, `medium`, `high`, `xhigh`, `max`;
-Copilot validates per-model levels from its ACP `thought_level` option before
-writing `session/set_config_option`, then confirms the reported value. Its CLI
-enum is not a model capability list. Codex catalog models, OpenCode and Antigravity
-also validate offered levels before delivery. Codex uses thread config, OpenCode uses an advertised
-model variant, and Antigravity uses an advertised model id with a level suffix.
-For OpenCode and Antigravity, effort chooses the level even if the model string
-names a different variant or suffix; selected and effective models show the result.
+Copilot and Antigravity validate effort against the selected model's ACP
+`thought_level` option, then confirm its `currentValue`. Antigravity reapplies
+the requested model and effort after each load. Codex catalog models and
+OpenCode also validate offered levels before delivery. Codex uses thread config.
+OpenCode selects an advertised variant. An effort override takes precedence
+over a variant in the model string.
 Invalid levels return `EFFORT_NOT_ALLOWED` with the offered levels or an
 omit-effort hint. An effort confirmation mismatch returns
 `CAPABILITY_UNAVAILABLE`; transport and history failures remain separate.
@@ -527,12 +529,13 @@ effort leaves the previous effort override or inheritance intact.
 It includes `target`, `selected_model`, `selected_effort`, `effective_model`,
 `effective_effort` and `permission_mode`. Selected fields are overrides; effective
 fields reflect provider reports and are null when unknown. Claude reports its
-model at init but does not report effective effort. Copilot reports its advertised
-thought level. OpenCode queries variants only for an effort override, then derives
-effective effort from the reported variant settings; inheritance leaves it null.
-Antigravity derives effort from the reported model’s advertised level suffix. Catalog permissions use the
-same resolver as launch and onboarding diagnostics. Per-job status also includes
-`selected_effort`, `permission_mode` and `activity`: Claude can report `thinking`,
+model at init but does not report effective effort. Copilot and Antigravity
+report the session's thought level. OpenCode queries variants only for an effort
+override and derives effective effort from the reported variant settings.
+Inheritance leaves it null.
+Catalog permissions use the same resolver as launch and onboarding diagnostics.
+Per-job status also includes `selected_effort`, `permission_mode` and `activity`.
+Claude can report `thinking`,
 `responding`, `running <command>` or `retrying`; other companions fall back to
 command/text activity. Thinking content is never included, and terminal activity is null. An identical
 retry on the same in-flight job reattaches to its delivery acknowledgement.
@@ -596,8 +599,11 @@ Codex app-server follow-ups report the current turn's usage, not the thread's
 cumulative total. Bridge loss ends that execution; a replacement never resumes
 an in-flight turn. Missing native counters remain absent.
 Copilot uses native prompt counters when available and falls back to OTEL;
-`usage_update` measures context occupancy, not turn tokens. Antigravity's ACP
-surface reports no usage (measured on 1.1.1). OpenCode reports tokens and cost
+`usage_update` measures context occupancy. Antigravity sums each prompt response's
+input, output, cache read, cache write, thought and total tokens. As for other
+companions, the bridge includes cache reads in input. If work continues after
+`end_turn`, the later reply has no counters and usage is marked `partial`.
+The measured upstream error returned no usage. OpenCode reports tokens and cost
 from its native events. Claude Code uses per-turn `result.usage` counters;
 `modelUsage` and `total_cost_usd` include restored history. Cost is therefore
 reported only for fresh history, and a reported cost does not establish a bill.

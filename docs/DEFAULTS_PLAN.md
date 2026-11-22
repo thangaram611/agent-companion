@@ -25,8 +25,8 @@ also see what an "inherit" resolves to before a job runs.
    Claude's `/companion` keeps opening the Companions pane.
 4. **One shared settings file for both hosts.**
 5. **Defaults are applied in one place, routing, for all five companions.** This
-   includes removing Antigravity's own read, which the user approved despite the
-   pause. It gets unit and replay tests only, no live run.
+   included removing Antigravity's own read. The user approved that change
+   during the November 17 pause, with unit and replay tests only.
 6. **Claude's Companions pane opens only when asked or in view.** This replaces
    the live-view plan's "Unasked it opens when a companion job starts". A job
    starting never opens the pane. It opens when the person types `/companion`

@@ -1,6 +1,6 @@
 # MVP Tracker
 
-Last updated: 2026-11-21
+Last updated: 2026-11-22
 
 Current direction: active development of the approved conversational redesign.
 The shipped controller owns one cold provider runtime per execution. Qualification
@@ -79,9 +79,10 @@ remains separate from implementation; see the release gates below.
 
 - Copilot cold follow-up is unsupported (`FOLLOWUP_UNSUPPORTED`) pending account
   resolution and qualification of cross-process history loading. It must not
-  silently open a new conversation. Copilot accepts no interventions;
-  Antigravity and Claude Code support queue and interrupt. Codex and OpenCode
-  also support in-flight steer. Unsupported modes return `reply_unavailable`.
+  silently open a new conversation. Copilot accepts no interventions. Codex,
+  OpenCode and Antigravity default to steer and support queue and interrupt.
+  Claude Code defaults to queue and supports interrupt. Unsupported modes
+  return `reply_unavailable`.
 - OpenCode 1.x is dropped; only the authenticated 2.x HTTP contract is shipped.
 - Codex desktop remains unqualified. TUI-only rows require operator actions:
   compaction, UI stop/restart, native close, suspend/wake and clock observation.
@@ -92,8 +93,9 @@ remains separate from implementation; see the release gates below.
   execute that handoff. Startup never adopts a live/unverified tree.
 - Catalog readiness reflects the last check. Models requiring a session to
   enumerate are reported as such; reading the catalog starts no session.
-- Usage is present only when reported by the provider. Antigravity 1.1.1 reports
-  none. New execution/result records have no one-hour expiry; delivery-queue TTLs
+- Usage is present only when reported by the provider. Antigravity reports
+  prompt counters. Usage is partial if the turn continues after `end_turn`.
+  New execution/result records have no one-hour expiry; delivery-queue TTLs
   and rotating logs do not make a complete adoption/cost history.
 - Silence never ends a job (decision 12). A job whose subagent ended with no stop
   signal (Esc between waits) finishes its current turn; if that turn hangs, it runs
@@ -106,11 +108,15 @@ remains separate from implementation; see the release gates below.
   directory) without bridge cleanup, and follow-ups need those files.
 - Codex rollouts accumulate under `$CODEX_HOME/sessions` without automatic
   cleanup. Sandbox boundaries are in [Architecture](ARCHITECTURE.md#negative-results).
-- Antigravity is paused on `agy_acp_server.par` 1.1.1 (registry: 1.5.0) pending
-  the switch in decision 8. Unreproduced here: t3code reports that Antigravity
-  ends a turn that hit an upstream API error with `end_turn` and the error as
-  reply text, and a quota exhaustion with `refusal`. The bridge would report the
-  first as `completed`.
+- Antigravity open measurements (2026-11-22, agy 1.5.13, macOS):
+  - A corrupt image reproduced an upstream error returned as `end_turn` with
+    the error as reply text. The native terminal error now fails the job.
+    Quota exhaustion remains unreproduced here. t3code reports `refusal`. The
+    adapter fails stop reasons other than `end_turn` and `cancelled`.
+  - The reported roughly 1 GB temporary unpack per launch was not observed on
+    the macOS Homebrew build. The auth probe reports unknown outside macOS.
+  - The reader handles `SUBAGENT_STATE_KILLED`, unseen here. `schedule`
+    timers have not been measured and do not hold a turn open.
 
 ## Decisions
 
@@ -144,14 +150,14 @@ remains separate from implementation; see the release gates below.
    protocol v1 and refuses a different answer; protocol changes need explicit
    adapter qualification.
 
-8. Antigravity uses Google's registry ACP server, `agy_acp_server.par`, with
-   credentials held by that server. The integration is limited to its stdio
-   protocol; the bridge does not reuse the OAuth token or call Google's backend.
+8. **Original decision (registry server).** Antigravity used Google's
+   `agy_acp_server.par`, which held the credentials. The integration was
+   limited to its stdio protocol.
    The [registry entry](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json)
-   names Google as the publisher, and Google's
+   named Google as the publisher, and Google's
    [Zed instructions](https://antigravity.google/docs/ide/extensions/zed)
-   document registry installation with personal OAuth. This is the basis for
-   the integration decision, not an explicit authorization of orchestrators.
+   documented registry installation with personal OAuth. This was the basis
+   for the original integration decision.
    Google's [terms §6](https://antigravity.google/terms) and
    [FAQ](https://antigravity.google/docs/faq) restrict third-party access;
    the FAQ also excludes wrapping `agy -p` in third-party agents on consumer
@@ -159,20 +165,28 @@ remains separate from implementation; see the release gates below.
    Account risk stays with the operator; recheck this boundary before widening
    the integration.
 
-   **Re-read 2026-11-17, switch decided, all Antigravity work paused.** The
-   [FAQ](https://antigravity.google/docs/faq) now names this host directly:
+   **2026-11-17, switch decided and work paused.** On re-read, the
+   [FAQ](https://antigravity.google/docs/faq) named this host directly:
    "Why can't I use third-party software (such as Claude Code, OpenClaw, or
    OpenCode) with my Antigravity login? … a violation of our Terms of Service
    … can result in suspension or termination", and "Wrapping `agy` inside
    third-party coding agents or applications … is not supported under consumer
    plans". For third-party agents it recommends a Gemini Enterprise or AI Studio
    API key. Google's [ACP page](https://antigravity.google/docs/ide/extensions/acp/)
-   says "Any ACP client can launch Antigravity CLI", lists only editors,
-   registers `agy acp` for every client except Android Studio, and no longer
-   mentions `agy_acp_server.par`. The user decided to move to Homebrew
-   `agy acp` and keep the personal Google login, accepting the account risk,
-   with every Antigravity change and live run paused until they resume it.
-   The queued work is in [Next Backlog](#next-backlog).
+   said "Any ACP client can launch Antigravity CLI", listed only editors,
+   registered `agy acp` for every client except Android Studio, and no longer
+   mentioned `agy_acp_server.par`. The user chose Homebrew `agy acp` and the
+   personal Google login, accepted the account risk and paused changes and live runs.
+
+   **2026-11-22, user resumed work and the switch was completed.** The
+   companion launches Homebrew `agy acp`. The user keeps
+   their personal Google login on the default `agy` profile and accepts the
+   account risk. On re-read, Google's ACP page still said "Any ACP client can
+   launch Antigravity CLI" and registered `agy acp` for other clients. The FAQ
+   wording against third-party software on a consumer login was unchanged.
+   The bridge identifies itself as `agent-companion`, never as an editor. It
+   never holds the OAuth token or calls Google's backend. Re-read this decision
+   before widening what the bridge does with that login.
 
 9. Additional companions or transports require recurring use and an adoption
    check; the available paired-review evidence is insufficient to justify expansion.
@@ -195,11 +209,13 @@ remains separate from implementation; see the release gates below.
     natively, from whichever host the owner starts in. About 20% of 300 recent
     jobs used something OpenAI's codex-plugin-cc lacks (follow-ups to a thread
     other than the repo's latest, non-Codex companions, Codex as host). The claim
-    is only as true as the qualified host × companion pairs; Copilot follow-up and
-    Antigravity are known gaps. agent-companion stays TypeScript in its own repo:
-    no merge with vigil, no Rust rewrite, no pause feature. No new work on
-    Claude-host steering, Copilot or Antigravity until records show use. The next
-    milestone is walk-away reliability.
+    is only as true as the qualified host × companion pairs. Copilot follow-up
+    and Antigravity were known gaps on November 19. agent-companion stays
+    TypeScript in its own repo: no merge with vigil, no Rust rewrite, no pause
+    feature. No new work on
+    Claude-host steering or Copilot until records show use. The user resumed
+    Antigravity work on 2026-11-22 (decision 8). The next milestone is walk-away
+    reliability.
 
 12. **Silence never ends a job (2026-11-19).** The 120 s owner grace killed healthy
     owners waiting out an outage under Claude's retry watchdog. Codex and Fable
@@ -268,6 +284,8 @@ remains separate from implementation; see the release gates below.
   Whether a lead loses its plan when its session ends or compacts is unmeasured;
   count that before building job groups. Adopted: both roles now tell the parent
   to write the brief for a reader who has none of its conversation.
+- Regenerate `assets/readme/target-matrix.png`: the image still shows Antigravity
+  without in-flight replies; its prompt in `assets/readme/PROMPTS.md` is current.
 - Regenerate `assets/readme/architecture.png`: the image still says `lease`; its
   prompt in `assets/readme/PROMPTS.md` now says `owner attachment`.
 - Qualify Codex desktop as the third host and finish operator-only TUI rows.
@@ -277,24 +295,6 @@ remains separate from implementation; see the release gates below.
   limits; partial assistant text does not establish what changed on disk.
 - Permission mirroring remains a separate decision: align called-agent access
   with the caller only after the desired policy and acceptance checks are agreed.
-- Antigravity (paused 2026-11-17; resume only on the user's word):
-  1. Switch the runtime to Homebrew `agy acp`. Measured 2026-11-17: `agy` 1.5.9
-     has `acp` with `--login`, `--sandbox`, `--dangerously-skip-permissions`,
-     `--disable-telemetry` and `--process-per-session`. Google documents
-     credentials cached by `agy` and `-32000 "Authentication required"` without
-     them. Re-measure every 1.1.1 fact in Architecture's Negative Results
-     (protocol answer, `session/load` survival, per-session model, permission
-     requests, usage, credential store), then retire
-     `scripts/install-antigravity-acp.mjs` and its probe.
-  2. Reproduce, then fix, the suspected upstream-error-as-success. Capture a real
-     failing turn first, e.g. a model the account cannot use. Evidence so far is
-     t3code's `apps/server/src/provider/acp/AntigravityTurnOutcome.ts`: it names
-     native step type 17 `CORTEX_STEP_TYPE_ERROR_MESSAGE` and reads the turn's
-     last step for `Error <code>, Message: …, Status: …`, `QUOTA_EXHAUSTED` and
-     reset times. Our `lib/transcripts/antigravity.mjs` reads step 17 only as a
-     permission-refused tool call (the one local row, 2026-11-17, is a denial);
-     the controller's native-error override is Copilot-only. The fix would make
-     that override a target-registry setting instead of an id check.
 - Defaults from inside a host (deferred 2026-11-18; the CLI and the live-view
   panel come first, see [Defaults plan](DEFAULTS_PLAN.md)):
   1. Codex skill `agent-companion:companion`. Measured on codex-cli 0.170.0: a

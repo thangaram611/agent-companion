@@ -68,18 +68,16 @@ inherits configuration unless the conversation already has an override. Effort i
 a conversation override too, supported by all five companions. Claude has static
 levels `low`, `medium`, `high`, `xhigh`, `max`. Copilot sets a requested model
 after `session/new` through `session/set_config_option` and confirms `currentValue`.
-A model refusal lists the session's advertised ids. Copilot validates and confirms
-the selected model's ACP `thought_level` option, including reporting inherited effort.
-Codex catalog models, OpenCode and Antigravity validate model-specific levels before delivery.
+A model refusal lists the session's advertised ids. Copilot and Antigravity
+validate and confirm the selected model's ACP `thought_level` and report inherited effort.
+Codex catalog models and OpenCode also validate model-specific levels before delivery.
 Codex levels are unverified for models outside Codex's catalog: it confirms the
 reported effort and lets the backend validate vocabulary during the turn. Before writing any
-selection on existing history, Codex reads its model, OpenCode reads its variants,
-and Antigravity checks the loaded session's advertised model family. OpenCode
-selects a variant; Antigravity selects a model id suffix and reapplies it after
-load. In both, effort overrides any level embedded in the model string. OpenCode
-queries variants only for an effort override; inherited effort stays null. Refused effort is not saved on the conversation or written to native
-selection state. On a new conversation, omitted effort uses the companion's saved
-default, then native configuration. Copilot's spawn effort flag is removed;
+selection on existing history, Codex reads its model. OpenCode queries variants
+only for an effort override, which takes precedence over a variant in the model
+string. Inherited OpenCode effort stays null. Refused effort is not saved on the
+conversation or written to native selection state. On a new conversation, omitted
+effort uses the companion's saved default, then native configuration. Copilot's spawn effort flag is removed;
 the option is validated before a config write.
 Local Ollama BYOK makes Copilot testable; GitHub-hosted model qualification still
 hits this account's `session/new` 403. The isolated free-backend harness is in
@@ -100,11 +98,11 @@ neither start work nor attach the owner nor write execution state.
 
 **Capabilities are provider facts.** Codex uses app-server, OpenCode uses its
 2.x HTTP server, and Copilot/Antigravity use ACP. Claude Code uses its own `-p`
-stream-json protocol; cold follow-up via the saved session. Codex and OpenCode
-support steer (their default), queue and interrupt. Claude and Antigravity
-support queue (their default) and interrupt; Copilot supports cancel only.
-Antigravity interventions still need live qualification. There are no transport-selection knobs. Copilot cold follow-up is refused
-until qualified; Antigravity reloads saved sessions. Routing applies model defaults only on a new conversation. Both hosts share
+stream-json protocol; cold follow-up via the saved session. Codex, OpenCode and
+Antigravity default to steer and support queue and interrupt. Claude defaults to
+queue and supports interrupt. Copilot supports cancel only. There are no
+transport-selection knobs. Copilot cold follow-up is refused until qualified.
+Routing applies model defaults only on a new conversation. Both hosts share
 `settings.json` and its one-shot migration in `lib/state.mjs`.
 
 **Interventions share one controller path.** `agent_reply` accepts an optional
@@ -222,14 +220,11 @@ line, including `not_delivered` messages.
   denies `Agent(agent-companion)` and both bridge namespaces to prevent recursive
   delegation; user settings, hooks and plugins still load. These are protocol
   measurements on 2.1.319, not installed-host qualification.
-- **Antigravity model selection is per session.** `session/load` forgets it,
-  so the adapter applies the descriptor's `acp.setModel` after both new and loaded
-  sessions. The server is Google's `agy_acp_server.par`, installed by
-  `scripts/install-antigravity-acp.mjs`. Re-read `docs/MVP_TRACKER.md` item 8's
+- **Antigravity runs one `agy acp` per job.** Cold `session/load` must replay
+  history. Reapply requested model and thought level after each load. At
+  `end_turn`, keep the turn open while a non-daemon command is running or a
+  subagent has yet to report. Re-read `docs/MVP_TRACKER.md` item 8's
   account/terms assessment before widening what the bridge does with that login.
-  All Antigravity work is paused since 2026-11-17 (switch to `agy acp` decided,
-  queued in the tracker's Next Backlog); no changes or live runs until the user
-  resumes it.
 
 ## Docs
 

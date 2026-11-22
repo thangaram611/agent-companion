@@ -50,8 +50,8 @@ Title `Companion capabilities`. Columns `Companion`, `Transport`, `Follow-up`,
 | Companion | Transport | Follow-up | In-flight reply | Cancel |
 | --- | --- | --- | --- | --- |
 | Codex CLI | app-server | yes | yes | yes |
-| OpenCode 2.x | HTTP server | yes | no | yes |
-| Google Antigravity | ACP | yes | no | yes |
+| OpenCode 2.x | HTTP server | yes | yes | yes |
+| Google Antigravity | ACP | yes | yes | yes |
 | GitHub Copilot CLI | ACP | not yet | no | yes |
 
 Keep this table in step with the capability table in README.md.

@@ -89,7 +89,7 @@ Local BYOK recordings do not qualify GitHub-hosted authentication/model behavior
 
 | script | asserts |
 |---|---|
-| `free-backends/run.mjs [codex\|claude\|copilot\|opencode ...]` | Runs the shared effort probe against local Ollama for Codex, Claude and Copilot, checking each turn's proxy wire effort; OpenCode uses `opencode/flint-40b-free` and provider-reported effort. Defaults to these four companions. Antigravity and its existing probe are untouched. |
+| `free-backends/run.mjs [codex\|claude\|copilot\|opencode ...]` | Runs the shared effort probe against local Ollama for Codex, Claude and Copilot, checking each turn's proxy wire effort; OpenCode uses `opencode/flint-40b-free` and provider-reported effort. Defaults to these four companions. |
 | `free-backends/proxy.mjs` | Runner-owned loopback proxy to local Ollama. Logs only canonical endpoint path and model/effort leaves, without headers, query strings or message content. Importing it opens no listener. |
 
 Install the selected companion CLIs and Ollama using Homebrew. Prepare Ollama
@@ -128,8 +128,8 @@ OpenCode uses its documented [XDG config location](https://opencode.ai/docs/cli/
 and explicit [`OPENCODE_DB` override](https://opencode.ai/docs/troubleshooting/),
 both inside the temporary home, with isolated XDG data/state/cache paths. Its
 free model needs no copied credentials; this isolation choice has hermetic coverage
-and awaits live verification. Antigravity needs its existing login and has no
-custom backend, so this runner does not start it or read its home.
+and awaits live verification. Antigravity uses the signed-in `agy` profile.
+This runner skips it and never reads its home.
 
 Every acquired bridge is stopped before advancing, and the proxy closes on success,
 failure or handled signals (`SIGINT`, `SIGTERM`, `SIGHUP`). Bridge startup failure
@@ -182,7 +182,7 @@ a live provider run.
 |---|---|
 | `smoke.mjs` | Six MCP tools, invalid-model refusal, real Codex app-server work, persisted history and turn ids, native usage, digest content and verified runtime exit. Spends one turn. |
 | `orphan.mjs` | Bridge EOF hands work to the cleanup watcher; verified stopped result survives restart, and status preserves the digest and result. Spends one Codex turn. Does not test uncatchable SIGKILL. |
-| `acp-antigravity.mjs` | Completion without invented usage, cold history reuse in a new process, explicit unsupported-steer refusal, cancellation, acknowledged model selection and bridge-loss cleanup. Requires login and an available model id; spends five turns. |
+| `acp-antigravity.mjs` | Completion with prompt usage and a digest, cold history reuse in a new process, default steer during a command, cancel, a background command's file and final reply, confirmed model selection and bridge-loss cleanup. Logs whether the model waited in the prompt or the bridge kept the turn open. Starts seven jobs. Requires a signed-in `agy` CLI and an available model id. |
 | `claude.mjs` | Catalog/readiness, invalid-model refusal, fresh usage/cost, cold history reuse in a new process without cost, unsupported reply then cancel, and read-only transcript presence. Requires `claude` installed and signed in; budget four Haiku turns. Writes native transcripts into the operator's `~/.claude/projects` for the temporary cwd. |
 | `effort.mjs <target> [model]` | Invalid effort refused before delivery, lowest advertised level with selected/effective metadata, then cold follow-up omitting effort in a new process. Two trivial turns; Copilot skips unsupported cold follow-up and spends at most one. Refreshes target readiness; not run as part of implementation. |
 | `bridge-client.mjs` | Shared stdio MCP client, owner attribution, bounded waits and durable-record reader; no standalone probe. |
@@ -207,9 +207,9 @@ AGENT_COMPANION_HOST=claude node probes/smoke/claude.mjs
 The effort probe obtains dynamic offered levels from the bridge's refusal hint;
 static CLI enums come from the catalog. It fails before the valid send when no
 levels are advertised. Effective effort is required for Codex, OpenCode,
-Antigravity and Copilot; Claude remains unknown unless reported. Copilot's levels
-come from the session model's `thought_level` option; GitHub-hosted session creation
-can fail with this machine's account 403. A skipped
+Antigravity and Copilot; Claude remains unknown unless reported. Copilot and
+Antigravity get levels from the session model's `thought_level` option.
+GitHub-hosted Copilot session creation can fail with this machine's account 403. A skipped
 Copilot cold follow-up is not a pass. To select a model, append its available id
 (OpenCode accepts `provider/model#variant`; effort overrides the variant). These commands
 are hand-run and spend tokens; they have not been executed for this change:

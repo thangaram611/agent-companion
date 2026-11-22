@@ -1,6 +1,6 @@
 # Release Readiness
 
-Last updated: 2026-11-09
+Last updated: 2026-11-22
 
 Release metadata is `0.2.0` in both plugin manifests and the private bridge
 package. Readiness requires the gates below on the reviewed candidate commit;
@@ -20,8 +20,8 @@ not Claude as a companion.
 
 ## Source-Backed Compatibility Notes
 
-Historical installed-version snapshot from 2026-10-26, without model turns
-(not current qualification; the newer host versions are cited above):
+Installed versions from 2026-10-26, except for the Antigravity CLI measurement
+on 2026-11-22. These version checks do not establish release qualification.
 
 | Component | Version | Evidence |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ Historical installed-version snapshot from 2026-10-26, without model turns
 | Codex CLI | 0.164.0 | `/opt/homebrew/bin/codex --version` |
 | OpenCode | 2.1.4 | `opencode --version` |
 | GitHub Copilot CLI | 1.0.103 | `copilot --version` |
-| Antigravity ACP server | 1.1.1 | Installed `current` symlink; version lookup in `scripts/install-antigravity-acp.mjs` |
+| Antigravity CLI | 1.5.13 | `agy --version` on macOS |
 
 Claude Code plugins:
 
@@ -62,8 +62,8 @@ OpenCode companion:
 
 - Only OpenCode 2.x is supported. Each execution starts a private authenticated
   loopback HTTP server, sets OS cwd and `PWD`, and validates the native pid/version.
-  Permissions follow server configuration. Cold follow-up loads a saved session;
-  steer is unsupported. The current wire tests are
+  Permissions follow server configuration. Cold follow-up loads a saved session.
+  Steer sends a prompt during the turn. The current wire tests are
   `bridge-server/adapters/opencode*.test.mjs`.
 - Native provider connections establish local configuration, not provider
   availability or quota. Model validation can remain `unknown` until a real
@@ -116,10 +116,10 @@ Claude Code companion:
 
 Antigravity companion:
 
-- The installer selects the live registry version, so a new install can differ
-  from the installed version above. The adapter applies a pinned model after
-  both session creation and loading and answers permission requests under the
-  descriptor's policy. Usage is absent. Qualify those assumptions on the selected binary. Access and terms boundaries are [tracker item 8](MVP_TRACKER.md).
+- Install with `brew install --cask antigravity-cli` and sign in with
+  `agy acp --login`. Record `agy --version` on the candidate. Check history
+  replay, model and effort after load, prompt usage and the selected permission
+  policy. Access and terms boundaries are in [tracker item 8](MVP_TRACKER.md).
 
 ## Release Gates
 
@@ -128,7 +128,7 @@ Claude companion implementation and qualification are tracked separately:
 | Gate | Status | Evidence / next check |
 | --- | --- | --- |
 | Hermetic adapter and integration suite | Done | 503 tests green at `c8612ae` on Node 22 and 26, including the supervisor pid guard and the normalized-model default fix. |
-| Role templates and documentation | Done | Both hosts name all five companions and agree on Claude cold resume, no in-flight reply and relayed follow-ups; template/parity tests pin the wording. |
+| Role templates and documentation | Done | Both hosts name all five companions and agree on Claude cold resume, default reply modes and relayed follow-ups. Template/parity tests pin the wording. |
 | Live Claude companion smoke from Codex CLI | Done 2026-11-09 | [Report](../probes/host-qualification/claude-companion/REPORT-2026-11-09.md): installed branch plugin on codex-cli 0.167.0; send, relayed follow-up on the same history, refusal, interrupt verified gone. Codex does not forward the shell environment to the bridge, so model env knobs are inert there. |
 | Live Claude companion smoke from Claude Code | Done 2026-11-09 | Same report: nested Claude parent → Claude child, configured default model applied, follow-up relayed, TaskStop interrupt verified gone. |
 | Older Claude Code versions | UNVERIFIED | 2.1.319 measured; the 2.1.259 flag minimum is not full compatibility proof. |
@@ -184,16 +184,18 @@ Manual smoke gates before a public tag (real delegations spend model tokens):
    verifies EOF-triggered watcher cleanup and immutable recovery. The latter is
    not uncatchable SIGKILL coverage. Run doctor before/after an upgrade and record
    the selected executable/helper pair and `contractStatus`.
-9. `node probes/smoke/acp-antigravity.mjs <available-model-id>` verifies cold
-   history reuse in a new process, unsupported-steer refusal, cancellation,
-   acknowledged model selection and bridge-loss cleanup. Requires login and
-   spends five turns. Also qualify a real Copilot first send and usage, then
+9. `node probes/smoke/acp-antigravity.mjs <available-model-id>` starts seven
+   jobs on a signed-in CLI. Check completion with usage and digest, cold history
+   reuse in a new process, default steer, cancel, a background command's file
+   and final reply, model selection and bridge-loss cleanup. The probe logs
+   whether the model waited in the prompt or the bridge kept the turn open.
+   Also qualify a real Copilot first send and usage, then
    explicitly test `FOLLOWUP_UNSUPPORTED`; enable cold load only after its own gate.
 10. OpenCode 2.x: verify new pid plus same native history on follow-up, canonical
     cwd/worktree and symlink cases, model changes and inherited/resolved model,
     transcript boundaries, cancellation and no surviving descendants. Two
     same-provider children must have independent processes and remain isolated
-    when one stops. In-flight steer must refuse explicitly.
+    when one stops. Verify that an in-flight steer reaches the running session.
 11. Across Claude Code, Codex CLI and Codex desktop, qualify two parents, siblings,
     repeated status observers, startup/active-turn/bridge-replacement races,
     every stop/loss trigger, and suspend/wake. Record instruction/result accounting,
