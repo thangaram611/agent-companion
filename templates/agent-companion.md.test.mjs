@@ -40,7 +40,7 @@ test('Claude role names all five companions and explains Claude continuity', () 
   assert.match(parent, /Claude Code host can delegate to a Claude Code companion/);
   assert.match(parent, /separate process with the user's own Claude login and cannot delegate through Agent Companion again/);
   assert.match(prose, /Codex, OpenCode and Claude Code follow-ups resume saved conversations cold/);
-  assert.match(prose, /Codex and OpenCode default to steer; Claude Code and Antigravity default to queue/);
+  assert.match(prose, /Codex, OpenCode and Antigravity default to steer\. Claude Code defaults to queue/);
   assert.match(prose, /Copilot supports cancel only/);
   assert.match(prose, /Send every follow-up to the companion through `agent_send`, even when the earlier reply seems to answer it already/);
   assert.match(prose, /A different companion is a new conversation: this thread stays bound to the companion that started it/);

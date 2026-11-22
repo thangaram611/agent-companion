@@ -153,6 +153,8 @@ const ask = (method, params) => new Promise((resolve) => {
   out({ jsonrpc: '2.0', id, method, params });
 });
 const running = new Map();    // sessionId -> { cancel }
+const batches = env.ACP_FAKE_BATCHES && JSON.parse(env.ACP_FAKE_BATCHES);
+const promptIds = [];
 let nextBatch; // Tests can release a measured sequence of frames at a time.
 
 let buf = '';
@@ -225,6 +227,7 @@ function handle(msg) {
       return;
     case '_agent_companion/received':
       if (env.ACP_FAKE_RECEIPT === 'disconnect') process.exit(9);
+      if (env.ACP_FAKE_RECEIPT === 'silent') return;
       if (env.ACP_FAKE_RECEIPT === 'result') reply({});
       else fail(-32601, 'Method not found: ' + msg.method);
       return;
@@ -285,12 +288,15 @@ async function runPrompt(msg) {
   };
   if (!session) { out({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: 'Session not found: ' + sessionId } }); return; }
   if (running.has(sessionId)) { out({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: 'a prompt is already running on ' + sessionId } }); return; }
-  if (env.ACP_FAKE_BATCHES) {
-    const batches = JSON.parse(env.ACP_FAKE_BATCHES);
+  if (batches) {
+    promptIds.push(msg.id);
     nextBatch = () => {
-      const frames = (batches.shift() || []).map(entry => entry.stopReason
-        ? { jsonrpc: '2.0', id: msg.id, result: { usage: agy.prompt.usage, ...entry } }
-        : update(sessionId, entry));
+      const frames = (batches.shift() || []).map(({ promptIndex = promptIds.length - 1, error, ...entry }) => {
+        const id = promptIds[promptIndex];
+        if (error) return { jsonrpc: '2.0', id, error };
+        if (entry.stopReason) return { jsonrpc: '2.0', id, result: { usage: agy.prompt.usage, ...entry } };
+        return update(sessionId, entry);
+      });
       if (frames.length) process.stdout.write(frames.map(frame => JSON.stringify(frame)).join('\\n') + '\\n');
     };
     nextBatch();

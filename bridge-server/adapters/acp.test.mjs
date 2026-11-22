@@ -95,6 +95,7 @@ for (const fault of ['prompt-error', 'prompt-error-after-ack']) test(`ACP prompt
   const result = await h.finish(await h.send());
   assert.equal(result.outcome, fault === 'prompt-error' ? 'delivery_unknown' : 'failed');
   assert.equal(result.detail, fault === 'prompt-error' ? 'delivery_unknown' : 'prompt refused');
+  assert.equal(Object.hasOwn(result, 'usage'), false, 'a refused request has no prompt counters');
   assert.equal(result.text, fault === 'prompt-error' ? 'prompt refused' : 'ready\n\nprompt refused');
   assert.doesNotMatch(JSON.stringify(result), /SECRET_/);
 });
@@ -527,7 +528,6 @@ test('Antigravity waits for the cancelled prompt response, then sends only new t
   const h = setup(t, { descriptor: getTargetById('antigravity') });
   h.childEnv.ACP_FIXTURE_GATE = join(h.dir, 'release');
   const sent = await h.send({ text: 'sleep:60000 original task' });
-  assert.deepEqual(await input(h, sent, 'steer', 'unsupported'), { ok: false, status: 'intervention_unavailable', reason: 'capability' });
   const replacing = input(h, sent, 'interrupt', 'CONTINUATION\nnew text alone');
   await until(() => h.frames('session/cancel').length === 1);
   assert.equal(h.frames('session/prompt').length, 1);
@@ -550,6 +550,7 @@ test('Copilot refuses every intervention mode without writes, while cancel still
   for (const mode of ['steer', 'queue', 'interrupt']) {
     assert.deepEqual(await input(h, sent, mode, 'not supported'), { ok: false, status: 'intervention_unavailable', reason: 'capability' });
   }
+  await assert.rejects(h.adapters[0].steer({ text: 'unsupported' }), { code: 'DeliveryUnknown' });
   assert.deepEqual(h.records.readExecution(sent.executionId).interventions, []);
   assert.equal(h.frames('session/cancel').length, 0); assert.equal(h.frames('session/prompt').length, 1);
   const result = await h.controller.cancel({ owner: 'child', executionId: sent.executionId });
@@ -655,7 +656,7 @@ test('Antigravity keeps a follow-on reply open across an edit and a slow next mo
   assert.equal((await h.adapter.turn.terminal).text, 'Waiting.\n\nFinal');
 });
 
-test('Antigravity counts the reply bound from the last update, not from when work ended', async t => {
+test('Antigravity ends a follow-on reply that went quiet after text with no usage update', async t => {
   const h = await scriptedAgy(t, [background, [completed('one')], [message('\n\nStill writing')]]);
   await h.begin();
   await h.next();
@@ -667,14 +668,14 @@ test('Antigravity counts the reply bound from the last update, not from when wor
   assert.equal((await h.adapter.turn.terminal).text, 'Waiting.\n\nStill writing');
 });
 
-test('Antigravity waits for the reply bound when completion shares a read with end_turn', async t => {
+test('Antigravity silence after the work ended never ends the turn; an interrupt does', async t => {
   const h = await scriptedAgy(t, [[...background, completed('one')]]);
   await h.begin();
-  await h.clock.advance(119_999);
-  assert.equal(h.adapter.turn.finished, false, 'usage before end_turn does not qualify');
-  await h.clock.advance(1);
+  await h.clock.advance(3_600_000);
+  assert.equal(h.adapter.turn.finished, false, 'the agent may be retrying upstream before its reply');
+  await h.adapter.interrupt();
   const result = await h.adapter.turn.terminal;
-  assert.equal(result.outcome, 'completed');
+  assert.equal(result.outcome, 'interrupted');
   assert.equal(result.text, 'Waiting.');
   assert.equal(result.usage.partial, true);
   assert.equal(h.clock.timers.size, 0);
@@ -718,19 +719,20 @@ test('Antigravity waits for the ALIVE child to report to its parent and for the 
   assert.equal((await h.adapter.turn.terminal).text, 'Waiting.\n\nReported');
 });
 
-test('Antigravity polls native reports without a wire update and bounds the missing reply', async t => {
-  const h = await scriptedAgy(t, [launched], { GEMINI_HOME: '' });
+test('Antigravity polls native reports without a wire update and waits for the parent reply', async t => {
+  const h = await scriptedAgy(t, [launched, [message('\n\nReported'), usageUpdate]], { GEMINI_HOME: '' });
   const dir = childFiles(h, 'SUBAGENT_STATE_ALIVE');
   // The directory already lists this child while its state file is being written.
   writeFileSync(join(dir, '..', 'subagents', 'child.json'), '{');
   await h.begin();
   await h.clock.advance(30_000);
   writeFileSync(join(dir, 'report.json'), '{"sender":"child"}');
-  await h.clock.advance(2000 + 119_999);
-  assert.equal(h.adapter.turn.finished, false);
-  await h.clock.advance(1);
+  await h.clock.advance(600_000);
+  assert.equal(h.adapter.turn.finished, false, 'a report with no reply yet is not the end');
+  await h.next();
+  await h.clock.advance(3000);
   assert.equal(h.adapter.turn.finished, true);
-  assert.equal((await h.adapter.turn.terminal).outcome, 'completed');
+  assert.equal((await h.adapter.turn.terminal).text, 'Waiting.\n\nReported');
   assert.equal(h.clock.timers.size, 0);
 });
 
@@ -806,4 +808,148 @@ test('Antigravity receipt write failure leaves delivery unknown', async t => {
   await h.next();
   assert.equal(failure?.code, 'DeliveryUnknown');
   assert.equal(h.frames('_agent_companion/received').length, 0);
+});
+
+const firstAnswer = { ...endTurn, promptIndex: 0, usage: { inputTokens: 10, outputTokens: 2 } };
+
+test('Antigravity default steer joins the controller turn and sums both prompt answers', async t => {
+  const h = setup(t, { descriptor: getTargetById('antigravity'), clock: new ManualClock(),
+    env: { ACP_FAKE_BATCHES: JSON.stringify([[message('First.')], [command('one'), firstAnswer],
+      [completed('one'), message('\nSecond.'), endTurn]]) } });
+  h.controller.providers.antigravity = h.controller.providers.fake;
+  const sent = await h.send({ provider: 'antigravity' });
+  const supervisor = h.supervisors[0];
+  t.mock.method(supervisor, 'terminate', supervisor.terminate.bind(supervisor, { graceMs: 0 }));
+  const call = async args => (await dispatch(args, { controller: h.controller })).structuredContent;
+  const catalog = await call({ action: 'catalog' });
+  assert.deepEqual(catalog.targets.find(t => t.id === 'antigravity').capabilities.interventions,
+    { default: 'steer', steer: true, queue: 'bridge', interrupt: true });
+  const status = await call({ action: 'status', job_id: sent.executionId });
+  assert.deepEqual(status.interventions, { default: 'steer', steer: true, queue: true, interrupt: true });
+  const text = 'also do this\n  exactly';
+  const ack = await call({ action: 'reply', thread: 'child', job_id: sent.executionId, message: text });
+  assert.equal(ack.accepted, true); assert.equal(ack.confirmed, true);
+  assert.equal(h.records.readExecution(sent.executionId).interventions[0].state, 'joined');
+  assert.deepEqual(h.frames('session/prompt')[1].params, { sessionId: 'fake-sess-1', prompt: [{ type: 'text', text }] });
+  assert.equal(h.frames('_agent_companion/received').length, 2);
+  const adapter = h.adapters[0];
+  assert.equal(adapter.turn.finished, false);
+  assert.equal(adapter.clock.timers.size, 0, 'the superseded end_turn cannot start a follow-on wait');
+  adapter.connection._sendNotification('_fixture/next', {});
+  const result = await h.finish(sent);
+  assert.equal(result.outcome, 'completed');
+  assert.equal(result.text, 'First.\nSecond.');
+  assert.deepEqual(result.turns.map(t => [t.nativeTurnId, t.messages]), [[null, [sent.executionId, ack.id]]]);
+  assert.equal(result.interventions[0].state, 'answered');
+  assert.deepEqual(result.usage, { source: 'antigravity-acp', input_tokens: 18031, output_tokens: 90,
+    cached_input_tokens: 6842, cache_write_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 18121 });
+});
+
+test('Antigravity steer replaces an active follow-on wait and preserves partial usage', async t => {
+  const h = await scriptedAgy(t, [background, [completed('one'), usageUpdate], [message('\nSteered.'), endTurn]]);
+  await h.begin();
+  assert.equal(h.clock.timers.size, 1);
+  await h.adapter.steer({ text: 'continue' });
+  await h.clock.advance(120_000);
+  assert.equal(h.adapter.turn.finished, false);
+  assert.equal(h.clock.timers.size, 0);
+  await h.next();
+  const result = await h.adapter.turn.terminal;
+  assert.equal(result.outcome, 'completed');
+  assert.equal(result.text, 'Waiting.\nSteered.');
+  assert.equal(result.usage.partial, true);
+  assert.equal(result.usage.total_tokens, 2 * 18109);
+});
+
+test('Antigravity counts a late first answer without changing the newest outcome', async t => {
+  const h = await scriptedAgy(t, [[message('A')], [message('B'), endTurn], [{ ...firstAnswer, stopReason: 'cancelled' }]]);
+  await h.begin();
+  await h.adapter.steer({ text: 'more' });
+  await h.next();
+  const result = await h.adapter.turn.terminal;
+  assert.equal(result.outcome, 'completed');
+  assert.equal(result.text, 'AB');
+  assert.equal(result.usage.total_tokens, 18121);
+});
+
+test('Antigravity follows only the last of two steers through background completion', async t => {
+  const h = await scriptedAgy(t, [[message('A'), command('one')], [], [message('B'), endTurn],
+    [firstAnswer, { ...endTurn, promptIndex: 1 }], [completed('one'), message('C'), usageUpdate]]);
+  await h.begin();
+  await h.adapter.steer({ text: 'second' });
+  await h.adapter.steer({ text: 'third' });
+  assert.equal(h.clock.timers.size, 1);
+  await h.next();
+  assert.equal(h.clock.timers.size, 1, 'late responses cannot replace the follow-on timer');
+  await h.clock.advance(120_000);
+  assert.equal(h.adapter.turn.finished, false);
+  await h.next();
+  await h.clock.advance(2999);
+  assert.equal(h.adapter.turn.finished, false);
+  await h.clock.advance(1);
+  const result = await h.adapter.turn.terminal;
+  assert.equal(result.outcome, 'completed');
+  assert.equal(result.text, 'ABC');
+  assert.equal(result.usage.total_tokens, 2 * 18109 + 12);
+  assert.equal(result.usage.partial, true);
+  assert.equal(h.clock.timers.size, 0);
+});
+
+for (const ackBy of ['update', 'response']) test(`Antigravity steer can be acknowledged by its ${ackBy}`, async t => {
+  const h = await scriptedAgy(t, [[message('A')], [firstAnswer], [], ackBy === 'update' ? [message('B')] : [endTurn], [endTurn]],
+    { ACP_FAKE_RECEIPT: 'silent' });
+  await h.begin();
+  let ack;
+  const steering = h.adapter.steer({ text: 'more' }).then(value => { ack = value; });
+  await h.next(); // The fake read the steer and answered only the first prompt.
+  assert.equal(ack, undefined, 'the old prompt response cannot acknowledge the steer');
+  await h.next();
+  assert.equal(ack?.accepted, true);
+  await steering;
+  if (ackBy === 'update') await h.next();
+  assert.equal((await h.adapter.turn.terminal).outcome, 'completed');
+});
+
+test('Antigravity interrupt after steer waits for the newest cancelled response', async t => {
+  const h = await scriptedAgy(t, [[command('one')], [], [firstAnswer], [{ stopReason: 'cancelled' }]]);
+  await h.begin();
+  await h.adapter.steer({ text: 'more' });
+  const interrupted = h.adapter.interrupt();
+  await h.next();
+  assert.equal(h.frames('session/cancel').length, 1);
+  assert.equal(h.adapter.turn.finished, false);
+  await h.next();
+  await interrupted;
+  const result = await h.adapter.turn.terminal;
+  assert.equal(result.outcome, 'interrupted');
+  assert.equal(result.usage.total_tokens, 18121);
+  assert.equal(h.clock.timers.size, 0);
+});
+
+test('Antigravity refuses steer before and after a turn', async t => {
+  const h = await scriptedAgy(t, [[endTurn]]);
+  await assert.rejects(h.adapter.steer({ text: 'early' }), { code: 'DeliveryUnknown' });
+  await h.begin();
+  await assert.rejects(h.adapter.steer({ text: 'late' }), { code: 'DeliveryUnknown' });
+  assert.equal(h.frames('session/prompt').length, 1);
+});
+
+test('Antigravity fails the turn when the newest prompt is refused', async t => {
+  const h = await scriptedAgy(t, [[message('A')], [{ error: { code: -32603, message: 'steer refused' } }]]);
+  await h.begin();
+  await assert.rejects(h.adapter.steer({ text: 'more' }), { code: 'DeliveryUnknown' });
+  const result = await h.adapter.turn.terminal;
+  assert.equal(result.outcome, 'failed');
+  assert.equal(result.detail, 'steer refused');
+  assert.equal(result.text, 'A');
+});
+
+test('Antigravity loses the steered turn when the connection dies', async t => {
+  const h = await scriptedAgy(t, [background, []]);
+  await h.begin();
+  await h.adapter.steer({ text: 'more' });
+  const lost = assert.rejects(h.adapter.turn.terminal, { code: 'ProviderLost' });
+  h.adapter.connection.child.stdin.end();
+  await lost;
+  assert.equal(h.clock.timers.size, 0);
 });

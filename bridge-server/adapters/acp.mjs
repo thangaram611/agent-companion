@@ -3,6 +3,7 @@ import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AcpConnection } from './acp-protocol.mjs';
 import { systemClock } from '../controller/clock.mjs';
+import { sumUsage } from '../../lib/usage.mjs';
 import { getTargetById } from '../../lib/target-registry.mjs';
 import { companionReady } from '../../lib/target-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
@@ -33,15 +34,17 @@ function binaryFor(descriptor, env) {
 }
 
 // The prompt has ended with open work. Poll native-only state even on a silent
-// wire, and wake earlier when either reply deadline falls between polls.
+// wire. Silence alone never ends the turn: the agent may be retrying upstream
+// before its reply. The turn ends on evidence that the reply is over.
 function waitForFollowOn(clock, hasOpenWork) {
   const done = deferred();
-  let emptySince, lastUpdate, receivedUsage = false;
+  let emptySince, lastUpdate, lastKind, receivedUsage = false;
   let timer = clock.setTimeout(check, 2000);
   function check(params) {
     const now = clock.monotonic();
     let wait = 2000;
-    if (params) lastUpdate = now;
+    const kind = params?.update?.sessionUpdate;
+    if (params) { lastUpdate = now; lastKind = kind; }
     if (hasOpenWork()) {
       emptySince = null;
       receivedUsage = false;
@@ -49,11 +52,11 @@ function waitForFollowOn(clock, hasOpenWork) {
       emptySince ??= now;
       // A model call that starts any tool is called again with its result,
       // so only usage with no tool after it ends the reply.
-      const kind = params?.update?.sessionUpdate;
       if (kind === 'usage_update') receivedUsage = true;
       else if (kind === 'tool_call') receivedUsage = false;
-      wait = Math.min(wait, Math.max(emptySince, lastUpdate ?? 0) + 120_000 - now);
-      if (receivedUsage) wait = Math.min(wait, lastUpdate + 3000 - now);
+      // A reply that failed upstream ends as text with no usage update.
+      const quiet = receivedUsage ? 3000 : lastKind === 'agent_message_chunk' && lastUpdate >= emptySince ? 120_000 : null;
+      if (quiet !== null) wait = Math.min(wait, lastUpdate + quiet - now);
       if (wait <= 0) { done.resolve('completed'); return; }
     }
     clock.clearTimeout(timer);
@@ -87,7 +90,7 @@ class ProtocolConnection extends AcpConnection {
           this.effectiveEffort = thoughtLevel(this.configOptions)?.currentValue;
         }
         // Later frames from this same read can already finish or start a tool.
-        if (method === 'session/prompt') this.sessionCollectors.get(params.sessionId)?.onPromptResponse(result);
+        if (method === 'session/prompt') this.sessionCollectors.get(params.sessionId)?.onPromptResponse(id, result);
         resolve(result);
       } });
       const fail = (err) => { if (err) { this.pendingRequests.delete(id); reject(err); } };
@@ -240,46 +243,70 @@ export class AcpAdapter {
     if (this.turn && (!this.turn.finished || !this.capabilities.interventions.queue)) return Promise.reject(failure('DeliveryUnknown'));
     const conn = this.connection;
     this.progress = null;
-    const accepted = deferred();
     const events = { messageChunks: [], thoughtChunks: [], toolCalls: [], plans: [] };
-    const acknowledge = () => accepted.resolve({ acknowledged: true, nativeTurnId: null, nativeRefs: { promptRequestId: turn.promptId } });
-    const turn = this.turn = { acknowledge, events, sinceMs: Date.now(), finished: false };
+    const turn = this.turn = { done: deferred(), events, sinceMs: Date.now(), finished: false, pending: 0 };
     const acp = this.descriptor.acp;
     conn.sessionCollectors.set(this.sessionId, {
       events,
       reject: err => turn.followOn?.reject(failure('ProviderLost', err)),
-      onPromptResponse: result => {
-        if (result?.stopReason !== 'end_turn' || !acp.hasOpenWork) return;
+      onPromptResponse: (id, result) => {
+        if (id !== turn.promptId || result?.stopReason !== 'end_turn' || !acp.hasOpenWork) return;
         const hasOpenWork = () => acp.hasOpenWork({ toolCalls: events.toolCalls, sessionId: this.sessionId, env: this.env });
         if (hasOpenWork()) {
+          turn.extended = true;
           turn.followOn = waitForFollowOn(this.clock, hasOpenWork);
           if (turn.cancelRequested) turn.followOn.resolve('interrupted');
         }
       },
     });
-    const response = conn._sendRequest('session/prompt', { sessionId: this.sessionId, prompt: [{ type: 'text', text }] });
-    turn.promptId = conn.requestId;
-    if (acp.receiptMethod) {
-      conn._sendRequest(acp.receiptMethod, { sessionId: this.sessionId })
-        .then(acknowledge, err => accepted.reject(failure('DeliveryUnknown', err)));
-    }
-    turn.terminal = response.then(async (result) => {
-      acknowledge();
-      let outcome = result?.stopReason === 'end_turn' ? 'completed' : result?.stopReason === 'cancelled' ? 'interrupted' : 'failed';
-      if (turn.followOn) outcome = await turn.followOn.promise;
-      const usage = acp.usage({ result, sessionId: this.sessionId, sinceMs: turn.sinceMs, paths: this.paths, readFile });
-      if (usage && turn.followOn) usage.partial = true;
-      return { outcome, text: events.messageChunks.join(''), usage,
+    turn.terminal = turn.done.promise.then(({ outcome, ...detail }) => {
+      const { usage } = turn;
+      if (usage && turn.extended) usage.partial = true;
+      return { outcome, text: events.messageChunks.join(''), usage, ...detail,
         nativeRefs: { sessionId: this.sessionId, promptRequestId: turn.promptId },
         cause: outcome === 'completed' ? 'native_complete' : 'provider_error' };
-    }, (err) => {
-      accepted.reject(failure('DeliveryUnknown', err));
-      if (conn.dead || !conn.isAlive()) throw failure('ProviderLost', err);
-      return { outcome: 'failed', text: events.messageChunks.join(''), cause: 'provider_error', detail: err.message, error: err.message,
-        nativeRefs: { sessionId: this.sessionId, promptRequestId: turn.promptId } };
     }).finally(() => { turn.finished = true; conn.sessionCollectors.delete(this.sessionId); });
     // Observation attaches after acceptance; transport loss can race that gap.
     turn.terminal.catch(() => {});
+    return this._prompt(turn, text);
+  }
+  async steer({ text }) {
+    const turn = this.turn;
+    if (!this.capabilities.interventions.steer || !turn || turn.finished || turn.outcome) throw failure('DeliveryUnknown');
+    turn.followOn?.resolve();
+    turn.followOn = null;
+    await this._prompt(turn, text);
+    return { accepted: true, confirmed: true, nativeTurnId: null };
+  }
+  _prompt(turn, text) {
+    const conn = this.connection, acp = this.descriptor.acp, sessionId = this.sessionId;
+    const accepted = deferred();
+    turn.pending++;
+    const response = conn._sendRequest('session/prompt', { sessionId, prompt: [{ type: 'text', text }] });
+    const promptId = turn.promptId = conn.requestId;
+    const acknowledge = turn.acknowledge = () => accepted.resolve({
+      acknowledged: true, nativeTurnId: null, nativeRefs: { promptRequestId: promptId },
+    });
+    if (acp.receiptMethod) {
+      conn._sendRequest(acp.receiptMethod, { sessionId })
+        .then(acknowledge, err => accepted.reject(failure('DeliveryUnknown', err)));
+    }
+    response.then(async result => {
+      acknowledge();
+      const usage = acp.usage({ result, sessionId, sinceMs: turn.sinceMs, paths: this.paths, readFile });
+      turn.usage = turn.usage ? sumUsage([turn.usage, usage]) : usage;
+      if (turn.promptId !== promptId) return;
+      const outcome = turn.followOn ? await turn.followOn.promise
+        : result?.stopReason === 'end_turn' ? 'completed' : result?.stopReason === 'cancelled' ? 'interrupted' : 'failed';
+      if (turn.promptId === promptId) turn.outcome = outcome;
+    }, err => {
+      accepted.reject(failure('DeliveryUnknown', err));
+      if (conn.dead || !conn.isAlive()) throw failure('ProviderLost', err);
+      if (turn.promptId === promptId) turn.done.resolve({ outcome: 'failed', detail: err.message, error: err.message });
+    }).then(() => {
+      // A superseded prompt can answer last. Drain its usage before publishing the newest outcome.
+      if (--turn.pending === 0 && turn.outcome) turn.done.resolve({ outcome: turn.outcome });
+    }, turn.done.reject);
     return accepted.promise;
   }
   _activity(params) {

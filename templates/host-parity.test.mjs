@@ -117,7 +117,7 @@ test('both hosts describe the same five companions and Claude follow-up limits',
     .replace(/\s+/g, ' ').trim());
   assert.equal(continuity[0], continuity[1]);
   assert.match(continuity[0], /Claude Code follow-ups resume saved conversations cold/);
-  assert.match(continuity[0], /Codex and OpenCode default to steer; Claude Code and Antigravity default to queue/);
+  assert.match(continuity[0], /Codex, OpenCode and Antigravity default to steer\. Claude Code defaults to queue/);
   assert.match(continuity[0], /Send every follow-up to the companion through `agent_send`/);
   assert.match(continuity[0], /A different companion is a new conversation/);
   assert.match(continuity[0], /Copilot supports cancel only/);

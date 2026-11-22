@@ -105,7 +105,7 @@ owned provider tree and keeps history; it does not preserve in-flight work.
 A missing or unloadable history fails explicitly, never as a fresh conversation.
 `agent_reply` supports steer, queue and interrupt where the running execution
 allows them; otherwise it returns `reply_unavailable` with its reason.
-Codex and OpenCode default to steer; Claude Code and Antigravity default to
+Codex, OpenCode and Antigravity default to steer. Claude Code defaults to
 queue. Copilot supports cancel only. Read per-mode `interventions` from status.
 Send every follow-up to the companion through `agent_send`, even when the
 earlier reply seems to answer it already; the parent asked the companion.
