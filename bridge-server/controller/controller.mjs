@@ -376,10 +376,11 @@ export class Controller {
     try { if (a.record.transcript) transcript = readTranscript(a.record.transcript); }
     catch { transcript = { format: { detail: 'transcript_read_failed' }, items: [] }; }
     const items = selectTurnItems(transcript?.items ?? [], { companion: a.record.provider,
-      nativeTurnId: a.record.nativeTurnId, nativeTurnIds: a.record.nativeTurnIds, interventions: a.record.interventions, startedAt: a.record.startedAt });
+      nativeTurnId: a.record.nativeTurnId, nativeTurnIds: a.record.nativeTurnIds, interventions: a.record.interventions,
+      startedAt: a.record.startedAt, finishedAt: a.record.stopDecidedAt });
     const worktree = await diffWorktrees(a.record.cwd, a.record.startSnapshot, a.record.endSnapshot, { env: this.env });
     return { summary: summarizeWork({ locator: a.record.transcript, transcript, items, worktree, ended: true }),
-      nativeError: items.find(item => item.kind === 'error')?.error };
+      nativeError: items.find(item => item.kind === 'error' && item.terminal === true)?.error };
   }
   async _finish(a, cause) {
     const protocol = [];
@@ -395,7 +396,7 @@ export class Controller {
     const { summary: workSummary, nativeError } = await this._workSummary(a, cleanup);
     if (a.handedOff) return a.done.promise;
     let terminal = a.record.terminal;
-    if (a.record.provider === 'copilot' && terminal?.outcome === 'completed' && nativeError) {
+    if (terminal?.outcome === 'completed' && nativeError) {
       terminal = a.record.terminal = { ...terminal, outcome: 'failed', cause: 'provider_error', detail: nativeError.type,
         text: appendProviderError(terminal.text, nativeError.message) };
       this._recordTurn(a, terminal);

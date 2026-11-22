@@ -8,12 +8,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { USAGE_COUNTERS } from '../lib/usage.mjs';
 
 // Captured 2026-11-15: codex/claude runtime homes; Copilot/OpenCode turn-3
-// snapshots; Antigravity scrubbed final and streaming stores. JSONL strings
+// snapshots. Antigravity uses synthetic agy 1.5.13 steps. JSONL strings
 // over 2000 characters are trimmed and run roots become /tmp/fixture. Ordered
 // parts preserve every record while keeping each fixture file below 40 KB.
 const root = new URL('./fixtures/transcripts/', import.meta.url);
 const companions = ['codex', 'claude', 'copilot', 'opencode', 'antigravity'];
-const sessions = { opencode: 'ses_e229ce437ffeBST2EZW9xCg9Wa', antigravity: '1a918eda-5640-4eb3-b905-e322fadbadce' };
+const sessions = { opencode: 'ses_e229ce437ffeBST2EZW9xCg9Wa', antigravity: 'native-history' };
 const api = () => import('../lib/transcripts.mjs');
 function temp(t) {
   const dir = mkdtempSync(join(tmpdir(), 'transcripts-'));
@@ -25,13 +25,13 @@ function jsonl(companion, failure = false) {
   return readdirSync(dir).filter(n => n.startsWith(failure ? 'failure' : 'transcript')).sort()
     .map(n => readFileSync(new URL(n, dir))).reduce((a, b) => Buffer.concat([a, b]), Buffer.alloc(0));
 }
-function fixture(t, companion, { streaming = false, failure = false } = {}) {
+function fixture(t, companion, { failure = false } = {}) {
   const path = join(temp(t), 'transcript');
   const kind = ['opencode', 'antigravity'].includes(companion) ? 'sqlite' : 'jsonl';
   if (kind === 'jsonl') writeFileSync(path, jsonl(companion, failure));
   else {
     const db = new DatabaseSync(path);
-    db.exec(readFileSync(new URL(`${companion}/${companion === 'opencode' ? 'opencode' : streaming ? 'fixture-streaming' : 'fixture'}.sql`, root), 'utf8'));
+    db.exec(readFileSync(companion === 'antigravity' ? new URL('./controller/antigravity.sql', import.meta.url) : new URL('opencode/opencode.sql', root), 'utf8'));
     db.close();
   }
   return { companion, kind, path, sessionId: sessions[companion] ?? companion };
@@ -93,6 +93,7 @@ for (const companion of ['codex', 'claude', 'copilot', 'opencode']) {
     const error = result.items.find(i => i.kind === 'error');
     assert.ok(error);
     assert.equal(error.status, 'failed');
+    assert.equal(error.terminal === true, companion === 'copilot');
     assert.ok(error.error.type);
     assert.match(error.error.message, companion === 'opencode' ? /Model unavailable/ : /429/);
     if (companion === 'claude' || companion === 'copilot') assert.equal(error.error.type, 'rate_limit');
@@ -169,13 +170,16 @@ test('follow reads only appended bytes and restarts on a replaced or shrunk file
 });
 test('antigravity: streaming step 9 is upserted when finalized', async t => {
   const { readTranscript } = await api();
-  const first = readTranscript(fixture(t, 'antigravity', { streaming: true }));
+  const loc = fixture(t, 'antigravity');
+  const db = new DatabaseSync(loc.path);
+  db.exec('UPDATE steps SET status=8 WHERE idx=9');
+  const first = readTranscript(loc);
   assert.equal(first.format.recognized, true, first.format.detail);
-  assert.equal(first.counts.unrecognized, 0);
-  const streaming = first.items.find(i => i.status === 'streaming');
-  assert.ok(streaming);
+  const streaming = first.items.find(i => i.kind === 'assistant' && i.status === 'streaming');
   assert.match(streaming.id, /9$/);
-  const next = readTranscript(fixture(t, 'antigravity'), { after: first.cursor });
+  db.exec('UPDATE steps SET status=3 WHERE idx=9');
+  db.close();
+  const next = readTranscript(loc, { after: first.cursor });
   const final = next.items.find(i => i.id === streaming.id);
   assert.equal(final.status, 'completed');
   assert.match(final.text, /DONE/);
@@ -198,7 +202,7 @@ test('opencode: same-timestamp in-place update and session isolation', async t =
 test('locators: defaults, overrides, Codex preference, Claude project scan, missing', async t => {
   const { locateTranscript } = await api();
   const home = temp(t);
-  const defaults = { codex: '.codex/sessions/2026/11/15/rollout-date-session.jsonl', claude: '.claude/projects/project/session.jsonl', copilot: '.copilot/session-state/session/events.jsonl', opencode: '.local/share/opencode/opencode.db', antigravity: '.gemini/antigravity-acp/conversations/session.db' };
+  const defaults = { codex: '.codex/sessions/2026/11/15/rollout-date-session.jsonl', claude: '.claude/projects/project/session.jsonl', copilot: '.copilot/session-state/session/events.jsonl', opencode: '.local/share/opencode/opencode.db', antigravity: '.gemini/antigravity-cli/conversations/session.db' };
   const keys = { codex: 'CODEX_HOME', claude: 'CLAUDE_CONFIG_DIR', copilot: 'COPILOT_HOME', opencode: 'XDG_DATA_HOME', antigravity: 'GEMINI_HOME' };
   for (const companion of companions) {
     assert.equal(locateTranscript({ companion, historyId: 'session', env: { HOME: home } }), null);
@@ -471,31 +475,126 @@ test('Codex interrupted terminal upserts by native turn; Copilot failed task sta
   assert.equal(failed.items[0].status, 'failed'); assert.equal(failed.items[0].text, 'Fixture task failed');
 });
 
-// Live login runs, 2026-11-15 (scrubbed: steps and trajectory_meta only, the
-// operator's home path replaced byte-for-byte): a command refused by
-// AGENT_COMPANION_ANTIGRAVITY_PERMISSION=none, and one cancelled mid-run.
-function antigravityRun(t, name, sessionId) {
-  const path = join(temp(t), 'transcript');
-  const db = new DatabaseSync(path);
-  db.exec(readFileSync(new URL(`antigravity/${name}.sql`, root), 'utf8'));
-  db.close();
-  return { companion: 'antigravity', kind: 'sqlite', path, sessionId };
-}
-test('antigravity: a refused tool call is a failed command with the native reason', async t => {
+test('antigravity: the ACP session id matches cascade_id while trajectory_id identifies a different object', async t => {
   const { readTranscript } = await api();
-  const result = readTranscript(antigravityRun(t, 'fixture-denied', 'cd0abe1c-3503-4c78-98c2-5483de4a8bd6'));
-  assert.equal(result.counts.unrecognized, 0, result.format.detail);
-  const command = result.items.find(i => i.kind === 'command');
-  assert.equal(command.command, 'echo SHOULD-NOT-RUN');
-  assert.equal(command.status, 'failed'); assert.equal(command.exitCode, null);
-  assert.equal(command.denied, 'Denied by user (*).');
+  const loc = fixture(t, 'antigravity');
+  assert.ok(readTranscript(loc).items.length);
+  const mismatch = readTranscript({ ...loc, sessionId: 'trajectory' });
+  assert.deepEqual(mismatch.items, []);
+  assert.equal(mismatch.format.recognized, false);
 });
-test('antigravity: a cancelled command keeps its native running status', async t => {
+
+test('antigravity: planner text, thinking, parallel calls, tool results and system messages', async t => {
   const { readTranscript } = await api();
-  const result = readTranscript(antigravityRun(t, 'fixture-cancelled', '6ed710c6-e92b-4fa1-bbf6-70ab9bbc7935'));
-  assert.equal(result.counts.unrecognized, 0, result.format.detail);
-  const command = result.items.find(i => i.kind === 'command');
-  assert.equal(command.command, 'sleep 30 && echo LATE'); assert.equal(command.status, 'running');
+  const { items } = readTranscript(fixture(t, 'antigravity'));
+  const calls = items.find(i => i.toolCalls?.length)?.toolCalls;
+  assert.deepEqual(calls.map(c => [c.id, c.name]), [['call-1', 'run_command'], ['call-2', 'write_file']]);
+  assert.equal(JSON.parse(calls[0].arguments).CommandLine, 'echo FIXTURE-OK');
+  assert.ok(items.some(i => i.kind === 'reasoning' && i.text === 'Checked notes.'));
+  assert.ok(items.some(i => i.kind === 'system' && i.text === 'Task finished.'));
+  const [ok, nonzero] = items.filter(i => i.kind === 'command');
+  assert.deepEqual([ok.command, ok.cwd, ok.exitCode, ok.status], ['echo FIXTURE-OK', '/tmp/fixture', 0, 'completed']);
+  assert.match(ok.output, /FIXTURE-OK/);
+  assert.deepEqual([nonzero.exitCode, nonzero.status], [1, 'completed']);
+  assert.match(nonzero.output, /No such file/);
+  const [launch, question] = items.filter(i => i.kind === 'tool');
+  assert.equal(launch.name, 'invoke_subagent');
+  assert.deepEqual(launch.input, { Model: 'fixture', Prompt: 'Read notes', Role: 'reader', TypeName: 'self', Workspace: '/tmp/fixture' });
+  assert.match(launch.output, /fixture-child/);
+  assert.equal(question.name, 'ask_question'); assert.deepEqual(question.input.questions, [{ question: 'Continue?' }]);
+});
+
+test('antigravity: denied, waiting for approval, cancelled and running commands retain their native evidence', async t => {
+  const { readTranscript } = await api();
+  const loc = fixture(t, 'antigravity'), db = new DatabaseSync(loc.path);
+  const command = () => readTranscript(loc).items.find(i => i.command === 'sleep 30');
+  const denied = readTranscript(loc).items.find(i => i.command === 'echo refused');
+  assert.deepEqual([denied.status, denied.exitCode, denied.cwd], ['failed', null, null]);
+  assert.match(denied.denied, /user denied permission/);
+  assert.equal(command().status, 'cancelled');
+  db.exec('UPDATE steps SET status=9 WHERE idx=11');
+  assert.equal(command().status, 'waiting_for_approval');
+  db.exec('UPDATE steps SET status=2 WHERE idx=11');
+  assert.equal(command().status, 'running');
+  db.close();
+});
+
+test('antigravity: a command execution error without a permission denial is reported as failed', async t => {
+  const { readTranscript } = await api();
+  const loc = fixture(t, 'antigravity'), db = new DatabaseSync(loc.path);
+  db.prepare('UPDATE steps SET error_details=? WHERE idx=10').run(Buffer.from([0x12, 6, ...Buffer.from('failed')]));
+  db.close();
+  const cmd = readTranscript(loc).items.find(i => i.command === 'echo refused');
+  assert.equal(cmd.status, 'failed');
+  assert.equal(cmd.denied, undefined);
+  assert.equal(cmd.output, 'failed');
+});
+
+test('antigravity: background handoff stays running until the same row gains an exit code', async t => {
+  const { followTranscript } = await api();
+  const loc = fixture(t, 'antigravity'), follower = followTranscript(loc);
+  const pending = follower.read().items.find(i => i.command === 'sleep 5');
+  assert.deepEqual([pending.status, pending.exitCode], ['running', null]);
+  const db = new DatabaseSync(loc.path);
+  db.exec(readFileSync(new URL('./controller/antigravity-background-done.sql', import.meta.url), 'utf8'));
+  db.close();
+  const [done] = follower.read().items;
+  assert.deepEqual([done.id, done.at, done.command, done.toolCallId], [pending.id, pending.at, pending.command, pending.toolCallId]);
+  assert.deepEqual([done.status, done.exitCode], ['completed', 0]);
+});
+
+test('antigravity: legacy command, edit and refused-call shapes cannot produce a terminal error', async t => {
+  const { readTranscript } = await api();
+  for (const [file, types] of [['fixture.sql', ['21', '5']], ['fixture-denied.sql', ['17']]]) {
+    const path = join(temp(t), 'legacy.db'), db = new DatabaseSync(path);
+    db.exec(readFileSync(new URL(`antigravity/${file}`, root), 'utf8'));
+    const { cascade_id: sessionId } = db.prepare('SELECT cascade_id FROM trajectory_meta').get();
+    db.close();
+    const read = readTranscript({ companion: 'antigravity', path, kind: 'sqlite', sessionId });
+    assert.deepEqual([...new Set(read.items.filter(i => i.kind === 'unrecognized').map(i => i.nativeType))], types);
+    assert.ok(read.items.every(i => !i.terminal));
+  }
+});
+
+test('antigravity: only the last step marks a terminal error, including across cursor reads', async t => {
+  const { followTranscript } = await api();
+  const loc = fixture(t, 'antigravity'), db = new DatabaseSync(loc.path), follower = followTranscript(loc);
+  const errors = follower.read().items.filter(i => i.kind === 'error');
+  assert.deepEqual(errors.map(i => [i.error.type, i.terminal === true]), [['UNAVAILABLE', false], ['UNAVAILABLE', false], ['INVALID_ARGUMENT', true]]);
+  assert.equal(errors[0].at, new Date(1800000014123).toISOString());
+  assert.match(errors[0].error.message, /attempt 1/);
+  assert.match(errors[2].error.message, /Unable to process input image/);
+  assert.doesNotMatch(JSON.stringify(errors), /PRIVATE/);
+  db.exec('INSERT INTO steps SELECT 19, 15, status, has_subtrajectory, metadata, error_details, permissions, task_details, render_info, step_payload, step_format FROM steps WHERE idx=16');
+  db.close();
+  assert.equal(follower.read().items.find(i => i.id === errors[2].id)?.terminal, false);
+});
+
+test('antigravity: live rows, follow and digest show planner calls, system messages and only this execution', async t => {
+  const { JobTranscript } = await import('../bridge-server/ui/follow.mjs');
+  const { itemLines } = await import('../bridge-server/ui/rows.mjs');
+  const { renderDigest } = await import('../lib/digest.mjs');
+  const execution = { executionId: 'job', state: 'running', provider: 'antigravity', startedAt: 1800000000123, text: 'Run echo FIXTURE-OK', transcript: fixture(t, 'antigravity') };
+  const result = { outcome: 'completed', finishedAt: 1800000012123, text: 'DONE' };
+  const job = { execution, result, provider: execution.provider, status: result.outcome };
+  const follow = new JobTranscript();
+  const running = { ...job, result: null, status: 'running' };
+  assert.ok(follow.poll(running, true));
+  assert.equal(follow.select(running).list.at(-1).error.type, 'INVALID_ARGUMENT');
+  assert.ok(follow.poll(job, true), 'arrival of the end time reselects the turn even without new SQLite rows');
+  const { list } = follow.select(job);
+  assert.equal(list[0].text, execution.text);
+  assert.equal(list.at(-1).command, 'sleep 5');
+  const rendered = list.flatMap(i => itemLines(i)).flatMap(line => [...line.segs, ...(line.right ?? [])]).map(([text]) => text).join(' ');
+  for (const fragment of ['run_command', 'write_file', 'Checked notes.', 'Task finished.', 'cancelled', 'refused', 'exit 1']) assert.ok(rendered.includes(fragment), fragment);
+  assert.doesNotMatch(rendered, /unrecognized/);
+  assert.deepEqual(itemLines({ kind: 'command', command: 'sleep', status: 'waiting_for_approval' })[0].right, [['waiting for approval', 'warn']]);
+  const planner = list.find(i => i.toolCalls?.length);
+  const withAnswer = itemLines({ ...planner, text: result.text }, { answer: result.text });
+  assert.ok(withAnswer.some(line => line.segs.some(([value]) => value === 'write_file')));
+  const digest = renderDigest(execution, result, {});
+  for (const fragment of ['run_command', 'write_file', 'Checked notes.', 'Task finished.', 'exit 1']) assert.ok(digest.includes(fragment), fragment);
+  assert.doesNotMatch(digest, /Recovered|INVALID_ARGUMENT|UNAVAILABLE/);
 });
 
 test('opencode: a shell command a cancel or interrupt stopped is unfinished, not failed (measured on 2.3.0)', async t => {

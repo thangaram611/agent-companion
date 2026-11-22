@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, symlinkSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { SANDBOX_HOME } from '../sandbox-home.mjs';
 import { Controller } from '../../bridge-server/controller/controller.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
@@ -25,7 +26,7 @@ function setup(options = {}) {
       calls: [], terminal, ack,
       async start(args) { this.calls.push(['start', args]); if (options.startCrash) throw new Error('startup crash'); return { runtime: await args.supervisor.spawn(['fake'], { cwd: args.cwd }) }; },
       async openHistory(args) { this.calls.push(['openHistory', args]); if (options.historyError) throw Object.assign(new Error(options.historyError), { code: options.historyError }); if (options.historyCrash) throw new Error('HistoryUnavailable'); return { historyId: args.historyId || 'native-history', effectiveModel: 'effective-model' }; },
-      async deliver(args) { this.calls.push(['deliver', args]); if (options.lostAck) return ack.promise; return { nativeTurnId: 'turn-1' }; },
+      async deliver(args) { this.calls.push(['deliver', args]); if (options.lostAck) return ack.promise; return options.ack ?? { nativeTurnId: 'turn-1' }; },
       observe(args) { this.calls.push(['observe', args]); this.progress = args.onProgress; return terminal.promise; },
       async interrupt() { this.calls.push(['interrupt']); if (options.racingComplete) terminal.resolve({ outcome: 'completed', text: 'native answer', usage: { tokens: 7 } }); if (options.hungInterrupt) return new Promise(() => {}); },
       async close() { this.calls.push(['close']); if (options.hungClose) return new Promise(() => {}); },
@@ -33,9 +34,9 @@ function setup(options = {}) {
     adapters.push(adapter); return adapter;
   };
   // Lifecycle deadlines use the manual clock; git I/O is covered by snapshot integration tests.
-  const controller = new Controller({ snapshot: async () => ({ available: false, reason: 'test_non_git' }), providers: { fake: { enabled: true, ready: true, modelAllowed: (model) => ['a', 'b'].includes(model), create } }, records, clock,
+  const controller = new Controller({ snapshot: async () => ({ available: false, reason: 'test_non_git' }), providers: { [options.provider ?? 'fake']: { enabled: true, ready: true, modelAllowed: (model) => ['a', 'b'].includes(model), create } }, records, clock,
     env: options.env || {}, createSupervisor, launchWatcher: options.launchWatcher || (async () => ({ pid: 123 })) });
-  const send = (overrides = {}) => controller.send({ owner: 'child', provider: 'fake', cwd: dir, text: 'verbatim text\nwith context', ...overrides });
+  const send = (overrides = {}) => controller.send({ owner: 'child', provider: options.provider ?? 'fake', cwd: dir, text: 'verbatim text\nwith context', ...overrides });
   const done = async (executionId) => {
     await clock.flush();
     return controller.wait({ owner: records.readExecution(executionId).owner, executionId });
@@ -47,6 +48,30 @@ function setup(options = {}) {
 }
 const calls = (adapter, method) => adapter.calls.filter(([name]) => name === method);
 const disk = (dir) => readdirSync(dir, { recursive: true }).sort().filter((file) => statSync(join(dir, file)).isFile()).map((file) => [file, statSync(join(dir, file)).mtimeMs, readFileSync(join(dir, file), 'utf8')]);
+
+for (const failed of [false, true]) test(`Antigravity end_turn with ${failed ? 'a final upstream error' : 'two retries followed by an answer'}`, async () => {
+  const h = setup({ provider: 'antigravity', ack: { acknowledged: true, nativeTurnId: null } });
+  const conversations = join(h.dir, 'antigravity-cli', 'conversations');
+  h.controller.env.GEMINI_HOME = h.dir;
+  mkdirSync(conversations, { recursive: true });
+  const db = new DatabaseSync(join(conversations, 'native-history.db'));
+  db.exec(readFileSync(new URL('./antigravity.sql', import.meta.url), 'utf8'));
+  if (failed) db.exec('DELETE FROM steps WHERE idx IN (16,17)');
+  db.close();
+  h.clock.wall = 1800000013123;
+  const { executionId } = await h.send();
+  // The success case is already followed by a later execution's failed prompt.
+  h.clock.wall = failed ? 1800000018123 : 1800000016123;
+  const text = failed ? 'Agent execution terminated due to error.\nINVALID_ARGUMENT (code 400): Unable to process input image.' : 'Recovered.';
+  const result = await h.finish(executionId, { outcome: 'completed', text, stopReason: 'end_turn' });
+  assert.equal(result.outcome, failed ? 'failed' : 'completed');
+  assert.equal(result.cause, failed ? 'provider_error' : 'native_complete');
+  assert.equal(result.turns.at(-1).outcome, result.outcome);
+  assert.equal(result.text, text);
+  assert.deepEqual(result.workSummary.errors.map(e => e.type), failed ? ['UNAVAILABLE', 'UNAVAILABLE', 'INVALID_ARGUMENT'] : ['UNAVAILABLE', 'UNAVAILABLE']);
+  assert.deepEqual(result.workSummary.commands, []);
+  if (failed) assert.equal(result.detail, 'INVALID_ARGUMENT');
+});
 
 for (const [method, detail] of [['start', 'runtime_unavailable'], ['openHistory', 'history_unavailable'], ['deliver', 'delivery_unknown']]) {
   test(`wrapped ${method} failure relays the innermost message only, on one bounded line`, async () => {

@@ -47,7 +47,7 @@ export class JobTranscript {
     const read = this.follower.read();
     this.format = read.format;
     if (read.reset) this.items.clear();
-    if (!read.items.length && !read.reset) return false;
+    if (!read.items.length && !read.reset) return this.final; // The end time can narrow the selected turn.
     for (const item of read.items) this.items.set(item.id, item);
     return true;
   }
@@ -59,7 +59,8 @@ export class JobTranscript {
     const { execution } = job;
     const all = [...this.items.values()];
     const turn = selectTurnItems(all, { companion: job.provider, nativeTurnId: execution.nativeTurnId,
-      nativeTurnIds: execution.nativeTurnIds, interventions: execution.interventions, startedAt: execution.startedAt });
+      nativeTurnIds: execution.nativeTurnIds, interventions: execution.interventions,
+      startedAt: execution.startedAt, finishedAt: execution.stopDecidedAt ?? job.result?.finishedAt });
     const inTurn = new Set(turn);
     // Session-wide instructions carry no turn id; another turn's preamble is not this job's.
     const preamble = all.filter(item => item.kind === 'preamble' && joined(item) === item && (item.turnId == null || inTurn.has(item)));

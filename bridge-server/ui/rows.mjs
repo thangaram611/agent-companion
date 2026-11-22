@@ -154,6 +154,8 @@ function commandStatus(item, ended) {
   if (item.exitCode === 0) return [['ok', 'ok']];
   if (item.exitCode != null) return [[`exit ${item.exitCode}`, 'bad']];
   if (['running', 'streaming'].includes(item.status)) return ended ? [['unfinished', 'warn']] : [['running', 'ok']];
+  if (item.status === 'waiting_for_approval') return [['waiting for approval', 'warn']];
+  if (item.status === 'cancelled') return [['cancelled', 'warn']];
   if (item.status === 'unfinished') return [['unfinished', 'warn']];
   if (item.status === 'failed') return [['failed', 'bad']];
   return null;
@@ -166,12 +168,16 @@ const CHANGE = { add: 'added', update: 'updated', delete: 'deleted' };
 export function itemLines(item, { expanded = false, ended = false, cwd = null, answer = null, label = 'user' } = {}) {
   switch (item.kind) {
     case 'user': return textLines(label, 'dim', linesOf(item, 'text', item.text ?? (item.image ? '[image]' : '')), 'dim', expanded);
+    case 'system': return textLines('system', 'dim', linesOf(item, 'text'), 'dim', expanded);
     case 'reasoning': return textLines('think', 'dim', linesOf(item, 'text'), 'dim', expanded);
     case 'preamble': return textLines('pre', 'faint', linesOf(item, 'text'), 'dim', expanded);
-    case 'assistant':
+    case 'assistant': {
       // The final answer already opens a finished job.
-      if (answer != null && clean(item.text).trim() === answer) return [{ segs: [['answer, shown above', 'faint']] }];
-      return linesOf(item, 'text').map(line => ({ segs: [[line, 'normal']] }));
+      const reply = answer != null && clean(item.text).trim() === answer ? [{ segs: [['answer, shown above', 'faint']] }]
+        : linesOf(item, 'text').map(line => ({ segs: [[line, 'normal']] }));
+      if (!item.toolCalls?.length) return reply;
+      return [...(item.text ? reply : []), ...item.toolCalls.map(call => ({ segs: [['▸ ', 'title'], [clean(call.name), 'title']] }))];
+    }
     case 'command': {
       const head = { segs: [['$ ', 'title'], [commandText(item.command), 'title']], hang: 2, right: commandStatus(item, ended) };
       const extra = item.denied ? [{ segs: [[`refused: ${clean(item.denied)}`, 'warn']], indent: 2 }] : [];
