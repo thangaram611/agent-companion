@@ -153,6 +153,7 @@ const ask = (method, params) => new Promise((resolve) => {
   out({ jsonrpc: '2.0', id, method, params });
 });
 const running = new Map();    // sessionId -> { cancel }
+let nextBatch; // Tests can release a measured sequence of frames at a time.
 
 let buf = '';
 process.stdin.setEncoding('utf8');
@@ -218,6 +219,15 @@ function handle(msg) {
     case 'session/prompt':
       runPrompt(msg);
       return;
+    case '_fixture/next':
+      nextBatch();
+      reply({});
+      return;
+    case '_agent_companion/received':
+      if (env.ACP_FAKE_RECEIPT === 'disconnect') process.exit(9);
+      if (env.ACP_FAKE_RECEIPT === 'result') reply({});
+      else fail(-32601, 'Method not found: ' + msg.method);
+      return;
     case 'session/cancel': {
       const turn = running.get(p.sessionId);
       if (turn) turn.cancel();
@@ -275,6 +285,17 @@ async function runPrompt(msg) {
   };
   if (!session) { out({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: 'Session not found: ' + sessionId } }); return; }
   if (running.has(sessionId)) { out({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: 'a prompt is already running on ' + sessionId } }); return; }
+  if (env.ACP_FAKE_BATCHES) {
+    const batches = JSON.parse(env.ACP_FAKE_BATCHES);
+    nextBatch = () => {
+      const frames = (batches.shift() || []).map(entry => entry.stopReason
+        ? { jsonrpc: '2.0', id: msg.id, result: { usage: agy.prompt.usage, ...entry } }
+        : update(sessionId, entry));
+      if (frames.length) process.stdout.write(frames.map(frame => JSON.stringify(frame)).join('\\n') + '\\n');
+    };
+    nextBatch();
+    return;
+  }
   const promptText = (p.prompt || []).map((b) => (typeof b?.text === 'string' ? b.text : '')).join('');
   let cancelled = false;
   let wake = null;

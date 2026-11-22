@@ -2,6 +2,7 @@ import { accessSync, constants, mkdtempSync, readFileSync, rmSync, statSync } fr
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AcpConnection } from './acp-protocol.mjs';
+import { systemClock } from '../controller/clock.mjs';
 import { getTargetById } from '../../lib/target-registry.mjs';
 import { companionReady } from '../../lib/target-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
@@ -31,6 +32,36 @@ function binaryFor(descriptor, env) {
   throw failure('runtime_unavailable');
 }
 
+// The prompt has ended with open work. Poll native-only state even on a silent
+// wire, and wake earlier when either reply deadline falls between polls.
+function waitForFollowOn(clock, hasOpenWork) {
+  const done = deferred();
+  let emptySince, lastUpdate, receivedUsage = false;
+  let timer = clock.setTimeout(check, 2000);
+  function check(params) {
+    const now = clock.monotonic();
+    let wait = 2000;
+    if (params) lastUpdate = now;
+    if (hasOpenWork()) {
+      emptySince = null;
+      receivedUsage = false;
+    } else {
+      emptySince ??= now;
+      // A model call that starts any tool is called again with its result,
+      // so only usage with no tool after it ends the reply.
+      const kind = params?.update?.sessionUpdate;
+      if (kind === 'usage_update') receivedUsage = true;
+      else if (kind === 'tool_call') receivedUsage = false;
+      wait = Math.min(wait, Math.max(emptySince, lastUpdate ?? 0) + 120_000 - now);
+      if (receivedUsage) wait = Math.min(wait, lastUpdate + 3000 - now);
+      if (wait <= 0) { done.resolve('completed'); return; }
+    }
+    clock.clearTimeout(timer);
+    timer = clock.setTimeout(check, wait);
+  }
+  return { ...done, check, promise: done.promise.finally(() => clock.clearTimeout(timer)) };
+}
+
 // Reuse ACP framing, v1 initialization, session new/load, update parsing and
 // permission answers. The controller owns deadlines and process lifetime:
 // the inherited lifecycle methods are historical and unused here.
@@ -45,7 +76,7 @@ class ProtocolConnection extends AcpConnection {
     const id = ++this.requestId;
     if (method === 'session/load' && this.descriptor.acp.loadRequiresReplay) this.awaitingReplayFor = params.sessionId;
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(id, { reject, resolve: (result) => {
+      this.pendingRequests.set(id, { receiptOnly: method === this.descriptor.acp.receiptMethod, reject, resolve: (result) => {
         // Check at the response frame. A later update in the same stdout chunk is not replay.
         if (method === 'session/load' && this.awaitingReplayFor === params.sessionId) {
           return reject(new Error('The companion replayed no history for the requested session.'));
@@ -55,6 +86,8 @@ class ProtocolConnection extends AcpConnection {
           this.effectiveModel = reportedModel(result);
           this.effectiveEffort = thoughtLevel(this.configOptions)?.currentValue;
         }
+        // Later frames from this same read can already finish or start a tool.
+        if (method === 'session/prompt') this.sessionCollectors.get(params.sessionId)?.onPromptResponse(result);
         resolve(result);
       } });
       const fail = (err) => { if (err) { this.pendingRequests.delete(id); reject(err); } };
@@ -130,17 +163,19 @@ class ProtocolConnection extends AcpConnection {
 }
 
 export class AcpAdapter {
-  constructor(descriptor, { env = process.env, log = logWarning } = {}) {
+  constructor(descriptor, { env = process.env, log = logWarning, clock = systemClock } = {}) {
     if (!descriptor?.acp) throw new Error('AcpAdapter needs an ACP descriptor');
     this.descriptor = descriptor;
     this.env = env;
     this.log = log;
+    this.clock = clock;
     const loadsHistory = descriptor.acp.loadSession === true;
     this.capabilities = { followUp: loadsHistory, modelSelection: descriptor.capabilities.modelSelection === true, loadsHistory,
       interventions: descriptor.capabilities.interventions };
   }
   async start({ cwd, env = this.env, model, effort, supervisor }) {
     this.cwd = cwd;
+    this.env = env;
     const acp = this.descriptor.acp;
     this.connection = new ProtocolConnection(this.descriptor, env, this.log, (params) => this._activity(params));
     const conn = this.connection;
@@ -207,15 +242,34 @@ export class AcpAdapter {
     this.progress = null;
     const accepted = deferred();
     const events = { messageChunks: [], thoughtChunks: [], toolCalls: [], plans: [] };
-    const turn = this.turn = { accepted, events, sinceMs: Date.now(), finished: false };
-    conn.sessionCollectors.set(this.sessionId, { events, reject: () => {} });
+    const acknowledge = () => accepted.resolve({ acknowledged: true, nativeTurnId: null, nativeRefs: { promptRequestId: turn.promptId } });
+    const turn = this.turn = { acknowledge, events, sinceMs: Date.now(), finished: false };
+    const acp = this.descriptor.acp;
+    conn.sessionCollectors.set(this.sessionId, {
+      events,
+      reject: err => turn.followOn?.reject(failure('ProviderLost', err)),
+      onPromptResponse: result => {
+        if (result?.stopReason !== 'end_turn' || !acp.hasOpenWork) return;
+        const hasOpenWork = () => acp.hasOpenWork({ toolCalls: events.toolCalls, sessionId: this.sessionId, env: this.env });
+        if (hasOpenWork()) {
+          turn.followOn = waitForFollowOn(this.clock, hasOpenWork);
+          if (turn.cancelRequested) turn.followOn.resolve('interrupted');
+        }
+      },
+    });
     const response = conn._sendRequest('session/prompt', { sessionId: this.sessionId, prompt: [{ type: 'text', text }] });
     turn.promptId = conn.requestId;
-    turn.terminal = response.then((result) => {
-      accepted.resolve({ acknowledged: true, nativeTurnId: null, nativeRefs: { promptRequestId: turn.promptId } });
-      const outcome = result?.stopReason === 'end_turn' ? 'completed' : result?.stopReason === 'cancelled' ? 'interrupted' : 'failed';
-      return { outcome, text: events.messageChunks.join(''),
-        usage: this.descriptor.acp.usage({ result, sessionId: this.sessionId, sinceMs: turn.sinceMs, paths: this.paths, readFile }),
+    if (acp.receiptMethod) {
+      conn._sendRequest(acp.receiptMethod, { sessionId: this.sessionId })
+        .then(acknowledge, err => accepted.reject(failure('DeliveryUnknown', err)));
+    }
+    turn.terminal = response.then(async (result) => {
+      acknowledge();
+      let outcome = result?.stopReason === 'end_turn' ? 'completed' : result?.stopReason === 'cancelled' ? 'interrupted' : 'failed';
+      if (turn.followOn) outcome = await turn.followOn.promise;
+      const usage = acp.usage({ result, sessionId: this.sessionId, sinceMs: turn.sinceMs, paths: this.paths, readFile });
+      if (usage && turn.followOn) usage.partial = true;
+      return { outcome, text: events.messageChunks.join(''), usage,
         nativeRefs: { sessionId: this.sessionId, promptRequestId: turn.promptId },
         cause: outcome === 'completed' ? 'native_complete' : 'provider_error' };
     }, (err) => {
@@ -231,9 +285,8 @@ export class AcpAdapter {
   _activity(params) {
     const turn = this.turn;
     if (!turn || turn.finished || params?.sessionId !== this.sessionId) return;
-    // ACP's prompt response is terminal. A native update/permission request
-    // for this live session is its earlier evidence of prompt acceptance.
-    turn.accepted.resolve({ acknowledged: true, nativeTurnId: null, nativeRefs: { promptRequestId: turn.promptId } });
+    turn.acknowledge();
+    turn.followOn?.check(params);
     const active = turn.events.toolCalls.findLast((tool) => !['completed', 'failed', 'cancelled'].includes(tool.status));
     this.progress = { lastActivityAt: Date.now(), activeCommand: active ? active.input?.command || active.name : null,
       retry: params.update?.retry ?? null, partialText: turn.events.messageChunks.join('') };
@@ -247,8 +300,9 @@ export class AcpAdapter {
   async interrupt() {
     if (!this.turn || this.turn.finished) return;
     if (!this.connection.cancelSession(this.sessionId)) throw failure('ProviderLost');
-    // session/cancel is a notification: the prompt's terminal response is
-    // the acknowledgement, including a completion racing the cancellation.
+    // A follow-on has no outstanding prompt to answer the cancel.
+    this.turn.cancelRequested = true;
+    this.turn.followOn?.resolve('interrupted');
     await this.turn.terminal;
   }
   async close() {

@@ -1,7 +1,7 @@
 // Real Antigravity ACP through per-execution runtimes. Requires a signed-in
-// agy CLI (1.5+) and a currently available model id as argv[2]. Spends five turns.
+// agy CLI (1.5+) and a currently available model id as argv[2]. Starts six jobs.
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startBridge, record, eventually } from './bridge-client.mjs';
@@ -50,6 +50,14 @@ try {
   assert.equal(cancel.status, 'cancelled');
   assert.equal(cancel.meta.stop_evidence.gone, true);
 
+  const backgroundOwner = `${session}-background`;
+  const backgroundId = await send('Run exactly `sleep 20 && echo SLEPT > slept.txt` with run_command, WaitMsBeforeAsync 500 and IsDaemon false. After the command finishes, reply with only the word RESTED.', backgroundOwner);
+  const background = await bridge.wait(backgroundId, backgroundOwner);
+  assert.equal(background.status, 'completed', JSON.stringify(background));
+  assert.match(background.content, /\bRESTED\s*$/);
+  assert.equal(readFileSync(join(work, 'slept.txt'), 'utf8'), 'SLEPT\n');
+  assert.equal(background.meta.usage?.partial, true, 'the turn stayed open after the prompt response');
+
   const pinnedId = await send('Reply with ONLY the word PINNED.', `${session}-model`, { model });
   const pinned = await bridge.wait(pinnedId, `${session}-model`);
   assert.equal(pinned.status, 'completed', JSON.stringify(pinned));
@@ -68,5 +76,5 @@ try {
   const lost = await replacement.wait(lossId, lossOwner);
   assert.equal(lost.status, 'cancelled');
   assert.equal(lost.meta.cause, 'bridge_loss');
-  console.log('PASS: Antigravity completion, cold history, steer refusal, cancel, model pin and bridge-loss cleanup');
+  console.log('PASS: Antigravity completion, cold history, steer refusal, cancel, background reply, model pin and bridge-loss cleanup');
 } finally { await bridge?.stop(); await replacement?.stop(); }

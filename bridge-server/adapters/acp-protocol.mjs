@@ -90,7 +90,7 @@ export class AcpConnection {
       if (pending) {
         clearTimeout(pending.timer);
         this.pendingRequests.delete(msg.id);
-        if (msg.error) pending.reject(Object.assign(new Error(typeof msg.error.message === 'string' ? msg.error.message : ''), { code: msg.error.code }));
+        if (msg.error && !pending.receiptOnly) pending.reject(Object.assign(new Error(typeof msg.error.message === 'string' ? msg.error.message : ''), { code: msg.error.code }));
         else pending.resolve(msg.result);
       }
       return;
@@ -268,7 +268,7 @@ export class AcpConnection {
       // Non-message events arriving after at least one message chunk mark
       // the stream as needing a paragraph break on the next resumption.
       // See the agent_message_chunk case for consumption.
-      if (streamEvent && streamEvent.type !== 'message' && collector.events.messageChunks.length > 0) {
+      if (streamEvent && streamEvent.type !== 'message' && collector.events.messageChunks.length > 0 && !this.descriptor.acp.verbatimMessages) {
         collector._messageNeedsBreak = true;
       }
 

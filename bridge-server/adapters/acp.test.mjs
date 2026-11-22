@@ -1,11 +1,11 @@
 import '../../test/sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { SANDBOX_HOME } from '../../test/sandbox-home.mjs';
 import { FAKE_ACP_AGENT, fakeAcpDescriptor } from '../../test/fake-acp-agent.mjs';
-import { waitForResult, until } from '../../test/controller/helpers.mjs';
+import { ManualClock, waitForResult, until } from '../../test/controller/helpers.mjs';
 import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
 import { ProcessSupervisor } from '../controller/process-supervisor.mjs';
@@ -99,18 +99,18 @@ for (const fault of ['prompt-error', 'prompt-error-after-ack']) test(`ACP prompt
   assert.doesNotMatch(JSON.stringify(result), /SECRET_/);
 });
 
-function setup(t, { descriptor = fakeAcpDescriptor(), env = {} } = {}) {
+function setup(t, { descriptor = fakeAcpDescriptor(), env = {}, clock } = {}) {
   const dir = mkdtempSync(join(SANDBOX_HOME, 'owned-acp-'));
   const bin = join(dir, 'agent.mjs');
   writeFileSync(bin, `#!${process.execPath}\nimport ${JSON.stringify(new URL('../../test/adapters/acp-fixture.mjs', import.meta.url).href)};\n${FAKE_ACP_AGENT}`, { mode: 0o700 });
   const trace = join(dir, 'trace.jsonl'), rowsPath = join(dir, 'rows.jsonl');
-  const childEnv = { ...process.env, HOME: dir, [descriptor.binaryEnv]: bin, ACP_FAKE_TRACE: trace,
+  const childEnv = { ...process.env, HOME: dir, GEMINI_HOME: join(dir, 'gemini'), [descriptor.binaryEnv]: bin, ACP_FAKE_TRACE: trace,
     ACP_FAKE_LOAD_SESSION: '1', ACP_FIXTURE_ROWS: rowsPath, ...env };
   const records = new Records({ dir: join(dir, 'records'), log: () => {} });
   const adapters = [], supervisors = [], progress = [], logs = [];
   const controller = new Controller({ records, env: childEnv,
     providers: { fake: { enabled: true, ready: true, modelAllowed: () => true, create() {
-      const adapter = new AcpAdapter(descriptor, { log: (...args) => logs.push(args) });
+      const adapter = new AcpAdapter(descriptor, { clock, log: (...args) => logs.push(args) });
       const observe = adapter.observe.bind(adapter);
       adapter.observe = ({ onProgress }) => observe({ onProgress: (value) => { progress.push(value); onProgress(value); } });
       adapters.push(adapter); return adapter;
@@ -147,8 +147,8 @@ test('new session then cold follow-up loads the same history in a new process an
   assert.equal(second.text, 'continued'); // Replayed "earlier answer" is excluded.
   assert.equal(first.effectiveModel, 'gemini-3.8-flash'); assert.equal(second.effectiveModel, 'claude-sonnet-4-6');
   const methods = lines(h.trace).filter((f) => f.method).map((f) => f.method);
-  assert.deepEqual(methods, ['initialize', 'session/new', 'session/set_config_option', 'session/prompt',
-    'initialize', 'session/load', 'session/set_config_option', 'session/prompt']);
+  assert.deepEqual(methods, ['initialize', 'session/new', 'session/set_config_option', 'session/prompt', '_agent_companion/received',
+    'initialize', 'session/load', 'session/set_config_option', 'session/prompt', '_agent_companion/received']);
   assert.deepEqual(h.frames('session/prompt').map((f) => f.params.prompt), [
     [{ type: 'text', text: 'exact text\n  with spacing' }], [{ type: 'text', text: 'CONTINUATION\nexact follow-up' }],
   ]);
@@ -574,4 +574,236 @@ test('ACP resets the usage window and collectors for each descriptor-enabled bri
   assert.deepEqual(windows, [firstSince, nextSince]); assert.ok(nextSince > firstSince);
   assert.deepEqual(result.turns.map(t => [t.text, t.usage.input_tokens]), [['ready', 1234], ['continued', 1234]]);
   assert.equal(result.usage.input_tokens, 2468); assert.equal(h.supervisors.length, 1);
+});
+
+const endTurn = { stopReason: 'end_turn' };
+const usageUpdate = { sessionUpdate: 'usage_update', used: 123, size: 1000 };
+const message = text => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+const command = (id, rawInput = {}) => ({ sessionUpdate: 'tool_call', kind: 'execute', title: 'run_command',
+  toolCallId: id, status: 'in_progress', rawInput });
+const completed = id => ({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed' });
+const background = [command('one'), message('Waiting.'), usageUpdate, endTurn];
+
+async function scriptedAgy(t, batches, env = {}) {
+  const clock = new ManualClock();
+  const h = setup(t, { descriptor: getTargetById('antigravity'), clock,
+    env: { ACP_FAKE_BATCHES: JSON.stringify([[], ...batches]), ...env } });
+  const adapter = h.controller.providers.fake.create();
+  await adapter.start({ cwd: h.dir, env: h.childEnv, supervisor: h.controller.createSupervisor({}) });
+  const { historyId } = await adapter.openHistory({});
+  const next = async () => {
+    await adapter.connection._sendRequest('_fixture/next', {});
+    await clock.flush();
+  };
+  const begin = async () => {
+    const accepted = adapter.deliver({ text: 'fixture prompt' });
+    await next();
+    await accepted;
+  };
+  return { ...h, adapter, clock, historyId, next, begin };
+}
+
+test('Antigravity holds a running command through its follow-on reply and quiet period', async t => {
+  const h = await scriptedAgy(t, [[message('Starting.'), command('one'), message('\n\nWaiting.'), usageUpdate, endTurn],
+    [completed('one'), message('\n\nDO'), message('NE'), usageUpdate],
+    [message('!')]]);
+  await h.begin();
+  const terminal = h.adapter.observe({ onProgress() {} });
+  assert.equal(h.adapter.turn.finished, false);
+  await h.clock.advance(180_000);
+  assert.equal(h.adapter.turn.finished, false, 'no deadline while the command runs');
+  await h.next();
+  await h.clock.advance(2999);
+  assert.equal(h.adapter.turn.finished, false);
+  await h.next();
+  assert.equal(h.progress.at(-1).partialText, 'Starting.\n\nWaiting.\n\nDONE!');
+  await h.clock.advance(2999);
+  assert.equal(h.adapter.turn.finished, false, 'later activity resets the quiet period');
+  await h.clock.advance(1);
+  const result = await terminal;
+  assert.equal(result.outcome, 'completed');
+  assert.equal(result.text, 'Starting.\n\nWaiting.\n\nDONE!');
+  assert.deepEqual(result.usage, { source: 'antigravity-acp', input_tokens: 18021, output_tokens: 88,
+    cached_input_tokens: 6842, cache_write_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 18109, partial: true });
+  assert.equal(h.clock.timers.size, 0);
+});
+
+test('Antigravity sees end_turn in wire order when the same read already contains completion and another tool', async t => {
+  const h = await scriptedAgy(t, [[...background, completed('one'), usageUpdate, command('two')],
+    [completed('two'), message('\n\nFinal')], [usageUpdate]]);
+  await h.begin();
+  await h.clock.advance(120_000);
+  assert.equal(h.adapter.turn.finished, false);
+  await h.next();
+  await h.clock.advance(3000);
+  assert.equal(h.adapter.turn.finished, false, 'usage before the new tool cannot finish its reply');
+  await h.next();
+  await h.clock.advance(3000);
+  assert.equal((await h.adapter.turn.terminal).text, 'Waiting.\n\nFinal');
+});
+
+test('Antigravity keeps a follow-on reply open across an edit and a slow next model call', async t => {
+  const edit = { sessionUpdate: 'tool_call', kind: 'edit', title: 'File note.md', toolCallId: 'edit', status: 'in_progress' };
+  const h = await scriptedAgy(t, [background, [completed('one'), usageUpdate, edit, completed('edit')],
+    [message('\n\nFinal'), usageUpdate]]);
+  await h.begin();
+  await h.next();
+  await h.clock.advance(60_000);
+  assert.equal(h.adapter.turn.finished, false, 'a tool call after usage means the model answers again');
+  await h.next();
+  await h.clock.advance(3000);
+  assert.equal((await h.adapter.turn.terminal).text, 'Waiting.\n\nFinal');
+});
+
+test('Antigravity counts the reply bound from the last update, not from when work ended', async t => {
+  const h = await scriptedAgy(t, [background, [completed('one')], [message('\n\nStill writing')]]);
+  await h.begin();
+  await h.next();
+  await h.clock.advance(100_000);
+  await h.next();
+  await h.clock.advance(119_999);
+  assert.equal(h.adapter.turn.finished, false);
+  await h.clock.advance(1);
+  assert.equal((await h.adapter.turn.terminal).text, 'Waiting.\n\nStill writing');
+});
+
+test('Antigravity waits for the reply bound when completion shares a read with end_turn', async t => {
+  const h = await scriptedAgy(t, [[...background, completed('one')]]);
+  await h.begin();
+  await h.clock.advance(119_999);
+  assert.equal(h.adapter.turn.finished, false, 'usage before end_turn does not qualify');
+  await h.clock.advance(1);
+  const result = await h.adapter.turn.terminal;
+  assert.equal(result.outcome, 'completed');
+  assert.equal(result.text, 'Waiting.');
+  assert.equal(result.usage.partial, true);
+  assert.equal(h.clock.timers.size, 0);
+});
+
+for (const [name, tool] of [
+  ['pending ask_question', { sessionUpdate: 'tool_call', kind: 'other', title: 'ask_question', toolCallId: 'q', status: 'pending' }],
+  ['daemon command', command('server', { IsDaemon: true })],
+]) test(`Antigravity ends immediately with a ${name}`, async t => {
+  const h = await scriptedAgy(t, [[tool, endTurn]]);
+  await h.begin();
+  assert.equal(h.adapter.turn.finished, true);
+  const result = await h.adapter.turn.terminal;
+  assert.equal(result.outcome, 'completed');
+  assert.equal(result.usage.partial, undefined);
+  assert.equal(h.clock.timers.size, 0);
+});
+
+function childFiles(h, state) {
+  const dir = join(h.childEnv.GEMINI_HOME || join(h.dir, '.gemini'), 'antigravity-cli', 'brain', h.historyId, '.system_generated');
+  mkdirSync(join(dir, 'subagents'), { recursive: true });
+  mkdirSync(join(dir, 'messages', 'undelivered'), { recursive: true });
+  writeFileSync(join(dir, 'subagents', 'child.json'), JSON.stringify({ conversationId: 'child', state }));
+  return join(dir, 'messages');
+}
+const launched = [{ sessionUpdate: 'tool_call', kind: 'other', title: 'invoke_subagent', toolCallId: 'launch', status: 'in_progress' },
+  completed('launch'), message('Waiting.'), usageUpdate, endTurn];
+
+test('Antigravity waits for the ALIVE child to report to its parent and for the parent reply', async t => {
+  const h = await scriptedAgy(t, [launched, [message('\n\nReported'), usageUpdate]]);
+  const dir = childFiles(h, 'SUBAGENT_STATE_ALIVE');
+  writeFileSync(join(dir, 'task.json'), JSON.stringify({ sender: h.historyId + '/task-1' }));
+  for (const path of ['read.json', 'undelivered/child.json']) writeFileSync(join(dir, path), '{"sender":"child"}');
+  await h.begin();
+  await h.clock.advance(180_000);
+  assert.equal(h.adapter.turn.finished, false);
+  writeFileSync(join(dir, 'report.json'), '{"sender":"child"}');
+  await h.next();
+  await h.clock.advance(3000);
+  assert.equal(h.adapter.turn.finished, true);
+  assert.equal((await h.adapter.turn.terminal).text, 'Waiting.\n\nReported');
+});
+
+test('Antigravity polls native reports without a wire update and bounds the missing reply', async t => {
+  const h = await scriptedAgy(t, [launched], { GEMINI_HOME: '' });
+  const dir = childFiles(h, 'SUBAGENT_STATE_ALIVE');
+  // The directory already lists this child while its state file is being written.
+  writeFileSync(join(dir, '..', 'subagents', 'child.json'), '{');
+  await h.begin();
+  await h.clock.advance(30_000);
+  writeFileSync(join(dir, 'report.json'), '{"sender":"child"}');
+  await h.clock.advance(2000 + 119_999);
+  assert.equal(h.adapter.turn.finished, false);
+  await h.clock.advance(1);
+  assert.equal(h.adapter.turn.finished, true);
+  assert.equal((await h.adapter.turn.terminal).outcome, 'completed');
+  assert.equal(h.clock.timers.size, 0);
+});
+
+test('Antigravity ends immediately with a KILLED child', async t => {
+  const h = await scriptedAgy(t, [launched]);
+  childFiles(h, 'SUBAGENT_STATE_KILLED');
+  await h.begin();
+  assert.equal(h.adapter.turn.finished, true);
+  assert.equal((await h.adapter.turn.terminal).usage.partial, undefined);
+});
+
+test('Antigravity refuses delivery while open, then interrupts without another prompt response', async t => {
+  const h = await scriptedAgy(t, [background]);
+  await h.begin();
+  assert.equal(h.adapter.turn.finished, false);
+  await assert.rejects(h.adapter.deliver({ text: 'another prompt' }), { code: 'DeliveryUnknown' });
+  await h.adapter.interrupt();
+  await h.next(); // The fake has read the cancel and has sent no prompt response.
+  assert.equal(h.frames('session/prompt').length, 1);
+  assert.deepEqual(h.frames('session/cancel').map(f => f.params), [{ sessionId: h.historyId }]);
+  const result = await h.adapter.turn.terminal;
+  assert.equal(result.outcome, 'interrupted');
+  assert.equal(result.text, 'Waiting.');
+  assert.equal(h.clock.timers.size, 0);
+});
+
+for (const exit of ['close', 'disconnect']) test(`Antigravity ${exit} releases an open turn and its timer`, async t => {
+  const h = await scriptedAgy(t, [background]);
+  await h.begin();
+  const lost = assert.rejects(h.adapter.turn.terminal, { code: 'ProviderLost' });
+  if (exit === 'close') await h.adapter.close();
+  else h.adapter.connection.child.stdin.end();
+  await lost;
+  assert.equal(h.clock.timers.size, 0);
+});
+
+for (const stopReason of ['cancelled', 'max_tokens']) test(`Antigravity honors ${stopReason} with unfinished work`, async t => {
+  const h = await scriptedAgy(t, [[command('one'), { stopReason }]]);
+  await h.begin();
+  assert.equal(h.adapter.turn.finished, true);
+  assert.equal((await h.adapter.turn.terminal).outcome, stopReason === 'cancelled' ? 'interrupted' : 'failed');
+  assert.equal(h.clock.timers.size, 0);
+});
+
+for (const receipt of ['error', 'result', 'disconnect']) test(`Antigravity silent prompt receipt: ${receipt}`, async t => {
+  const h = await scriptedAgy(t, [], { ACP_FAKE_RECEIPT: receipt });
+  let ack, failure;
+  h.adapter.deliver({ text: 'silent prompt' }).then(value => { ack = value; }, err => { failure = err; });
+  await h.next().catch(err => { if (receipt !== 'disconnect') throw err; });
+  assert.deepEqual(lines(h.trace).filter(f => f.method).map(f => f.method).slice(2, 4),
+    ['session/prompt', '_agent_companion/received']);
+  assert.deepEqual(h.frames('_agent_companion/received')[0].params, { sessionId: h.historyId });
+  if (receipt === 'disconnect') assert.equal(failure?.code, 'DeliveryUnknown');
+  else {
+    assert.deepEqual(ack, { acknowledged: true, nativeTurnId: null, nativeRefs: { promptRequestId: h.frames('session/prompt')[0].id } });
+    assert.equal(h.adapter.progress, null);
+    assert.equal(h.adapter.turn.finished, false);
+  }
+});
+
+test('Antigravity receipt write failure leaves delivery unknown', async t => {
+  const h = await scriptedAgy(t, []);
+  const stdin = h.adapter.connection.child.stdin, write = stdin.write.bind(stdin);
+  t.mock.method(stdin, 'write', (frame, callback) => {
+    if (JSON.parse(frame).method === '_agent_companion/received') {
+      callback(Object.assign(new Error('fixture write failed'), { code: -32 }));
+      return false;
+    }
+    return write(frame, callback);
+  });
+  let failure;
+  h.adapter.deliver({ text: 'silent prompt' }).catch(err => { failure = err; });
+  await h.next();
+  assert.equal(failure?.code, 'DeliveryUnknown');
+  assert.equal(h.frames('_agent_companion/received').length, 0);
 });
