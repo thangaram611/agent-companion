@@ -84,7 +84,7 @@ test('a stopping job whose process is gone is read until its result, then the fo
   assert.equal(stopping.ended, false);
   assert.equal(lines(stopping)[0].job.status, 'unknown');
   f.append([codexItem('turn-2', { type: 'AgentMessage', id: 'a10', content: [{ type: 'text', text: 'Last words.' }] })]);
-  writeFileSync(join(f.states.claude, 'results', 'run-1.json'), JSON.stringify({ owner: 'agent-run', executionId: 'run-1', generation: 1, outcome: 'interrupted', cause: 'user_cancel', finishedAt: f.NOW }));
+  writeFileSync(join(f.states.claude, 'results', 'run-1.json'), JSON.stringify({ owner: 'th-run', executionId: 'run-1', generation: 1, outcome: 'interrupted', cause: 'user_cancel', finishedAt: f.NOW }));
   f.setExecution('run-1', () => ({ state: 'closed' }));
   const out = job.tick(), [first, second] = lines(out);
   assert.equal(out.ended, true);

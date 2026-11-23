@@ -92,8 +92,7 @@ const turnOf = ({ nativeTurnId, nativeTurnIds, interventions }) => `${nativeTurn
 // since the last tick and whether the job has ended, its final read done.
 export function createFollow({ dir, executionId, env = process.env, now = Date.now, alive = pidAlive }) {
   const records = new Records({ dir, log() {} }), read = recordReader();
-  const paths = { execution: records.path('executions', executionId), result: records.path('results', executionId),
-    attachment: records.path('attachments', executionId) };
+  const paths = { execution: records.path('executions', executionId), result: records.path('results', executionId) };
   const transcript = new JobTranscript({ env, now });
   let job = null, branch, seen = null, turn = null, sent = new Map(), sentTurn = null;
   return {
@@ -101,13 +100,12 @@ export function createFollow({ dir, executionId, env = process.env, now = Date.n
       const execution = read(paths.execution);
       if (!execution?.executionId) throw new Error(`no execution record ${executionId} in ${dir}`);
       const result = read(paths.result, true);
-      const attachment = result ? null : read(paths.attachment);
       const status = statusOf(execution, result, alive);
       const lines = [];
-      if (execution !== job?.execution || result !== job?.result || attachment !== job?.attachment || status !== job?.status) {
+      if (execution !== job?.execution || result !== job?.result || status !== job?.status) {
         branch ??= branchOf(execution.cwd);
-        job = { provider: execution.provider, execution, result, attachment, status };
-        lines.push({ job: { status, execution, result, attachment, branch } });
+        job = { provider: execution.provider, execution, result, status };
+        lines.push({ job: { status, execution, result, branch } });
       }
       const ended = hasEnded(job);
       let items = [];

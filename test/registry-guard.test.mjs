@@ -5,11 +5,8 @@ import { HOSTS } from '../lib/hosts/index.mjs';
 import { TARGET_IDS } from '../lib/target-registry.mjs';
 
 const root = new URL('../', import.meta.url);
-const later = 'removed or rewritten in a later step';
 // File, permitted source, reason. Keep temporary exceptions local to their callers.
 const exceptions = [
-  ['hooks/mod.ts', /.*/, later],
-  ['bridge-server/ui/jobs.mjs', /locate\('(?:claude|codex)'|job\.host === 'codex'/, later],
   ['bridge-server/ui/rows.mjs', /export const COMPANION_NAMES = \{[^}]+\}/, "Claude's mod loads these names without Node imports"],
   ['hooks/host-paths.sh', /"codex"\)/, 'shell copy of the host path rules, checked against the registry'],
   ['setup.sh', /"\$TARGET" = "copilot"/, 'installs the Copilot-specific reviewer'],

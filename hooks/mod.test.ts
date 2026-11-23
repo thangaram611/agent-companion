@@ -1,172 +1,110 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { On, RenderPropsOf } from 'claude-code'
+import type { On } from 'claude-code'
 
 const HOME = '/home/tester'
 const DIR = `${HOME}/.claude/agent-companion`
 const SEND = 'mcp__plugin_agent-companion_agent-bridge__agent_send'
 const START = 1_800_000_000_000
-const plain = (text?: string) => text?.replace(/\x1b\[[0-9;]*m/g, '')
 
-// The bridge's records, served to $.fs.read from memory; `reads` counts the reads.
-function records(on: On, files: Record<string, unknown>) {
+// The bridge's records, served to $.fs.read from memory (`reads` counts the
+// reads), and agent_send answering each send with the next thread and job.
+function setup(on: On, files: Record<string, unknown>, sends: [string, string][], now = START) {
+  mock.env(on, { HOME })
   const state = { reads: 0 }
   on('fs.read', (_, e) => {
     state.reads++
     return e.path in files ? { value: JSON.stringify(files[e.path]) } : { deny: `ENOENT: ${e.path}` }
   })
-  return state
-}
-
-// Each body the mod hands the engine for an agent row.
-function bodies(on: On) {
-  const seen: (string | undefined)[] = []
-  on('ui.render', { component: 'AgentRow' }, ($, e, next) => {
-    seen.push(e.props.body)
-    return next(e)
+  on('tool.call', () => {
+    const [thread, job_id] = sends.shift()!
+    return { result: {}, text: JSON.stringify({ ok: true, status: 'still_running', thread, job_id, target: 'codex' }) }
   })
-  return seen
+  return { clock: mock.clock(on, { now }), fs: state }
 }
 
-function setup(on: On, files: Record<string, unknown>, now = START) {
-  mock.env(on, { HOME })
-  return { clock: mock.clock(on, { now }), fs: records(on, files), seen: bodies(on) }
-}
-
-type RowProps = RenderPropsOf['AgentRow']
-const row = (id: string, props: Partial<RowProps> = {}) => ({
-  surface: 'terminal' as const,
-  component: 'AgentRow' as const,
-  requestId: id,
-  props: {
-    id, description: 'Step 3b-2: adapters', type: 'agent-companion', status: 'running', kind: 'local_agent',
-    taskStatus: 'running', label: 'Step 3b-2: adapters', startTime: START, cwd: '/work', tokenCount: 0,
-    tokenSamples: [], hasRow: true, rowIds: [id], columns: 120, isHidden: false, ...props,
-  } satisfies RowProps,
+const band = (props: Record<string, unknown> = {}) => ({
+  plugin: 'agent-companion', surface: 'terminal' as const, component: 'AbovePrompt' as const, requestId: 'band',
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 12, bodyColumns: 100, scroll: { offset: 0, bodyRows: 12 }, view: {}, ...props },
 })
+// The band as plain text, one line per row, trailing spaces cut; nothing when the mod drew nothing.
+async function rows(ui: { drawn: () => Promise<unknown> }): Promise<string[]> {
+  const text = (node: any): string => typeof node === 'string' ? node : (node?.children ?? []).map(text).join('')
+  const root: any = await ui.drawn()
+  return root?.type === 'Box' ? root.children.map((row: unknown) => text(row).trimEnd()) : []
+}
 
 const execution = (id: string, fields: Record<string, unknown> = {}) => ({
-  executionId: id, owner: 'a', provider: 'codex', state: 'running', startedAt: START, cwd: '/work',
+  executionId: id, owner: 't', provider: 'codex', state: 'running', startedAt: START, cwd: '/work',
   interventions: [], interventionModes: { default: 'steer', steer: true, queue: 'bridge', interrupt: true }, progress: {}, ...fields,
 })
 
-test('agent_send maps the subagent to its job and the row shows the running command', async ($, on) => {
+test("a send from the main conversation lists its thread above the prompt: title, companion · model, what it does, elapsed", async ($, on) => {
   const files: Record<string, unknown> = {
+    [`${DIR}/conversations/t1.json`]: { owner: 't1', title: 'Step 3b-2: adapters' },
     [`${DIR}/executions/j1.json`]: execution('j1', { effectiveModel: 'gpt-6-astra', effortOverride: 'max',
       progress: { activeCommand: ['/bin/zsh', '-lc', 'node --test opencode.test.mjs'] } }),
   }
-  const { clock, fs, seen } = setup(on, files, START + 400_000)
-  on('tool.call', () => ({ result: {}, text: JSON.stringify({ ok: true, status: 'still_running', job_id: 'j1', thread: 'a1', target: 'codex' }) }))
-
-  await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: 'a1' })
+  const { clock, fs } = setup(on, files, [['t1', 'j1']], START + 400_000)
+  await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work' })
   await clock.advance(1000)
   const reads = fs.reads
-  await $.ui.render(row('a1'))
-  await $.ui.render(row('a1'))
-
-  expect(plain(seen.at(-1))).toBe('Step 3b-2: adapters  codex · gpt-6-astra max · running $ node --test opencode.test.mjs · 6:41')
-  expect(seen.at(-1)).toContain('\x1b[32mrunning $ node --test opencode.test.mjs\x1b[39m')
+  const ui = await $.ui.mount(band())
+  expect(await rows(ui)).toEqual(['Step 3b-2: adapters  codex · gpt-6-astra max · running $ node --test opencode.test.mjs · 6:41'])
+  // The live line in the theme's success colour, the title bold.
+  const spans = ((await ui.drawn()) as any).children[0].children
+  expect(spans.map((span: any) => [span.children[0], span.props])).toContainEqual(['running $ node --test opencode.test.mjs', { color: 'success' }])
+  expect(spans[0].props).toEqual({ weight: 'bold' })
   // Records are read on the clock, never by a render.
+  await ui.redraw()
   expect(fs.reads).toBe(reads)
-})
-
-test('a job started before the mod loaded is found through its conversation record, and the row follows it to its end', async ($, on) => {
-  const files: Record<string, unknown> = {
-    [`${DIR}/conversations/a2.json`]: { owner: 'a2', executionId: 'j2' },
-    [`${DIR}/executions/j2.json`]: execution('j2', { provider: 'opencode', effectiveModel: { providerID: 'opencode', id: 'flint-40b-free', variant: 'default' },
-      progress: { partialText: 'Reading the adapter' } }),
-  }
-  const { clock, seen } = setup(on, files, START + 41_000)
-
-  const ui = await $.ui.mount({ plugin: 'agent-companion', ...row('a2', { description: 'Review auth middleware' }) })
-  expect(seen.at(-1)).toBeUndefined()
-
-  // The clock finds the job and redraws the row.
-  await clock.advance(1000)
-  expect(plain(seen.at(-1))).toBe('Review auth middleware  opencode · flint-40b-free · responding · 0:42')
-
-  files[`${DIR}/results/j2.json`] = { executionId: 'j2', outcome: 'completed', finishedAt: START + 38_000 }
-  await clock.advance(1000)
-  expect(plain(seen.at(-1))).toBe('Review auth middleware  opencode · ✓ done in 0:38')
   await ui.unmount()
 })
 
-test('a job whose subagent ended without a stop signal keeps its row, shows the owner away and is followed to its end', async ($, on) => {
-  // Silence never ends a job: the bridge lets it finish its turn, so the row
-  // must not give up after the subagent ends (the old 120 s rule did).
+test("the person's queued message replaces the live line, titles line up, and an ended thread leaves the band", async ($, on) => {
   const files: Record<string, unknown> = {
-    [`${DIR}/conversations/a7.json`]: { owner: 'a7', executionId: 'j7' },
-    [`${DIR}/executions/j7.json`]: execution('j7', { owner: 'a7', progress: { activeCommand: ['npm', 'test'] } }),
-    [`${DIR}/attachments/j7.json`]: { owner: 'a7', executionId: 'j7', attached: false, requestIds: [], detachedAt: START },
-  }
-  const { clock, seen } = setup(on, files, START + 1000)
-  await $.ui.render(row('a7', { description: 'Long tests' }))
-  await clock.advance(1000)
-  await $.ui.render(row('a7', { description: 'Long tests', status: 'killed' }))
-  await clock.advance(300_000)
-  await $.ui.render(row('a7', { description: 'Long tests', status: 'killed' }))
-  expect(plain(seen.at(-1))).toBe('Long tests  codex · running $ npm test · owner away 5m · 5:02')
-
-  files[`${DIR}/results/j7.json`] = { executionId: 'j7', outcome: 'completed', finishedAt: START + 302_000 }
-  await clock.advance(1000)
-  await $.ui.render(row('a7', { description: 'Long tests', status: 'killed' }))
-  expect(plain(seen.at(-1))).toBe('Long tests  codex · ✓ done in 5:02')
-})
-
-test("the person's queued message replaces the live line, and a failure shows in red", async ($, on) => {
-  const files: Record<string, unknown> = {
-    [`${DIR}/conversations/a3.json`]: { owner: 'a3', executionId: 'j3' },
-    [`${DIR}/executions/j3.json`]: execution('j3', { provider: 'claude', effectiveModel: 'opus-5.5',
+    [`${DIR}/executions/j3.json`]: execution('j3', { provider: 'claude', effectiveModel: 'opus-5.5', text: 'Second opinion on schema\nwith detail',
       interventionModes: { default: 'queue', steer: false, queue: 'native', interrupt: true },
       interventions: [{ id: 'm1', from: 'user', mode: 'queue', state: 'delivered', text: 'also check the schema', at: START }],
       progress: { activity: 'thinking' } }),
+    [`${DIR}/executions/j4.json`]: execution('j4', { provider: 'opencode', text: 'Probe', progress: { partialText: 'Reading' } }),
   }
-  const { clock, seen } = setup(on, files, START + 125_000)
-
-  await $.ui.render(row('a3', { description: 'Second opinion on schema' }))
+  const { clock } = setup(on, files, [['t3', 'j3'], ['t4', 'j4']], START + 125_000)
+  // A subagent's send is listed as the main conversation's are.
+  await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work', agentId: 'a1' })
+  await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work' })
   await clock.advance(1000)
-  await $.ui.render(row('a3', { description: 'Second opinion on schema' }))
-  expect(plain(seen.at(-1))).toBe('Second opinion on schema  claude · opus-5.5 · ◌ your message queued · 2:06')
-  expect(seen.at(-1)).toContain('\x1b[33m◌ your message queued\x1b[39m')
-
+  const ui = await $.ui.mount(band())
+  expect(await rows(ui)).toEqual([
+    'Second opinion on schema  claude · opus-5.5 · ◌ your message queued · 2:06',
+    'Probe                     opencode · responding · 2:06',
+  ])
   files[`${DIR}/results/j3.json`] = { executionId: 'j3', outcome: 'failed', finishedAt: START + 62_000 }
+  files[`${DIR}/results/j4.json`] = { executionId: 'j4', outcome: 'completed', finishedAt: START + 62_000 }
   await clock.advance(1000)
-  await $.ui.render(row('a3', { description: 'Second opinion on schema' }))
-  expect(seen.at(-1)).toBe('Second opinion on schema  claude · \x1b[31m✗ failed after 1:02\x1b[39m')
+  await ui.redraw()
+  expect(await rows(ui)).toEqual([])
+  await ui.unmount()
 })
 
-test("another subagent's row is left to the engine and reads nothing", async ($, on) => {
-  const { clock, fs, seen } = setup(on, {})
-
-  await $.ui.render(row('e1', { type: 'Explore', description: 'find the retry code' }))
-  await clock.advance(5000)
-
-  expect(seen).toEqual([undefined])
-  expect(fs.reads).toBe(0)
-})
-
-test('a companion subagent with no job yet keeps the engine row and looks only for its conversation', async ($, on) => {
-  const { clock, fs, seen } = setup(on, {})
-
-  await $.ui.render(row('a4'))
-  await clock.advance(1000)
-  await $.ui.render(row('a4'))
-
-  expect(seen).toEqual([undefined, undefined])
-  expect(fs.reads).toBe(1)
-})
-
-test("the body is cut to the row's columns", async ($, on) => {
+test('the band draws nothing with no thread running, yields to a survey, and cuts rows to its columns', async ($, on) => {
   const files: Record<string, unknown> = {
-    [`${DIR}/conversations/a5.json`]: { owner: 'a5', executionId: 'j5' },
+    [`${DIR}/conversations/t5.json`]: { owner: 't5', title: 'Step 3b-2: adapters' },
     [`${DIR}/executions/j5.json`]: execution('j5', { progress: { activeCommand: 'npm test -- --reporter spec' }, effectiveModel: 'gpt-6-astra' }),
   }
-  const { clock, seen } = setup(on, files)
+  const { clock, fs } = setup(on, files, [['t5', 'j5']])
+  const empty = await $.ui.mount(band())
+  expect(await rows(empty)).toEqual([])
+  expect(fs.reads).toBe(0)
+  await empty.unmount()
 
-  await $.ui.render(row('a5', { columns: 40 }))
+  await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work' })
   await clock.advance(1000)
-  await $.ui.render(row('a5', { columns: 40 }))
-
-  const shown = plain(seen.at(-1))!
+  const survey = await $.ui.mount(band({ hasSurvey: true }))
+  expect(await rows(survey)).toEqual([])
+  await survey.unmount()
+  const narrow = await $.ui.mount(band({ bodyColumns: 40 }))
+  const [shown] = await rows(narrow)
   expect(shown).toBe('Step 3b-2: a…  codex · gpt-6-astra · ru…')
-  expect([...shown].length).toBeLessThanOrEqual(40)
+  expect([...shown!].length).toBeLessThanOrEqual(40)
+  await narrow.unmount()
 })

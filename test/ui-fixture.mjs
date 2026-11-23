@@ -24,17 +24,10 @@ export function uiFixture(t) {
   json(join(repo, '.git/HEAD'), 'ref: refs/heads/main\n');
   json(join(web, '.git/HEAD'), 'ref: refs/heads/auth-guard\n');
 
-  // Callers: Claude lead sessions name their subagents; Codex names the task.
+  // Lead session names: Claude's from its transcript titles, Codex's from its session index.
   json(join(env.CLAUDE_CONFIG_DIR, 'projects/-work/lead-1.jsonl'), jsonl([
-    { type: 'ai-title', aiTitle: 'Generated' }, { type: 'custom-title', customTitle: 'Live view plan' },
-    { toolUseResult: { status: 'async_launched', agentId: 'agent-run', description: 'Step 1b-2: digest on demand' } },
-    { toolUseResult: { status: 'async_launched', agentId: 'agent-op', description: 'Restore spec triage' } },
-    { toolUseResult: { status: 'async_launched', agentId: 'agent-old', description: 'Antigravity scenario' } }]));
-  json(join(env.CLAUDE_CONFIG_DIR, 'projects/-web/lead-2.jsonl'), jsonl([
-    { type: 'ai-title', aiTitle: 'Auth hardening' },
-    { toolUseResult: { status: 'async_launched', agentId: 'agent-done', description: 'Review auth middleware' } }]));
-  json(join(env.CODEX_HOME, 'sessions/2026/11/15/rollout-2026-11-15T10-58-00-thread-child.jsonl'), jsonl([
-    { type: 'session_meta', payload: { id: 'thread-child', parent_thread_id: 'root-1', agent_path: '/root/rate_limit_probe', agent_nickname: 'Popper' } }]));
+    { type: 'ai-title', aiTitle: 'Generated' }, { type: 'custom-title', customTitle: 'Live view plan' }]));
+  json(join(env.CLAUDE_CONFIG_DIR, 'projects/-web/lead-2.jsonl'), jsonl([{ type: 'ai-title', aiTitle: 'Auth hardening' }]));
   json(join(env.CODEX_HOME, 'session_index.jsonl'), jsonl([{ id: 'root-1', thread_name: 'Release checks' }]));
 
   // Running Codex job, as in the mockup, from a bridge that takes messages;
@@ -79,15 +72,15 @@ export function uiFixture(t) {
   const execution = fields => ({ generation: 1, state: 'closed', writer: 'controller', ...fields });
   const records = {
     [claude]: [
-      [execution({ executionId: 'run-1', owner: 'agent-run', hostSessionId: 'lead-1', provider: 'codex', cwd: repo, text: 'Step 1b-2 of the live-view plan',
+      [execution({ executionId: 'run-1', owner: 'th-run', hostSessionId: 'lead-1', provider: 'codex', cwd: repo, text: 'Step 1b-2 of the live-view plan',
         startedAt: NOW - 4 * M - 12 * S, state: 'running', processes: { pid: 4242 }, historyId: 'thread-run', nativeTurnId: 'turn-2',
         effectiveModel: 'gpt-6-astra', effectiveEffort: 'high', transcript: locator('codex', running, 'thread-run'),
         interventionModes: { default: 'steer', steer: true, queue: 'bridge', interrupt: true }, interventions: [], turns: [], nativeTurnIds: ['turn-2'],
         progress: { activeCommand: 'node --test lib/digest.test.mjs', partialText: '', lastActivityAt: NOW - 18 * S } })],
-      [execution({ executionId: 'op-1', owner: 'agent-op', hostSessionId: 'lead-1', provider: 'opencode', cwd: join(root, 'work/hermes'), text: 'Triage the restore spec',
+      [execution({ executionId: 'op-1', owner: 'th-op', hostSessionId: 'lead-1', provider: 'opencode', cwd: join(root, 'work/hermes'), text: 'Triage the restore spec',
         startedAt: NOW - 41 * S, state: 'running', processes: { pid: 4343 }, effectiveModel: { providerID: 'opencode', id: 'flint-40b-free', variant: 'default' },
         transcript: null, progress: { partialText: 'Reading the restore spec', lastActivityAt: NOW - 2 * S } })],
-      [execution({ executionId: 'done-1', owner: 'agent-done', hostSessionId: 'lead-2', provider: 'claude', cwd: web, text: 'Review the auth middleware for CSRF gaps and fix what you find.',
+      [execution({ executionId: 'done-1', owner: 'th-done', hostSessionId: 'lead-2', provider: 'claude', cwd: web, text: 'Review the auth middleware for CSRF gaps and fix what you find.',
         startedAt: NOW - 12 * M - 362 * S, historyId: 'sess-done', nativeTurnId: 'u1', transcript: locator('claude', done, 'sess-done') }),
       { outcome: 'completed', cause: 'native_complete', finishedAt: NOW - 12 * M, text: answer, usage: { source: 'claude-result', total_tokens: 412_000 },
         effectiveModel: 'opus-5.5', effectiveEffort: 'xhigh', workSummary: {
@@ -95,11 +88,11 @@ export function uiFixture(t) {
           commands: [{ command: 'rg -n csrf src', exitCode: 0, status: 'completed' }, { command: 'npm test', exitCode: 1, status: 'failed' }, { command: 'npm run lint', exitCode: 0, status: 'completed' }],
           commandsOmitted: 0, edits: [{ path: join(web, 'src/auth.ts'), change: 'update' }], editsOmitted: 0, errors: [], errorsOmitted: 0,
           worktree: { available: true, files: [{ path: 'src/auth.ts', added: 18, deleted: 6 }, { path: 'src/auth.test.ts', added: 40, deleted: 0 }], filesOmitted: 0 } } }],
-      [execution({ executionId: 'old-1', owner: 'agent-old', hostSessionId: 'lead-1', provider: 'antigravity', cwd: join(root, 'work/notes-app'), text: 'Scenario', startedAt: NOW - 2 * 24 * 60 * M }),
+      [execution({ executionId: 'old-1', owner: 'th-old', hostSessionId: 'lead-1', provider: 'antigravity', cwd: join(root, 'work/notes-app'), text: 'Scenario', startedAt: NOW - 2 * 24 * 60 * M }),
         { outcome: 'completed', finishedAt: NOW - 2 * 24 * 60 * M + M, text: 'ok' }],
     ],
     [codex]: [
-      [execution({ executionId: 'fail-1', owner: 'thread-child', hostSessionId: 'root-1', provider: 'copilot', cwd: join(root, 'work/scratch'), text: 'Reply with the word FAILURE.',
+      [execution({ executionId: 'fail-1', owner: 'th-fail', hostSessionId: 'root-1', provider: 'copilot', cwd: join(root, 'work/scratch'), text: 'Reply with the word FAILURE.',
         startedAt: NOW - 61 * M - 10 * S, historyId: '2bd1aa29-799a-478e-beb6-0108984d8d63', effectiveModel: 'fixture-mock',
         transcript: locator('copilot', failed, '2bd1aa29-799a-478e-beb6-0108984d8d63') }),
       { outcome: 'failed', cause: 'provider_error', detail: 'rate_limit', finishedAt: NOW - 61 * M, text: rateLimit, workSummary: {
@@ -108,8 +101,14 @@ export function uiFixture(t) {
         worktree: { available: false, reason: 'not_a_git_repository', files: [], filesOmitted: 0 } } }],
     ],
   };
+  // Each job's thread: its lead and the title the lead gave it.
+  const titles = { 'run-1': 'Step 1b-2: digest on demand', 'op-1': 'Restore spec triage', 'done-1': 'Review auth middleware',
+    'old-1': 'Antigravity scenario', 'fail-1': 'rate limit probe' };
   for (const [dir, jobs] of Object.entries(records)) for (const [record, result] of jobs) {
     json(join(dir, 'executions', `${record.executionId}.json`), { ...record, owner: record.owner });
+    json(join(dir, 'conversations', `${record.owner}.json`), { owner: record.owner, generation: 1, executionId: record.executionId,
+      provider: record.provider, cwd: record.cwd, title: titles[record.executionId],
+      lead: { host: dir === claude ? 'claude' : 'codex', session: record.hostSessionId, agent: null } });
     if (result) json(join(dir, 'results', `${record.executionId}.json`), { owner: record.owner, executionId: record.executionId, generation: 1, ...result });
   }
   const dirs = [{ host: 'claude', dir: claude }, { host: 'codex', dir: codex }];
