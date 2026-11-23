@@ -2,6 +2,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -9,9 +11,11 @@ import {
   detectHost,
   _resetHostCacheForTests,
   companionHomeDir,
-  agentsDir,
+  HOSTS,
   settingsFile,
-} from './host.mjs';
+} from '../lib/hosts/index.mjs';
+
+const agentsDir = host => join(HOSTS[host].configDir(), 'agents');
 
 function withEnv(key, value, fn) {
   const prior = process.env[key];
@@ -77,4 +81,30 @@ test('CODEX_HOME relocates every Codex path without affecting Claude paths', () 
     assert.equal(settingsFile('codex'), join(custom, 'config.toml'));
     assert.equal(companionHomeDir('claude'), join(homedir(), '.claude', 'agent-companion'));
   });
+});
+
+const paths = {
+  claude: { config: '/fake home/.claude', data: '/plugin root/.plugin-data', settings: 'settings.json', wall: 'timeout', scale: 1000 },
+  codex: { config: '/custom codex', data: '/custom codex/plugins/data/agent-companion-agent-companion', settings: 'config.toml', wall: 'tool_timeout_sec', scale: 1 },
+};
+
+for (const host of Object.values(HOSTS)) test(`${host.id} paths, shell hooks and bridge registration`, () => {
+  const root = '/plugin root';
+  const { config, data, settings, wall, scale } = paths[host.id];
+  const script = '. ./hooks/host-paths.sh && host_paths "$1" "$2" && printf "%s\\n" "$HOST_CONFIG_DIR" "$HOST_STATE_DIR" "$HOST_PLUGIN_DATA"';
+  for (const overrides of [{ CODEX_HOME: '/custom codex' }, {}, { CODEX_HOME: ' ./old/../custom codex/ ' }, { PLUGIN_DATA: '/plugin data', CLAUDE_PLUGIN_DATA: '/claude data' }]) {
+    const env = { HOME: '/fake home', ...overrides };
+    const dirs = [host.configDir(env), host.stateDir(env), host.pluginDataDir(env, root)];
+    if (env.CODEX_HOME === '/custom codex') {
+      assert.deepEqual(dirs, [config, join(config, 'agent-companion'), data]);
+      assert.equal(host.settingsFile(env), join(config, settings));
+    }
+    const shell = execFileSync('/bin/bash', ['-c', script, 'bash', host.id, root], { cwd: new URL('..', import.meta.url), env, encoding: 'utf8' });
+    assert.deepEqual(shell.trimEnd().split('\n'), dirs);
+  }
+  const manifest = JSON.parse(readFileSync(new URL(`../.${host.id}-plugin/plugin.json`, import.meta.url)));
+  const bridge = manifest.mcpServers['agent-bridge'];
+  assert.equal(bridge.env.AGENT_COMPANION_HOST, host.id);
+  assert.equal(bridge[wall], 1320 * scale);
+  assert.ok(bridge[wall] / scale > 1200);
 });

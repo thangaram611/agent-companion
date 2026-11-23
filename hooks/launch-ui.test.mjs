@@ -15,7 +15,7 @@ function fixture(t) {
   const root = path.join(dir, 'plugin root');
   mkdirSync(path.join(root, 'hooks'), { recursive: true });
   mkdirSync(path.join(root, 'bridge-server/ui'), { recursive: true });
-  for (const file of ['launch-ui.sh', 'launch-agent-bridge.mjs', 'resolve-codex-deps.mjs']) copyFileSync(path.join(HERE, file), path.join(root, 'hooks', file));
+  for (const file of ['launch-ui.sh', 'host-paths.sh', 'launch-agent-bridge.mjs', 'resolve-codex-deps.mjs']) copyFileSync(path.join(HERE, file), path.join(root, 'hooks', file));
   writeFileSync(path.join(root, 'hooks/node-tools.sh'), `resolve_node() { [ -n "$FAKE_NODE" ] && printf '%s\\n' "$FAKE_NODE"; }
 node_requirement_error() { echo 'agent-companion: Node.js 26 or newer is required.' >&2; }
 `);

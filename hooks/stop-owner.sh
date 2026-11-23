@@ -28,7 +28,7 @@ try {
     console.error(`agent-companion: ${source} lacks a native child id; no stop marker written`);
     process.exit(0);
   }
-  const { companionHomeDir, refuseRealHomeUnderTest } = await import(pathToFileURL(join(process.argv[1], "lib/host.mjs")));
+  const { companionHomeDir, refuseRealHomeUnderTest } = await import(pathToFileURL(join(process.argv[1], "lib/hosts/index.mjs")));
   const base = refuseRealHomeUnderTest(process.env.AGENT_COMPANION_HOME || companionHomeDir(), "state dir");
   const dir = join(base, "stops");
   mkdirSync(dir, { recursive: true, mode: 0o700 });

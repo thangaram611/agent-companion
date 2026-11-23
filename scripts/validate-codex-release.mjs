@@ -7,9 +7,11 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
 } from 'node:fs';
+import { codex } from '../lib/hosts/codex.mjs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -114,13 +116,15 @@ function validateMarketplaceTree(marketplaceRoot) {
   assert(manifest.mcpServers?.['agent-bridge']?.tool_timeout_sec === 1320, 'plugin MCP tool timeout mismatch');
   assertExists(path.join(pluginRoot, 'hooks', 'hooks-codex.json'), 'Codex hook manifest');
   assertExists(path.join(pluginRoot, 'hooks', 'launch-agent-bridge.sh'), 'Codex bridge launcher');
+  assertExists(path.join(pluginRoot, 'hooks', 'host-paths.sh'), 'Codex hook path helper');
   assertExists(path.join(pluginRoot, 'templates', 'agent-companion.toml'), 'Codex agent template');
   const roleTemplate = readFileSync(path.join(pluginRoot, 'templates', 'agent-companion.toml'), 'utf8');
-  assert(roleTemplate.includes('mcp__agent_bridge__agent_send'), 'Codex role does not use normalized agent_bridge tool names');
+  assert(roleTemplate.includes(codex.toolPrefix + 'agent_send'), 'Codex role does not use normalized agent_bridge tool names');
   assert(!roleTemplate.includes('mcp__agent-bridge__'), 'Codex role contains unsanitized agent-bridge tool names');
   assertExists(path.join(pluginRoot, 'bridge-server', 'server.mjs'), 'bridge server');
-  for (const name of ['codex', 'opencode', 'acp']) {
-    assertExists(path.join(pluginRoot, 'bridge-server', 'adapters', `${name}-protocol.mjs`));
+  const adapters = 'bridge-server/adapters';
+  for (const name of readdirSync(path.join(REPO_ROOT, adapters)).filter(name => name.endsWith('-protocol.mjs'))) {
+    assertExists(path.join(pluginRoot, adapters, name));
   }
   for (const retired of [
     'bridge-server/codex-runtime.mjs', 'bridge-server/codex-app-server-runtime.mjs',
@@ -154,6 +158,7 @@ function validateInstalledTree(codexHome, installedPath) {
   assert(manifest.mcpServers?.['agent-bridge']?.default_tools_approval_mode === 'approve', 'installed plugin MCP approval mode mismatch');
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'hooks-codex.json'), 'installed Codex hook manifest');
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'launch-agent-bridge.sh'), 'installed Codex bridge launcher');
+  assertExists(path.join(resolvedInstalledPath, 'hooks', 'host-paths.sh'), 'installed Codex hook path helper');
   assertExists(path.join(resolvedInstalledPath, 'templates', 'agent-companion.toml'), 'installed Codex agent template');
   assertExists(path.join(resolvedInstalledPath, 'bridge-server', 'server.mjs'), 'installed bridge server');
   assertExists(path.join(resolvedInstalledPath, 'assets', 'readme', 'hero.png'), 'installed README assets');

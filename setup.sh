@@ -13,6 +13,24 @@ ok()   { printf "${GREEN}[OK]${NC}   %s\n" "$1"; }
 warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
 fail() { printf "${RED}[FAIL]${NC} %s\n" "$1"; }
 
+. "$SCRIPT_DIR/hooks/host-paths.sh"
+. "$SCRIPT_DIR/hooks/node-tools.sh"
+
+read_registry_ids() {
+  if ! command -v node >/dev/null 2>&1; then
+    node_requirement_error ''
+    exit 1
+  fi
+  NODE_VERSION=$(node --version)
+  NODE_VER="${NODE_VERSION#v}"
+  if [ "${NODE_VER%%.*}" -lt 26 ] 2>/dev/null; then
+    node_requirement_error "$NODE_VERSION"
+    exit 1
+  fi
+  TARGET_IDS=$(node -p '[...require(process.argv[1]).TARGET_IDS].join(" ")' "$SCRIPT_DIR/lib/target-registry.mjs")
+  HOST_IDS=$(node -p 'Object.keys(require(process.argv[1]).HOSTS).join(" ")' "$SCRIPT_DIR/lib/hosts/index.mjs")
+}
+
 # --- Argument parsing -------------------------------------------------------
 #
 # An omitted host is detected; an omitted target preserves existing configuration.
@@ -36,12 +54,13 @@ while [ "$#" -gt 0 ]; do
     --yes|-y) YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
+      read_registry_ids
       cat <<EOF
-Usage: $(basename "$0") [--host claude|codex|both] [--target opencode|copilot|codex|claude|antigravity|auto|none]
+Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both] [--target ${TARGET_IDS// /|}|auto|none]
                         [--model <id|inherit>] [--no-target-check] [--skip-tests] [--yes] [--dry-run]
 
-  --host claude|codex|both   install that harness surface (default: detect installed CLIs)
-  --target opencode|copilot|codex|claude|antigravity|auto|none
+  --host ${HOST_IDS// /|}|both   install that harness surface (default: detect installed CLIs)
+  --target ${TARGET_IDS// /|}|auto|none
                              choose a default companion (default: preserve existing config,
                              otherwise select the only ready target). none preserves
                              config; auto explicitly selects the only ready target.
@@ -60,15 +79,20 @@ EOF
   esac
 done
 
-case "$HOST" in
-  ""|claude|codex|both) ;;
-  *) fail "--host must be one of: claude, codex, both (got: $HOST)"; exit 2 ;;
-esac
+read_registry_ids
+has_id() {
+  local wanted="$1" id
+  shift
+  for id in "$@"; do [ "$wanted" != "$id" ] || return 0; done
+  return 1
+}
 
-case "$TARGET" in
-  ""|opencode|copilot|codex|claude|antigravity|auto|none) ;;
-  *) fail "--target must be one of: opencode, copilot, codex, claude, antigravity, auto, none (got: $TARGET)"; exit 2 ;;
-esac
+if ! has_id "$HOST" "" $HOST_IDS both; then
+  fail "--host must be one of: ${HOST_IDS// /, }, both (got: $HOST)"; exit 2
+fi
+if ! has_id "$TARGET" "" $TARGET_IDS auto none; then
+  fail "--target must be one of: ${TARGET_IDS// /, }, auto, none (got: $TARGET)"; exit 2
+fi
 
 if [ -n "$MODEL" ]; then
   case "$TARGET" in
@@ -79,17 +103,16 @@ fi
 # Host selection never assumes that both CLIs are installed.
 if [ -z "$HOST" ]; then
   DETECTED=()
-  command -v claude >/dev/null 2>&1 && DETECTED+=(claude)
-  command -v codex >/dev/null 2>&1 && DETECTED+=(codex)
+  for h in $HOST_IDS; do command -v "$h" >/dev/null 2>&1 && DETECTED+=("$h"); done
   case "${#DETECTED[@]}" in
-    0) fail "No supported harness found. Install Claude Code or Codex CLI, then rerun with --host claude|codex."; exit 1 ;;
+    0) fail "No supported harness found. Install Claude Code or Codex CLI, then rerun with --host ${HOST_IDS// /|}."; exit 1 ;;
     1) HOST="${DETECTED[0]}"; ok "detected harness: $HOST" ;;
     *)
       if [ -t 0 ] && [ "$YES" = 0 ]; then
-        read -r -p "Installed harnesses: claude, codex. Install for [claude/codex/both]: " HOST
-        case "$HOST" in claude|codex|both) ;; *) fail "Select claude, codex or both."; exit 2 ;; esac
+        read -r -p "Installed harnesses: ${HOST_IDS// /, }. Install for [${HOST_IDS// /\/}/both]: " HOST
+        has_id "$HOST" $HOST_IDS both || { fail "Select ${HOST_IDS// /, } or both."; exit 2; }
       else
-        fail "Both harnesses are installed. Select --host claude|codex|both."; exit 2
+        fail "Both harnesses are installed. Select --host ${HOST_IDS// /|}|both."; exit 2
       fi
       ;;
   esac
@@ -100,7 +123,7 @@ HOSTS=()
 case "$HOST" in
   claude) DO_CLAUDE=1; HOSTS=(claude) ;;
   codex) DO_CODEX=1; HOSTS=(codex) ;;
-  both) DO_CLAUDE=1; DO_CODEX=1; HOSTS=(claude codex) ;;
+  both) DO_CLAUDE=1; DO_CODEX=1; HOSTS=($HOST_IDS) ;;
 esac
 
 DEPS_STATUS="not installed this run"
@@ -151,18 +174,6 @@ echo "=== agent-companion setup: preflight (host=$HOST) ==="
 
 printf "Checking prerequisites...\n"
 
-# shellcheck source=hooks/node-tools.sh
-. "$SCRIPT_DIR/hooks/node-tools.sh"
-if ! command -v node >/dev/null 2>&1; then
-  node_requirement_error ''
-  exit 1
-fi
-NODE_VERSION=$(node --version)
-NODE_VER="${NODE_VERSION#v}"
-if [ "${NODE_VER%%.*}" -lt 26 ] 2>/dev/null; then
-  node_requirement_error "$NODE_VERSION"
-  exit 1
-fi
 ok "node v$(node --version | tr -d 'v')"
 
 if ! command -v npm >/dev/null 2>&1; then
@@ -269,7 +280,7 @@ for h in "${HOSTS[@]}"; do
   jq -r '.targets[] | "  \(.displayName): " + (if .ready then "ready" else "not ready" end), (.blockers[], .warnings[] | "    " + .message), (.nextSteps[] | "    Next: " + .)' "$PLAN_DIR/$h.json"
   if [ "$PLAN_CODE" != 0 ] && [ -t 0 ] && [ "$YES" = 0 ] \
       && jq -e '.plan.code == "ambiguous_target" or .plan.code == "no_ready_target"' "$PLAN_DIR/$h.json" >/dev/null; then
-    read -r -p "Shared default companion [opencode/copilot/codex/claude/antigravity/none]: " CHOICE
+    read -r -p "Shared default companion [${TARGET_IDS// /\/}/none]: " CHOICE
     if jq -e --arg id "$CHOICE" '.targets[$id].capabilities.modelSelection == true' "$PLAN_DIR/$h.json" >/dev/null; then
       read -r -p "Default model for $CHOICE [inherit]: " MODEL_CHOICE
       [ "$MODEL_CHOICE" != inherit ] || MODEL_CHOICE=""
@@ -297,11 +308,8 @@ for h in "${HOSTS[@]}"; do
     fi
     jq -r 'if .plan.ready then empty else "  Readiness deferred by --no-target-check; companion is not ready." end' "$PLAN_DIR/$h.json"
   fi
-  if [ "$h" = codex ]; then
-    AGENT_FILE="${CODEX_HOME:-$HOME/.codex}/agents/agent-companion.toml"
-  else
-    AGENT_FILE="$HOME/.claude/agents/agent-companion.md"
-  fi
+  host_paths "$h" "$SCRIPT_DIR"
+  AGENT_FILE="$HOST_AGENT_FILE"
   if [ -f "$AGENT_FILE" ] && ! grep -qF '# AUTO-INSTALLED by agent-companion plugin' "$AGENT_FILE"; then
     fail "User-owned agent preserved: $AGENT_FILE. Move or reconcile it manually before rerunning."; exit 1
   fi
@@ -312,7 +320,10 @@ echo "Intended installation changes:"
 echo "  Install bridge-server dependencies in $SCRIPT_DIR/bridge-server."
 echo "  Install or refresh the live-view launcher ~/.local/bin/agent-companion (runs this checkout's hooks/launch-ui.sh)."
 [ "$DO_CLAUDE" = 0 ] || echo "  Materialize the Claude agent; merge companion permissions into ~/.claude/settings.json."
-[ "$DO_CODEX" = 0 ] || echo "  Create ${CODEX_HOME:-$HOME/.codex} if needed; refresh the Codex plugin, verify MCP and agent, and remove legacy managed hooks."
+if [ "$DO_CODEX" = 1 ]; then
+  host_paths codex "$SCRIPT_DIR"
+  echo "  Create $HOST_CONFIG_DIR if needed; refresh the Codex plugin, verify MCP and agent, and remove legacy managed hooks."
+fi
 echo "  Write diagnostic install markers after each harness finishes."
 if [ "$MODEL" = inherit ]; then
   echo "  Clear the shared default model for ${SELECTED_TARGETS[0]}."
@@ -398,9 +409,10 @@ if [ "$DO_CLAUDE" = 1 ]; then
   printf "=== Claude Code host install ===\n"
 
   # 5a. Eagerly materialize the Markdown subagent. Idempotent.
+  host_paths claude "$SCRIPT_DIR"
   printf "Materializing subagent at ~/.claude/agents/agent-companion.md...\n"
   CLAUDE_PLUGIN_ROOT="$SCRIPT_DIR" bash "$SCRIPT_DIR/hooks/install-agent.sh"
-  if [ -f "$HOME/.claude/agents/agent-companion.md" ]; then
+  if [ -f "$HOST_AGENT_FILE" ]; then
     CLAUDE_STATUS="agent installed; permissions pending"
     ok "subagent installed at ~/.claude/agents/agent-companion.md"
   else
@@ -421,8 +433,8 @@ if [ "$DO_CLAUDE" = 1 ]; then
   fi
 
   # 5c. Diagnostic marker.
-  mkdir -p "$HOME/.claude/agent-companion"
-  printf "claude\n" > "$HOME/.claude/agent-companion/.host"
+  mkdir -p "$HOST_STATE_DIR"
+  printf "claude\n" > "$HOST_STATE_DIR/.host"
   CLAUDE_STATUS="agent and permissions installed"
   ok "diagnostic marker: ~/.claude/agent-companion/.host"
 
@@ -440,9 +452,9 @@ fi
 if [ "$DO_CODEX" = 1 ]; then
   STEP="Codex plugin installation"
   printf "=== Codex CLI host install ===\n"
-  CODEX_DATA_ROOT="${CODEX_HOME:-$HOME/.codex}"
+  host_paths codex "$SCRIPT_DIR"
   # Codex requires an explicit CODEX_HOME to exist before plugin commands.
-  mkdir -p "$CODEX_DATA_ROOT"
+  mkdir -p "$HOST_CONFIG_DIR"
 
   # 6a. Build and install/refresh the local Codex plugin. The manifest owns the
   # MCP registration and plugin-scoped hooks; no root .mcp.json is installed,
@@ -512,10 +524,10 @@ if [ "$DO_CODEX" = 1 ]; then
   # 6b. Eagerly materialize the TOML subagent from the installed package.
   # SessionStart repeats this after upgrades, but doing it now makes the next
   # fresh Codex session usable even before any hook has run.
-  printf "Materializing subagent at %s/agents/agent-companion.toml...\n" "$CODEX_DATA_ROOT"
+  printf "Materializing subagent at %s/agents/agent-companion.toml...\n" "$HOST_CONFIG_DIR"
   CLAUDE_PLUGIN_ROOT="$INSTALLED_PLUGIN_ROOT" \
     /bin/bash "$INSTALLED_PLUGIN_ROOT/hooks/install-agent-codex.sh"
-  AGENT_DEST="$CODEX_DATA_ROOT/agents/agent-companion.toml"
+  AGENT_DEST="$HOST_AGENT_FILE"
   AGENT_SENTINEL="# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent-codex.sh) — edits will be overwritten on next session"
   AGENT_EXPECTED="$(mktemp)"
   {
@@ -555,10 +567,10 @@ if [ "$DO_CODEX" = 1 ]; then
   fi
 
   # 6e. Diagnostic marker.
-  mkdir -p "$CODEX_DATA_ROOT/agent-companion"
-  printf "codex\n" > "$CODEX_DATA_ROOT/agent-companion/.host"
+  mkdir -p "$HOST_STATE_DIR"
+  printf "codex\n" > "$HOST_STATE_DIR/.host"
   CODEX_STATUS="plugin, MCP, agent and hooks installed/verified"
-  ok "diagnostic marker: $CODEX_DATA_ROOT/agent-companion/.host"
+  ok "diagnostic marker: $HOST_STATE_DIR/.host"
 
   echo ""
 fi

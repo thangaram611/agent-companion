@@ -6,7 +6,7 @@
 import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { stateDirs } from '../../lib/host.mjs';
+import { stateDirs, HOSTS } from '../../lib/hosts/index.mjs';
 import { locateTranscript } from '../../lib/transcripts.mjs';
 import { Records } from '../controller/records.mjs';
 import { pidAlive } from '../controller/process-supervisor.mjs';
@@ -85,7 +85,7 @@ export function createJobSource({ env = process.env, dirs = stateDirs(env), aliv
 // newest job of each of the session's subagents in list() order, the first
 // `limit` with the lead's title for each, and the ids of the session's other jobs.
 export function sessionJobs({ dir, sessionId, limit, env = process.env, alive = pidAlive }) {
-  const source = createJobSource({ dirs: [{ host: 'claude', dir }], env, alive });
+  const source = createJobSource({ dirs: [{ host: HOSTS.claude.id, dir }], env, alive });
   const spawned = sessionAgents(sessionId, env);
   const all = source.list().filter(job => job.execution.hostSessionId === sessionId || spawned.has(job.execution.owner));
   const owners = new Set();
@@ -100,7 +100,7 @@ export function sessionJobs({ dir, sessionId, limit, env = process.env, alive = 
 // 2026-11-17 on 2.1.326: two resumes in a row each got one), copying the
 // history, these results included, under it; the jobs keep the id they started under.
 function sessionAgents(sessionId, env) {
-  const path = locateTranscript({ companion: 'claude', historyId: sessionId, env })?.path;
+  const path = locateTranscript({ companion: HOSTS.claude.id, historyId: sessionId, env })?.path;
   if (!path) return new Set();
   const lead = { ino: null, offset: 0, agents: new Map(), custom: null, ai: null };
   try { scanLead(path, lead); } catch { return new Set(); }

@@ -10,7 +10,7 @@ import { validateAgentArgs } from './validation.mjs';
 import { Records } from './controller/records.mjs';
 import { callArgs, mcp, resolveRouting, dispatch, getHostSessionId, _resetForTest } from './server.mjs';
 import { BASE_DIR, writeTargetChecks, writeDefaultTarget, writeDefaultModel, writeCompanionDefaults } from '../lib/state.mjs';
-import { companionHomeDir } from '../lib/host.mjs';
+import { companionHomeDir } from '../lib/hosts/index.mjs';
 import { getTargetById } from '../lib/target-registry.mjs';
 
 test('conversational send accepts exact text and an explicit model, with no framing fields', () => {

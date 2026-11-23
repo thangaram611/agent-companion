@@ -33,7 +33,7 @@ function makeFixture() {
   mkdirSync(hooks, { recursive: true });
   mkdirSync(bridge, { recursive: true });
   copyFileSync(LAUNCHER, path.join(hooks, 'launch-agent-bridge.sh'));
-  for (const file of ['launch-agent-bridge.mjs', 'resolve-codex-deps.mjs']) {
+  for (const file of ['host-paths.sh', 'launch-agent-bridge.mjs', 'resolve-codex-deps.mjs']) {
     copyFileSync(path.join(HERE, file), path.join(hooks, file));
   }
   chmodSync(path.join(hooks, 'launch-agent-bridge.sh'), 0o755);

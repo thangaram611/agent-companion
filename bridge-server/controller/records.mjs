@@ -1,7 +1,7 @@
 import { readFileSync, readSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, statSync, lstatSync, fstatSync, rmSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { BASE_DIR } from '../../lib/state.mjs';
-import { refuseRealHomeUnderTest } from '../../lib/host.mjs';
+import { refuseRealHomeUnderTest } from '../../lib/hosts/index.mjs';
 import { writePrivateFileAtomic } from '../../lib/runtime-paths.mjs';
 import { sumUsage } from '../../lib/usage.mjs';
 

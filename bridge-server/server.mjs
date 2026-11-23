@@ -2,7 +2,7 @@
 // agent-bridge MCP server (subagent-oriented, target-generic architecture)
 //
 // MCP tools: agent_catalog | agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
-// agent_send takes an optional `target` (opencode | copilot | codex | claude | antigravity);
+// agent_send takes an optional registered `target`;
 // omitting it uses the configured default target, and there is no silent
 // fallback.
 // Both hosts register this server at plugin/session scope. Owner-bound calls
@@ -27,7 +27,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { detectHost } from '../lib/host.mjs';
+import { detectHost } from '../lib/hosts/index.mjs';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -45,17 +45,15 @@ import { Controller } from './controller/controller.mjs';
 import { Records, firstLine } from './controller/records.mjs';
 import { lastRuns } from './last-runs.mjs';
 import { systemClock } from './controller/clock.mjs';
-import { codexProvider, getCodexContractStatus } from './adapters/codex.mjs';
-import { claudeProvider } from './adapters/claude.mjs';
-import { opencodeProvider } from './adapters/opencode.mjs';
-import { acpProvider } from './adapters/acp.mjs';
+import { getCodexContractStatus } from './adapters/codex.mjs';
+import { createProviders } from './providers.mjs';
 
 import { log, validateAgentArgs } from './validation.mjs';
 import { BASE_DIR, readDefaultModel, readDefaultEffort, readSettings, settingsPath, migrateDefaults, migrateLegacyState, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
 import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
 import { queuePath, runtimeDir, appendPrivateFile, writePrivateFile } from '../lib/runtime-paths.mjs';
 import { renderDigest } from '../lib/digest.mjs';
-import { defaultTargetInfo, defaultTargetId, getTarget, listTargets, listTargetIds } from '../lib/target-registry.mjs';
+import { defaultTargetInfo, defaultTargetId, getTarget, TARGETS, modelHint, listTargets, listTargetIds } from '../lib/target-registry.mjs';
 
 function getQueuePath() {
   return queuePath();
@@ -202,7 +200,7 @@ export function resolveRouting({ target = null, model = null, effort = null } = 
   if (selectedModel && !isModelAllowedFor(companion, selectedModel)) {
     return { ok: false, code: 'MODEL_NOT_ALLOWED', companion, model: selectedModel,
       error: `model "${selectedModel}" is not valid for ${companion}`,
-      hint: companion === 'opencode' ? 'Use a provider/model id.' : 'Model ids must contain no whitespace.' };
+      hint: modelHint(companion) };
   }
   const selection = resolveEffort(descriptor, effort, env, true);
   return selection.refusal || { ok: true, resolved: { companion, model: selectedModel, effort: selection.effort, capabilities: descriptor.capabilities } };
@@ -359,8 +357,7 @@ function ownerTerminalResponse(records, execution, result, action, request) {
 export function createBridgeController({ env = process.env, records = new Records({ dir: BASE_DIR }), ...options } = {}) {
   const safely = (fn) => (...args) => { try { fn(...args); } catch (err) { log('WARN', 'execution publication failed:', err.message); } };
   return new Controller({ env, records, clock: systemClock,
-    providers: { codex: codexProvider({ env }), claude: claudeProvider({ env }), opencode: opencodeProvider({ env }),
-      copilot: acpProvider('copilot', { env }), antigravity: acpProvider('antigravity', { env }) },
+    providers: createProviders(env),
     ...options, onResult: safely((execution, result) => publishResult(records, execution, result)),
   });
 }
@@ -424,14 +421,6 @@ async function handleReply({ job_id, message, thread, mode }, active, request) {
     ...(response.status === 'intervention_unavailable' ? { status: 'reply_unavailable' } : {}) });
 }
 
-const nativeDefaults = {
-  codex: "the setting in ~/.codex/config.toml or a trusted project's .codex/config.toml",
-  opencode: "OpenCode's configured default model",
-  claude: 'the Claude Code account default',
-  copilot: "the account's default",
-  antigravity: "the account's default",
-};
-
 function catalogLastRun(run, field) {
   return run ? { value: run[field], at: new Date(run.startedAt).toISOString(), age_ms: run.ageMs, host: run.host } : null;
 }
@@ -444,32 +433,32 @@ function handleCatalog(env) {
   return asJson({
     ok: true, action: 'catalog',
     default_target: defaultTarget,
-    targets: listTargets(env, defaultTarget.target).filter((t) => t.implemented).map((target) => {
+    targets: Object.values(TARGETS).filter((t) => t.implemented).map((target) => {
       const model = readDefaultModel(target.id, env, undefined, settings);
       const saved = settings.companions?.[target.id];
       const reports = last.get(target.id);
-      const native = nativeDefaults[target.id];
+      const { nativeDefault: native, adapterKind, modelNote, modelEnumeration, effortDefaultPrefix } = target.runtime;
       const modelDefault = model.source === 'env' ? 'the environment override ahead of the saved default' : 'the saved default';
       const permission = probePermission(target, env);
       const checked = checks[target.id];
       return {
         id: target.id,
         display_name: target.displayName,
-        default: target.default,
+        default: target.id === defaultTarget.target,
         model: {
           ...model,
           saved: saved?.model ?? null,
           last_run: catalogLastRun(reports?.model, 'model'),
           description: `When the model is omitted, a new conversation uses ${modelDefault}, then ${native}.` +
-            (target.id === 'claude' ? ' Claude Code validates the model id or alias.' : ''),
-          enumeration: target.capabilities.acp || ['codex', 'claude'].includes(target.id) ? 'not enumerable without a session' : 'not cached',
+            (modelNote ?? ''),
+          enumeration: modelEnumeration ?? 'not enumerable without a session',
         },
         effort: { selection: target.capabilities.effortSelection, levels: target.capabilities.effortLevels ?? null,
           saved: saved?.effort ?? null,
           last_run: catalogLastRun(reports?.effort, 'effort'),
           description: !target.capabilities.effortSelection ? 'Effort selection is unsupported.'
             : (target.capabilities.effortLevels ? '' : 'Levels depend on the model and are checked at send. ') +
-              effortDescription(target.id === 'opencode' ? 'the effort of ' + native : native) },
+              effortDescription((effortDefaultPrefix ?? '') + native) },
         permission: permission ? { mode: permission.mode, source: permission.source, risk: permission.risk } : null,
         capabilities: Object.fromEntries(['interventions', 'resume', 'cancel', 'modelSelection', 'effortSelection']
           .map((key) => [key, target.capabilities[key]])),
@@ -479,7 +468,7 @@ function handleCatalog(env) {
           checked_at: checked?.checkedAt || null,
         },
         installed_version: checked?.version || null,
-        ...(target.id === 'codex' ? { contractStatus: getCodexContractStatus() } : {}),
+        ...(adapterKind === 'app-server' ? { contractStatus: getCodexContractStatus() } : {}),
       };
     }),
   });

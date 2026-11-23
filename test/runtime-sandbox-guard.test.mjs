@@ -2,7 +2,7 @@
 // touching the operator's real ~/.{claude,codex}/agent-companion.
 //
 // The precondition lives in production code, at the choke points every path
-// goes through — lib/host.mjs's refuseRealHomeUnderTest, called by
+// goes through — lib/hosts/index.mjs's refuseRealHomeUnderTest, called by
 // runtime-paths' runtimeDir() and by state.mjs's BASE_DIR at import, and its
 // bash twin in hooks/drain-completions.sh. It keys on NODE_TEST_CONTEXT, which
 // `node --test` sets in every test child and which everything a test spawns
@@ -25,7 +25,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { refuseRealHomeUnderTest } from '../lib/host.mjs';
+import { refuseRealHomeUnderTest } from '../lib/hosts/index.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const HOOK = join(REPO_ROOT, 'hooks', 'drain-completions.sh');

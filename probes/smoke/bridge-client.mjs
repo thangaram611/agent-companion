@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { companionHomeDir, refuseRealHomeUnderTest } from '../../lib/host.mjs';
+import { companionHomeDir, refuseRealHomeUnderTest } from '../../lib/hosts/index.mjs';
 
 const repo = process.env.AGENT_COMPANION_REPO || fileURLToPath(new URL('../..', import.meta.url));
 export const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 const STATE_SANDBOX = mkdtempSync(join(tmpdir(), 'copilot-state-server-'));
 process.env.AGENT_COMPANION_HOME = STATE_SANDBOX;
 // runtimeDir() is pinned rather than the bridge log alone: AGENT_COMPANION_HOME
-// does not reach it (lib/host.mjs derives the companion home from the HOST, not
+// does not reach it (lib/hosts/ derives the companion home from the HOST, not
 // from that var), and the bridge log is not the only artifact a fake job leaves
 // behind. Measured for one run of this file against the operator's live
 // ~/.claude/agent-companion/runtime: 31,396 bytes of agent-bridge.log, 22,031
@@ -168,7 +168,7 @@ test('all owner-bound MCP calls require a native child owner before adopting a s
         assert.notEqual(parse(await call({ method: 'tools/call', params: { name: 'agent_status', arguments: args } })).status, 'NATIVE_OWNER_REQUIRED');
       }
       assert.equal(mod.callArgs('catalog', { arguments: {} }).action, 'catalog');
-      const host = await import('../lib/host.mjs');
+      const host = await import('../lib/hosts/index.mjs');
       await withEnv('AGENT_COMPANION_HOST', 'codex', async () => {
         host._resetHostCacheForTests();
         try {
