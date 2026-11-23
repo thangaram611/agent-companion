@@ -1,51 +1,29 @@
 import '../sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, readdirSync, symlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, readdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { SANDBOX_HOME } from '../sandbox-home.mjs';
 import { Controller } from '../../bridge-server/controller/controller.mjs';
 import { Records, resultText, resultUsage } from '../../bridge-server/controller/records.mjs';
-import { ManualClock, deferred, waitForResult } from './helpers.mjs';
+import { fakeAdapter, setupController, deferred, waitForResult } from './helpers.mjs';
 
 function setup(t, interventions = { default: 'steer', steer: true, queue: 'bridge', interrupt: true }) {
-  const clock = new ManualClock(), dir = mkdtempSync(join(SANDBOX_HOME, 'interventions-'));
-  const records = new Records({ dir, log() {} }), calls = [];
-  let turn = deferred(), serial = 0, pending = false;
   const beforeSend = id => {
     if (id === records.readConversation('child').executionId) return;
     assert.equal(records.readExecution(records.readConversation('child').executionId).interventions.find(i => i.id === id)?.state, 'accepted');
   };
-  const adapter = {
-    capabilities: { followUp: true, loadsHistory: true, interventions },
-    async start() {}, async openHistory() { return { historyId: 'same-session' }; },
-    async deliver({ text, messageId }) {
-      beforeSend(messageId); calls.push(['deliver', text]); turn = deferred();
-      return { nativeTurnId: `turn-${++serial}` };
-    },
-    observe({ onInput }) { this.onInput = onInput; calls.push(['observe']); return turn.promise; },
-    hasPendingInput() { return pending; },
-    async steer({ text, id }) { beforeSend(id); calls.push(['steer', text]); return { accepted: true, confirmed: true, nativeTurnId: `turn-${serial}` }; },
-    async intervene({ text, id, mode }) { beforeSend(id); calls.push([mode, text]); pending = true; return { accepted: true }; },
-    async interrupt() { calls.push(['interrupt']); turn.resolve({ outcome: 'interrupted', text: 'partial must disappear' }); },
-    async close() { calls.push(['close']); },
-  };
-  const controller = new Controller({ clock, records, env: {},
-    snapshot: async () => ({ available: false, reason: 'test' }),
-    providers: { fake: { enabled: true, ready: true, create: () => adapter } },
-    createSupervisor: () => ({ async terminate() { return { gone: true }; }, async quiesce() {}, async census() {},
-      serialize() { return {}; }, stopCensus() {}, detach() {} }), launchWatcher: async () => ({ pid: 123 }),
-  });
+  const adapter = fakeAdapter({ capabilities: { interventions }, beforeSend, history: { historyId: 'same-session' },
+    interruptResult: { outcome: 'interrupted', text: 'partial must disappear' } });
+  const { controller, records, clock, send } = setupController({ adapter });
   t.after(() => { for (const a of controller.live.values()) clock.clearTimeout(a.timer); });
-  const send = () => controller.send({ owner: 'child', provider: 'fake', cwd: dir, text: 'original task' });
   const input = (executionId, mode, extra = {}) => controller.intervene({ executionId, from: 'user', mode, text: 'new text\nsecond line', ...extra });
   const finish = async (outcome = 'completed', text = 'answer', messages, next = false) => {
-    const old = turn; if (next) turn = deferred(); pending = next;
-    old.resolve({ outcome, text, ...(messages ? { messages, nativeTurnId: `turn-${++serial}` } : {}) });
+    adapter.finishTurn({ outcome, text, ...(messages ? { messages } : {}) }, next);
     await clock.flush();
   };
   const result = executionId => waitForResult(controller, { owner: 'child', executionId });
-  return { controller, records, clock, calls, adapter, send, input, finish, result };
+  return { controller, records, clock, adapter, send: () => send({ text: 'original task' }), input, finish, result,
+    get calls() { return adapter.calls.map(([name, args]) => [name, args?.text]); } };
 }
 
 for (const steer of [false, true]) for (const queue of [false, 'native', 'bridge']) for (const interrupt of [false, true]) {
@@ -281,17 +259,6 @@ test('bridge turns without native ids retain separate answers', async t => {
   assert.deepEqual(result.turns.map(t => [t.nativeTurnId, t.text]), [[null, 'first'], [null, 'second']]);
   assert.deepEqual(result.nativeTurnIds, []);
   assert.match(result.text, /Task\n\nfirst/); assert.match(result.text, /queued.*\n\nsecond/);
-});
-
-test('steer joins its turn, preserves the legacy reply entry and caller attachment handling', async t => {
-  const h = setup(t), { executionId } = await h.send();
-  await h.clock.advance(2000);
-  const reply = await h.controller.steer({ owner: 'child', executionId, text: 'change course' });
-  assert.equal(reply.ok, true); assert.equal(h.records.readAttachment(executionId).detachedAt, h.clock.now());
-  await h.finish(); const result = await h.result(executionId);
-  assert.deepEqual(result.turns[0].messages, [executionId, result.interventions[0].id]);
-  assert.equal(result.text, 'answer');
-  assert.deepEqual(await h.controller.steer({ owner: 'child', executionId, text: 'too late' }), { ok: false, status: 'reply_unavailable', reason: 'state' });
 });
 
 test('user intervention does not attach the owner; held input is not delivered after an owner stop', async t => {

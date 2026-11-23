@@ -3,7 +3,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Controller } from '../bridge-server/controller/controller.mjs';
 import { Records } from '../bridge-server/controller/records.mjs';
-import { createBridgeController, recoverController } from '../bridge-server/server.mjs';
 import { codexDispatchFixture, diskSnapshot, terminalRows } from './controller/codex-dispatch-fixture.mjs';
 import { until } from './controller/helpers.mjs';
 import { note } from './codex-wire-frames.mjs';
@@ -71,16 +70,6 @@ async function retryFixture(t) {
     error: { message: 'Reconnecting... 2/5', codexErrorInfo: 'internalServerError', additionalDetails: null } })]);
   return { ...h, job_id };
 }
-// Phase 3 mapping: schema-validated retry frames remain native progress.
-test('CONTRACT: willRetry:true must not settle the bridge job before native terminal', async (t) => {
-  const h = await retryFixture(t);
-  const status = await h.call({ action: 'status', job_id: h.job_id });
-  assert.equal(status.status, 'running');
-  assert.equal(status.retry.willRetry, true);
-  assert.equal(h.records.readResult(h.job_id), null);
-  assert.equal(h.records.readExecution(h.job_id).terminal, undefined);
-  assert.equal(terminalRows(h.job_id).length, 0);
-});
 // Phase 3 mapping: the later native completion, rather than the retry error,
 // becomes the durable result and remains observable on repeated waits.
 test('CONTRACT: a recovered native answer must remain observable after a retryable error', async (t) => {
@@ -91,24 +80,6 @@ test('CONTRACT: a recovered native answer must remain observable after a retryab
     assert.equal(result.status, 'completed');
     assert.equal(result.content, 'RECOVERED_AND_FINISHED');
   }
-});
-
-// Phase 3 mapping: a second controller reads the shared records but neither
-// adopts the runtime nor attaches the owner nor writes a digest.
-test('CONTRACT: a status-only second bridge must not recover a live owner job', async (t) => {
-  const h = codexDispatchFixture(t);
-  const { job_id } = await h.send();
-  const second = new Controller({ records: new Records({ dir: h.records.dir }), clock: h.clock });
-  const before = diskSnapshot();
-  const attachment = h.records.readAttachment(job_id);
-  const status = await h.call({ action: 'status', job_id }, {}, second);
-  assert.equal(status.status, 'unknown');
-  assert.deepEqual(diskSnapshot(), before);
-  assert.deepEqual(second.records.readAttachment(job_id), attachment);
-  assert.equal(second.live.size, 0);
-  assert.equal(second.requests.size, 0);
-  assert.equal(h.active.live.size, 1);
-  assert.equal(h.frames().filter((f) => f.method === 'turn/start').length, 1);
 });
 
 // Phase 3 mapping: results are immutable even within the same generation;
@@ -128,22 +99,6 @@ test('CONTRACT: an older observer must not overwrite an already persisted termin
   assert.equal(second.records.writeResult({ ...result, outcome: 'failed' }), false);
   assert.equal(logs.filter((r) => r.code === 'stale_generation').length, 2);
   assert.deepEqual(h.records.readResult(job_id), result);
-});
-
-// Phase 3 mapping: durable completion receipts deduplicate publications from
-// repeated waits and startup reconciliation, including after the queue drains.
-test('CONTRACT: one native job must publish at most one terminal event across observers', async (t) => {
-  const h = codexDispatchFixture(t);
-  const { job_id } = await h.send();
-  await h.complete(job_id);
-  await h.call({ action: 'wait', thread: 'child', job_id });
-  const second = createBridgeController({ records: new Records({ dir: h.records.dir }), env: h.env });
-  await recoverController(second);
-  await h.call({ action: 'wait', thread: 'child', job_id }, {}, second);
-  await recoverController(second);
-  assert.equal(terminalRows(job_id).length, 1);
-  assert.equal(terminalRows(job_id)[0].consumed, true);
-  assert.deepEqual(second.records.read('completions', job_id), { executionId: job_id });
 });
 
 // Phase 3 mapping: expose the native event timestamp, not total job age.
@@ -176,11 +131,6 @@ test('CONTROL: sandbox-addressed transport starts only the fake Codex binary', a
   assert.deepEqual(h.spawns, [[h.bin, 'app-server']]);
   assert.ok(h.records.dir.startsWith(h.dir));
   assert.ok(h.frames().some((f) => f.method === 'initialize'));
-});
-test('CONTROL: duplicate send reattaches without a second native start', async (t) => {
-  const h = codexDispatchFixture(t);
-  assert.equal((await h.send()).job_id, (await h.send()).job_id);
-  assert.equal(h.frames().filter((f) => f.method === 'turn/start').length, 1);
 });
 test('CONTROL: fake server rejects frames outside the pinned wire schema', async (t) => {
   const h = codexDispatchFixture(t);

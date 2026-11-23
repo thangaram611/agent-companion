@@ -54,7 +54,6 @@ import { log, validateAgentArgs } from './validation.mjs';
 import { BASE_DIR, readDefaultModel, readDefaultEffort, readSettings, settingsPath, migrateDefaults, migrateLegacyState, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
 import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
 import { queuePath, runtimeDir, appendPrivateFile, writePrivateFile } from '../lib/runtime-paths.mjs';
-import { logEvent } from '../lib/log.mjs';
 import { renderDigest } from '../lib/digest.mjs';
 import { defaultTargetInfo, defaultTargetId, getTarget, listTargets, listTargetIds } from '../lib/target-registry.mjs';
 
@@ -858,7 +857,7 @@ if (isMain) {
   // the private runtime bridge log for "host detected" and see what the
   // bridge resolved on this run. The README's Diagnostics section points
   // readers here.
-  logEvent('info', 'bridge.startup', { host_detected: detectHost() });
+  log('INFO', `bridge.startup host_detected=${detectHost()}`);
 
   await mcp.connect(new StdioServerTransport());
 }

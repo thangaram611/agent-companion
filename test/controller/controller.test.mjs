@@ -1,53 +1,16 @@
 import '../sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, symlinkSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, symlinkSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { SANDBOX_HOME } from '../sandbox-home.mjs';
+import { createBridgeController, dispatch, recoverController } from '../../bridge-server/server.mjs';
+import { diskSnapshot as disk, terminalRows } from './codex-dispatch-fixture.mjs';
 import { Controller } from '../../bridge-server/controller/controller.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
-import { ManualClock, deferred } from './helpers.mjs';
+import { setupController as setup, deferred } from './helpers.mjs';
 
-function setup(options = {}) {
-  const clock = new ManualClock();
-  const dir = mkdtempSync(join(SANDBOX_HOME, 'controller-'));
-  const records = new Records({ dir, log: () => {} });
-  const adapters = [], supervisors = [];
-  const createSupervisor = () => {
-    const supervisor = { spawn: async () => ({}), serialize: () => ({ processes: [] }), census: async () => {}, quiesce: async () => {}, stopCensus() {}, detach() {},
-      terminate: async () => { supervisor.terminated++; return { gone: options.gone ?? true, signals: [], checkedAt: clock.now() }; }, terminated: 0 };
-    supervisors.push(supervisor); return supervisor;
-  };
-  const create = () => {
-    const terminal = deferred(), ack = deferred();
-    const adapter = {
-      capabilities: { followUp: true, modelSelection: true, loadsHistory: true, ...options.capabilities },
-      calls: [], terminal, ack,
-      async start(args) { this.calls.push(['start', args]); if (options.startCrash) throw new Error('startup crash'); return { runtime: await args.supervisor.spawn(['fake'], { cwd: args.cwd }) }; },
-      async openHistory(args) { this.calls.push(['openHistory', args]); if (options.historyError) throw Object.assign(new Error(options.historyError), { code: options.historyError }); if (options.historyCrash) throw new Error('HistoryUnavailable'); return { historyId: args.historyId || 'native-history', effectiveModel: 'effective-model' }; },
-      async deliver(args) { this.calls.push(['deliver', args]); if (options.lostAck) return ack.promise; return options.ack ?? { nativeTurnId: 'turn-1' }; },
-      observe(args) { this.calls.push(['observe', args]); this.progress = args.onProgress; return terminal.promise; },
-      async interrupt() { this.calls.push(['interrupt']); if (options.racingComplete) terminal.resolve({ outcome: 'completed', text: 'native answer', usage: { tokens: 7 } }); if (options.hungInterrupt) return new Promise(() => {}); },
-      async close() { this.calls.push(['close']); if (options.hungClose) return new Promise(() => {}); },
-    };
-    adapters.push(adapter); return adapter;
-  };
-  // Lifecycle deadlines use the manual clock; git I/O is covered by snapshot integration tests.
-  const controller = new Controller({ snapshot: async () => ({ available: false, reason: 'test_non_git' }), providers: { [options.provider ?? 'fake']: { enabled: true, ready: true, modelAllowed: (model) => ['a', 'b'].includes(model), create } }, records, clock,
-    env: options.env || {}, createSupervisor, launchWatcher: options.launchWatcher || (async () => ({ pid: 123 })) });
-  const send = (overrides = {}) => controller.send({ owner: 'child', provider: options.provider ?? 'fake', cwd: dir, text: 'verbatim text\nwith context', ...overrides });
-  const done = async (executionId) => {
-    await clock.flush();
-    return controller.wait({ owner: records.readExecution(executionId).owner, executionId });
-  };
-  const finish = async (executionId, outcome = { outcome: 'completed', text: 'answer' }, adapter = adapters[0]) => {
-    adapter.terminal.resolve(outcome); return done(executionId);
-  };
-  return { controller, clock, records, dir, adapters, supervisors, send, done, finish };
-}
 const calls = (adapter, method) => adapter.calls.filter(([name]) => name === method);
-const disk = (dir) => readdirSync(dir, { recursive: true }).sort().filter((file) => statSync(join(dir, file)).isFile()).map((file) => [file, statSync(join(dir, file)).mtimeMs, readFileSync(join(dir, file), 'utf8')]);
 
 for (const failed of [false, true]) test(`Antigravity end_turn with ${failed ? 'a final upstream error' : 'two retries followed by an answer'}`, async () => {
   const h = setup({ provider: 'antigravity', ack: { acknowledged: true, nativeTurnId: null } });
@@ -94,6 +57,7 @@ test('duplicate send reattaches once; different text or model on a busy conversa
   const h = setup();
   const [one, two] = await Promise.all([h.send({ model: 'a' }), h.send({ model: 'a' })]);
   assert.equal(one.executionId, two.executionId);
+  assert.equal((await h.send({ model: 'a' })).executionId, one.executionId);
   assert.equal(h.adapters.length, 1);
   assert.deepEqual(calls(h.adapters[0], 'deliver').map(([, args]) => args.text), ['verbatim text\nwith context']);
   await assert.rejects(h.send({ text: 'different' }), { code: 'thread_busy' });
@@ -172,11 +136,21 @@ test('status-only second bridge writes nothing, renews nothing and refuses overl
   const h = setup(); const sent = await h.send();
   const observer = new Controller({ records: new Records({ dir: h.dir }), providers: h.controller.providers, clock: h.clock });
   const before = disk(h.dir);
+  const allFiles = disk();
+  const attachment = h.records.readAttachment(sent.executionId);
+  const response = await dispatch({ action: 'status', job_id: sent.executionId }, { controller: observer });
+  assert.equal(response.structuredContent.status, 'unknown');
   for (let i = 0; i < 5; i++) {
     assert.equal(observer.status({ executionId: sent.executionId }).state, 'unknown');
     h.controller.status({ owner: 'child' });
   }
   assert.deepEqual(disk(h.dir), before);
+  assert.deepEqual(disk(), allFiles);
+  assert.deepEqual(observer.records.readAttachment(sent.executionId), attachment);
+  assert.equal(observer.live.size, 0);
+  assert.equal(observer.requests.size, 0);
+  assert.equal(h.controller.live.size, 1);
+  assert.equal(calls(h.adapters[0], 'deliver').length, 1);
   await assert.rejects(observer.send({ owner: 'child', provider: 'fake', cwd: h.dir, text: 'new' }), { code: 'previous_execution_unverified' });
   assert.deepEqual(disk(h.dir), before);
   assert.equal((await h.finish(sent.executionId)).cause, 'native_complete');
@@ -222,7 +196,7 @@ test('startup crash becomes failed runtime_unavailable and cleans up', async () 
 });
 
 test('native completion racing stop keeps completed and publishes one immutable result', async () => {
-  const h = setup({ racingComplete: true }); const sent = await h.send();
+  const h = setup({ racingComplete: true, createController: createBridgeController }); const sent = await h.send();
   const result = await h.controller.cancel({ owner: 'child', executionId: sent.executionId });
   assert.equal(result.outcome, 'completed'); assert.equal(result.cause, 'native_complete');
   assert.equal(result.text, 'native answer'); assert.deepEqual(result.usage, { tokens: 7 });
@@ -230,6 +204,15 @@ test('native completion racing stop keeps completed and publishes one immutable 
   assert.deepEqual(await h.controller.cancel({ owner: 'child', executionId: sent.executionId }), result);
   assert.equal(readFileSync(h.records.path('results', sent.executionId), 'utf8'), bytes);
   assert.equal(readdirSync(join(h.dir, 'results')).length, 1);
+  const wait = { action: 'wait', thread: 'child', job_id: sent.executionId };
+  await dispatch(wait, { controller: h.controller });
+  const second = createBridgeController({ records: new Records({ dir: h.dir }), env: h.controller.env });
+  await recoverController(second);
+  await dispatch(wait, { controller: second });
+  await recoverController(second);
+  assert.equal(terminalRows(sent.executionId).length, 1);
+  assert.equal(terminalRows(sent.executionId)[0].consumed, true);
+  assert.deepEqual(second.records.read('completions', sent.executionId), { executionId: sent.executionId });
 });
 
 test('two same-provider executions: closing one leaves the other untouched', async () => {
@@ -255,9 +238,14 @@ test('pending owner requests attach the owner; observers and other children cann
 });
 
 test('retry progress stays nonterminal and fresh activity is persisted as provider activity', async () => {
-  const h = setup(); const sent = await h.send(); await h.clock.advance(5000);
-  h.adapters[0].progress({ lastActivityAt: h.clock.now(), retry: { attempt: 2, cause: 'reconnect' }, activeCommand: 'fake-command', partialText: 'recovering' });
+  const h = setup({ createController: createBridgeController }); const sent = await h.send(); await h.clock.advance(5000);
+  h.adapters[0].progress({ lastActivityAt: h.clock.now(), retry: { willRetry: true, attempt: 2, cause: 'reconnect' }, activeCommand: 'fake-command', partialText: 'recovering' });
   const status = h.controller.status({ executionId: sent.executionId });
+  const response = await dispatch({ action: 'status', job_id: sent.executionId }, { controller: h.controller });
+  assert.equal(response.structuredContent.status, 'running');
+  assert.equal(response.structuredContent.retry.willRetry, true);
+  assert.equal(h.records.readExecution(sent.executionId).terminal, undefined);
+  assert.equal(terminalRows(sent.executionId).length, 0);
   assert.equal(status.result, null);
   assert.equal(status.execution.progress.lastActivityAt, h.clock.now());
   assert.equal((await h.finish(sent.executionId, { outcome: 'completed', text: 'recovered' })).text, 'recovered');

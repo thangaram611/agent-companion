@@ -24,7 +24,7 @@ const deferred = () => {
 };
 
 // providers[id] = { enabled, ready, modelAllowed(model), create() }.
-// create() returns exactly the protocol-only adapter in PHASE3-SPEC.md.
+// create() supplies the adapter for one execution.
 // The host supplies trusted owner/request identities; this module does no
 // metadata attribution. send/wait/reply/cancel hold attachment until they return.
 export class Controller {
@@ -506,10 +506,6 @@ export class Controller {
       a.inputTail = operation.catch(() => {});
       return await operation;
     } finally { if (request) this.endRequest(request); }
-  }
-  async steer(args) {
-    const result = await this.intervene({ ...args, from: 'caller', mode: 'steer' });
-    return result.status === 'intervention_unavailable' ? { ...result, status: 'reply_unavailable' } : result;
   }
   async cancel({ owner, executionId, requestId, signal }) {
     this._owner(owner);

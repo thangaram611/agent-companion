@@ -566,7 +566,7 @@ for (const mode of ['queue', 'interrupt']) test(`${mode} continues with a distin
 
 test('controller steer belongs to the active native turn and cannot create a second answer', async t => {
   const h = setup(t), { executionId } = await h.send();
-  const reply = h.controller.steer({ owner: 'child', executionId, text: 'STEER-B' });
+  const reply = h.controller.intervene({ owner: 'child', executionId, text: 'STEER-B', from: 'caller', mode: 'steer' });
   await until(() => h.trace().some(f => f.method === 'turn/steer'));
   // Completion may arrive before the steer confirmation promise is settled.
   await h.emit(note('item/completed', { threadId: 'T1', turnId: 'TURN1',

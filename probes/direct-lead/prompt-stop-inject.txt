@@ -1,0 +1,3 @@
+Your first action MUST be a tool call to mcp__fixture__job_send with task "probe". Call it exactly once and write no text before it.
+After it returns, reply "SENT" and end your turn. Do not call any other tool, do not wait, do not poll.
+If a later message or reminder tells you the job finished, reply "WOKEN", then say exactly how that text was framed (what kind of message it was in, any tags or labels around it), quote its first 150 characters and its last 150 characters exactly, and give the number of the last "Line NNNNN" you can see. Call no tool, unless you were told the text was saved to a file; then say so and give the path.

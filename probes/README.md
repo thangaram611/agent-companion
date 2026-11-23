@@ -85,6 +85,12 @@ or reproduce an unrecorded interaction. Only ACP stdout/stdin are captured:
 stderr, native session files and the older OTEL usage fallback are not replayed.
 Local BYOK recordings do not qualify GitHub-hosted authentication/model behavior.
 
+## `direct-lead/` — the lead calls the bridge and is woken
+
+Host measurements behind `docs/THREAD_PLAN.md`: the lead's own tool calls, result
+sizes, background waits and the idle wake on all five hosts. See
+[`direct-lead/README.md`](direct-lead/README.md).
+
 ## `free-backends/` — isolated free-backend effort checks
 
 | script | asserts |

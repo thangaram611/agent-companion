@@ -413,6 +413,8 @@ No behaviour changes in this step.
   `test/controller/helpers.mjs` and use them in the files with inline fakes
   that survive. `bridge-server/server.test.mjs` is left alone; step 2 replaces
   it.
+- Fold the four duplicated tests in `test/incident-regressions.test.mjs` into the
+  controller tests (audit section 2).
 
 Check: the affected suites pass with no assertion changed except in tests
 deleted with their code.

@@ -1,4 +1,4 @@
-// Pure-function helpers for the agent-bridge MCP server (v6.1).
+// Tool argument validation and runtime logging for the agent-bridge MCP server.
 //
 // Internal action validator for the split MCP tools:
 // agent_catalog | agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
@@ -36,9 +36,7 @@ export function log(level, ...args) {
   const logFile = getBridgeLogFile();
   try {
     if (existsSync(logFile) && statSync(logFile).size > BRIDGE_LOG_MAX_BYTES) {
-      // v6.1 C4: keep the previous log in .bak instead of truncating in
-      // place. Truncate-on-rotate dropped the most recent diagnostic data
-      // exactly when something went wrong enough to fill the log.
+      // Keep the previous log in .bak for diagnostics.
       try {
         renameSync(logFile, logFile + '.bak');
         chmodPrivate(logFile + '.bak');
