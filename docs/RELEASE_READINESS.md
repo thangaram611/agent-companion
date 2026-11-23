@@ -1,8 +1,8 @@
 # Release Readiness
 
-Last updated: 2026-11-22
+Last updated: 2026-11-23
 
-Release metadata is `0.2.0` in both plugin manifests and the private bridge
+Release metadata is `0.3.0` in both plugin manifests and the private bridge
 package. Readiness requires the gates below on the reviewed candidate commit;
 installed versions and a matching wire fixture do not establish live transport
 qualification. Product vocabulary and supported capabilities belong in
