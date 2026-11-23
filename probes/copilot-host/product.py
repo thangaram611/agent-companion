@@ -1,5 +1,6 @@
 """Install the working tree twice in a disposable Copilot profile. Print its launcher."""
 import json
+import os
 from pathlib import Path
 import shlex
 import shutil
@@ -10,7 +11,15 @@ src = Path(__file__).resolve().parents[2]
 root = Path(subprocess.check_output([sys.executable, src / 'probes/copilot-host/prepare.py'], text=True).strip())
 checkout = root / 'checkout'
 print(f'Probe directory: {root}', flush=True)
-shutil.copytree(src, checkout, ignore=shutil.ignore_patterns('.git', 'node_modules', '.plugin-data', 'dist', '__pycache__'))
+def copy_checkout(src, dst):
+    """Copy tracked and unignored files: ignored run folders hold runtime state and dangling links."""
+    names = subprocess.run(["git", "-C", str(src), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                           capture_output=True, check=True).stdout.decode().split("\0")
+    for name in names:
+        if name and os.path.lexists(src / name):
+            (dst / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src / name, dst / name, follow_symlinks=False)
+copy_checkout(src, checkout)
 run = str(root / 'run')
 def command(*argv):
     return subprocess.check_output([run, *map(str, argv)], text=True)

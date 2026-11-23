@@ -33,6 +33,16 @@ def wait_for(check, seconds):
     raise RuntimeError(f"timed out waiting for {check.__name__} after {seconds}s")
 
 
+def copy_checkout(src, dst):
+    """Copy tracked and unignored files: ignored run folders hold runtime state and dangling links."""
+    names = subprocess.run(["git", "-C", str(src), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                           capture_output=True, check=True).stdout.decode().split("\0")
+    for name in names:
+        if name and os.path.lexists(src / name):
+            (dst / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src / name, dst / name, follow_symlinks=False)
+
+
 class ProviderUnavailable(RuntimeError):
     pass
 
@@ -74,17 +84,24 @@ def qualify(base):
 
     def messages(session):
         # Reading the isolated DB does not reset the location's idle timer.
+        # 2.4.0 keeps a message's parts in session_part and leaves `content` empty.
         with sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True) as connection:
-            return [(role, json.loads(data)) for role, data in connection.execute(
-                "SELECT type,data FROM session_message WHERE session_id=? ORDER BY seq", (session,))]
+            rows = connection.execute("SELECT id,type,data FROM session_message WHERE session_id=? ORDER BY seq", (session,)).fetchall()
+            parts = {}
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_part'").fetchone():
+                for message, data in connection.execute(
+                        "SELECT message_id,data FROM session_part WHERE session_id=? ORDER BY message_id,ordinal", (session,)):
+                    parts.setdefault(message, []).append(json.loads(data))
+        return [(role, {**json.loads(data), **({"content": parts[mid]} if mid in parts else {})}) for mid, role, data in rows]
 
     def scenario(long_job):
         task = ("Use the shell to run sleep 170 in the foreground. After it exits reply OC-LONG."
                 if long_job else "Reply OC-SHORT.")
         provider_id, _, model_id = MODEL.partition("/")
         model = {"providerID": provider_id, "id": model_id}
-        permissions = [{"action": "*", "resource": "*", "effect": "deny"},
-                       {"action": "agent-bridge_*", "resource": "*", "effect": "allow"}]
+        # Without companion_wait the lead must end its turn, so the result arrives through the wake.
+        permissions = [{"action": "*", "resource": "*", "effect": "deny"}] + [
+            {"action": "agent-bridge_companion_" + tool, "resource": "*", "effect": "allow"} for tool in ("send", "read")]
         session = api("POST", "/api/session", {"location": {"directory": str(work)}, "model": model,
                                               "permissions": permissions})["data"]["id"]
         prompt = (f"Copy the exact six tool names beginning with agent-bridge_companion_ from your "
@@ -157,14 +174,15 @@ def qualify(base):
               f"job_seconds={elapsed:.1f} idle_before_wake_seconds={idle_seconds:.1f} lead_bridge_starts={len(lead_bridges)} nested_bridge_starts={len(nested)} "
               f"cleanup={result.get('stopEvidence', {}).get('error', 'ok')}", flush=True)
         token = "OC-LONG" if long_job else "OC-SHORT"
-        return (listed == 6 and result["outcome"] == "completed" and token in result["text"]
-                and token in " ".join(response) and lead_bridges and not nested
+        dashes = lambda text: text.replace("\u2011", "-")  # small models write a non-breaking hyphen
+        return (listed == 6 and result["outcome"] == "completed" and token in dashes(result["text"])
+                and token in dashes(" ".join(response)) and lead_bridges and not nested
                 and (not long_job or (elapsed >= 170 and idle_seconds > 60)))
 
     port = str(random.SystemRandom().randrange(41000, 49000))
     run("opencode", "service", "set", "port", port)
     try:
-        shutil.copytree(ROOT, checkout, ignore=shutil.ignore_patterns(".git", "node_modules", ".drafts", ".plugin-data", "dist"))
+        copy_checkout(ROOT, checkout)
         (config / "opencode.json").write_text(json.dumps({"model": MODEL, **({"provider": PROVIDER} if PROVIDER else {})}))
         # OPENCODE_PROBE_IDLE goes through setup's own option: "1 minute" (default) checks the idle unload;
         # "false" (the decided install) checks that a long job survives an idle lead.

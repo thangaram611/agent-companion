@@ -613,6 +613,25 @@ test('opencode: a shell command a cancel or interrupt stopped is unfinished, not
   assert.equal(command.exitCode, null);
 });
 
+test('opencode: 2.4.0 parts come from session_part, with the shell directory in workdir (measured on 2.4.0)', async t => {
+  const { readTranscript } = await api();
+  // Captured 2026-11-24 from an isolated probe run; run root replaced by /tmp/oc-fixture.
+  const path = join(temp(t), 'transcript');
+  const seed = new DatabaseSync(path);
+  seed.exec(readFileSync(new URL('opencode/opencode-2.4.0.sql', root), 'utf8'));
+  seed.close();
+  const loc = { companion: 'opencode', kind: 'sqlite', path, sessionId: 'ses_df64530ceffeIFq2vBPQYgbAiW' };
+  const first = readTranscript(loc);
+  assert.equal(first.format.recognized, true, first.format.detail);
+  const [command] = first.items.filter(i => i.kind === 'command');
+  assert.deepEqual([command.command, command.cwd, command.exitCode, command.status], ['sleep 170', '/tmp/oc-fixture/work', 0, 'completed']);
+  assert.ok(first.items.some(i => i.kind === 'assistant' && i.text === 'OC-LONG'));
+  const db = new DatabaseSync(path);
+  db.prepare("UPDATE session_part SET data=json_set(data, '$.text', 'changed in place') WHERE type='text'").run();
+  db.close();
+  assert.ok(readTranscript(loc, { after: first.cursor }).items.some(i => i.text === 'changed in place'));
+});
+
 test('opencode: a shell command killed by its timeout is failed, naming the signal (measured on 2.3.0)', async t => {
   const { readTranscript } = await api();
   const loc = fixture(t, 'opencode');

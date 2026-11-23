@@ -21,16 +21,16 @@ not Claude as a companion.
 
 ## Source-Backed Compatibility Notes
 
-Installed versions on 2026-11-23, macOS, Node 26.13.0. These version checks do
+Installed versions on 2026-11-24, macOS, Node 26.13.1. These version checks do
 not establish release qualification.
 
 | Component | Version | Evidence |
 | --- | --- | --- |
 | Claude Code | 2.1.330 | `claude --version` |
 | Codex CLI | 0.171.0 | `codex --version` |
-| OpenCode | 2.3.2 | `opencode --version` |
+| OpenCode | 2.4.0 | `opencode --version` |
 | GitHub Copilot CLI | 1.0.114 | `copilot --version` |
-| Antigravity CLI | 1.5.13 | `agy --version` |
+| Antigravity CLI | 1.5.15 | `agy --version` |
 
 Claude Code plugins:
 

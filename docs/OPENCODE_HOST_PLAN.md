@@ -60,6 +60,15 @@ observed through a fixture MCP server. The live companion harness is in
 | Keeping the bridge out of companion jobs | The OpenCode companion runs a private `opencode serve`, which loads global plugins and MCP servers. A config override can disable an MCP entry only by restating it whole with `disabled: true`; plugin lists merge rather than replace. |
 | Service port | One fixed port per machine and channel (49374 here). A second home's service on it makes the user's TUI fail to start. Probes set their own port and stop their service on exit. |
 
+**Rechecked on 2.4.0 (2026-11-24).** The probe passed setup twice, one active
+plugin entry, a connected bridge, the wake of an idle lead (128 s idle under
+`false`) and the read. `opencode plugin add` still refuses a local path, so
+setup links `plugins/agent-companion`. Two storage changes reached the
+transcript reader: message parts moved to a `session_part` table and the shell
+input names its directory `workdir`. A command that outlives its timeout now
+moves to the background; when it finishes, OpenCode adds a `synthetic`
+`<background-result>` message and starts a new turn on its own.
+
 ## Design
 
 **Plugin** (`opencode-plugin/`, loaded from the checkout):
