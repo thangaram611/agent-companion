@@ -24,7 +24,7 @@ function smokeFixture(id, terminal) {
 }
 
 for (const id of ['codex', 'opencode', 'copilot', 'antigravity', 'claude']) {
-  test(`${id} smoke performs one controller execution and cleans up before returning`, async () => {
+  test(`${id} smoke performs one controller job and cleans up before returning`, async () => {
     const h = smokeFixture(id, Promise.resolve({ outcome: 'completed', text: 'ready', cause: 'native_complete' }));
     assert.deepEqual(await h.pending, { supported: true, passed: true, detail: 'ready' });
     assert.deepEqual(h.calls, [['start', undefined], ['history', null], ['deliver', 'Reply with the single word: ready'], ['observe'], ['close'], ['terminate']]);

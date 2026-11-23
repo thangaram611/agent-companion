@@ -9,7 +9,7 @@ import { createFollow } from './follow.mjs';
 import { codexItem, uiFixture } from '../../test/ui-fixture.mjs';
 
 const LAUNCH = fileURLToPath(new URL('../../hooks/launch-ui.sh', import.meta.url));
-const follow = (f, executionId) => createFollow({ dir: f.states.claude, executionId, env: f.env, now: () => f.NOW, alive: () => true });
+const follow = (f, jobId) => createFollow({ dir: f.states.claude, jobId, env: f.env, now: () => f.NOW, alive: () => true });
 const lines = out => out.lines.map(line => JSON.parse(line));
 
 test('a running job: its records with the branch, then its own turn with labels; nothing again until something changes', t => {
@@ -20,7 +20,7 @@ test('a running job: its records with the branch, then its own turn with labels;
   assert.deepEqual(rest, []);
   assert.equal(first.job.status, 'running');
   assert.equal(first.job.branch, 'main');
-  assert.equal(first.job.execution.executionId, 'run-1');
+  assert.equal(first.job.record.jobId, 'run-1');
   assert.equal(first.job.result, null);
   // turn-1 is an earlier job's turn; the session's base instructions are preamble.
   assert.deepEqual(second.items.map(item => item.kind), ['user', 'reasoning', 'command', 'edit', 'command', 'assistant']);
@@ -37,12 +37,12 @@ test('a running job: its records with the branch, then its own turn with labels;
 test("a recorded message the transcript shows is taken and labelled by its sender; the record's change is sent", t => {
   const f = uiFixture(t), job = follow(f, 'run-1');
   job.tick();
-  f.setExecution('run-1', () => ({ interventions: [
+  f.setJob('run-1', () => ({ interventions: [
     { id: 'l0', from: 'caller', mode: 'steer', text: 'Lead steer.', at: f.NOW, state: 'joined' },
     { id: 'u1', from: 'user', mode: 'queue', text: 'Then the logout route.', at: f.NOW, state: 'accepted' }] }));
   f.append([codexItem('turn-2', { type: 'UserMessage', id: 'x1', content: [{ type: 'text', text: 'Lead steer.' }] })]);
   const [changed, turn] = lines(job.tick());
-  assert.equal(changed.job.execution.interventions.length, 2);
+  assert.equal(changed.job.record.interventions.length, 2);
   assert.deepEqual(turn.turn.taken, ['l0']);
   assert.equal(turn.turn.labels[turn.items[0].id], 'lead');
 });
@@ -73,19 +73,19 @@ test('a finished job is read once with its result, then the follow ends', t => {
 test('a stopping job whose process is gone is read until its result, then the follow ends with it', t => {
   const f = uiFixture(t);
   let alive = true;
-  const job = createFollow({ dir: f.states.claude, executionId: 'run-1', env: f.env, now: () => f.NOW, alive: () => alive });
+  const job = createFollow({ dir: f.states.claude, jobId: 'run-1', env: f.env, now: () => f.NOW, alive: () => alive });
   job.tick();
   // A cancel, as measured live: the controller kills the tree and records
   // `stopping`, and writes the result only after verifying the tree is gone.
-  f.setExecution('run-1', () => ({ state: 'stopping', stopCause: 'user_cancel' }));
+  f.setJob('run-1', () => ({ state: 'stopping', stopCause: 'user_cancel' }));
   alive = false;
   f.append([codexItem('turn-2', { type: 'AgentMessage', id: 'a9', content: [{ type: 'text', text: 'Stopped mid-way.' }] })]);
   const stopping = job.tick();
   assert.equal(stopping.ended, false);
   assert.equal(lines(stopping)[0].job.status, 'unknown');
   f.append([codexItem('turn-2', { type: 'AgentMessage', id: 'a10', content: [{ type: 'text', text: 'Last words.' }] })]);
-  writeFileSync(join(f.states.claude, 'results', 'run-1.json'), JSON.stringify({ owner: 'th-run', executionId: 'run-1', generation: 1, outcome: 'interrupted', cause: 'user_cancel', finishedAt: f.NOW }));
-  f.setExecution('run-1', () => ({ state: 'closed' }));
+  writeFileSync(join(f.states.claude, 'results', 'run-1.json'), JSON.stringify({ thread: 'th-run', jobId: 'run-1', generation: 1, outcome: 'interrupted', cause: 'user_cancel', finishedAt: f.NOW }));
+  f.setJob('run-1', () => ({ state: 'closed' }));
   const out = job.tick(), [first, second] = lines(out);
   assert.equal(out.ended, true);
   assert.equal(first.job.result.outcome, 'interrupted');
@@ -97,7 +97,7 @@ test('a job whose transcript is not found yet says so, and a missing record is a
   const [, { turn, items }] = lines(follow(f, 'op-1').tick());
   assert.deepEqual(items, []);
   assert.equal(turn.located, false);
-  assert.throws(() => follow(f, 'gone').tick(), /no execution record gone/);
+  assert.throws(() => follow(f, 'gone').tick(), /no job record gone/);
   assert.throws(() => follow(f, '../x'), /invalid record id/);
 });
 
@@ -112,8 +112,8 @@ test('through launch-ui.sh: follow needs no UI packages, prints JSON lines and e
 
   const bad = spawnSync('/bin/bash', [LAUNCH, 'follow', 'relative', 'done-1'], { env, encoding: 'utf8', timeout: 20_000 });
   assert.equal(bad.status, 2);
-  assert.match(bad.stderr, /usage: agent-companion follow <state dir> <execution id>/);
+  assert.match(bad.stderr, /usage: agent-companion follow <state dir> <job id>/);
   const gone = spawnSync('/bin/bash', [LAUNCH, 'follow', join(f.root, 'nowhere'), 'done-1'], { env, encoding: 'utf8', timeout: 20_000 });
   assert.equal(gone.status, 1);
-  assert.match(gone.stderr, /agent-companion follow: no execution record done-1/);
+  assert.match(gone.stderr, /agent-companion follow: no job record done-1/);
 });

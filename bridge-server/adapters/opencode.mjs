@@ -1,13 +1,13 @@
 import { Agent, request } from 'node:http';
 import { createTurnAccumulator, parseOpenCodeModel } from './opencode-protocol.mjs';
 import { openCodeCliMajor } from '../../lib/opencode-cli.mjs';
-import { getTargetById } from '../../lib/target-registry.mjs';
-import { companionReady } from '../../lib/target-diagnostics.mjs';
+import { getCompanionById } from '../../lib/companion-registry.mjs';
+import { companionReady } from '../../lib/companion-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 import { usageFromOpenCodeInfo, sumUsage } from '../../lib/usage.mjs';
 
 const capabilities = Object.freeze({ followUp: true, modelSelection: true, loadsHistory: true,
-  interventions: getTargetById('opencode').capabilities.interventions });
+  interventions: getCompanionById('opencode').capabilities.interventions });
 const failure = (code, cause) => Object.assign(new Error(code, { cause }), { name: code, code });
 const outcomes = { succeeded: 'completed', interrupted: 'interrupted', failed: 'failed' };
 
@@ -26,21 +26,21 @@ export function openCodeEffortVariant(entry, name, effort, preferred) {
 // Registry diagnostics own readiness. Reading their last evidence never runs
 // an auth/version probe or starts a provider. start checks the private runtime.
 export function opencodeProvider({ env = process.env } = {}) {
-  const target = getTargetById('opencode', env);
+  const companion = getCompanionById('opencode', env);
   return {
-    enabled: target.implemented,
+    enabled: companion.implemented,
     get ready() { return companionReady('opencode', env); },
     modelAllowed: model => isModelAllowedFor('opencode', model),
-    create: () => new OpenCodeAdapter(env, target),
+    create: () => new OpenCodeAdapter(env, companion),
   };
 }
 
 class OpenCodeAdapter {
   capabilities = capabilities;
   #authorization;
-  constructor(env, target) {
+  constructor(env, companion) {
     this.env = env;
-    this.target = target;
+    this.companion = companion;
     this.channel = new AbortController();
     this.http = new Agent({ keepAlive: true });
   }
@@ -53,7 +53,7 @@ class OpenCodeAdapter {
     this.clock = supervisor.clock;
     try {
       if (this.channel.signal.aborted) throw failure('ProviderLost');
-      const bin = String(this.env[this.target.binaryEnv] || this.target.binaryNames[0]).trim();
+      const bin = String(this.env[this.companion.binaryEnv] || this.companion.binaryNames[0]).trim();
       this.child = await supervisor.spawn([bin, 'serve', '--hostname', '127.0.0.1', '--port', '0'], {
         cwd, env: { ...this.env, PWD: cwd }, stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -308,7 +308,7 @@ class OpenCodeAdapter {
       error: outcome === 'failed' ? [idle, ...assistants].map(m => m?.error?.message).find(m => typeof m === 'string' && m.trim()) : undefined,
       usage: sumUsage(assistants.map(m => usageFromOpenCodeInfo({ ...m, modelID: m.model?.id }, 'opencode-server'))),
       nativeRefs: { sessionId: this.sessionId, messageId: assistants[0]?.id || this.messageId || this.nativeTurnId },
-      cause: outcome === 'completed' ? 'native_complete' : 'provider_error',
+      cause: outcome === 'completed' ? 'native_complete' : 'companion_error',
     };
   }
 
@@ -324,7 +324,7 @@ class OpenCodeAdapter {
       // close can tear down a pending SSE/transcript read during owner stop.
       const snapshot = this.acc?.snapshot();
       this.resolveInterrupt?.({ outcome: 'interrupted', nativeTurnId: this.nativeTurnId, text: snapshot?.message || '', usage: snapshot?.usage,
-        nativeRefs: { sessionId: this.sessionId, messageId: this.messageId || this.nativeTurnId }, cause: 'provider_error' });
+        nativeRefs: { sessionId: this.sessionId, messageId: this.messageId || this.nativeTurnId }, cause: 'companion_error' });
     }
   }
 

@@ -168,7 +168,7 @@ agent-companion defaults companion=inherit
 Set either field or both. Every form accepts `--json`. For a new thread,
 the host's explicit choice wins, followed by the model environment override
 (model only), the saved default, then the companion's own configuration.
-Follow-ups keep the conversation’s selection.
+Follow-ups keep the thread’s selection.
 
 Codex and OpenCode read native defaults for the current directory without a
 turn. Claude, Copilot and Antigravity show what their last run reported and
@@ -470,7 +470,7 @@ saved effort, then its native configuration. Copilot reports the session option'
 `currentValue`, including when inherited. Its BYOK path is testable against local
 Ollama; qualification against GitHub-hosted models remains blocked by this account's
 `session/new` 403. Accepted effort
-is stored for the conversation: omitted follow-ups keep the override where cold
+is stored for the thread: omitted follow-ups keep the override where cold
 follow-up is supported, and explicit effort can change after completion. Refused
 effort leaves the previous effort override or inheritance intact.
 
@@ -509,14 +509,14 @@ subsequent wait. The lead can wait again for the answer. Cancelling
 from the page produces a terminal result with cause `user_cancel`.
 
 User requests use the owning host's state inbox:
-`inbox/<executionId>/<requestId>.json`, written atomically with mode 0600, holding
-`{ requestId, executionId, mode, text, at }`. Cancel uses mode `cancel` and no text.
-The controller reads live executions' inboxes on its tick. Only regular files are read, at most 64 KiB of JSON and 8000 text
+`inbox/<jobId>/<requestId>.json`, written atomically with mode 0600, holding
+`{ requestId, jobId, mode, text, at }`. Cancel uses mode `cancel` and no text.
+The controller reads live jobs' inboxes on its tick. Only regular files are read, at most 64 KiB of JSON and 8000 text
 characters. It writes `<requestId>.outcome.json` atomically with mode 0600:
 `{ requestId, ok, status, reason?, interventionId? }`, then removes the request.
-The view removes outcomes after reading; execution close removes the whole inbox,
+The view removes outcomes after reading; job close removes the whole inbox,
 including requests left behind. Rejected input reports its reason; input for an
-execution not live in that bridge reports `state`. The saved execution's `interventionModes` snapshots its adapter's
+job not live in that bridge reports `state`. The saved job's `interventionModes` snapshots its adapter's
 capabilities for the view.
 
 Terminal envelope statuses are `completed`, `failed` and `cancelled`; durable
@@ -541,7 +541,7 @@ has no `usage` key. Transport readers and the shared shape are defined in
 `lib/usage.mjs`.
 
 Codex app-server follow-ups report the current turn's usage, not the thread's
-cumulative total. Bridge loss ends that execution; a replacement never resumes
+cumulative total. Bridge loss ends that job; a replacement never resumes
 an in-flight turn. Missing native counters remain absent.
 Copilot uses native prompt counters when available and falls back to OTEL;
 `usage_update` measures context occupancy. Antigravity sums each prompt response's
@@ -562,8 +562,8 @@ Per-host state lives under:
 ~/.codex/agent-companion/
 ```
 
-`conversations/` holds each thread's lead, title, directory and native history
-reference. `executions/` and immutable `results/` hold progress and outcomes.
+`threads/` holds each thread's lead, title, directory, native history reference,
+`companion` and latest `jobId`. Jobs and results identify their `thread`, `jobId` and `companion`. `jobs/` and immutable `results/` hold progress and outcomes.
 A receipt beside each result records delivery by a tool or hook. `reads/` holds
 paging cursors. The hook checks `runtime/news/` for pending results. Claude
 checks `runtime/sessions/` before waking a lead. User requests
@@ -572,14 +572,14 @@ See [State](docs/ARCHITECTURE.md#state) for path overrides.
 
 Logs live under `runtime/` in `agent-bridge.log`. See [State](docs/ARCHITECTURE.md#state) for record and recovery rules.
 
-The bridge renders `agent-digest://<executionId>` on demand from the execution
+The bridge renders `job-digest://<jobId>` on demand from the job
 and result records plus the companion's own native transcript. It includes the
 request, models, effort, status, timestamps, final or partial answer, work summary
 and that turn's transcript items in order. Preamble is collapsed to a count;
 each item's output is capped at about 2 KB, with the native transcript path for
 the rest. Running reads include the in-flight progress line. Missing or
 unrecognized transcripts are explicitly labelled. Resources are listed from
-execution records. Digest reads write nothing.
+job records. Digest reads write nothing.
 Existing files under `runtime/digests/` are left alone and are no longer written.
 
 Results carry `workSummary`, exposed as `meta.work_summary` on terminal envelopes.
@@ -603,7 +603,7 @@ first line of the task), the companion and the project. The selected job's
 header adds the host and lead session, model
 and effort, tokens (finished jobs) and branch. Below it is that job's turn from
 the companion's own native transcript, followed as it grows, with the
-in-flight activity from the execution record as the last line. A finished job
+in-flight activity from the job record as the last line. A finished job
 opens on its outcome: result, git change list, errors and answer. Command and
 tool output is folded to its first and last lines; the preamble is hidden.
 In the transcript, `task` is the lead's request, `lead` its later messages and
@@ -622,7 +622,7 @@ no box; a running job started by an older bridge shows a one-line hint instead.
 
 The view's job writes are those messages and cancels: one 0600 request file
 per send in the owning host's state directory, under
-`inbox/<executionId>/`, and the deletion of each outcome file it has read. Drafts stay in memory.
+`inbox/<jobId>/`, and the deletion of each outcome file it has read. Drafts stay in memory.
 
 `d` opens the defaults panel: the default companion and each companion's model
 and effort, saved or what inherit resolves to, as `agent-companion defaults`

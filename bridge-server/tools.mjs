@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
 import { detectHost, HOSTS } from '../lib/hosts/index.mjs';
-import { readDefaultModel, readDefaultEffort, readSettings, settingsPath, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
-import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
-import { defaultTargetInfo, getTarget, TARGETS, modelHint, listTargets, listTargetIds } from '../lib/target-registry.mjs';
+import { readDefaultModel, readDefaultEffort, readSettings, settingsPath, isModelAllowedFor, readDefaultCompanion } from '../lib/state.mjs';
+import { lastCompanionChecks, probePermission } from '../lib/companion-diagnostics.mjs';
+import { defaultCompanionInfo, getCompanion, COMPANIONS, modelHint, listCompanions, listCompanionIds } from '../lib/companion-registry.mjs';
 import { lastRuns } from './last-runs.mjs';
 import { getCodexContractStatus } from './adapters/codex.mjs';
-import { executionStatus, publish, toolAnswer, wakeNotice } from './delivery.mjs';
+import { jobStatus, publish, toolAnswer, wakeNotice } from './delivery.mjs';
 import { Controller } from './controller/controller.mjs';
 import { Records, firstLine, isCompanionSession } from './controller/records.mjs';
 import { systemClock } from './controller/clock.mjs';
@@ -21,7 +21,7 @@ export function clampWaitSec(input) {
 }
 
 function iso(ts) { return ts ? new Date(ts).toISOString() : null; }
-// --- Target routing and capability gate ------------------------------------
+// --- Companion routing and capability gate ------------------------------------
 
 const UNCONFIGURED_SEND_ERROR =
   'no default companion configured and none passed. Pass companion on companion_send, ' +
@@ -41,8 +41,8 @@ function effortRefusal(descriptor, effort) {
   return null;
 }
 
-function resolveEffort(descriptor, requested, env, newConversation) {
-  const configured = newConversation && requested == null ? readDefaultEffort(descriptor.id, env) : null;
+function resolveEffort(descriptor, requested, env, newThread) {
+  const configured = newThread && requested == null ? readDefaultEffort(descriptor.id, env) : null;
   const saved = configured?.source === 'config' ? configured.effort : null;
   const effort = requested ?? configured?.effort ?? null;
   const savedEffortHint = saved && `Effort "${saved}" came from the saved default for ${descriptor.id} in ${settingsPath(env)}. Remove the saved default to omit effort, or pass an explicit effort.`;
@@ -51,15 +51,15 @@ function resolveEffort(descriptor, requested, env, newConversation) {
   return { effort, refusal, savedEffortHint };
 }
 
-export function resolveRouting({ companion: target = null, model = null, effort = null } = {}, env = process.env, newConversation = true) {
-  const companion = target ? String(target).trim().toLowerCase() : readDefaultTarget(env).companion;
+export function resolveRouting({ companion: requested = null, model = null, effort = null } = {}, env = process.env, newThread = true) {
+  const companion = requested ? String(requested).trim().toLowerCase() : readDefaultCompanion(env).companion;
   if (!companion) return { ok: false, code: 'COMPANION_UNCONFIGURED', error: UNCONFIGURED_SEND_ERROR };
-  const descriptor = getTarget(companion, env);
+  const descriptor = getCompanion(companion, env);
   if (!descriptor?.implemented || !descriptor.capabilities?.send) {
     return { ok: false, code: 'COMPANION_UNSUPPORTED', companion,
-      error: `unsupported companion "${companion}" (supported: ${listTargetIds().join(', ')})` };
+      error: `unsupported companion "${companion}" (supported: ${listCompanionIds().join(', ')})` };
   }
-  const selectedModel = model ?? (newConversation ? readDefaultModel(companion, env).model : null);
+  const selectedModel = model ?? (newThread ? readDefaultModel(companion, env).model : null);
   if (selectedModel && !descriptor.capabilities.modelSelection) {
     return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion,
       error: `companion "${companion}" cannot select a model` };
@@ -69,16 +69,16 @@ export function resolveRouting({ companion: target = null, model = null, effort 
       error: `model "${selectedModel}" is not valid for ${companion}`,
       hint: modelHint(companion) };
   }
-  const selection = resolveEffort(descriptor, effort, env, newConversation);
+  const selection = resolveEffort(descriptor, effort, env, newThread);
   return selection.refusal || { ok: true, resolved: { companion, model: selectedModel, effort: selection.effort, capabilities: descriptor.capabilities, savedEffortHint: selection.savedEffortHint } };
 }
 
 function runningEnvelope(view, action, now) {
-  const execution = view.execution;
-  return { ok: true, action, status: 'still_running', job_id: execution.executionId, companion: execution.provider,
-    thread: execution.owner, current_status: view.state, started_at: iso(execution.startedAt),
-    age_s: Math.round((now - execution.startedAt) / 1000),
-    digest_uri: digestResourceUri(execution.executionId),
+  const job = view.job;
+  return { ok: true, action, status: 'still_running', job_id: job.jobId, companion: job.companion,
+    thread: job.thread, current_status: view.state, started_at: iso(job.startedAt),
+    age_s: Math.round((now - job.startedAt) / 1000),
+    digest_uri: digestResourceUri(job.jobId),
     hint: 'call companion_wait({ job_id, max_wait_sec }) again to continue blocking.' };
 }
 
@@ -92,21 +92,21 @@ async function handleWait(args, active, request) {
   waits.add(waiter);
   let response;
   try {
-    response = await active.wait({ owner: args.thread, executionId: args.job_id,
+    response = await active.wait({ thread: args.thread, jobId: args.job_id,
       timeoutMs: clampWaitSec(args.max_wait_sec) * 1000, ...request });
   } finally { waits.delete(waiter); }
   if (response?.status === 'user_intervened') return asJson({ ok: true, action: 'wait', status: response.status,
     thread: args.thread, job_id: args.job_id, intervention: response.intervention });
-  const view = active.status({ executionId: args.job_id });
+  const view = active.status({ jobId: args.job_id });
   if (!view.result) return asJson(runningEnvelope(view, 'wait', active.clock.now()));
-  return ownerTerminalResponse(active.records, view.execution, view.result, 'wait', request);
+  return terminalResponse(active.records, view.job, view.result, 'wait', request);
 }
 
 async function handleCancel(args, active, request) {
-  await active.cancel({ owner: args.thread, executionId: args.job_id, ...request });
-  const view = active.status({ executionId: args.job_id });
+  await active.cancel({ thread: args.thread, jobId: args.job_id, ...request });
+  const view = active.status({ jobId: args.job_id });
   if (!view.result) return asJson(runningEnvelope(view, 'cancel', active.clock.now()));
-  return ownerTerminalResponse(active.records, view.execution, view.result, 'cancel', request);
+  return terminalResponse(active.records, view.job, view.result, 'cancel', request);
 }
 
 function catalogLastRun(run, field) {
@@ -114,25 +114,25 @@ function catalogLastRun(run, field) {
 }
 
 function handleCatalog(args, { env }) {
-  const checks = lastTargetChecks();
+  const checks = lastCompanionChecks();
   const settings = readSettings(settingsPath(env)) ?? {};
-  const defaultTarget = readDefaultTarget(env, undefined, settings);
+  const defaultCompanion = readDefaultCompanion(env, undefined, settings);
   const last = lastRuns(env);
   return asJson({
     ok: true, action: 'catalog',
-    default_companion: defaultTarget,
-    companions: Object.values(TARGETS).filter((t) => t.implemented).map((target) => {
-      const model = readDefaultModel(target.id, env, undefined, settings);
-      const saved = settings.companions?.[target.id];
-      const reports = last.get(target.id);
-      const { nativeDefault: native, adapterKind, modelNote, modelEnumeration, effortDefaultPrefix } = target.runtime;
+    default_companion: defaultCompanion,
+    companions: Object.values(COMPANIONS).filter((t) => t.implemented).map((companion) => {
+      const model = readDefaultModel(companion.id, env, undefined, settings);
+      const saved = settings.companions?.[companion.id];
+      const reports = last.get(companion.id);
+      const { nativeDefault: native, adapterKind, modelNote, modelEnumeration, effortDefaultPrefix } = companion.runtime;
       const modelDefault = model.source === 'env' ? 'the environment override ahead of the saved default' : 'the saved default';
-      const permission = probePermission(target, env);
-      const checked = checks[target.id];
+      const permission = probePermission(companion, env);
+      const checked = checks[companion.id];
       return {
-        id: target.id,
-        display_name: target.displayName,
-        default: target.id === defaultTarget.companion,
+        id: companion.id,
+        display_name: companion.displayName,
+        default: companion.id === defaultCompanion.companion,
         model: {
           ...model,
           saved: saved?.model ?? null,
@@ -141,15 +141,15 @@ function handleCatalog(args, { env }) {
             (modelNote ?? ''),
           enumeration: modelEnumeration ?? 'not enumerable without a session',
         },
-        effort: { selection: target.capabilities.effortSelection, levels: target.capabilities.effortLevels ?? null,
+        effort: { selection: companion.capabilities.effortSelection, levels: companion.capabilities.effortLevels ?? null,
           saved: saved?.effort ?? null,
           last_run: catalogLastRun(reports?.effort, 'effort'),
-          description: !target.capabilities.effortSelection ? 'Effort selection is unsupported.'
-            : (target.capabilities.effortLevels ? '' : 'Levels depend on the model and are checked at send. ') +
+          description: !companion.capabilities.effortSelection ? 'Effort selection is unsupported.'
+            : (companion.capabilities.effortLevels ? '' : 'Levels depend on the model and are checked at send. ') +
               effortDescription((effortDefaultPrefix ?? '') + native) },
         permission: permission ? { mode: permission.mode, source: permission.source, risk: permission.risk } : null,
         capabilities: Object.fromEntries(['interventions', 'resume', 'cancel', 'modelSelection', 'effortSelection']
-          .map((key) => [key, target.capabilities[key]])),
+          .map((key) => [key, companion.capabilities[key]])),
         readiness: {
           ready: checked?.ready ?? null,
           summary: checked ? (checked.ready ? 'ready at last check' : checked.blockers?.[0]?.message || 'not ready') : 'not checked; run companion_status with diagnostics',
@@ -164,9 +164,9 @@ function handleCatalog(args, { env }) {
 
 function handleStatus({ job_id, diagnostics, lead }, active) {
   const project = (view) => {
-    const { execution: e, result: r, state } = view;
-    return { ok: true, action: 'status', job_id: e.executionId, thread: e.owner, companion: e.provider, cwd: e.cwd,
-      status: r ? executionStatus(r) : state, native_turn_state: e.terminal?.outcome ?? e.state,
+    const { job: e, result: r, state } = view;
+    return { ok: true, action: 'status', job_id: e.jobId, thread: e.thread, companion: e.companion, cwd: e.cwd,
+      status: r ? jobStatus(r) : state, native_turn_state: e.terminal?.outcome ?? e.state,
       started_at: iso(e.startedAt), terminal_at: iso(r?.finishedAt),
       last_native_activity: e.progress?.lastActivityAt ?? null, active_command: e.progress?.activeCommand ?? null,
       activity: r || e.terminal ? null : e.progress?.activity !== undefined ? e.progress.activity
@@ -178,36 +178,36 @@ function handleStatus({ job_id, diagnostics, lead }, active) {
       effective_model: r?.effectiveModel ?? e.progress?.effectiveModel ?? e.effectiveModel ?? null,
       effective_effort: r?.effectiveEffort ?? e.progress?.effectiveEffort ?? e.effectiveEffort ?? null,
       cause: r?.cause ?? null, detail: r?.detail ?? null, native_refs: r?.nativeRefs ?? { historyId: e.historyId, nativeTurnId: e.nativeTurnId },
-      digest_uri: digestResourceUri(e.executionId), interventions: view.interventions };
+      digest_uri: digestResourceUri(e.jobId), interventions: view.interventions };
   };
   let response;
   if (job_id) {
-    const view = active.status({ executionId: job_id });
+    const view = active.status({ jobId: job_id });
     response = view ? project(view) : { ok: false, action: 'status', status: 'unknown_job', error: 'unknown job_id' };
   } else {
-    const executions = active.records.listExecutions();
-    const threads = active.records.listConversations().filter(c => sameLead(c.lead, lead)).map(c => {
-      const view = active.status({ executionId: c.executionId });
-      const generation = active.records.read('reads', c.owner)?.generation ?? 0;
-      const unread = executions.filter(e => e.owner === c.owner && e.generation > generation
-        && existsSync(active.records.path('results', e.executionId))).length;
-      return { thread: c.owner, unread, title: c.title, companion: c.provider, cwd: c.cwd,
-        state: view.result ? executionStatus(view.result) : view.state,
-        job_id: c.executionId, started_at: iso(view.execution.startedAt) };
+    const jobs = active.records.listJobs();
+    const threads = active.records.listThreads().filter(c => sameLead(c.lead, lead)).map(c => {
+      const view = active.status({ jobId: c.jobId });
+      const generation = active.records.read('reads', c.thread)?.generation ?? 0;
+      const unread = jobs.filter(e => e.thread === c.thread && e.generation > generation
+        && existsSync(active.records.path('results', e.jobId))).length;
+      return { thread: c.thread, unread, title: c.title, companion: c.companion, cwd: c.cwd,
+        state: view.result ? jobStatus(view.result) : view.state,
+        job_id: c.jobId, started_at: iso(view.job.startedAt) };
     });
     const running = row => ['starting', 'delivering', 'running', 'stopping'].includes(row.state);
     threads.sort((a, b) => running(b) - running(a) || b.started_at.localeCompare(a.started_at));
-    response = { ok: true, action: 'status', default_companion: defaultTargetInfo(active.env), companions: listTargets(active.env), threads };
+    response = { ok: true, action: 'status', default_companion: defaultCompanionInfo(active.env), companions: listCompanions(active.env), threads };
   }
   response.contractStatus = getCodexContractStatus();
-  if (diagnostics) response.diagnostics = { companions: lastTargetChecks() };
+  if (diagnostics) response.diagnostics = { companions: lastCompanionChecks() };
   return asJson(response);
 }
 
 function readThread({ thread, after, offset = 0, limit = 8000 }, { records }) {
-  const posts = records.listExecutions().filter(e => e.owner === thread).sort((a, b) => a.generation - b.generation);
+  const posts = records.listJobs().filter(e => e.thread === thread).sort((a, b) => a.generation - b.generation);
   const cursor = records.read('reads', thread)?.job_id;
-  const index = id => posts.findIndex(e => e.executionId === id);
+  const index = id => posts.findIndex(e => e.jobId === id);
   const original = index(cursor);
   let lastRead = original;
   // An empty anchor means before the first post. Continuation links keep the
@@ -217,10 +217,10 @@ function readThread({ thread, after, offset = 0, limit = 8000 }, { records }) {
   let length = 0, first, last;
   const page = [];
   for (const [i, e] of posts.slice(start).entries()) {
-    const result = records.readResult(e.executionId);
-    const status = result ? executionStatus(result) : 'running';
+    const result = records.readResult(e.jobId);
+    const status = result ? jobStatus(result) : 'running';
     const time = result ? new Date(result.finishedAt ?? e.startedAt).toISOString() : 'running';
-    const header = `## ${e.executionId} · ${status} · ${e.provider} · ${time}\nTask: ${e.text.split(/\r?\n/, 1)[0]}`;
+    const header = `## ${e.jobId} · ${status} · ${e.companion} · ${time}\nTask: ${e.text.split(/\r?\n/, 1)[0]}`;
     const chars = Array.from((i ? '\n\n' : '') + header + (result ? '\n' + (result.text ?? '') : ''));
     const finish = length + chars.length;
     if (finish > offset && length < offset + limit) {
@@ -234,14 +234,14 @@ function readThread({ thread, after, offset = 0, limit = 8000 }, { records }) {
   const end = Math.min(offset + limit, length);
   if (lastRead > original) {
     records._locked(thread, () => {
-      const { executionId: job_id, generation } = posts[lastRead];
+      const { jobId: job_id, generation } = posts[lastRead];
       const saved = records.read('reads', thread);
       if (!saved || generation > saved.generation) records._write('reads', thread, { job_id, generation });
       else lastRead = posts.findLastIndex(e => e.generation <= saved.generation);
     });
   }
-  const unread = posts.slice(lastRead + 1).filter(e => existsSync(records.path('results', e.executionId))).length;
-  const anchor = posts[start - 1]?.executionId ?? '';
+  const unread = posts.slice(lastRead + 1).filter(e => existsSync(records.path('results', e.jobId))).length;
+  const anchor = posts[start - 1]?.jobId ?? '';
   const next = `companion_read({ thread: ${JSON.stringify(thread)}, after: ${JSON.stringify(anchor)}, offset: ${end} })`;
   const footer = end === length ? `[end · ${unread} unread]`
     : `[posts ${first ?? start + 1}–${last ?? start + 1} of ${posts.length} · characters ${offset}–${end} of ${length} · next: ${next}]`;
@@ -260,28 +260,28 @@ function sendDelivery(lead, env) {
   return { ...HOSTS[lead.host].wakeStatus(lead, env), fallback: 'companion_wait' };
 }
 
-async function handleSend(args, active, request, conversation) {
+async function handleSend(args, active, request, threadRecord) {
   const { task, mode, lead } = args;
-  const cwd = args.cwd ?? conversation?.cwd;
+  const cwd = args.cwd ?? threadRecord?.cwd;
   let thread = args.thread;
-  const live = conversation && active.live.has(conversation.executionId);
-  if (conversation) {
-    const mismatch = args.companion && args.companion !== conversation.provider ? 'provider_mismatch'
-      : args.cwd && realpathSync(args.cwd) !== conversation.cwd ? 'cwd_mismatch' : null;
-    if (mismatch) return refuse('send', mismatch, { thread, job_id: conversation.executionId, companion: conversation.provider,
-      hint: `This thread is bound to ${conversation.provider} in ${conversation.cwd}. Omit thread to start a new thread.` });
+  const live = threadRecord && active.live.has(threadRecord.jobId);
+  if (threadRecord) {
+    const mismatch = args.companion && args.companion !== threadRecord.companion ? 'companion_mismatch'
+      : args.cwd && realpathSync(args.cwd) !== threadRecord.cwd ? 'cwd_mismatch' : null;
+    if (mismatch) return refuse('send', mismatch, { thread, job_id: threadRecord.jobId, companion: threadRecord.companion,
+      hint: `This thread is bound to ${threadRecord.companion} in ${threadRecord.cwd}. Omit thread to start a new thread.` });
     if (live) {
-      const e = active.records.readExecution(conversation.executionId);
+      const e = active.records.readJob(threadRecord.jobId);
       if ((args.model && args.model !== e.modelOverride) || (args.effort && args.effort !== e.effortOverride)) {
-        return refuse('send', 'thread_busy', { thread, job_id: e.executionId, companion: e.provider, current_status: e.state });
+        return refuse('send', 'thread_busy', { thread, job_id: e.jobId, companion: e.companion, current_status: e.state });
       }
       if (task !== e.text) {
         if (task.length > 8000) invalid('intervention text exceeds 8000 characters');
         const selected = mode ?? e.interventionModes.default;
-        const { id, ...ack } = await active.intervene({ from: 'caller', owner: thread, executionId: e.executionId,
+        const { id, ...ack } = await active.intervene({ from: 'caller', thread, jobId: e.jobId,
           mode: selected, text: task, ...request });
         if (!ack.ok) return asJson({ action: 'send', ...ack });
-        return asJson({ ...ack, action: 'send', status: 'intervened', thread, job_id: e.executionId, mode: selected, intervention_id: id,
+        return asJson({ ...ack, action: 'send', status: 'intervened', thread, job_id: e.jobId, mode: selected, intervention_id: id,
           delivery: sendDelivery(lead, active.env) });
       }
     }
@@ -289,19 +289,19 @@ async function handleSend(args, active, request, conversation) {
   if (mode !== undefined) invalid('mode requires new text on a running thread');
   // Work a send would start is refused to a companion session a bridge started.
   if (!live && isCompanionSession(lead.session, active.env)) return refuse('send', 'RECURSION_REFUSED');
-  const route = resolveRouting({ ...args, companion: conversation?.provider ?? args.companion }, active.env, !conversation);
+  const route = resolveRouting({ ...args, companion: threadRecord?.companion ?? args.companion }, active.env, !threadRecord);
   if (!route.ok) return asJson({ ...route, action: 'send', status: route.code });
   const { companion, model, effort, savedEffortHint } = route.resolved;
   if (!thread) {
-    do { thread = 'th-' + randomBytes(5).toString('hex'); } while (active.records.readConversation(thread));
+    do { thread = 'th-' + randomBytes(5).toString('hex'); } while (active.records.readThread(thread));
   }
-  const sent = await active.send({ owner: thread, lead, title: args.title, text: task, provider: companion, cwd,
+  const sent = await active.send({ thread, lead, title: args.title, text: task, companion, cwd,
     model: model ?? undefined, effort: effort ?? undefined, savedEffortHint, hostSessionId: lead.session, ...request });
   if (!sent.outcome && !sent.acknowledged) {
-    return refuse('send', sent.error ?? 'bridge_loss', { thread, job_id: sent.executionId, status: sent.state });
+    return refuse('send', sent.error ?? 'bridge_loss', { thread, job_id: sent.jobId, status: sent.state });
   }
-  if (sent.outcome) return ownerTerminalResponse(active.records, active.records.readExecution(sent.executionId), sent, 'send', request);
-  return asJson({ ok: true, status: 'still_running', thread, job_id: sent.executionId, companion, delivery: sendDelivery(lead, active.env),
+  if (sent.outcome) return terminalResponse(active.records, active.records.readJob(sent.jobId), sent, 'send', request);
+  return asJson({ ok: true, status: 'still_running', thread, job_id: sent.jobId, companion, delivery: sendDelivery(lead, active.env),
     selected_model: sent.selectedModel ?? null, selected_effort: sent.selectedEffort ?? null,
     effective_model: sent.effectiveModel ?? null, effective_effort: sent.effectiveEffort ?? null, permission_mode: sent.permissionMode ?? null });
 }
@@ -330,7 +330,7 @@ export const tools = [
     { readOnlyHint: true, destructiveHint: false, idempotentHint: true }),
   tool('send', 'Send the task verbatim. Pass the returned thread for a follow-up. New text on a running thread intervenes in its default or requested mode.', {
     task: field('string', string), cwd: field('string', assertCwd, { description: 'Absolute working directory. Required for a new thread.' }),
-    thread, companion: field('string', (v, k) => optionalString(v, k)?.toLowerCase(), { enum: listTargetIds() }),
+    thread, companion: field('string', (v, k) => optionalString(v, k)?.toLowerCase(), { enum: listCompanionIds() }),
     model: field('string', optionalString), effort: field('string', optionalString),
     mode: field('string', v => modes.includes(v) ? v : invalid('unknown intervention mode'), { enum: modes }),
     title: field('string', string),
@@ -376,19 +376,19 @@ export async function dispatch(params, { controller: active, host = detectHost()
   let args;
   try {
     args = attributedInput(tool, params, host, active);
-    let conversation;
+    let threadRecord;
     if (args.job_id) {
-      const execution = active.records.readExecution(args.job_id);
-      if (!execution) return refuse(action, 'execution_unknown', { status: 'unknown_job', job_id: args.job_id });
-      args.thread = execution.owner;
+      const job = active.records.readJob(args.job_id);
+      if (!job) return refuse(action, 'execution_unknown', { status: 'unknown_job', job_id: args.job_id });
+      args.thread = job.thread;
     }
     if (args.thread) {
-      conversation = active.records.readConversation(args.thread);
-      if (!conversation) return refuse(action, 'thread_unknown', { status: 'unknown_thread', thread: args.thread });
-      if (!sameLead(conversation.lead, args.lead)) return refuse(action, 'THREAD_NOT_YOURS');
-      args.job_id ??= conversation.executionId;
+      threadRecord = active.records.readThread(args.thread);
+      if (!threadRecord) return refuse(action, 'thread_unknown', { status: 'unknown_thread', thread: args.thread });
+      if (!sameLead(threadRecord.lead, args.lead)) return refuse(action, 'THREAD_NOT_YOURS');
+      args.job_id ??= threadRecord.jobId;
     }
-    return await tool.handler(args, active, { requestId, signal }, conversation);
+    return await tool.handler(args, active, { requestId, signal }, threadRecord);
   } catch (err) {
     if (!err.code) throw err;
     return refuse(action, err.code, { error: err.message,
@@ -399,9 +399,9 @@ export async function dispatch(params, { controller: active, host = detectHost()
 
 // Digest resources and terminal delivery
 
-const DIGEST_RESOURCE_SCHEME = 'agent-digest';
+const DIGEST_RESOURCE_SCHEME = 'job-digest';
 const DIGEST_RESOURCE_MIME_TYPE = 'text/markdown';
-const DIGEST_RESOURCE_URI_RE = /^agent-digest:\/\/([a-zA-Z0-9._-]+)$/;
+const DIGEST_RESOURCE_URI_RE = /^job-digest:\/\/([a-zA-Z0-9._-]+)$/;
 
 export function digestResourceUri(jobId) {
   if (typeof jobId !== 'string' || !/^[a-zA-Z0-9._-]+$/.test(jobId)) return null;
@@ -415,27 +415,27 @@ export function digestJobIdFromResourceUri(uri) {
 
 export function digestResourceForJobId(jobId, active) {
   const uri = digestResourceUri(jobId);
-  if (!uri || !active.records.readExecution(jobId)) return null;
+  if (!uri || !active.records.readJob(jobId)) return null;
   // Keep the descriptor minimal. Codex 0.139 accepts this shape for
   // list_mcp_resources; richer MCP metadata is still not portable across hosts.
   return {
     uri,
-    name: `agent-digest-${jobId}`,
+    name: `job-digest-${jobId}`,
     description: `Native transcript digest for job ${jobId}.`,
     mimeType: DIGEST_RESOURCE_MIME_TYPE,
   };
 }
 
 export function listDigestResources(active) {
-  return active.records.listExecutions()
-    .map((execution) => digestResourceForJobId(execution.executionId, active))
+  return active.records.listJobs()
+    .map((job) => digestResourceForJobId(job.jobId, active))
     .filter(Boolean);
 }
 
 export function listDigestResourceTemplates() {
   return [{
     uriTemplate: `${DIGEST_RESOURCE_SCHEME}://{job_id}`,
-    name: 'agent-digest',
+    name: 'job-digest',
     title: 'Job digest',
     description: 'Read a native transcript digest for a companion job by job_id.',
     mimeType: DIGEST_RESOURCE_MIME_TYPE,
@@ -451,7 +451,7 @@ export function readDigestResource(uri, active) {
     contents: [{
       uri: resource.uri,
       mimeType: DIGEST_RESOURCE_MIME_TYPE,
-      text: renderDigest(active.records.readExecution(jobId), active.records.readResult(jobId), active.env),
+      text: renderDigest(active.records.readJob(jobId), active.records.readResult(jobId), active.env),
     }],
   };
 }
@@ -460,50 +460,50 @@ function asJson(obj) {
   return { content: [{ type: 'text', text: JSON.stringify(obj) }], ...(obj.ok === false && { isError: true }) };
 }
 
-function ownerTerminalResponse(records, execution, result, action, { signal }) {
-  const status = executionStatus(result);
+function terminalResponse(records, job, result, action, { signal }) {
+  const status = jobStatus(result);
   const evidence = result.stopEvidence;
   const meta = {
-    status, job_id: result.executionId, thread: result.owner, companion: execution.provider,
+    status, job_id: result.jobId, thread: result.thread, companion: job.companion,
     cause: result.cause, detail: result.outcome === 'delivery_unknown' ? 'delivery_unknown' : result.detail ?? null,
     work_summary: result.workSummary ?? null, usage: result.usage, selected_model: result.selectedModel ?? null, effective_model: result.effectiveModel ?? null,
     selected_effort: result.selectedEffort ?? null, effective_effort: result.effectiveEffort ?? null, native_refs: result.nativeRefs ?? {},
     stop_evidence: evidence ? { gone: evidence.gone, signals: evidence.signals?.length ?? 0,
       survivors: evidence.survivors?.length ?? 0, cleanup_ms: evidence.cleanupMs ?? null,
       protocol: evidence.protocol ?? [] } : null,
-    digest_uri: digestResourceUri(result.executionId),
+    digest_uri: digestResourceUri(result.jobId),
     ...(result.interventions?.length ? { interventions: result.interventions.map(({ from, mode, state, text }) =>
       ({ from, mode, state, first_line: firstLine(text) })) } : {}),
   };
   const { text, delivered_by } = toolAnswer(records, result, signal);
   if (delivered_by) meta.delivered_by = delivered_by;
-  const metadata = { ok: true, action, status, thread: result.owner, job_id: result.executionId, companion: execution.provider, meta };
+  const metadata = { ok: true, action, status, thread: result.thread, job_id: result.jobId, companion: job.companion, meta };
   return { content: [{ type: 'text', text }, { type: 'text', text: JSON.stringify(metadata) }] };
 }
 
 export function createBridgeController({ env = process.env, records = new Records(), ...options } = {}) {
   const controller = new Controller({ env, records, clock: systemClock, providers: createProviders(env), ...options,
-    onResult(execution, result) {
+    onResult(job, result) {
       try {
-        const lead = publish(records, execution, result);
+        const lead = publish(records, job, result);
         const waits = pendingWaits.get(controller) ?? [];
-        const waiting = [...waits].some(w => w.id === execution.executionId && !w.signal?.aborted);
-        if (lead && !waiting) HOSTS[lead.host].wake(lead, wakeNotice(execution, result), env)
+        const waiting = [...waits].some(w => w.id === job.jobId && !w.signal?.aborted);
+        if (lead && !waiting) HOSTS[lead.host].wake(lead, wakeNotice(job, result), env)
           .catch(err => log('WARN', 'completion wake failed:', err.message));
-      } catch (err) { log('WARN', 'execution publication failed:', err.message); }
+      } catch (err) { log('WARN', 'job publication failed:', err.message); }
     },
   });
   return controller;
 }
 export async function recoverController(active) {
-  for (const execution of active.records.listExecutions()) {
-    const conversation = active.records.readConversation(execution.owner);
-    if (conversation?.executionId === execution.executionId && execution.state !== 'closed') {
-      await active.recover({ owner: execution.owner });
+  for (const job of active.records.listJobs()) {
+    const threadRecord = active.records.readThread(job.thread);
+    if (threadRecord?.jobId === job.jobId && job.state !== 'closed') {
+      await active.recover({ thread: job.thread });
     }
     // A startup scan can observe another bridge's live completion. Restore
     // news here; only the bridge finishing the job attempts its wake.
-    const result = active.records.readResult(execution.executionId);
-    if (result) publish(active.records, execution, result);
+    const result = active.records.readResult(job.jobId);
+    if (result) publish(active.records, job, result);
   }
 }

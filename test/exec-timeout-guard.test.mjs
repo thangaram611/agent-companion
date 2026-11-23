@@ -7,7 +7,7 @@
 // this is a routine code path.
 //
 // The fix is a timeout, and the way a timeout gets lost is duplication: doctor
-// and target-diagnostics each carried their own copy of the exec helper and
+// and companion-diagnostics each carried their own copy of the exec helper and
 // neither had one. This test fails on any new synchronous exec that isn't the
 // single shared probe.
 

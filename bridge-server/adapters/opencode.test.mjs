@@ -10,8 +10,8 @@ import { ProcessSupervisor } from '../controller/process-supervisor.mjs';
 import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
 import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
-import { writeTargetChecks } from '../../lib/state.mjs';
-import { getTargetById } from '../../lib/target-registry.mjs';
+import { writeCompanionChecks } from '../../lib/state.mjs';
+import { getCompanionById } from '../../lib/companion-registry.mjs';
 import { opencodeProvider } from './opencode.mjs';
 import { callTool, testLead } from '../../test/tool-call.mjs';
 
@@ -23,13 +23,13 @@ for (const source of ['both', 'idle', 'assistant', 'empty-final']) test(`OpenCod
     FAKE_OPENCODE_PARTIAL: partial ? '1' : '0', FAKE_OPENCODE_EMPTY_FINAL: source === 'empty-final' ? '1' : '0' });
   const sent = await h.send();
   await h.finish(sent);
-  const call = action => callTool({ action, job_id: sent.executionId }, { controller: h.controller });
+  const call = action => callTool({ action, job_id: sent.jobId }, { controller: h.controller });
   const waited = await call('wait'), status = await call('status');
   const message = 'Add usage credits or subscribe and save up to 66%: https://ollama.com/plans (ref: quota-fixture)';
-  assert.equal(waited.status, 'failed'); assert.equal(waited.meta.cause, 'provider_error'); assert.equal(waited.meta.detail, null);
+  assert.equal(waited.status, 'failed'); assert.equal(waited.meta.cause, 'companion_error'); assert.equal(waited.meta.detail, null);
   assert.equal(waited.content, (partial ? 'answer: hello\n\n' : '') + message);
   assert.equal(status.partial_text, waited.content);
-  assert.equal(h.records.readResult(sent.executionId).text, waited.content);
+  assert.equal(h.records.readResult(sent.jobId).text, waited.content);
   assert.doesNotMatch(JSON.stringify([waited, status]), /SECRET_|response|authorization/i);
   if (source === 'both') t.diagnostic('PROVIDER_ERROR_ENVELOPE opencode ' + JSON.stringify({ status: waited.status,
     cause: waited.meta.cause, detail: waited.meta.detail, content: waited.content }));
@@ -41,7 +41,7 @@ function setup(t, extra = {}) {
   writeFileSync(bin, `#!${process.execPath}\nawait import(${JSON.stringify(fake)});\n`, { mode: 0o700 });
   const env = { ...process.env, HOME: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir,
     OPENCODE_BIN: bin, FAKE_OPENCODE_DIR: dir, AGENT_COMPANION_OPENCODE_MODEL: '', ...extra };
-  writeTargetChecks({ opencode: { ready: true, binary: bin, version: '2.2.5' } });
+  writeCompanionChecks({ opencode: { ready: true, binary: bin, version: '2.2.5' } });
   const clock = new ManualClock();
   const records = new Records({ dir: join(dir, 'records') });
   const adapters = [], supervisors = [], advancedCleanup = new Set();
@@ -62,7 +62,7 @@ function setup(t, extra = {}) {
     supervisors.push(supervisor); return supervisor;
   } });
   t.after(async () => {
-    for (const a of controller.live.values()) await settle(controller.cancel({ owner: a.record.owner, executionId: a.record.executionId }));
+    for (const a of controller.live.values()) await settle(controller.cancel({ thread: a.record.thread, jobId: a.record.jobId }));
     await Promise.all(adapters.map(a => a.close()));
     for (const s of supervisors) {
       const stopping = s.terminate({ graceMs: 0 });
@@ -71,7 +71,7 @@ function setup(t, extra = {}) {
       await stopping;
     }
   });
-  const send = (args = {}) => settle(controller.send({ owner: 'child', lead: testLead, provider: 'opencode', cwd: dir, text: 'hello', ...args }));
+  const send = (args = {}) => settle(controller.send({ thread: 'child', lead: testLead, companion: 'opencode', cwd: dir, text: 'hello', ...args }));
   const requests = () => existsSync(join(dir, 'requests.jsonl')) ? readFileSync(join(dir, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse) : [];
   const settle = async (promise) => {
     let result, error, done = false;
@@ -92,7 +92,7 @@ function setup(t, extra = {}) {
     if (error) throw error;
     return result;
   };
-  const finish = (sent) => settle(waitForResult(controller, { owner: records.readExecution(sent.executionId).owner, executionId: sent.executionId, timeoutMs: 100_000 }));
+  const finish = (sent) => settle(waitForResult(controller, { thread: records.readJob(sent.jobId).thread, jobId: sent.jobId, timeoutMs: 100_000 }));
   return { dir, env, clock, provider, controller, records, adapters, supervisors, send, settle, finish, requests };
 }
 
@@ -104,10 +104,10 @@ test('provider readiness is cached and never spawns; model gate and capabilities
   assert.equal(h.provider.modelAllowed('malformed'), false);
   const { capabilities } = h.provider.create();
   assert.deepEqual(capabilities, { followUp: true, modelSelection: true, loadsHistory: true,
-    interventions: getTargetById('opencode').capabilities.interventions });
-  assert.equal(capabilities.interventions, getTargetById('opencode').capabilities.interventions);
+    interventions: getCompanionById('opencode').capabilities.interventions });
+  assert.equal(capabilities.interventions, getCompanionById('opencode').capabilities.interventions);
   assert.deepEqual(h.requests(), []);
-  writeTargetChecks({ opencode: { ready: false } });
+  writeCompanionChecks({ opencode: { ready: false } });
   assert.equal(opencodeProvider({ env: h.env }).ready, false);
 });
 
@@ -125,7 +125,7 @@ test('new session and cold follow-up keep history, change PID, and record changi
   const two = await h.finish(second);
   assert.equal(two.text, text);
   assert.equal(two.nativeRefs.sessionId, one.nativeRefs.sessionId);
-  assert.notEqual(h.records.readExecution(first.executionId).processes.pid, h.records.readExecution(second.executionId).processes.pid);
+  assert.notEqual(h.records.readJob(first.jobId).processes.pid, h.records.readJob(second.jobId).processes.pid);
   assert.equal(two.effectiveModel.id, 'second');
   assert.equal(two.effectiveModel.source, 'inherited');
   assert.equal(two.usage.input_tokens, 11);
@@ -142,7 +142,7 @@ test('new session and cold follow-up keep history, change PID, and record changi
   }
   assert.equal(one.stopEvidence.gone, true); assert.equal(two.stopEvidence.gone, true);
   assert.equal(existsSync(join(h.dir, 'servers.json')), false);
-  assert.doesNotMatch(JSON.stringify(h.records.listExecutions()), /password|authorization/i);
+  assert.doesNotMatch(JSON.stringify(h.records.listJobs()), /password|authorization/i);
 });
 
 for (const [label, extra, args] of [
@@ -171,8 +171,8 @@ test('execution model mismatch fails instead of claiming the selected model ran'
   const h = setup(t, { FAKE_OPENCODE_MODE: 'execution-mismatch' });
   const result = await h.finish(await h.send({ model: 'fixture/chosen' }));
   assert.equal(result.outcome, 'failed');
-  assert.equal(result.cause, 'provider_error');
-  assert.equal(h.records.readExecution(result.executionId).terminal.error, 'ModelSelectionMismatch');
+  assert.equal(result.cause, 'companion_error');
+  assert.equal(h.records.readJob(result.jobId).terminal.error, 'ModelSelectionMismatch');
   assert.equal(result.effectiveModel.id, 'different');
 });
 
@@ -185,7 +185,7 @@ for (const mode of ['no-ack', 'bad-ack', 'hang-ack']) test(`${mode} yields Deliv
   }
   const result = await h.settle(sending);
   assert.equal(result.outcome, 'delivery_unknown');
-  assert.equal(h.records.readExecution(result.executionId).terminal.error, 'DeliveryUnknown');
+  assert.equal(h.records.readJob(result.jobId).terminal.error, 'DeliveryUnknown');
   assert.equal(h.requests().filter(r => r.path?.endsWith('/prompt')).length, 1);
   assert.equal(result.stopEvidence.gone, true);
 });
@@ -194,8 +194,8 @@ test('native interrupt records the tool PID and yields interrupted with the owne
   const h = setup(t, { FAKE_OPENCODE_MODE: 'tool' });
   const sent = await h.send();
   await until(() => h.supervisors[0].serialize().processes.length === 2, 'reported shell PID');
-  assert.equal(h.records.readExecution(sent.executionId).progress.activeCommand, 'fixture tool');
-  const result = await h.settle(h.controller.cancel({ owner: 'child', executionId: sent.executionId }));
+  assert.equal(h.records.readJob(sent.jobId).progress.activeCommand, 'fixture tool');
+  const result = await h.settle(h.controller.cancel({ thread: 'child', jobId: sent.jobId }));
   assert.equal(result.outcome, 'interrupted');
   assert.equal(result.cause, 'owner_stop');
   assert.equal(result.stopEvidence.gone, true);
@@ -206,14 +206,14 @@ test('native interrupt records the tool PID and yields interrupted with the owne
 test('retry is progress and interrupting one private runtime leaves its sibling running', async t => {
   const h = setup(t, { FAKE_OPENCODE_MODE: 'retry' });
   const one = await h.send();
-  const two = await h.send({ owner: 'sibling', text: 'sibling work' });
-  await until(() => h.records.readExecution(one.executionId).progress?.retry?.attempt === 2);
-  assert.equal(h.records.readResult(one.executionId), null);
-  const siblingPid = h.records.readExecution(two.executionId).processes.pid;
-  assert.equal((await h.settle(h.controller.cancel({ owner: 'child', executionId: one.executionId }))).outcome, 'interrupted');
+  const two = await h.send({ thread: 'sibling', text: 'sibling work' });
+  await until(() => h.records.readJob(one.jobId).progress?.retry?.attempt === 2);
+  assert.equal(h.records.readResult(one.jobId), null);
+  const siblingPid = h.records.readJob(two.jobId).processes.pid;
+  assert.equal((await h.settle(h.controller.cancel({ thread: 'child', jobId: one.jobId }))).outcome, 'interrupted');
   assert.equal(pidAlive(siblingPid), true);
-  assert.equal(h.records.readResult(two.executionId), null);
-  assert.equal((await h.settle(h.controller.cancel({ owner: 'sibling', executionId: two.executionId }))).outcome, 'interrupted');
+  assert.equal(h.records.readResult(two.jobId), null);
+  assert.equal((await h.settle(h.controller.cancel({ thread: 'sibling', jobId: two.jobId }))).outcome, 'interrupted');
 });
 
 for (const mode of ['crash', 'no-boot']) test(`startup ${mode} becomes failed runtime_unavailable`, async t => {
@@ -234,8 +234,8 @@ test('unknown history throws HistoryUnavailable and never creates a replacement'
   writeFileSync(join(h.dir, 'history.json'), '{}');
   const result = await h.settle(h.send({ text: 'follow up' }));
   assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'history_unavailable');
-  assert.equal(h.records.readExecution(result.executionId).terminal.error, 'HistoryUnavailable');
-  assert.equal(h.records.readConversation('child').historyId, one.nativeRefs.sessionId);
+  assert.equal(h.records.readJob(result.jobId).terminal.error, 'HistoryUnavailable');
+  assert.equal(h.records.readThread('child').historyId, one.nativeRefs.sessionId);
   assert.equal(h.requests().filter(r => r.path === '/api/session').length, 1);
   assert.equal(h.requests().filter(r => r.path?.endsWith('/prompt')).length, 1);
 });
@@ -246,7 +246,7 @@ for (const mode of ['drop-stream', 'die']) test(`${mode} before terminal rejects
   h.env.FAKE_OPENCODE_MODE = mode;
   const result = await h.finish(await h.send({ text: 'unfinished' }));
   assert.equal(result.outcome, 'failed');
-  assert.equal(h.records.readExecution(result.executionId).terminal.error, 'ProviderLost');
+  assert.equal(h.records.readJob(result.jobId).terminal.error, 'ProviderLost');
   assert.equal(result.stopEvidence.gone, true);
   if (mode === 'die') assert.equal(result.stopEvidence.protocol.find(p => p.method === 'interrupt').acknowledged, false);
 });
@@ -255,7 +255,7 @@ test('provider failure yields failed and close only closes HTTP channels', async
   const h = setup(t, { FAKE_OPENCODE_MODE: 'provider-error' });
   const result = await h.finish(await h.send());
   assert.equal(result.outcome, 'failed');
-  assert.equal(result.cause, 'provider_error');
+  assert.equal(result.cause, 'companion_error');
   h.env.FAKE_OPENCODE_MODE = 'tool';
   const sent = await h.send({ text: 'still running' });
   await h.adapters[1].close();
@@ -312,7 +312,7 @@ test('OpenCode effort overrides an older variant, accepts matching aliases, and 
   const refused = await h.send({ effort: 'low' });
   assert.equal(refused.detail, 'CAPABILITY_UNAVAILABLE');
   assert.equal(h.requests().slice(offset).some(r => r.path?.endsWith('/prompt')), false);
-  assert.equal(h.records.readConversation('child').effortOverride, 'high');
+  assert.equal(h.records.readThread('child').effortOverride, 'high');
 });
 
 test('OpenCode effort selects a variant on its configured model', async t => {
@@ -321,7 +321,7 @@ test('OpenCode effort selects a variant on its configured model', async t => {
     task: 'select high', effort: 'high' }, { controller: h.controller }));
   assert.equal(sent.status, 'still_running');
   assert.equal(sent.effective_effort, 'high');
-  await h.finish({ executionId: sent.job_id });
+  await h.finish({ jobId: sent.job_id });
 });
 
 for (const [mode, code] of [
@@ -332,7 +332,7 @@ for (const [mode, code] of [
   const refused = await h.send({ effort: 'low' });
   assert.equal(refused.detail, code);
   assert.equal(h.requests().some(r => r.path?.endsWith('/prompt')), false);
-  assert.equal(h.records.readConversation('child').effortOverride, undefined);
+  assert.equal(h.records.readThread('child').effortOverride, undefined);
 });
 
 
@@ -344,7 +344,7 @@ test('OpenCode effort overrides the variant named on the same send', async t => 
   assert.equal(sent.selected_model, 'fixture/first#high');
   assert.equal(sent.effective_model.variant, 'soft');
   assert.equal(sent.effective_effort, 'low');
-  const result = await h.finish({ executionId: sent.job_id });
+  const result = await h.finish({ jobId: sent.job_id });
   assert.equal(result.selectedModel, 'fixture/first#high');
   assert.equal(result.effectiveModel.variant, 'soft');
   assert.equal(result.effectiveEffort, 'low');
@@ -358,7 +358,7 @@ for (const effort of [undefined, 'low']) test(`routing keeps OpenCode's starting
       cwd: h.dir, task: 'hello', ...args }, { controller: h.controller }));
     thread = sent.thread;
     assert.equal(sent.selected_model, 'fixture/first#high');
-    return h.finish({ executionId: sent.job_id });
+    return h.finish({ jobId: sent.job_id });
   };
   await send({ effort });
   h.env.AGENT_COMPANION_OPENCODE_MODEL = 'fixture/second#high';
@@ -380,7 +380,7 @@ for (const model of [undefined, 'fixture/chosen#fast']) test(`OpenCode without e
   assert.equal(h.requests().some(r => r.path === '/api/model'), false);
 });
 
-const intervene = (h, sent, mode, text) => h.controller.intervene({ executionId: sent.executionId, from: 'user', mode, text });
+const intervene = (h, sent, mode, text) => h.controller.intervene({ jobId: sent.jobId, from: 'user', mode, text });
 const endTurn = (h, outcome = 'succeeded') => h.adapters[0]._request('/fixture/finish', { method: 'POST', body: { outcome } });
 const prompts = h => h.requests().filter(r => r.path?.endsWith('/prompt'));
 
@@ -399,7 +399,7 @@ for (const earlyResult of [false, true]) test(`OpenCode steer acknowledges and j
   assert.equal(result.outcome, 'completed'); assert.equal(result.text, 'steered: new direction\nonly once');
   assert.deepEqual(result.nativeTurnIds, session.messages.filter(m => m.type === 'user').map(m => m.id));
   assert.equal(result.turns.length, 1);
-  assert.deepEqual(result.turns[0].messages, [sent.executionId, ack.id]);
+  assert.deepEqual(result.turns[0].messages, [sent.jobId, ack.id]);
   assert.equal(result.interventions[0].state, 'answered');
   assert.equal(result.usage.input_tokens, 18); assert.equal(result.usage.output_tokens, 5); assert.equal(result.usage.cost, 0.03);
   assert.equal(h.supervisors.length, 1);
@@ -409,7 +409,7 @@ test('OpenCode does not claim a steer when native admission confirms another del
   const h = setup(t, { FAKE_OPENCODE_MODE: 'interventions', FAKE_OPENCODE_STEER_DELIVERY: 'queue' });
   const sent = await h.send();
   await assert.rejects(intervene(h, sent, 'steer', 'must be steer'), { code: 'DeliveryUnknown' });
-  assert.equal(h.records.readExecution(sent.executionId).interventions[0].state, 'not_delivered');
+  assert.equal(h.records.readJob(sent.jobId).interventions[0].state, 'not_delivered');
   assert.equal(prompts(h).length, 2, 'no fallback or resend');
 });
 
@@ -421,8 +421,8 @@ test('OpenCode bridge queue uses the live session after idle, with fresh progres
   const nextProgress = [], observe = h.adapters[0].observe.bind(h.adapters[0]);
   h.adapters[0].observe = options => observe({ ...options, onProgress: progress => { nextProgress.push(progress); options.onProgress(progress); } });
   await endTurn(h);
-  await until(() => h.records.readExecution(sent.executionId).progress?.partialText === 'answer: second text', 'next turn progress');
-  assert.equal(h.records.readResult(sent.executionId), null);
+  await until(() => h.records.readJob(sent.jobId).progress?.partialText === 'answer: second text', 'next turn progress');
+  assert.equal(h.records.readResult(sent.jobId), null);
   await endTurn(h);
   const result = await h.finish(sent);
   assert.deepEqual(prompts(h).map(r => r.body), [{ text: 'hello' }, { text: 'second text' }]);
@@ -433,7 +433,7 @@ test('OpenCode bridge queue uses the live session after idle, with fresh progres
     [['answer: hello', 11, 3, 0.01], ['answer: second text', 11, 3, 0.01]]);
   assert.equal(result.usage.input_tokens, 22); assert.equal(result.usage.cost, 0.02);
   assert.equal(nextProgress[0].partialText, ''); assert.equal(nextProgress[0].activeCommand, null); assert.equal(nextProgress[0].retry, null);
-  assert.deepEqual(result.turns.map(t => t.messages), [[sent.executionId], [queued.id]]);
+  assert.deepEqual(result.turns.map(t => t.messages), [[sent.jobId], [queued.id]]);
   assert.equal(result.interventions[0].state, 'answered');
 });
 
@@ -458,11 +458,11 @@ test('OpenCode interrupt waits for native idle before sending only the replaceme
   assert.equal(prompts(h).length, 1, 'abort admission is not an idle boundary');
   await endTurn(h, 'interrupted'); await interrupt;
   await until(() => prompts(h).length === 2);
-  await until(() => h.records.readExecution(sent.executionId).progress?.partialText === 'answer: replacement');
+  await until(() => h.records.readJob(sent.jobId).progress?.partialText === 'answer: replacement');
   const again = intervene(h, sent, 'interrupt', 'final text');
   await until(() => h.requests().filter(r => r.path?.endsWith('/interrupt')).length === 2);
   await endTurn(h, 'interrupted'); await again;
-  await until(() => h.records.readExecution(sent.executionId).progress?.partialText === 'answer: final text');
+  await until(() => h.records.readJob(sent.jobId).progress?.partialText === 'answer: final text');
   await endTurn(h);
   const result = await h.finish(sent);
   assert.deepEqual(result.turns.map(t => t.outcome), ['interrupted', 'interrupted', 'completed']);

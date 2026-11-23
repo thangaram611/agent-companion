@@ -39,14 +39,14 @@
 // neutral descriptor the suites drive the ACP adapter with; Antigravity's
 // real descriptor is driven through the same fake via `ANTIGRAVITY_BIN`.
 // It carries an `acp` block exactly as a real descriptor in
-// lib/target-registry.mjs does, so a suite that passes against it is a suite
+// lib/companion-registry.mjs does, so a suite that passes against it is a suite
 // the next real companion inherits.
 
 import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { makeUsage } from '../lib/usage.mjs';
-import { getTargetById } from '../lib/target-registry.mjs';
+import { getCompanionById } from '../lib/companion-registry.mjs';
 
 const FAKE_UPDATES = ['agent_thought_chunk', 'agent_message_chunk', 'tool_call', 'tool_call_update', 'user_message_chunk'];
 
@@ -71,7 +71,7 @@ export function fakeAcpDescriptor({ id = 'fake-acp', loadSession = true, updates
     displayName: 'Fake ACP agent',
     implemented: true,
     capabilities: { send: true, wait: true, status: true, cancel: true, resume: true, jsonEvents: true, acp: true, serverMode: false, modelSelection: true,
-      interventions: getTargetById('copilot').capabilities.interventions },
+      interventions: getCompanionById('copilot').capabilities.interventions },
     binaryEnv: 'FAKE_ACP_BIN',
     binaryNames: ['fake-acp-agent'],
     versionArgs: ['--version'],

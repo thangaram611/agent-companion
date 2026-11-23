@@ -16,7 +16,7 @@ import { callTool } from './tool-call.mjs';
 import { createBridgeController, recoverController } from '../bridge-server/tools.mjs';
 import { Records } from '../bridge-server/controller/records.mjs';
 import { claudeProvider, ClaudeAdapter } from '../bridge-server/adapters/claude.mjs';
-import { writeTargetChecks, writeDefaultEffort } from '../lib/state.mjs';
+import { writeCompanionChecks, writeDefaultEffort } from '../lib/state.mjs';
 
 const EXACT_TASK = '  First line.\nA second line.  ';
 
@@ -42,7 +42,7 @@ handle = (msg) => {
 };
 `);
   const env = { ...process.env, CODEX_BIN: bin, CODEX_FAKE_TRACE: join(dir, 'trace.jsonl') };
-  writeTargetChecks({ codex: { ready: true } });
+  writeCompanionChecks({ codex: { ready: true } });
   const records = new Records({ dir: join(dir, 'records') });
   // Keep production adapters and real child processes. The existing identity
   // fixture replaces ps, which the execution sandbox denies.
@@ -57,15 +57,15 @@ handle = (msg) => {
   const watcherPath = join(dir, 'watcher.mjs');
   writeFileSync(watcherPath, `
 import { Records } from ${JSON.stringify(new URL('../bridge-server/controller/records.mjs', import.meta.url).href)};
-import { cleanupExecution } from ${JSON.stringify(new URL('../scripts/cleanup-watcher.mjs', import.meta.url).href)};
+import { cleanupJob } from ${JSON.stringify(new URL('../scripts/cleanup-watcher.mjs', import.meta.url).href)};
 import { fixtureSupervisor } from ${JSON.stringify(new URL('../test/controller/fixture-table.mjs', import.meta.url).href)};
 const records = new Records({ dir: process.argv[2] });
-await cleanupExecution({ records, execution: records.readExecution(process.argv[3]), createSupervisor: fixtureSupervisor });
+await cleanupJob({ records, job: records.readJob(process.argv[3]), createSupervisor: fixtureSupervisor });
 `);
   let watcher;
   const active = createBridgeController({ env, records, createSupervisor,
-    launchWatcher: async ({ stateDir, executionId }) => {
-      watcher = spawn(process.execPath, [watcherPath, stateDir, executionId], { detached: true, stdio: 'ignore' });
+    launchWatcher: async ({ stateDir, jobId }) => {
+      watcher = spawn(process.execPath, [watcherPath, stateDir, jobId], { detached: true, stdio: 'ignore' });
       await once(watcher, 'spawn');
       return { pid: watcher.pid };
     } });
@@ -85,7 +85,7 @@ await cleanupExecution({ records, execution: records.readExecution(process.argv[
   assert.equal(cancelled.status, 'cancelled'); assert.equal(cancelled.meta.stop_evidence.gone, true);
   const lost = await send('wait for bridge loss');
   await active.bridgeLost();
-  assert.equal(records.readExecution(lost.job_id).writer, 'watcher');
+  assert.equal(records.readJob(lost.job_id).writer, 'watcher');
   await until(() => records.readResult(lost.job_id), 'cleanup watcher result');
   const fresh = createBridgeController({ env, records, createSupervisor });
   await recoverController(fresh);
@@ -149,17 +149,17 @@ test('aborting a pending steer leaves the native turn running', async (t) => {
 });
 
 test('Claude provider uses cached readiness, accepts aliases and creates independent adapters', () => {
-  writeTargetChecks({ claude: { ready: false } });
+  writeCompanionChecks({ claude: { ready: false } });
   const provider = claudeProvider({ env: { CLAUDE_BIN: '/missing-claude', PATH: '' } });
   assert.equal(provider.enabled, true);
   assert.equal(provider.ready, false);
-  writeTargetChecks({ claude: { ready: true } });
+  writeCompanionChecks({ claude: { ready: true } });
   assert.equal(provider.ready, true, 'readiness getter observes updated cached evidence without probing');
   assert.equal(provider.modelAllowed('haiku'), true);
   assert.equal(provider.modelAllowed('bad model'), false);
   assert.ok(provider.create() instanceof ClaudeAdapter);
   assert.notEqual(provider.create(), provider.create());
-  writeTargetChecks({});
+  writeCompanionChecks({});
   assert.equal(provider.ready, false);
 });
 
@@ -167,7 +167,7 @@ test('dispatch wires the Claude provider through fake native send and cold resum
   const dir = mkdtempSync(join(SANDBOX_HOME, 'claude-wire-'));
   const env = { ...process.env, HOME: dir, CLAUDE_CONFIG_DIR: join(dir, 'config'), CLAUDE_BIN: fakeClaudeBin(dir),
     FAKE_CLAUDE_TRACE: join(dir, 'trace.jsonl'), AGENT_COMPANION_CLAUDE_PERMISSION: 'plan' };
-  writeTargetChecks({ claude: { ready: true } });
+  writeCompanionChecks({ claude: { ready: true } });
   const supervisors = [];
   const active = createBridgeController({ env, records: new Records({ dir: join(dir, 'records') }), createSupervisor: (options) => {
     const supervisor = fixtureSupervisor(options), spawn = supervisor.spawn.bind(supervisor);
@@ -176,9 +176,9 @@ test('dispatch wires the Claude provider through fake native send and cold resum
     return supervisor;
   } });
   t.after(async () => {
-    for (const live of [...active.live.values()]) await active.cancel({ owner: live.record.owner, executionId: live.record.executionId });
+    for (const live of [...active.live.values()]) await active.cancel({ thread: live.record.thread, jobId: live.record.jobId });
     for (const supervisor of supervisors) await supervisor.terminate({ graceMs: 0 });
-    writeTargetChecks({});
+    writeCompanionChecks({});
   });
   const call = (args) => callTool(args, { controller: active });
   const answers = [];
@@ -192,7 +192,7 @@ test('dispatch wires the Claude provider through fake native send and cold resum
     assert.equal(sent.effective_effort, null);
     assert.equal(sent.permission_mode, 'plan');
     const catalog = await call({ action: 'catalog' });
-    assert.equal(catalog.companions.find((target) => target.id === 'claude').permission.mode, sent.permission_mode);
+    assert.equal(catalog.companions.find((companion) => companion.id === 'claude').permission.mode, sent.permission_mode);
     const answer = await call({ action: 'wait', job_id: sent.job_id, max_wait_sec: 5 });
     assert.equal(answer.status, 'completed');
     assert.equal(answer.content, 'alpha');

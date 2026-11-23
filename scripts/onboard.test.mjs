@@ -27,7 +27,7 @@ test('parseArgs reads flags, inline values, and toggles', () => {
   assert.equal(o.setDefault, true);
   assert.equal(o.yes, true);
   assert.equal(o.json, true);
-  assert.equal(parseArgs(['--list-companions']).listTargets, true);
+  assert.equal(parseArgs(['--list-companions']).listCompanions, true);
   assert.equal(parseArgs(['--bogus']).unknown, '--bogus');
 });
 

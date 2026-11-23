@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { AcpConnection } from './acp-protocol.mjs';
 import { systemClock } from '../controller/clock.mjs';
 import { sumUsage } from '../../lib/usage.mjs';
-import { getTargetById } from '../../lib/target-registry.mjs';
-import { companionReady } from '../../lib/target-diagnostics.mjs';
+import { getCompanionById } from '../../lib/companion-registry.mjs';
+import { companionReady } from '../../lib/companion-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 
 const failure = (code, cause) => Object.assign(new Error(code, { cause }), { code });
@@ -184,7 +184,7 @@ export class AcpAdapter {
     conn.effort = effort;
     this.paths = {};
     try {
-      // Copilot's legacy usage fallback gets an execution-private exporter;
+      // Copilot's legacy usage fallback gets a job-private exporter;
       // no shared provider files, rotation, leases or durable adapter state.
       if (acp.rotate?.includes('otelTraces')) {
         this.telemetryDir = mkdtempSync(join(tmpdir(), 'acp-usage-'));
@@ -262,7 +262,7 @@ export class AcpAdapter {
       if (usage && turn.extended) usage.partial = true;
       return { outcome, text: events.messageChunks.join(''), usage, ...detail,
         nativeRefs: { sessionId: this.sessionId, promptRequestId: turn.promptId },
-        cause: outcome === 'completed' ? 'native_complete' : 'provider_error' };
+        cause: outcome === 'completed' ? 'native_complete' : 'companion_error' };
     }).finally(() => { turn.finished = true; conn.sessionCollectors.delete(this.sessionId); });
     // Observation attaches after acceptance; transport loss can race that gap.
     turn.terminal.catch(() => {});
@@ -339,7 +339,7 @@ export class AcpAdapter {
 }
 
 export function acpProvider(companion, { env = process.env } = {}) {
-  const descriptor = getTargetById(companion, env);
+  const descriptor = getCompanionById(companion, env);
   if (!descriptor?.acp) throw new Error(`Not an ACP companion: ${companion}`);
   return {
     enabled: descriptor.implemented === true,

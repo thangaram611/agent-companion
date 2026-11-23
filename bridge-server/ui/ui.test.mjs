@@ -54,7 +54,7 @@ const styleOf = (model, text) => model.render().flat().find(([cell]) => cell.inc
 
 test('running job focused with a queued message and a draft at 150 columns', t => {
   const f = uiFixture(t);
-  f.setExecution('run-1', () => ({ interventions: [{ id: 'q1', from: 'caller', mode: 'queue', text: 'Also check the logout route.', at: f.NOW - 3000, state: 'accepted' }] }));
+  f.setJob('run-1', () => ({ interventions: [{ id: 'q1', from: 'caller', mode: 'queue', text: 'Also check the logout route.', at: f.NOW - 3000, state: 'accepted' }] }));
   const model = open(f, 'claude:run-1', 150);
   press(model, 'tab');
   type(model, 'Keep the fake server; add an idle event after the step instead.');
@@ -68,7 +68,7 @@ test('cancel confirmation at 80 columns', t => {
 
 test('opening a running job focuses its box: letters type, ctrl+j adds a line, shift+tab cycles modes, esc keeps each job\'s draft', t => {
   const f = uiFixture(t);
-  f.setExecution('op-1', () => ({ interventionModes: { default: 'queue', steer: false, queue: 'bridge', interrupt: true } }));
+  f.setJob('op-1', () => ({ interventionModes: { default: 'queue', steer: false, queue: 'bridge', interrupt: true } }));
   const model = open(f, 'claude:run-1', 80);
   type(model, 'q?/egG');
   assert.match(screen(model), /│ › q\?\/egG▌ +│/, 'single-letter keys type into the box');
@@ -115,7 +115,7 @@ test('⏎ writes one private request per the inbox contract; its outcome is read
   enter(model);
   const { name, request, mode } = box.take();
   assert.deepEqual(box.requests(), [name], 'one file, no temporary left');
-  assert.deepEqual(request, { requestId: name.slice(0, -5), executionId: 'run-1', mode: 'steer', text: 'Keep the fake server;\nadd an idle event.', at: f.NOW }, 'escape sequences, C1 controls and bidi overrides are not text');
+  assert.deepEqual(request, { requestId: name.slice(0, -5), jobId: 'run-1', mode: 'steer', text: 'Keep the fake server;\nadd an idle event.', at: f.NOW }, 'escape sequences, C1 controls and bidi overrides are not text');
   assert.equal(mode, 0o600);
   assert.equal(statSync(box.dir).mode & 0o777, 0o700);
   assert.match(screen(model), /◌ you · waiting for the bridge  Keep the fake server; add an idle event\.\n +╭/);
@@ -127,7 +127,7 @@ test('⏎ writes one private request per the inbox contract; its outcome is read
   model.tick();
   assert.deepEqual(readdirSync(box.dir), [], 'the outcome is deleted once read');
   assert.match(screen(model), /◌ you · accepted  Keep the fake server/);
-  f.setExecution('run-1', () => ({ interventions: [{ id: 'i-1', from: 'user', mode: 'steer', text: request.text, at: f.NOW, state: 'joined' }] }));
+  f.setJob('run-1', () => ({ interventions: [{ id: 'i-1', from: 'user', mode: 'steer', text: request.text, at: f.NOW, state: 'joined' }] }));
   model.tick();
   assert.match(screen(model), /◌ you · joined  Keep the fake server; add an idle event\.  in the running turn/);
   assert.doesNotMatch(screen(model), /accepted/);
@@ -167,7 +167,7 @@ test('ctrl+x asks inside the box: n restores it, y writes a cancel request with 
   ctrl(model, 'x');
   press(model, 'y');
   const { request } = box.take();
-  assert.deepEqual(request, { requestId: request.requestId, executionId: 'run-1', mode: 'cancel', at: f.NOW });
+  assert.deepEqual(request, { requestId: request.requestId, jobId: 'run-1', mode: 'cancel', at: f.NOW });
   assert.match(screen(model), /◌ you · cancel · waiting for the bridge\n/);
   assert.match(screen(model), /│ › draft▌ +│/, 'the draft stays');
   box.answer(request.requestId, { ok: true, status: 'accepted' });
@@ -198,7 +198,7 @@ test('ctrl+c clears a draft, then quits; on the list it quits, and ctrl+letters 
 test('pending and transcript labels: task, lead and you from the record; an unmatched message stays user', t => {
   const f = uiFixture(t);
   const at = f.NOW - 60_000;
-  f.setExecution('run-1', () => ({ interventions: [
+  f.setJob('run-1', () => ({ interventions: [
     { id: 'l0', from: 'caller', mode: 'steer', text: 'Lead steer.', at, state: 'joined' },
     { id: 'u1', from: 'user', mode: 'interrupt', text: 'Stop and use the idle event.', at: at + 2000, state: 'accepted' },
     { id: 'l1', from: 'caller', mode: 'queue', text: 'Also check the logout route.', at: at + 1000, state: 'accepted' },
@@ -220,7 +220,7 @@ test('a Claude message that joined the running turn is a message, labelled by it
   const f = uiFixture(t);
   appendFileSync(join(f.root, 'transcripts/claude-done.jsonl'), JSON.stringify({ type: 'attachment', sessionId: 'sess-done', uuid: 'att-1',
     attachment: { type: 'queued_command', prompt: 'Also check the logout route.', source_uuid: 'i-9', commandMode: 'prompt' } }) + '\n');
-  f.setExecution('done-1', () => ({ interventions: [{ id: 'i-9', from: 'user', mode: 'queue', text: 'Also check the logout route.', at: f.NOW - 13 * 60_000, state: 'answered' }] }));
+  f.setJob('done-1', () => ({ interventions: [{ id: 'i-9', from: 'user', mode: 'queue', text: 'Also check the logout route.', at: f.NOW - 13 * 60_000, state: 'answered' }] }));
   const model = open(f, 'claude:done-1', 150, 60);
   const text = screen(model);
   assert.match(text, /│  task {3}Review the auth middleware/);
@@ -237,7 +237,7 @@ test('an older bridge\'s running job shows no box but a one-line hint, and keeps
 
 test('a companion with no message modes offers cancel only', t => {
   const f = uiFixture(t);
-  f.setExecution('run-1', () => ({ interventionModes: { default: null, steer: false, queue: false, interrupt: false } }));
+  f.setJob('run-1', () => ({ interventionModes: { default: null, steer: false, queue: false, interrupt: false } }));
   const model = open(f, 'claude:run-1', 80);
   type(model, 'ignored');
   enter(model);
@@ -254,7 +254,7 @@ test('when the job ends the box goes and the draft stays in memory only', t => {
   const model = open(f, 'claude:run-1', 80);
   type(model, 'kept draft');
   ctrl(model, 'x');
-  f.setExecution('run-1', () => ({ state: 'closed' }));
+  f.setJob('run-1', () => ({ state: 'closed' }));
   model.tick();
   const text = screen(model);
   assert.doesNotMatch(text, /╭|kept draft|Cancel this job/);
@@ -296,7 +296,7 @@ function fakeDefaults() {
     calls.push(query);
     if (query.effort === 'turbo') throw new Error('effort "turbo" is not valid for Codex model "gpt-6.2-astra". Use one of: low, medium, high, xhigh, max, ultra');
     const result = DEFAULTS();
-    if (query.target) return { settingsFile: result.settingsFile, companion: { ...result.companion, saved: query.target === 'inherit' ? null : query.target }, conflicts: [] };
+    if (query.defaultCompanion) return { settingsFile: result.settingsFile, companion: { ...result.companion, saved: query.defaultCompanion === 'inherit' ? null : query.defaultCompanion }, conflicts: [] };
     if (query.companion) {
       const row = result.companions[query.companion];
       for (const key of ['model', 'effort']) if (query[key]) row[key] = query[key] === 'inherit'
@@ -336,7 +336,7 @@ test('editing a default: ⏎ edits the selected field, ⏎ saves through default
   const defaults = fakeDefaults();
   const model = uiFixture(t).model({ size: { columns: 110, rows: 30 }, defaults });
   press(model, 'd'); await settle();
-  // target, then codex model, then codex effort.
+  // defaultCompanion, then codex model, then codex effort.
   press(model, 'downArrow', 'downArrow', 'return');
   assert.match(screen(model), /effort +› high▌/);
   assert.match(screen(model), /⏎ save, empty clears to inherit {3}esc cancel/);
@@ -435,7 +435,7 @@ test('follow: appended items arrive above the box; scrolling up stops following 
 test('folding: e expands the cursor item, E expands all, p shows the preamble', t => {
   // An older bridge's running job has no box, so the transcript takes the keys.
   const f = uiFixture(t);
-  f.setExecution('run-1', () => ({ interventionModes: undefined }));
+  f.setJob('run-1', () => ({ interventionModes: undefined }));
   const model = open(f, 'claude:run-1', 150, 80);
   press(model, 'tab', 'g');
   assert.match(screen(model), /\+19 lines/);
@@ -495,7 +495,7 @@ test('native terminal escapes never reach the frame', t => {
 test('a multi-line command, activity or title never puts a newline inside a frame row', t => {
   const f = uiFixture(t);
   f.append([codexItem('turn-2', { type: 'CommandExecution', id: 'heredoc', command: ['/bin/zsh', '-lc', "cat > notes.txt <<'EOF'\nfirst\nsecond\nEOF"], status: 'completed', exit_code: 0, aggregated_output: '' })]);
-  f.setExecution('run-1', () => ({ progress: { activeCommand: 'python3 - <<EOF\nprint(1)\nEOF', lastActivityAt: f.NOW } }));
+  f.setJob('run-1', () => ({ progress: { activeCommand: 'python3 - <<EOF\nprint(1)\nEOF', lastActivityAt: f.NOW } }));
   const model = open(f, 'claude:run-1', 150, 40);
   model.tick();
   const rows = model.render().map(row => row.map(([text]) => text).join(''));

@@ -27,7 +27,7 @@ read_registry_ids() {
     node_requirement_error "$NODE_VERSION"
     exit 1
   fi
-  TARGET_IDS=$(node -p '[...require(process.argv[1]).TARGET_IDS].join(" ")' "$SCRIPT_DIR/lib/target-registry.mjs")
+  COMPANION_IDS=$(node -p '[...require(process.argv[1]).COMPANION_IDS].join(" ")' "$SCRIPT_DIR/lib/companion-registry.mjs")
   HOST_IDS=$(node -p 'Object.keys(require(process.argv[1]).HOSTS).join(" ")' "$SCRIPT_DIR/lib/hosts/index.mjs")
 }
 
@@ -35,9 +35,9 @@ read_registry_ids() {
 #
 # An omitted host is detected; an omitted companion preserves existing configuration.
 HOST=""
-TARGET=""
+COMPANION=""
 MODEL=""
-NO_TARGET_CHECK=0
+NO_COMPANION_CHECK=0
 SKIP_TESTS=0
 YES=0
 DRY_RUN=0
@@ -46,25 +46,25 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --host)   [ "$#" -ge 2 ] && [ -n "$2" ] || { fail "--host requires a value"; exit 2; }; HOST="$2"; shift 2 ;;
     --host=*) HOST="${1#--host=}"; [ -n "$HOST" ] || { fail "--host requires a value"; exit 2; }; shift ;;
-    --companion) [ "$#" -ge 2 ] && [ -n "$2" ] || { fail "--companion requires a value"; exit 2; }; TARGET="$2"; shift 2 ;;
-    --companion=*) TARGET="${1#--companion=}"; [ -n "$TARGET" ] || { fail "--companion requires a value"; exit 2; }; shift ;;
+    --companion) [ "$#" -ge 2 ] && [ -n "$2" ] || { fail "--companion requires a value"; exit 2; }; COMPANION="$2"; shift 2 ;;
+    --companion=*) COMPANION="${1#--companion=}"; [ -n "$COMPANION" ] || { fail "--companion requires a value"; exit 2; }; shift ;;
     --model) [ "$#" -ge 2 ] && [ -n "$2" ] && [[ "$2" != -* ]] || { fail "--model requires a value"; exit 2; }; MODEL="$2"; shift 2 ;;
     --model=*) MODEL="${1#--model=}"; [ -n "$MODEL" ] || { fail "--model requires a value"; exit 2; }; shift ;;
     --codex-unload-delay) [[ "${2:-}" =~ ^([0-9]+|default)$ ]] || { fail "--codex-unload-delay takes seconds or default"; exit 2; }; UNLOAD_DELAY="$2"; shift 2 ;;
     --codex-unload-delay=*) UNLOAD_DELAY="${1#--codex-unload-delay=}"; [[ "$UNLOAD_DELAY" =~ ^([0-9]+|default)$ ]] || { fail "--codex-unload-delay takes seconds or default"; exit 2; }; shift ;;
-    --no-companion-check) NO_TARGET_CHECK=1; shift ;;
+    --no-companion-check) NO_COMPANION_CHECK=1; shift ;;
     --skip-tests)      SKIP_TESTS=1; shift ;;
     --yes|-y) YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
       read_registry_ids
       cat <<EOF
-Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both] [--companion ${TARGET_IDS// /|}|auto|none]
+Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both] [--companion ${COMPANION_IDS// /|}|auto|none]
                         [--model <id|inherit>] [--codex-unload-delay <seconds|default>]
                         [--no-companion-check] [--skip-tests] [--yes] [--dry-run]
 
   --host ${HOST_IDS// /|}|both   install that host surface (default: detect installed CLIs)
-  --companion ${TARGET_IDS// /|}|auto|none
+  --companion ${COMPANION_IDS// /|}|auto|none
                              choose a default companion (default: preserve existing config,
                              otherwise select the only ready companion). none preserves
                              config; auto explicitly selects the only ready companion.
@@ -98,12 +98,12 @@ has_id() {
 if ! has_id "$HOST" "" $HOST_IDS both; then
   fail "--host must be one of: ${HOST_IDS// /, }, both (got: $HOST)"; exit 2
 fi
-if ! has_id "$TARGET" "" $TARGET_IDS auto none; then
-  fail "--companion must be one of: ${TARGET_IDS// /, }, auto, none (got: $TARGET)"; exit 2
+if ! has_id "$COMPANION" "" $COMPANION_IDS auto none; then
+  fail "--companion must be one of: ${COMPANION_IDS// /, }, auto, none (got: $COMPANION)"; exit 2
 fi
 
 if [ -n "$MODEL" ]; then
-  case "$TARGET" in
+  case "$COMPANION" in
     ""|auto|none) fail "--model requires an explicit --companion <companion> (not auto or none)."; exit 2 ;;
   esac
 fi
@@ -269,14 +269,14 @@ echo ""
 # --- Companion preflight and change preview ---------------------------------
 
 PLAN_DIR="$(mktemp -d)"
-SELECTED_TARGETS=()
+SELECTED_COMPANIONS=()
 SELECTED_MODELS=()
 for h in "${HOSTS[@]}"; do
   MODEL_CHOICE="$MODEL"
   ONBOARD_ARGS=(--host "$h" --plan --json --set-default --yes)
-  [ -z "$TARGET" ] || ONBOARD_ARGS+=(--companion "$TARGET")
+  [ -z "$COMPANION" ] || ONBOARD_ARGS+=(--companion "$COMPANION")
   [ -z "$MODEL_CHOICE" ] || ONBOARD_ARGS+=(--model "$MODEL_CHOICE")
-  [ "$NO_TARGET_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-companion-check)
+  [ "$NO_COMPANION_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-companion-check)
   PLAN_CODE=0
   AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
   if ! jq -e '.configuration and .plan' "$PLAN_DIR/$h.json" >/dev/null; then
@@ -288,13 +288,13 @@ for h in "${HOSTS[@]}"; do
   jq -r '.companions[] | "  \(.displayName): " + (if .ready then "ready" else "not ready" end), (.blockers[], .warnings[] | "    " + .message), (.nextSteps[] | "    Next: " + .)' "$PLAN_DIR/$h.json"
   if [ "$PLAN_CODE" != 0 ] && [ -t 0 ] && [ "$YES" = 0 ] \
       && jq -e '.plan.code == "ambiguous_companion" or .plan.code == "no_ready_companion"' "$PLAN_DIR/$h.json" >/dev/null; then
-    read -r -p "Shared default companion [${TARGET_IDS// /\/}/none]: " CHOICE
+    read -r -p "Shared default companion [${COMPANION_IDS// /\/}/none]: " CHOICE
     if jq -e --arg id "$CHOICE" '.companions[$id].capabilities.modelSelection == true' "$PLAN_DIR/$h.json" >/dev/null; then
       read -r -p "Default model for $CHOICE [inherit]: " MODEL_CHOICE
       [ "$MODEL_CHOICE" != inherit ] || MODEL_CHOICE=""
       [ -z "$MODEL_CHOICE" ] || ONBOARD_ARGS+=(--model "$MODEL_CHOICE")
     fi
-    TARGET="$CHOICE"
+    COMPANION="$CHOICE"
     MODEL="$MODEL_CHOICE"
     PLAN_CODE=0
     AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" --companion "$CHOICE" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
@@ -304,7 +304,7 @@ for h in "${HOSTS[@]}"; do
     exit "$PLAN_CODE"
   fi
   CHOICE="$(jq -r 'if .plan.kind == "chosen" then .plan.id else "none" end' "$PLAN_DIR/$h.json")"
-  SELECTED_TARGETS+=("$CHOICE")
+  SELECTED_COMPANIONS+=("$CHOICE")
   SELECTED_MODELS+=("$MODEL_CHOICE")
   if [ "$CHOICE" = none ]; then
     echo "Plan ($h): preserve companion configuration."
@@ -341,11 +341,11 @@ if [ "$DO_CODEX" = 1 ]; then
 fi
 echo "  Write diagnostic install markers after each host finishes."
 if [ "$MODEL" = inherit ]; then
-  echo "  Clear the shared default model for ${SELECTED_TARGETS[0]}."
+  echo "  Clear the shared default model for ${SELECTED_COMPANIONS[0]}."
 elif [ -n "$MODEL" ]; then
-  echo "  Save shared default model $MODEL for ${SELECTED_TARGETS[0]}."
+  echo "  Save shared default model $MODEL for ${SELECTED_COMPANIONS[0]}."
 fi
-if [ "$TARGET" = copilot ] || command -v copilot >/dev/null 2>&1; then
+if [ "$COMPANION" = copilot ] || command -v copilot >/dev/null 2>&1; then
   echo "  Install the Copilot reviewer agent if absent (preserve any existing file)."
 fi
 if [ "$DRY_RUN" = 1 ]; then exit 0; fi
@@ -399,7 +399,7 @@ echo ""
 # or is already installed (so existing Copilot users keep it); an OpenCode-only
 # install skips it entirely.
 
-if [ "$TARGET" = "copilot" ] || command -v copilot >/dev/null 2>&1; then
+if [ "$COMPANION" = "copilot" ] || command -v copilot >/dev/null 2>&1; then
   printf "Setting up Copilot reviewer agent...\n"
   COPILOT_AGENTS="$HOME/.copilot/agents"
   REVIEWER_AGENT="$COPILOT_AGENTS/reviewer.agent.md"
@@ -628,11 +628,11 @@ fi
 STEP="companion configuration"
 for i in "${!HOSTS[@]}"; do
   h="${HOSTS[$i]}"
-  CHOICE="${SELECTED_TARGETS[$i]}"
+  CHOICE="${SELECTED_COMPANIONS[$i]}"
   [ "$CHOICE" != none ] || continue
   ONBOARD_ARGS=(--host "$h" --companion "$CHOICE" --set-default --yes --json)
   [ -z "${SELECTED_MODELS[$i]}" ] || ONBOARD_ARGS+=(--model "${SELECTED_MODELS[$i]}")
-  [ "$NO_TARGET_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-companion-check)
+  [ "$NO_COMPANION_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-companion-check)
   if AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" > "$PLAN_DIR/$h-result.json"; then
     CURRENT="$(jq -r '.configuration.summary' "$PLAN_DIR/$h-result.json")"
     jq -r 'if .ok then empty else "Companion readiness deferred; fix prerequisites before delegating." end' "$PLAN_DIR/$h-result.json"

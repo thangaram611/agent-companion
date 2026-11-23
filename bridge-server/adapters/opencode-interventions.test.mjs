@@ -50,24 +50,24 @@ test('m3 steer admission joins the actual store turn id through controller, work
     createSupervisor: () => ({ async terminate() { return { gone: true }; }, async quiesce() {}, async census() {}, serialize() { return {}; } }),
   });
   t.after(async () => { for (const a of controller.live.values()) clock.clearTimeout(a.timer); stream.destroy(); await adapter.close(); });
-  const sent = await controller.send({ owner: 'child', provider: 'opencode', cwd: dir, text: fixture.first.payload.text });
-  const ack = await controller.intervene({ executionId: sent.executionId, from: 'user', mode: 'steer', text: fixture.steer.payload.text });
-  const joined = records.readExecution(sent.executionId);
+  const sent = await controller.send({ thread: 'child', companion: 'opencode', cwd: dir, text: fixture.first.payload.text });
+  const ack = await controller.intervene({ jobId: sent.jobId, from: 'user', mode: 'steer', text: fixture.steer.payload.text });
+  const joined = records.readJob(sent.jobId);
   assert.deepEqual(joined.nativeTurnIds, [fixture.first.id, fixture.steer.id]);
   assert.equal(joined.interventions[0].state, 'joined');
   stream.write(`data: ${JSON.stringify({ type: 'session.execution.succeeded', data: { sessionID: fixture.sessionId } })}\n\n`);
-  const result = await waitForResult(controller, { owner: 'child', executionId: sent.executionId });
-  const execution = records.readExecution(sent.executionId);
+  const result = await waitForResult(controller, { thread: 'child', jobId: sent.jobId });
+  const job = records.readJob(sent.jobId);
   assert.equal(result.text, 'ORIGINAL-A\n\nBANANA-42');
-  assert.equal(result.turns.length, 1); assert.deepEqual(result.turns[0].messages, [sent.executionId, ack.id]);
+  assert.equal(result.turns.length, 1); assert.deepEqual(result.turns[0].messages, [sent.jobId, ack.id]);
   assert.equal(result.usage.input_tokens, 3574); assert.equal(result.usage.output_tokens, 275);
-  const transcript = readTranscript(execution.transcript);
+  const transcript = readTranscript(job.transcript);
   assert.equal(transcript.format.recognized, true);
   assert.equal(transcript.items.find(i => i.kind === 'assistant').turnId, fixture.steer.id);
   const selected = selectTurnItems(transcript.items, { companion: 'opencode', nativeTurnIds: result.nativeTurnIds });
   assert.deepEqual(selected, transcript.items);
   assert.equal(result.workSummary.commands[0].exitCode, 0);
-  const digest = renderDigest(execution, result, env);
+  const digest = renderDigest(job, result, env);
   assert.match(digest.split('## Transcript')[1], /ORIGINAL-A\s+BANANA-42/);
   assert.match(digest.split('## Transcript')[1], /MIDTURN-B/);
   // Synthetic later work verifies the same selection also covers commands and edits.

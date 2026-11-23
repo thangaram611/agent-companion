@@ -6,7 +6,7 @@ lifetimes, sandbox enforcement, restart recovery and control behavior that unit
 fakes cannot establish. Measurement evidence lives in
 [`docs/RELIABILITY_REMEDIATION.md`](../docs/RELIABILITY_REMEDIATION.md).
 
-Smoke jobs use temporary workspaces but write live execution records and runtime state and Codex
+Smoke jobs use temporary workspaces but write live job records in `jobs/` and runtime state and Codex
 rollouts. These are not read-only checks. The `free-backends/` runner below keeps
 all companion homes, workspaces and bridge state in its own temporary directory.
 
@@ -44,7 +44,7 @@ Ollama at `http://127.0.0.1:11434`, model `gpt-oss:20b`, and **$0 provider cost*
 It checks the pulled model but cannot detect the running server's context size;
 start it with at least 32768 as above. It never starts or stops Ollama.
 
-Every scenario has a disposable HOME, workspace, tmp, provider homes, XDG roots
+Every scenario has a disposable HOME, workspace, tmp, companion homes, XDG roots
 and bridge state. Only PATH and the binary override come from the operator;
 credentials, installed instructions and provider settings are not inherited.
 State environment is set before runtime imports. The recorder does not read or

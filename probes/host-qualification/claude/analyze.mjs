@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { rows, readJSON, writeJSON, pidRecords, phaseAt, inside } from './common.mjs';
+import { fixtureExecutions, rows, readJSON, writeJSON, pidRecords, phaseAt, inside } from './common.mjs';
 
 function isolationReport(dir, events, hooks, stream) {
   // Claude Code's built-in agents are always in the inventory; they are not a leak
@@ -204,9 +204,9 @@ export function analyze(dir) {
       inspected: contained, note: contained ? 'Run-local transcript; availability only, resume not inferred' : 'Outside run; not read' };
   });
   const saved = executions.map(x => ({ executionId: x.executionId, owner: x.owner, historyId: x.historyId,
-    header: readJSON(dir + '/executions/' + x.executionId + '.json'),
-    partial: readJSON(dir + '/executions/' + x.executionId + '.partial.json'),
-    result: readJSON(dir + '/executions/' + x.executionId + '.result.json'), fake: true }));
+    header: readJSON(fixtureExecutions(dir) + '/' + x.executionId + '.json'),
+    partial: readJSON(fixtureExecutions(dir) + '/' + x.executionId + '.partial.json'),
+    result: readJSON(fixtureExecutions(dir) + '/' + x.executionId + '.result.json'), fake: true }));
   const issues = [...events, ...hooks, ...control, ...samples, ...beats].filter(x => x.event === 'parse_error');
   const version = fs.existsSync(dir + '/host-version.txt') ? fs.readFileSync(dir + '/host-version.txt', 'utf8').trim() : null;
   const stream = rows(dir, 'stdout.jsonl');

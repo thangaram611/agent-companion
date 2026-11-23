@@ -132,11 +132,11 @@ export async function recordCopilot({ selected = SCENARIOS, outputDir = defaultO
     await (check || checkOllama)({ signal });
     const { AcpAdapter } = await import('../../bridge-server/adapters/acp.mjs');
     const { ProcessSupervisor } = await import('../../bridge-server/controller/process-supervisor.mjs');
-    const { getTargetById } = await import('../../lib/target-registry.mjs');
+    const { getCompanionById } = await import('../../lib/companion-registry.mjs');
     for (const scenario of selected) {
       signal?.throwIfAborted();
       const scenarioRoot = join(root, scenario);
-      const env = companionEnv({ root: scenarioRoot, target: 'copilot', proxyUrl: 'http://127.0.0.1:11434', source });
+      const env = companionEnv({ root: scenarioRoot, companion: 'copilot', proxyUrl: 'http://127.0.0.1:11434', source });
       if (scenario === 'signed-out') for (const key of byokKeys) delete env[key];
       const cwd = join(scenarioRoot, 'work');
       env.AGENT_RUNTIME_DIR = join(scenarioRoot, 'runtime');
@@ -159,7 +159,7 @@ export async function recordCopilot({ selected = SCENARIOS, outputDir = defaultO
       writeFileSync(env.COPILOT_BIN, `#!${process.execPath}\nimport ${JSON.stringify(new URL('./tee.mjs', import.meta.url).href)};\n`, { mode: 0o700 });
       env._ACP_RECORD = JSON.stringify({ binary, capture, header, paths, forbidden });
       const supervisor = createSupervisor ? createSupervisor({ scenario, env }) : new ProcessSupervisor();
-      const adapter = new AcpAdapter(getTargetById('copilot'), { env, log() {} });
+      const adapter = new AcpAdapter(getCompanionById('copilot'), { env, log() {} });
       let observed;
       try {
         observed = await bounded(() => exerciseScenario(adapter, { scenario, cwd, env, supervisor }), timeoutMs, signal);

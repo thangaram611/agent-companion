@@ -8,7 +8,7 @@ import { ManualClock, until } from './helpers.mjs';
 import { fixtureSupervisor } from './fixture-table.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
 import { systemClock } from '../../bridge-server/controller/clock.mjs';
-import { writeTargetChecks } from '../../lib/state.mjs';
+import { writeCompanionChecks } from '../../lib/state.mjs';
 import { createBridgeController } from '../../bridge-server/tools.mjs';
 import { callTool } from '../tool-call.mjs';
 
@@ -27,7 +27,7 @@ if (process.argv[2] === 'app-server') {
 `);
   const trace = join(dir, 'trace.jsonl');
   const env = { ...process.env, CODEX_BIN: bin, CODEX_FAKE_TRACE: trace };
-  writeTargetChecks({ codex: { ready: true } });
+  writeCompanionChecks({ codex: { ready: true } });
   const records = new Records({ dir: join(dir, 'records'), log: () => {} });
   const clock = new ManualClock();
   const spawns = [];
@@ -61,7 +61,7 @@ if (process.argv[2] === 'app-server') {
   };
   const frames = () => existsSync(trace) ? readFileSync(trace, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
   t.after(async () => {
-    for (const a of [...active.live.values()]) await active.cancel({ owner: a.record.owner, executionId: a.record.executionId });
+    for (const a of [...active.live.values()]) await active.cancel({ thread: a.record.thread, jobId: a.record.jobId });
   });
   return { dir, bin, env, records, clock, active, call, send, adapter, emit, complete, frames, spawns };
 }

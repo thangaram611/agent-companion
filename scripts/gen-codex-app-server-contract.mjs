@@ -28,7 +28,7 @@ import {
   parseCodexVersion,
   serializeContract,
 } from '../lib/codex-app-server-contract.mjs';
-import { probeCommand } from '../lib/target-diagnostics.mjs';
+import { probeCommand } from '../lib/companion-diagnostics.mjs';
 
 const args = process.argv.slice(2);
 

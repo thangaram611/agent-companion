@@ -22,7 +22,7 @@ function joined(item) {
   return message;
 }
 
-// job: { provider, execution, result, status }, as jobs.mjs lists it.
+// job: { companion, record, result, status }, as jobs.mjs lists it.
 export class JobTranscript {
   locator = null; follower = null; format = null; final = false; located = 0; polled = 0;
   items = new Map();
@@ -36,8 +36,8 @@ export class JobTranscript {
     if (!this.follower && (force || now - this.located >= LOCATE_MS)) {
       this.located = now;
       try {
-        this.locator = job.execution.transcript ?? locateTranscript({ companion: job.provider, historyId: job.execution.historyId,
-          nativeRefs: { ...job.execution.nativeRefs, ...job.result?.nativeRefs }, env: this.env });
+        this.locator = job.record.transcript ?? locateTranscript({ companion: job.companion, historyId: job.record.historyId,
+          nativeRefs: { ...job.record.nativeRefs, ...job.result?.nativeRefs }, env: this.env });
       } catch { this.locator = null; }
       if (this.locator) this.follower = followTranscript(this.locator);
     }
@@ -56,16 +56,16 @@ export class JobTranscript {
   // unclaimed recorded message with exactly its text, whose sender names it
   // (lead or you; `taken` holds those ids); anything else stays `user`.
   select(job) {
-    const { execution } = job;
+    const { record } = job;
     const all = [...this.items.values()];
-    const turn = selectTurnItems(all, { companion: job.provider, nativeTurnId: execution.nativeTurnId,
-      nativeTurnIds: execution.nativeTurnIds, interventions: execution.interventions,
-      startedAt: execution.startedAt, finishedAt: execution.stopDecidedAt ?? job.result?.finishedAt });
+    const turn = selectTurnItems(all, { companion: job.companion, nativeTurnId: record.nativeTurnId,
+      nativeTurnIds: record.nativeTurnIds, interventions: record.interventions,
+      startedAt: record.startedAt, finishedAt: record.stopDecidedAt ?? job.result?.finishedAt });
     const inTurn = new Set(turn);
     // Session-wide instructions carry no turn id; another turn's preamble is not this job's.
     const preamble = all.filter(item => item.kind === 'preamble' && joined(item) === item && (item.turnId == null || inTurn.has(item)));
     const list = turn.map(joined).filter(item => !HIDDEN.has(item.kind));
-    const labels = new Map(), taken = new Set(), inputs = execution.interventions ?? [];
+    const labels = new Map(), taken = new Set(), inputs = record.interventions ?? [];
     let first = true;
     for (const item of list) {
       if (item.kind !== 'user') continue;
@@ -90,27 +90,27 @@ const turnOf = ({ nativeTurnId, nativeTurnIds, interventions }) => `${nativeTurn
 // messages the transcript shows (taken), whether the transcript was found and
 // its format, with only the items not sent before. tick() answers the lines
 // since the last tick and whether the job has ended, its final read done.
-export function createFollow({ dir, executionId, env = process.env, now = Date.now, alive = pidAlive }) {
+export function createFollow({ dir, jobId, env = process.env, now = Date.now, alive = pidAlive }) {
   const records = new Records({ dir, log() {} }), read = recordReader();
-  const paths = { execution: records.path('executions', executionId), result: records.path('results', executionId) };
+  const paths = { record: records.path('jobs', jobId), result: records.path('results', jobId) };
   const transcript = new JobTranscript({ env, now });
   let job = null, branch, seen = null, turn = null, sent = new Map(), sentTurn = null;
   return {
     tick() {
-      const execution = read(paths.execution);
-      if (!execution?.executionId) throw new Error(`no execution record ${executionId} in ${dir}`);
+      const record = read(paths.record);
+      if (!record?.jobId) throw new Error(`no job record ${jobId} in ${dir}`);
       const result = read(paths.result, true);
-      const status = statusOf(execution, result, alive);
+      const status = statusOf(record, result, alive);
       const lines = [];
-      if (execution !== job?.execution || result !== job?.result || status !== job?.status) {
-        branch ??= branchOf(execution.cwd);
-        job = { provider: execution.provider, execution, result, status };
-        lines.push({ job: { status, execution, result, branch } });
+      if (record !== job?.record || result !== job?.result || status !== job?.status) {
+        branch ??= branchOf(record.cwd);
+        job = { companion: record.companion, record, result, status };
+        lines.push({ job: { status, record, result, branch } });
       }
       const ended = hasEnded(job);
       let items = [];
-      if (transcript.poll(job, seen === null || ended) || turnOf(execution) !== seen) {
-        seen = turnOf(execution);
+      if (transcript.poll(job, seen === null || ended) || turnOf(record) !== seen) {
+        seen = turnOf(record);
         const { list, labels, taken } = transcript.select(job);
         const tail = list.slice(-TAIL);
         turn = { ids: tail.map(item => item.id), earlier: list.length - tail.length,
@@ -127,18 +127,18 @@ export function createFollow({ dir, executionId, env = process.env, now = Date.n
   };
 }
 
-const USAGE = `usage: agent-companion follow <state dir> <execution id>
+const USAGE = `usage: agent-companion follow <state dir> <job id>
 
 Prints one companion job's records and selected transcript items as JSON
 lines while it runs, then exits after the final read once it has ended.
 Claude Code's Companions pane runs it; it reads only.
 `;
 if (import.meta.main) {
-  const [dir, executionId, ...rest] = process.argv.slice(2);
+  const [dir, jobId, ...rest] = process.argv.slice(2);
   let follow;
   try {
-    if (!dir || !isAbsolute(dir) || rest.length) throw new Error('needs an absolute state dir and an execution id');
-    follow = createFollow({ dir, executionId });
+    if (!dir || !isAbsolute(dir) || rest.length) throw new Error('needs an absolute state dir and a job id');
+    follow = createFollow({ dir, jobId });
   } catch {
     process.stderr.write(USAGE);
     process.exit(2);

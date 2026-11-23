@@ -5,7 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { ROOT, log, rows, readJSON, writeJSON, recordPID, sleep, phaseAt } from './common.mjs';
+import { fixtureExecutions, ROOT, log, rows, readJSON, writeJSON, recordPID, sleep, phaseAt } from './common.mjs';
 
 const [dir, channel = 'fixture'] = process.argv.slice(2);
 const config = readJSON(dir + '/scenario.json');
@@ -52,7 +52,7 @@ const canonical = cwd => {
 };
 const execution = (id, thread, cwd) => {
   if (!/^[0-9a-f-]{36}$/.test(id ?? '')) throw Error('INVALID_EXECUTION_ID');
-  const state = readJSON(path.join(dir, 'executions', id + '.json'));
+  const state = readJSON(path.join(fixtureExecutions(dir), id + '.json'));
   if (!state) throw Error('EXECUTION_NOT_FOUND');
   if (state.owner !== thread || state.channel !== channel) throw Error('OWNER_MISMATCH');
   if (cwd !== undefined && canonical(cwd) !== state.cwd) throw Error('WORKSPACE_MISMATCH');
@@ -90,14 +90,14 @@ async function call(q) {
     if (typeof args.thread !== 'string' || !args.thread) throw Error('NATIVE_OWNER_REQUIRED');
     if (name === 'send') {
       const cwd = canonical(args.cwd);
-      const existing = fs.readdirSync(dir + '/executions').filter(f => /^[0-9a-f-]{36}\.json$/.test(f))
-        .map(f => readJSON(dir + '/executions/' + f)).find(s => s.owner === args.thread && s.channel === channel);
+      const existing = fs.readdirSync(fixtureExecutions(dir)).filter(f => /^[0-9a-f-]{36}\.json$/.test(f))
+        .map(f => readJSON(fixtureExecutions(dir) + '/' + f)).find(s => s.owner === args.thread && s.channel === channel);
       if (existing) throw Error('ALREADY_DISPATCHED_USE_WAIT');
       const executionId = randomUUID();
       const state = { executionId, owner: args.thread, channel, cwd, receivedCwd: args.cwd,
         childCwd: args.childCwd ?? null, parentCwd: args.parentCwd ?? null, serverCwd: process.cwd(),
         historyId: `fake-history-${executionId}`, created: Date.now(), finishAt: Date.now() + config.workSec * 1000 };
-      writeJSON(path.join(dir, 'executions', executionId + '.json'), state);
+      writeJSON(path.join(fixtureExecutions(dir), executionId + '.json'), state);
       const child = spawn(process.execPath, [path.join(ROOT, 'worker.mjs'), dir, executionId],
         { detached: true, stdio: 'ignore', cwd });
       recordPID(dir, child.pid, 'worker', { executionId, channel, owner: args.thread });
@@ -113,7 +113,7 @@ async function call(q) {
       phase('pending-wait', state, q.id);
       const deadline = Date.now() + args.seconds * 1000;
       let nextProgress = Date.now() + config.progressSec * 1000;
-      while (Date.now() < deadline && !fs.existsSync(dir + '/executions/' + state.executionId + '.result.json')) {
+      while (Date.now() < deadline && !fs.existsSync(fixtureExecutions(dir) + '/' + state.executionId + '.result.json')) {
         await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
         if (config.progress && Date.now() >= nextProgress) {
           nextProgress = Date.now() + config.progressSec * 1000;
@@ -125,7 +125,7 @@ async function call(q) {
         }
       }
       pending.delete(q.id);
-      const finished = fs.existsSync(dir + '/executions/' + state.executionId + '.result.json');
+      const finished = fs.existsSync(fixtureExecutions(dir) + '/' + state.executionId + '.result.json');
       result = { executionId: state.executionId, status: finished ? 'finished' : 'running',
         historyId: state.historyId, passive: true };
       phase(finished ? 'finished' : 'between-waits', state, q.id);
@@ -133,7 +133,7 @@ async function call(q) {
       const state = execution(args.executionId, args.thread);
       emit('stop_requested', { executionId: state.executionId, owner: state.owner });
       result = { executionId: state.executionId,
-        status: fs.existsSync(dir + '/executions/' + state.executionId + '.result.json') ? 'finished' : 'running',
+        status: fs.existsSync(fixtureExecutions(dir) + '/' + state.executionId + '.result.json') ? 'finished' : 'running',
         cleanupImplemented: false };
     } else throw Error('UNKNOWN_TOOL');
   }

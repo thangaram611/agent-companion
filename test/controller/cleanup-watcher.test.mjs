@@ -10,13 +10,13 @@ import { SANDBOX_HOME } from '../sandbox-home.mjs';
 import { snapshotWorktree } from '../../lib/worktree-snapshot.mjs';
 import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
-import { cleanupExecution, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';
+import { cleanupJob, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';
 import { fixtureSupervisor } from './fixture-table.mjs';
 import { ManualClock, setupController, until } from './helpers.mjs';
 
 const treePath = fileURLToPath(new URL('./process-tree.mjs', import.meta.url));
 const watcherPath = fileURLToPath(new URL('./watcher-child.mjs', import.meta.url));
-const input = (executionId, owner = 'child') => ({ owner, executionId, provider: 'fake', cwd: SANDBOX_HOME, text: 'work', now: 1 });
+const input = (jobId, thread = 'child') => ({ thread, jobId, companion: 'fake', cwd: SANDBOX_HOME, text: 'work', now: 1 });
 const makeRecords = () => new Records({ dir: mkdtempSync(join(SANDBOX_HOME, 'watcher-')), log: () => {} });
 
 test('bridge loss: detached watcher kills grouped grandchild and SIGTERM-ignoring child; fresh records read verified result', async (t) => {
@@ -26,8 +26,8 @@ test('bridge loss: detached watcher kills grouped grandchild and SIGTERM-ignorin
     start: async ({ supervisor }) => ({ runtime: await supervisor.spawn([process.execPath, treePath, 'root', 'ignore'], { stdio: ['pipe', 'ignore', 'ignore', 'ipc'] }) }),
     interrupt() { throw new Error('watcher must not use protocol'); },
     createSupervisor: fixtureSupervisor, snapshot: snapshotWorktree,
-    launchWatcher: async ({ stateDir, executionId }) => {
-      watcher = fork(watcherPath, [stateDir, executionId], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+    launchWatcher: async ({ stateDir, jobId }) => {
+      watcher = fork(watcherPath, [stateDir, jobId], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
       watcherMessage = once(watcher, 'message');
       await once(watcher, 'spawn');
       return { pid: watcher.pid };
@@ -43,20 +43,20 @@ test('bridge loss: detached watcher kills grouped grandchild and SIGTERM-ignorin
   const grandchild = supervisors[0].fixture.grandchild;
   const handoffs = await controller.bridgeLost();
   assert.equal(handoffs.length, 1);
-  const bytes = readFileSync(records.path('executions', sent.executionId), 'utf8');
+  const bytes = readFileSync(records.path('jobs', sent.jobId), 'utf8');
   const exited = once(watcher, 'exit');
   const [message] = await watcherMessage;
   assert.equal(message.gone, true);
   assert.equal((await exited)[0], 0);
   const fresh = new Records({ dir: records.dir });
-  const result = fresh.readResult(sent.executionId);
+  const result = fresh.readResult(sent.jobId);
   assert.equal(result.outcome, 'stopped'); assert.equal(result.cause, 'bridge_loss');
   assert.equal(result.stopEvidence.gone, true);
   assert.ok(result.stopEvidence.signals.some((signal) => signal.pid === -record.pgid && signal.signal === 'SIGTERM'));
   assert.ok(result.stopEvidence.signals.some((signal) => signal.pid === grandchild && signal.signal === 'SIGKILL'));
   assert.ok(record.processes.every((row) => !pidAlive(row.pid)));
-  assert.equal(readFileSync(records.path('executions', sent.executionId), 'utf8'), bytes, 'watcher only writes its terminal result');
-  assert.equal(fresh.readConversation('child').historyId, 'saved-history');
+  assert.equal(readFileSync(records.path('jobs', sent.jobId), 'utf8'), bytes, 'watcher only writes its terminal result');
+  assert.equal(fresh.readThread('child').historyId, 'saved-history');
 });
 
 test('watcher stale generation is refused before any destructive action', async () => {
@@ -65,37 +65,37 @@ test('watcher stale generation is refused before any destructive action', async 
   records.writeResult({ ...first, outcome: 'stopped', cause: 'bridge_loss', stopEvidence: { gone: true } }, 'watcher');
   records.begin(input('second'), 1);
   let created = false;
-  const result = await cleanupExecution({ records, execution: first, createSupervisor: () => { created = true; } });
+  const result = await cleanupJob({ records, job: first, createSupervisor: () => { created = true; } });
   assert.equal(result, null); assert.equal(created, false);
   assert.equal(records.readResult('second'), null);
 });
 
 test('watcher records failed cleanup honestly without claiming stopped', async () => {
-  const records = makeRecords(); const execution = records.begin({ ...input('unverified'), effortOverride: 'low' }, 0); records.handoff(execution);
-  const result = await cleanupExecution({ records, execution, clock: new ManualClock(), createSupervisor: () => ({ terminate: async () => ({ gone: false, survivors: [{ pid: 123, birthTime: 'birth' }] }) }) });
+  const records = makeRecords(); const job = records.begin({ ...input('unverified'), effortOverride: 'low' }, 0); records.handoff(job);
+  const result = await cleanupJob({ records, job, clock: new ManualClock(), createSupervisor: () => ({ terminate: async () => ({ gone: false, survivors: [{ pid: 123, birthTime: 'birth' }] }) }) });
   assert.equal(result.selectedEffort, 'low');
   assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'cleanup_unverified'); assert.equal(result.cause, 'bridge_loss');
 });
 
 test('watcher preserves turn attribution and intervention delivery states after bridge loss', async () => {
-  const records = makeRecords(), execution = records.begin(input('intervened'), 0);
-  const inbox = join(records.dir, 'inbox', execution.executionId);
+  const records = makeRecords(), job = records.begin(input('intervened'), 0);
+  const inbox = join(records.dir, 'inbox', job.jobId);
   mkdirSync(inbox, { recursive: true }); writeFileSync(join(inbox, 'pending.json'), '{}');
-  execution.nativeTurnIds = ['one'];
-  execution.interventions = [{ id: 'queued', from: 'user', mode: 'queue', text: 'later', at: 2, state: 'accepted' }];
-  execution.turns = [{ nativeTurnId: 'one', messages: ['intervened'], outcome: 'completed', text: 'first answer' }];
-  records.handoff(execution);
-  const result = await cleanupExecution({ records, execution, createSupervisor: () => ({ terminate: async () => ({ gone: true }) }) });
+  job.nativeTurnIds = ['one'];
+  job.interventions = [{ id: 'queued', from: 'user', mode: 'queue', text: 'later', at: 2, state: 'accepted' }];
+  job.turns = [{ nativeTurnId: 'one', messages: ['intervened'], outcome: 'completed', text: 'first answer' }];
+  records.handoff(job);
+  const result = await cleanupJob({ records, job, createSupervisor: () => ({ terminate: async () => ({ gone: true }) }) });
   assert.equal(result.text, 'first answer');
   assert.equal(result.interventions[0].state, 'not_delivered');
-  assert.deepEqual(result.nativeTurnIds, ['one']); assert.deepEqual(result.turns, execution.turns);
+  assert.deepEqual(result.nativeTurnIds, ['one']); assert.deepEqual(result.turns, job.turns);
   assert.equal(existsSync(inbox), false, 'watcher terminal result removes the abandoned inbox');
 });
 
 test('production watcher CLI writes a durable result and exits without provider protocol', async () => {
-  const records = makeRecords(); const execution = records.begin(input('empty-tree'), 0); records.handoff(execution);
-  const watcher = await spawnCleanupWatcher({ stateDir: records.dir, executionId: execution.executionId });
-  await until(() => records.readResult(execution.executionId), 'standalone watcher result');
+  const records = makeRecords(); const job = records.begin(input('empty-tree'), 0); records.handoff(job);
+  const watcher = await spawnCleanupWatcher({ stateDir: records.dir, jobId: job.jobId });
+  await until(() => records.readResult(job.jobId), 'standalone watcher result');
   await until(() => !pidAlive(watcher.pid), 'standalone watcher exit');
-  assert.equal(records.readResult(execution.executionId).stopEvidence.gone, true);
+  assert.equal(records.readResult(job.jobId).stopEvidence.gone, true);
 });

@@ -86,22 +86,23 @@ plans) keep their wording and gain one line naming the 1.0.0 vocabulary.
 
 ## Migration
 
-One function in `bridge-server/controller/records.mjs`, idempotent, under a
-lock in the state directory, run by every reader that opens a store (the
+The first `Records` constructor for each directory in a process runs the
+idempotent record migration in `bridge-server/controller/records.mjs` (the
 bridge at startup, the views, the recursion guard reading the other host's
 records, the hook's delivery path):
 
-1. If `conversations/` exists, any `threads/` or `jobs/` beside it is 0.x
-   state (measured on the operator's homes: 110 and 194 files from 5 to 6
+1. If `conversations/` exists and `legacy/` does not, the adjacent
+   `threads/` and `jobs/` are 0.x state (measured on the operator's homes: 110 and 194 files from 5 to 6
    Nov). Move those two folders, and the other 0.x leftovers
    (`attachments/`, `completions/`, `leases/`, `stops/`, `phase1-migrated`,
-   `daemon.log`, `profiles.retired-*`), into `legacy/`. Nothing is deleted.
+   `daemon.log`, `profiles.retired-*`), into `legacy/`. Only the process that
+   creates `legacy/` archives them.
 2. Rewrite each record of `conversations/` and `executions/` into `threads/`
    and `jobs/` with the new field names, atomically, then remove the old file.
    Results get the same field renames in place. A record that already exists
    under the new name wins.
-3. `settings.json` `target` and `target-checks.json` become `companion` and
-   `companion-checks.json` in the same pass as the defaults migration.
+3. The defaults migration handles the settings key and readiness cache renames
+   listed in the table above.
 
 A bridge still running old code may write `conversations/` after the
 migration; the next reader moves that record over by the same rules.

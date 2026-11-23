@@ -95,7 +95,7 @@ async function readyHook(env) {
 }
 
 test('racing hook and terminal tool calls deliver once and preserve sibling news', async () => {
-  const h = setupController({ provider: 'opencode', createController: createBridgeController });
+  const h = setupController({ companion: 'opencode', createController: createBridgeController });
   const env = { AGENT_COMPANION_HOME: h.dir, AGENT_RUNTIME_DIR: process.env.AGENT_RUNTIME_DIR };
   const lead = { session: 'race-session', agent: 'native-child' };
   const payload = { session_id: lead.session, agent_id: lead.agent };

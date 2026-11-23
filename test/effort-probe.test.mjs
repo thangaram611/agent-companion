@@ -2,39 +2,39 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runEffortProbe } from '../probes/smoke/effort.mjs';
 
-function fixture(target, { acceptInvalid = false, effectiveEffort, effectiveModel } = {}) {
-  const calls = [], reports = [], executions = new Map();
+function fixture(companion, { acceptInvalid = false, effectiveEffort, effectiveModel } = {}) {
+  const calls = [], reports = [], jobs = new Map();
   let turns = 0, selectedModel;
   const models = { claude: 'claude-haiku-4-5', codex: 'gpt-fixture', opencode: { providerID: 'fixture', id: 'model', variant: 'soft' }, antigravity: 'gpt-oss-120b-medium', copilot: null };
   const bridge = {
     async tool(name, args, owner) {
       calls.push({ name, args, owner });
-      if (name === 'companion_catalog') return { companions: [{ id: target, effort: { selection: true, levels: null } }] };
+      if (name === 'companion_catalog') return { companions: [{ id: companion, effort: { selection: true, levels: null } }] };
       if (name === 'companion_cancel') return { ok: true };
       if (args.effort?.startsWith('__')) return acceptInvalid ? { status: 'still_running', job_id: 'bad' } :
         { status: 'failed', content: 'Use one of: high, low, medium, or omit effort.', meta: { detail: 'EFFORT_NOT_ALLOWED' } };
       selectedModel = args.model ?? selectedModel;
       const job_id = `job-${++turns}`;
-      executions.set(job_id, { historyId: 'history', processes: { pid: turns } });
+      jobs.set(job_id, { historyId: 'history', processes: { pid: turns } });
       return { ok: true, status: 'still_running', job_id, thread: 'th-fixture', selected_effort: 'low' };
     },
     async wait(job_id) {
       return { ok: true, status: 'completed', job_id, content: 'OK', meta: { selected_effort: 'low',
-        effective_effort: effectiveEffort ?? (target === 'claude' ? null : 'low'),
+        effective_effort: effectiveEffort ?? (companion === 'claude' ? null : 'low'),
         selected_model: selectedModel,
-        effective_model: effectiveModel ?? models[target], stop_evidence: { gone: true } } };
+        effective_model: effectiveModel ?? models[companion], stop_evidence: { gone: true } } };
     },
   };
-  return { bridge, target, cwd: '/fixture', owner: 'owner', record: (_, id) => executions.get(id), report: line => reports.push(line), calls, reports };
+  return { bridge, companion, cwd: '/fixture', owner: 'owner', record: (_, id) => jobs.get(id), report: line => reports.push(line), calls, reports };
 }
 
-for (const target of ['claude', 'codex', 'opencode', 'antigravity', 'copilot']) test(`effort probe ${target}: refusal, lowest level, truthful reports and cold follow-up scope`, async () => {
-  const h = fixture(target);
-  await runEffortProbe({ ...h, model: target === 'antigravity' ? 'gpt-oss-120b-medium' : undefined });
+for (const companion of ['claude', 'codex', 'opencode', 'antigravity', 'copilot']) test(`effort probe ${companion}: refusal, lowest level, truthful reports and cold follow-up scope`, async () => {
+  const h = fixture(companion);
+  await runEffortProbe({ ...h, model: companion === 'antigravity' ? 'gpt-oss-120b-medium' : undefined });
   const sends = h.calls.filter(c => c.name === 'companion_send');
   assert.equal(sends[1].args.effort, 'low');
   assert.equal(sends[1].args.task, 'Reply with exactly: OK');
-  if (target === 'copilot') {
+  if (companion === 'copilot') {
     assert.equal(sends.length, 2); assert.match(h.reports[2], /^SKIP.*unsupported/);
   } else {
     assert.equal(sends.length, 3); assert.equal(Object.hasOwn(sends[2].args, 'effort'), false);
@@ -59,14 +59,14 @@ test('effort probe fails on a provider-reported mismatch before follow-up', asyn
   assert.match(h.reports.at(-1), /^FAIL b:/);
 });
 
-for (const target of ['codex', 'claude', 'copilot']) test(`wire assertion checks each ${target} turn independently`, async () => {
-  const h = fixture(target), rows = [];
-  const path = { codex: '/v1/responses', claude: '/v1/messages', copilot: '/v1/chat/completions' }[target];
-  const entry = effort => ({ path, ...(target === 'codex' ? { reasoning: { effort } } : target === 'claude' ? { output_config: { effort } } : { reasoning_effort: effort }) });
+for (const companion of ['codex', 'claude', 'copilot']) test(`wire assertion checks each ${companion} turn independently`, async () => {
+  const h = fixture(companion), rows = [];
+  const path = { codex: '/v1/responses', claude: '/v1/messages', copilot: '/v1/chat/completions' }[companion];
+  const entry = effort => ({ path, ...(companion === 'codex' ? { reasoning: { effort } } : companion === 'claude' ? { output_config: { effort } } : { reasoning_effort: effort }) });
   const wait = h.bridge.wait;
   h.bridge.wait = async id => { rows.push(entry('low')); return wait(id); };
   await runEffortProbe({ ...h, readWire: () => rows });
-  const broken = fixture(target);
+  const broken = fixture(companion);
   // A previous turn's matching request cannot prove this turn's effort.
   await assert.rejects(runEffortProbe({ ...broken, readWire: () => rows }), /fresh proxy request/);
 });
@@ -82,7 +82,7 @@ test('unlisted Codex probe waits for backend vocabulary failure and verifies all
   const h = fixture('codex', { acceptInvalid: true }), rows = [], wait = h.bridge.wait;
   h.bridge.wait = async id => {
     rows.push({ path: '/v1/responses', reasoning: { effort: id === 'bad' ? '__unsupported_effort_probe__' : 'low' } });
-    return id === 'bad' ? { status: 'failed', content: 'invalid reasoning value', meta: { cause: 'provider_error', stop_evidence: { gone: true } } } : wait(id);
+    return id === 'bad' ? { status: 'failed', content: 'invalid reasoning value', meta: { cause: 'companion_error', stop_evidence: { gone: true } } } : wait(id);
   };
   await runEffortProbe({ ...h, backendEffort: 'low', readWire: () => rows });
   assert.equal(rows.length, 3);

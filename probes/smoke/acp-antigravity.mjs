@@ -1,4 +1,4 @@
-// Real Antigravity ACP through per-execution runtimes. Requires a signed-in
+// Real Antigravity ACP through per-job runtimes. Requires a signed-in
 // agy CLI (1.5+) and a currently available model id as argv[2]. Starts seven jobs.
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -19,8 +19,8 @@ const send = async (task, lead = owner, extra = {}) => {
 };
 try {
   const firstId = await send('Read README.md and reply with ONLY the magic word.');
-  const firstExecution = record('executions', firstId);
-  assert.ok(firstExecution.historyId);
+  const firstJob = record('jobs', firstId);
+  assert.ok(firstJob.historyId);
   const first = await bridge.wait(firstId, owner);
   assert.equal(first.status, 'completed', JSON.stringify(first));
   assert.match(first.content, /BANANA/i);
@@ -30,8 +30,8 @@ try {
   assert.match(await bridge.readResource(first.meta.digest_uri), /BANANA/i);
 
   const secondId = await send('What magic word did you just report? Reply from memory; do not read any file.', owner, { thread: first.thread });
-  const secondExecution = record('executions', secondId);
-  assert.notEqual(secondExecution.processes.pid, firstExecution.processes.pid);
+  const secondJob = record('jobs', secondId);
+  assert.notEqual(secondJob.processes.pid, firstJob.processes.pid);
   const second = await bridge.wait(secondId, owner);
   assert.equal(second.status, 'completed');
   assert.equal(second.meta.native_refs.historyId, first.meta.native_refs.historyId);

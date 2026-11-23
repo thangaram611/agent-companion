@@ -17,7 +17,7 @@ import { jobModel } from '../lib/model-name.mjs'
 type Card = {
   title: string
   jobId?: string
-  execution?: any
+  record?: any
   result?: any
   texts?: string
   // The thread's record was read for its title.
@@ -36,7 +36,7 @@ type Follow = {
   stopped?: boolean
   ended?: boolean
   failure?: string
-  job?: { status: string; execution: any; result: any; branch: string | null }
+  job?: { status: string; record: any; result: any; branch: string | null }
   turn?: Turn
   items: Map<string, any>
   list: any[]
@@ -89,10 +89,10 @@ let older = 0, rebuilds = 0, failure: string | undefined
 // state. The draft outlives the job's end and the pane's close, in memory only.
 type MessageBox = { draft: string; mode: string | null; confirm: boolean; sending: boolean; refused?: string }
 const boxes = new Map<string, MessageBox>()
-function boxOf(jobId: string, execution: any): MessageBox {
+function boxOf(jobId: string, record: any): MessageBox {
   let box = boxes.get(jobId)
   if (!box) {
-    const modes = supportedModes(execution), preferred = execution?.interventionModes?.default
+    const modes = supportedModes(record), preferred = record?.interventionModes?.default
     boxes.set(jobId, box = { draft: '', mode: modes.includes(preferred) ? preferred : modes[0] ?? null, confirm: false, sending: false })
   }
   return box
@@ -149,15 +149,15 @@ async function tick($: EngineInterface) {
     pending = true
     if (!a.looked) {
       a.looked = true
-      a.title ||= clean(parse(await readText($, `${base}/conversations/${id}.json`))?.title ?? '')
+      a.title ||= clean(parse(await readText($, `${base}/threads/${id}.json`))?.title ?? '')
     }
-    const execution = await readText($, `${base}/executions/${a.jobId}.json`)
+    const record = await readText($, `${base}/jobs/${a.jobId}.json`)
     const result = await readText($, `${base}/results/${a.jobId}.json`)
-    if (execution + result !== a.texts) {
-      Object.assign(a, { texts: execution + result, execution: parse(execution) ?? a.execution, result: parse(result) })
+    if (record + result !== a.texts) {
+      Object.assign(a, { texts: record + result, record: parse(record) ?? a.record, result: parse(result) })
       redraw = true
     }
-    if (a.execution && !a.result) redraw = true
+    if (a.record && !a.result) redraw = true
   }
   if (redraw) $.ui.invalidate('ui.render')
   if (!pending) { timer?.cancel(); timer = undefined }
@@ -165,30 +165,30 @@ async function tick($: EngineInterface) {
 
 // The person's queued messages: held by the bridge until their turn, or in
 // the companion's own queue (delivered there) until it starts them.
-function queued(execution: any) {
-  return (execution.interventions ?? []).filter((m: any) => m.from === 'user' && m.mode === 'queue'
-    && (m.state === 'accepted' || (m.state === 'delivered' && execution.interventionModes?.queue === 'native'))).length
+function queued(record: any) {
+  return (record.interventions ?? []).filter((m: any) => m.from === 'user' && m.mode === 'queue'
+    && (m.state === 'accepted' || (m.state === 'delivered' && record.interventionModes?.queue === 'native'))).length
 }
 // What a running job is doing, as the band and the card say it: the
 // person's queued messages, or the live view's in-flight line less its bullet.
-function doing(execution: any, now: number): Seg[] {
-  const waiting = queued(execution)
+function doing(record: any, now: number): Seg[] {
+  const waiting = queued(record)
   if (waiting) return [[`◌ your ${waiting === 1 ? 'message' : `${waiting} messages`} queued`, 'warn']]
-  const [[head, style], ...rest] = liveLines({ execution }, { now }).at(-1)!.segs as [Seg, ...Seg[]]
+  const [[head, style], ...rest] = liveLines({ record }, { now }).at(-1)!.segs as [Seg, ...Seg[]]
   return [[head.slice(2), style], ...rest]
 }
 // The model, less its provider prefix when that repeats the companion (opencode/flint-40b-free).
-function modelText(execution: any, result?: any) {
-  const provider = clean(execution.provider)
-  return jobModel(execution, result).map(clean).map(m => m.startsWith(`${provider}/`) ? m.slice(provider.length + 1) : m).join(' ')
+function modelText(record: any, result?: any) {
+  const companion = clean(record.companion)
+  return jobModel(record, result).map(clean).map(m => m.startsWith(`${companion}/`) ? m.slice(companion.length + 1) : m).join(' ')
 }
 
 // A running thread's row above the prompt: title, companion · model, the
 // live line and elapsed time, cut to `columns`.
 function bandRow(a: Card, now: number, columns: number, titleWidth: number): Seg[] {
-  const { execution } = a, title = cut(titleOf(a), titleWidth), model = modelText(execution)
-  return fitSegs([[title + ' '.repeat(titleWidth - width(title) + 2), 'title'], [clean(execution.provider), 'dim'],
-    ...(model ? [[` · ${model}`, 'dim'] as Seg] : []), [' · ', 'dim'], ...doing(execution, now), [` · ${clock(now - execution.startedAt)}`, 'dim']], columns)
+  const { record } = a, title = cut(titleOf(a), titleWidth), model = modelText(record)
+  return fitSegs([[title + ' '.repeat(titleWidth - width(title) + 2), 'title'], [clean(record.companion), 'dim'],
+    ...(model ? [[` · ${model}`, 'dim'] as Seg] : []), [' · ', 'dim'], ...doing(record, now), [` · ${clock(now - record.startedAt)}`, 'dim']], columns)
 }
 
 // Claude Code 2.1.326 dropped /companion from the typeahead after the person
@@ -232,7 +232,7 @@ async function rebuild($: EngineInterface) {
   if (!why) {
     const listed = new Set<string>(), old = new Set(out.older)
     for (const job of out.jobs) {
-      const jobId = job.execution?.executionId
+      const jobId = job.record?.jobId
       if (!isId(jobId) || !isId(job.thread)) continue
       listed.add(job.thread)
       const a = threads.get(job.thread) ?? { title: '' }
@@ -240,9 +240,9 @@ async function rebuild($: EngineInterface) {
       a.title ||= clean(job.title)
       a.looked = true
       // A newer job the mod saw start stands.
-      if (a.jobId && a.jobId !== jobId && !(a.execution?.startedAt < job.execution.startedAt)) continue
+      if (a.jobId && a.jobId !== jobId && !(a.record?.startedAt < job.record.startedAt)) continue
       // No result and no process: the job is gone, so its record is not read again.
-      Object.assign(a, { jobId, execution: job.execution, result: job.result, texts: undefined,
+      Object.assign(a, { jobId, record: job.record, result: job.result, texts: undefined,
         gone: job.status !== 'running' && !job.result })
     }
     for (const [id, a] of threads) a.listed = listed.has(id) || (a.listed && !old.has(a.jobId))
@@ -303,30 +303,30 @@ function take(f: Follow, message: any) {
 
 // This session's jobs, running first, then the rest by when they ended.
 function cards() {
-  const at = (c: { status: string; a: Card }) => c.status === 'running' ? Infinity : c.a.result?.finishedAt ?? c.a.execution.startedAt
-  return [...threads].flatMap(([id, a]) => a.listed && a.jobId && a.execution ? [{ id, a, status: statusOf(a) }] : [])
-    .sort((x, y) => at(y) - at(x) || y.a.execution.startedAt - x.a.execution.startedAt)
+  const at = (c: { status: string; a: Card }) => c.status === 'running' ? Infinity : c.a.result?.finishedAt ?? c.a.record.startedAt
+  return [...threads].flatMap(([id, a]) => a.listed && a.jobId && a.record ? [{ id, a, status: statusOf(a) }] : [])
+    .sort((x, y) => at(y) - at(x) || y.a.record.startedAt - x.a.record.startedAt)
 }
-const titleOf = (a: Card) => a.title || (clean(a.execution?.text ?? '').split('\n')[0] ?? '')
+const titleOf = (a: Card) => a.title || (clean(a.record?.text ?? '').split('\n')[0] ?? '')
 // A card's second row, under its title: the status glyph, the companion,
 // then what it is doing or how it ended, the glyph not repeated.
 function cardLine({ a, status }: { a: Card; status: string }, glyph: Seg, now: number): Seg[] {
-  const line: Seg[] = [[' '.repeat(HOTKEY)], glyph, [` ${clean(a.execution.provider)} · `, 'dim']]
-  if (status === 'running') return [...line, ...doing(a.execution, now).map(([text, style]): Seg => [text, style === 'ok' ? 'dim' : style])]
+  const line: Seg[] = [[' '.repeat(HOTKEY)], glyph, [` ${clean(a.record.companion)} · `, 'dim']]
+  if (status === 'running') return [...line, ...doing(a.record, now).map(([text, style]): Seg => [text, style === 'ok' ? 'dim' : style])]
   if (status === 'unknown') return [...line, ['no result', 'warn']]
-  const [text, style] = outcomeLabel({ execution: a.execution, result: a.result })
+  const [text, style] = outcomeLabel({ record: a.record, result: a.result })
   return [...line, [text.slice(2), status === 'completed' ? 'dim' : style]]
 }
 
 // The viewed job's rows, exactly what fits in `rows`: a running job follows
 // its live line, an ended one opens on its outcome.
 function jobRows(a: Card, f: Follow, now: number, w: number, rows: number): Seg[][] {
-  const job = f.job ?? (a.execution && { status: statusOf(a), execution: a.execution, result: a.result ?? null, branch: null })
-  const about = job ? [clean(job.execution.provider), modelText(job.execution, job.result), clean(job.branch ?? '')].filter(Boolean).join(' · ') : ''
+  const job = f.job ?? (a.record && { status: statusOf(a), record: a.record, result: a.result ?? null, branch: null })
+  const about = job ? [clean(job.record.companion), modelText(job.record, job.result), clean(job.branch ?? '')].filter(Boolean).join(' · ') : ''
   const head = layoutLine({ segs: [[titleOf(a), 'title'], ...(about ? [[`  ${about}`, 'dim'] as Seg] : [])], wrap: false }, w)
   if (!job) return [...head, [], [['waiting for the job\'s record', 'dim']]]
   const running = job.status === 'running'
-  const pending = running ? pendingInputs(job.execution, f.taken).sort((x, y) => x.at - y.at).map(pendingLine) : []
+  const pending = running ? pendingInputs(job.record, f.taken).sort((x, y) => x.at - y.at).map(pendingLine) : []
   // The pane opens no item, so a message from you or the lead shows whole:
   // short, and folded it hid the lines the person wrote. The task stays folded.
   const blocks: Block[] = jobBlocks(job, { list: f.list, labels: f.labels, located: f.turn?.located ?? false, format: f.turn?.format ?? null, now, pending,
@@ -363,7 +363,7 @@ export const register: Register = on => {
     if (isId(thread) && isId(jobId)) {
       const a = threads.get(thread) ?? { title: '' }
       threads.set(thread, a)
-      if (a.jobId !== jobId) Object.assign(a, { jobId, execution: undefined, result: undefined, texts: undefined, gone: false, listed: true })
+      if (a.jobId !== jobId) Object.assign(a, { jobId, record: undefined, result: undefined, texts: undefined, gone: false, listed: true })
       startClock($)
     }
     return ran
@@ -402,12 +402,12 @@ export const register: Register = on => {
         if (first) ring($, first.id)
       }
       // The job as jobRows draws it: the child's record, else the clock's.
-      const status = follow?.job?.status ?? (a.execution ? statusOf(a) : null), execution = follow?.job?.execution ?? a.execution
-      const box = status === 'running' && execution?.interventionModes ? boxOf(a.jobId, execution) : null
+      const status = follow?.job?.status ?? (a.record ? statusOf(a) : null), record = follow?.job?.record ?? a.record
+      const box = status === 'running' && record?.interventionModes ? boxOf(a.jobId, record) : null
       const jobsButton = h(Button, { key: 'jobs', label: '← jobs', plain: true, dimColor: true, hotkey: 'b', ...(box ? {} : { autoFocus: true as const }), onPress: back })
       if (!box) return column(...jobRows(a, follow!, now, w, e.props.scroll.bodyRows).map(row),
         h(Box, { flexDirection: 'row', justifyContent: 'space-between' }, row([[focused ? 'esc returns' : 'ctrl+x tab for keys', 'faint']]), jobsButton))
-      const jobId = a.jobId, modes = supportedModes(execution), name = COMPANION_NAMES[execution.provider] ?? clean(execution.provider)
+      const jobId = a.jobId, modes = supportedModes(record), name = COMPANION_NAMES[record.companion] ?? clean(record.companion)
       const redraw = () => $.ui.invalidate('ui.render')
       // The box as Claude Code draws its own prompt: a faint rule above and
       // below, the field the pane's full width between them. The engine sizes
@@ -449,7 +449,7 @@ export const register: Register = on => {
       picked = thread
       $.ui.invalidate('ui.render')
       const opened = threads.get(thread)
-      ring($, opened?.execution && statusOf(opened) === 'running' && supportedModes(opened.execution).length ? 'message' : 'jobs')
+      ring($, opened?.record && statusOf(opened) === 'running' && supportedModes(opened.record).length ? 'message' : 'jobs')
     }
     const list = cards(), shown = list.slice(0, CARDS), more = older + list.length - shown.length
     const running = list.filter(c => c.status === 'running').length
@@ -464,7 +464,7 @@ export const register: Register = on => {
     // outside the Button.
     return column(title, ...failed, row([]),
       ...shown.flatMap((c, i) => {
-        const head = cardHead({ status: c.status, startedAt: c.a.execution.startedAt, finishedAt: c.a.result?.finishedAt }, titleOf(c.a), now, w - HOTKEY + 4)
+        const head = cardHead({ status: c.status, startedAt: c.a.record.startedAt, finishedAt: c.a.result?.finishedAt }, titleOf(c.a), now, w - HOTKEY + 4)
         return [h(Button, { key: c.id, label: head.slice(3, 6).map(([text]) => text).join(''), plain: true, hotkey: String(i + 1),
           ...(i === 0 ? { autoFocus: true as const } : {}), onPress: () => open(c.id) }), row(fitSegs(cardLine(c, head[1]!, now), w)), row([])]
       }),

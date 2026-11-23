@@ -47,7 +47,7 @@ if (process.argv.includes('generate-json-schema')) appendFileSync(${JSON.stringi
       const { controller } = setupController();
       assert.equal((await callTool({ action: 'status' }, { controller })).contractStatus, verdict);
       const catalog = await callTool({ action: 'catalog' }, { controller });
-      assert.equal(catalog.companions.find((target) => target.id === 'codex').contractStatus, verdict);
+      assert.equal(catalog.companions.find((companion) => companion.id === 'codex').contractStatus, verdict);
     }
   });
 }

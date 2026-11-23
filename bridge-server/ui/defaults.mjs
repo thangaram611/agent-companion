@@ -2,10 +2,10 @@
 // have zero-turn native reads. Neither probe opens a history or sends input.
 import { rmSync } from 'node:fs';
 import { aborted } from 'node:util';
-import { listTargetIds, TARGET_IDS, getTargetById } from '../../lib/target-registry.mjs';
+import { listCompanionIds, COMPANION_IDS, getCompanionById } from '../../lib/companion-registry.mjs';
 import {
   settingsPath, previewDefaults, migrateDefaults, legacyDefaultConflicts, isModelAllowedFor,
-  readDefaultModel, readDefaultEffort, readDefaultTarget, writeCompanionDefaults, writeDefaultTarget, clearDefaultTarget,
+  readDefaultModel, readDefaultEffort, readDefaultCompanion, writeCompanionDefaults, writeDefaultCompanion, clearDefaultCompanion,
 } from '../../lib/state.mjs';
 import { CodexAdapter, validateCodexEffort } from '../adapters/codex.mjs';
 import { opencodeProvider, openCodeEffortVariant } from '../adapters/opencode.mjs';
@@ -14,8 +14,8 @@ import { bounded, systemClock } from '../controller/clock.mjs';
 import { lastRuns } from '../last-runs.mjs';
 import { age, one } from './rows.mjs';
 
-const usesServer = id => getTargetById(id).capabilities.serverMode;
-const usesAppServer = id => getTargetById(id).runtime.adapterKind === 'app-server';
+const usesServer = id => getCompanionById(id).capabilities.serverMode;
+const usesAppServer = id => getCompanionById(id).runtime.adapterKind === 'app-server';
 const unavailable = reason => ({ model: null, effort: null, reason });
 const reason = err => one([err.message, err.cause?.message].filter(Boolean).join(': ')).slice(0, 300);
 
@@ -67,15 +67,15 @@ async function probe(id, needModels, { cwd, env, createSupervisor, timeoutMs, si
 }
 
 function validateQuery(query) {
-  const { companion, model, target, effort } = query;
+  const { companion, model, defaultCompanion, effort } = query;
   for (const [key, value] of Object.entries(query)) {
-    if (!['companion', 'model', 'target', 'effort'].includes(key)) throw new Error('unknown setting ' + key);
-    if (typeof value !== 'string' || !value.trim()) throw new Error('empty ' + (key === 'target' ? 'companion' : key));
+    if (!['companion', 'model', 'defaultCompanion', 'effort'].includes(key)) throw new Error('unknown setting ' + key);
+    if (typeof value !== 'string' || !value.trim()) throw new Error('empty ' + (key === 'defaultCompanion' ? 'companion' : key));
   }
-  if (companion !== undefined && !TARGET_IDS.has(companion)) throw new Error('unknown companion ' + companion);
-  if (target !== undefined) {
+  if (companion !== undefined && !COMPANION_IDS.has(companion)) throw new Error('unknown companion ' + companion);
+  if (defaultCompanion !== undefined) {
     if (Object.keys(query).length !== 1) throw new Error('set the default companion on its own');
-    if (target !== 'inherit' && !TARGET_IDS.has(target)) throw new Error('unknown companion ' + target);
+    if (defaultCompanion !== 'inherit' && !COMPANION_IDS.has(defaultCompanion)) throw new Error('unknown companion ' + defaultCompanion);
   }
   if ((model !== undefined || effort !== undefined) && !companion) throw new Error('name a companion before model or effort');
   if (model !== undefined && model !== 'inherit' && !isModelAllowedFor(companion, model)) {
@@ -86,7 +86,7 @@ function validateQuery(query) {
 function validateSelection(id, changes, saved, native) {
   const model = Object.hasOwn(changes, 'model') ? changes.model : saved?.model;
   const effort = Object.hasOwn(changes, 'effort') ? changes.effort : saved?.effort;
-  const levels = getTargetById(id).capabilities.effortLevels;
+  const levels = getCompanionById(id).capabilities.effortLevels;
   if (levels && effort && !levels.includes(effort)) throw new Error('invalid ' + id + ' effort. Use one of: ' + levels.join(', '));
   if (!usesServer(id)) return;
   if (native.catalogError) throw new Error(id + ' model list unavailable: ' + native.catalogError);
@@ -116,7 +116,7 @@ function companionRow(id, settings, env, native) {
     effort: field(saved.effort, readDefaultEffort(id, env, undefined, settings), 'effort'),
     inherit,
   };
-  if (getTargetById(id).capabilities.acp && (saved.model || saved.effort)) {
+  if (getCompanionById(id).capabilities.acp && (saved.model || saved.effort)) {
     row.validation = 'unverified until a session runs';
   }
   const selected = saved.model ?? (saved.effort ? inherit.model : null);
@@ -126,7 +126,7 @@ function companionRow(id, settings, env, native) {
   return row;
 }
 
-// A query is {}, {companion}, {companion, model?, effort?}, or {target}.
+// A query is {}, {companion}, {companion, model?, effort?}, or {defaultCompanion}.
 // The return value also supplies the JSON representation. Only "inherit"
 // clears a setting. Reads of a single companion never probe another one.
 export async function defaults(query = {}, {
@@ -135,7 +135,7 @@ export async function defaults(query = {}, {
 } = {}) {
   validateQuery(query);
   signal?.throwIfAborted();
-  const { companion, target } = query;
+  const { companion, defaultCompanion } = query;
   const changes = {};
   for (const key of ['model', 'effort']) {
     if (Object.hasOwn(query, key)) {
@@ -143,7 +143,7 @@ export async function defaults(query = {}, {
       changes[key] = value === 'inherit' ? null : value;
     }
   }
-  const editing = target !== undefined || Object.keys(changes).length > 0;
+  const editing = defaultCompanion !== undefined || Object.keys(changes).length > 0;
   // Removing overrides works even if the native server is offline.
   const validating = Object.values(changes).some(value => value !== null);
   const warnings = [];
@@ -153,7 +153,7 @@ export async function defaults(query = {}, {
   // Validate before even creating settings.json or consuming a legacy file.
   const opts = { env, log };
   let settings = editing ? null : migrateDefaults(opts);
-  const ids = companion ? [companion] : target ? [] : listTargetIds();
+  const ids = companion ? [companion] : defaultCompanion ? [] : listCompanionIds();
   const last = ids.some(id => !usesServer(id)) ? lastRuns(env, warnings) : null;
   const natives = new Map(await Promise.all(ids.map(async id => {
     if (!usesServer(id)) return [id, { inherit: last.get(id)?.run ?? unavailable('no reported run') }];
@@ -170,10 +170,10 @@ export async function defaults(query = {}, {
   if (editing) {
     if (validating) validateSelection(companion, changes, previewDefaults(opts).companions?.[companion], natives.get(companion));
     migrateDefaults(opts);
-    if (target === 'inherit') clearDefaultTarget(env);
-    else if (target) writeDefaultTarget(target, env);
+    if (defaultCompanion === 'inherit') clearDefaultCompanion(env);
+    else if (defaultCompanion) writeDefaultCompanion(defaultCompanion, env);
     else writeCompanionDefaults(companion, changes, env);
-    const resolved = target ? 'companion' : Object.hasOwn(changes, 'model') ? 'companions.' + companion + '.model' : null;
+    const resolved = defaultCompanion ? 'companion' : Object.hasOwn(changes, 'model') ? 'companions.' + companion + '.model' : null;
     conflicts = conflicts.filter(entry => {
       if (entry.setting !== resolved) return true;
       try { rmSync(entry.path, { force: true }); return false; }
@@ -183,8 +183,8 @@ export async function defaults(query = {}, {
   }
 
   const result = { settingsFile: settingsPath(env) };
-  if (!companion) result.companion = { ...field(settings.companion, readDefaultTarget(env, log, settings), 'companion'),
-    inherit: readDefaultTarget(env, log, {}).companion };
+  if (!companion) result.companion = { ...field(settings.companion, readDefaultCompanion(env, log, settings), 'companion'),
+    inherit: readDefaultCompanion(env, log, {}).companion };
   for (const [id, native] of natives) {
     result.companions ??= {};
     result.companions[id] = companionRow(id, settings, env, native);
@@ -203,7 +203,7 @@ function parseArgs(args) {
     const match = /^(companion|model|effort)=([\s\S]*)$/.exec(word);
     if (!match) throw new Error('expected companion=<id>, model=<id>, or effort=<level>');
     const [, setting, value] = match;
-    const key = setting === 'companion' ? 'target' : setting;
+    const key = setting === 'companion' ? 'defaultCompanion' : setting;
     if (Object.hasOwn(query, key)) throw new Error('duplicate ' + setting);
     query[key] = value;
   }

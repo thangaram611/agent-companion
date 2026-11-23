@@ -17,7 +17,7 @@ for (let i = 0; i < rest.length; i += 2) opt[rest[i].slice(2)] = ['sleeps', 'wal
 const run = path.join(here, 'runs', `${name}-${new Date().toISOString().replaceAll(':', '-')}`);
 fs.mkdirSync(run + '/workspace', { recursive: true });
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agentco-direct-'));
-const bridgeEnv = { ...companionEnv({ root, target: 'opencode', proxyUrl: '' }), AGENT_COMPANION_HOST: 'claude' };
+const bridgeEnv = { ...companionEnv({ root, companion: 'opencode', proxyUrl: '' }), AGENT_COMPANION_HOST: 'claude' };
 const work = path.join(root, 'opencode', 'work');
 for (const dir of [work, bridgeEnv.HOME, bridgeEnv.TMPDIR, bridgeEnv.XDG_CONFIG_HOME, bridgeEnv.XDG_STATE_HOME, bridgeEnv.XDG_CACHE_HOME,
   bridgeEnv.AGENT_COMPANION_HOME, path.join(bridgeEnv.XDG_DATA_HOME, 'opencode')]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });

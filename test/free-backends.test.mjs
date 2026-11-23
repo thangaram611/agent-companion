@@ -7,7 +7,7 @@ import { readFileSync, rmSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { SANDBOX_HOME } from './sandbox-home.mjs';
 import { wireFields } from '../probes/free-backends/proxy.mjs';
-import { companionEnv, runFreeBackends, checkOllama, repo, targets } from '../probes/free-backends/run.mjs';
+import { companionEnv, runFreeBackends, checkOllama, repo, companions } from '../probes/free-backends/run.mjs';
 import { startBridge } from '../probes/smoke/bridge-client.mjs';
 import { claudeEnv } from '../bridge-server/adapters/claude-protocol.mjs';
 
@@ -22,26 +22,26 @@ test('proxy logs only model/effort leaves and canonical endpoint paths', () => {
   assert.deepEqual(wireFields('/v1/responses', { model: { headers: 'SECRET' }, reasoning: { effort: ['SECRET'] } }), { path: '/v1/responses' });
 });
 
-for (const target of targets) test(`${target} env uses isolated homes and excludes live setup and credentials`, () => {
+for (const companion of companions) test(`${companion} env uses isolated homes and excludes live setup and credentials`, () => {
   const root = join(SANDBOX_HOME, 'isolated');
   const source = { HOME: '/live', CODEX_HOME: '/live/codex', CLAUDE_CONFIG_DIR: '/live/claude', COPILOT_HOME: '/live/copilot',
     AGENT_COMPANION_HOME: '/live/bridge', AGENT_COMPANION_REPO: '/live/main-checkout',
     ANTHROPIC_AUTH_TOKEN: 'SECRET', OPENAI_API_KEY: 'SECRET', GITHUB_TOKEN: 'SECRET', NODE_OPTIONS: 'SECRET',
     OPENCODE_CONFIG: '/live/instructions', OPENCODE_CONFIG_CONTENT: 'SECRET', COPILOT_CUSTOM_INSTRUCTIONS_DIRS: '/live',
     HTTPS_PROXY: 'SECRET', PATH: '/bin' };
-  const before = { ...source }, env = companionEnv({ root, target, proxyUrl: 'http://127.0.0.1:1234', source });
+  const before = { ...source }, env = companionEnv({ root, companion, proxyUrl: 'http://127.0.0.1:1234', source });
   for (const key of ['HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'COPILOT_HOME', 'AGENT_COMPANION_HOME',
     'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'TMPDIR']) {
-    assert.ok(isAbsolute(env[key]) && env[key].startsWith(join(root, target) + '/'), key);
+    assert.ok(isAbsolute(env[key]) && env[key].startsWith(join(root, companion) + '/'), key);
   }
   assert.doesNotMatch(JSON.stringify(env), /SECRET|\/live/);
   assert.deepEqual(source, before);
-  if (target === 'claude') {
+  if (companion === 'claude') {
     const native = claudeEnv(env, '/empty');
     assert.equal(native.CLAUDE_CONFIG_DIR, env.CLAUDE_CONFIG_DIR);
     assert.equal(native.ANTHROPIC_AUTH_TOKEN, 'ollama'); assert.equal(native.ANTHROPIC_BASE_URL, 'http://127.0.0.1:1234');
   }
-  if (target === 'copilot') {
+  if (companion === 'copilot') {
     assert.equal(env.COPILOT_OFFLINE, 'true'); assert.equal(env.COPILOT_MODEL, 'gpt-oss:20b');
     assert.equal(env.COPILOT_PROVIDER_BASE_URL, 'http://127.0.0.1:1234/v1'); assert.equal(env.COPILOT_PROVIDER_TYPE, 'openai');
   }
@@ -59,7 +59,7 @@ for (const scenario of ['success', 'probe-fails', 'bridge-start-fails', 'bridge-
   test(`runner closes every acquired bridge and proxy: ${scenario}`, async t => {
     const calls = [], abort = new AbortController(), roots = new Set();
     t.after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
-    const source = Object.fromEntries(targets.map(target => [`${target.toUpperCase()}_BIN`, process.execPath]));
+    const source = Object.fromEntries(companions.map(companion => [`${companion.toUpperCase()}_BIN`, process.execPath]));
     const running = runFreeBackends({ selected: ['codex', 'claude'], source, signal: abort.signal,
       report: line => { if (line.startsWith('Artifacts: ')) roots.add(line.slice(11)); } }, {
       check: async () => calls.push('check'),
@@ -73,7 +73,7 @@ for (const scenario of ['success', 'probe-fails', 'bridge-start-fails', 'bridge-
       },
       probe: async args => {
         calls.push('probe'); assert.ok(args.cwd.startsWith([...roots][0] + '/'));
-        assert.deepEqual(args.readWire(), []); assert.equal(args.backendEffort, args.target === 'codex' ? 'low' : undefined);
+        assert.deepEqual(args.readWire(), []); assert.equal(args.backendEffort, args.companion === 'codex' ? 'low' : undefined);
         if (scenario === 'probe-fails') throw new Error('probe failed');
         if (scenario === 'abort') { abort.abort(new Error('signal')); abort.signal.throwIfAborted(); }
       },

@@ -232,7 +232,7 @@ const scenarios = {
 
 const directives = lines => lines.map(([kind, tool, args]) => `${kind} ${tool} ${JSON.stringify(args)}`).join('\n');
 const job = (task, fields = {}) => ({ cwd: dirs.work, companion: 'codex', task, ...fields });
-const threadOf = () => records('conversations')[0];
+const threadOf = () => records('threads')[0];
 const answerOf = () => records('results')[0];
 
 Object.assign(scenarios, {
@@ -260,7 +260,7 @@ Later a message about that thread will arrive. Then reply WOKE, then the first l
       tui.stop();
       check(true, 'the woken turn carried the answer to the host model');
     }
-    const delivered = fs.readFileSync(path.join(dirs.state, 'results', answerOf().executionId + '.json.delivery'), 'utf8').trim();
+    const delivered = fs.readFileSync(path.join(dirs.state, 'results', answerOf().jobId + '.json.delivery'), 'utf8').trim();
     check(delivered === 'hook', `the prompt hook delivered it (${delivered})`);
   },
   // A pending wait is cancelled; the job runs on and a later wait returns its result.
@@ -274,20 +274,20 @@ Later a message about that thread will arrive. Then reply WOKE, then the first l
       lead.interrupt();
       await until(() => lead.turns() >= 1, 'the interrupted turn', 60_000);
       await sleep(3000);
-      check(!answerOf() && records('executions')[0].state === 'running', 'after the interrupt the job is still running with no result');
-      lead.say(`Call mcp__agent-bridge__companion_wait with thread="${threadOf().owner}" and max_wait_sec=300, then reply with the first line of the answer.`);
+      check(!answerOf() && records('jobs')[0].state === 'running', 'after the interrupt the job is still running with no result');
+      lead.say(`Call mcp__agent-bridge__companion_wait with thread="${threadOf().thread}" and max_wait_sec=300, then reply with the first line of the answer.`);
       await until(() => lead.turns() >= 2, 'the second wait', 300_000);
       lead.close();
       const waited = lead.toolResults('companion_wait').at(-1) ?? '';
       check(waited.startsWith('line 000001'), 'the later wait returned the answer');
     } else {
       const tui = codexTui(directives([['PROBE-CALL', 'companion_send', job(task)], ['PROBE-CALL', 'companion_wait', { thread: '$THREAD', max_wait_sec: 300 }]]), 600);
-      await until(() => threadOf() && records('executions')[0]?.state === 'running', 'the job', 120_000);
+      await until(() => threadOf() && records('jobs')[0]?.state === 'running', 'the job', 120_000);
       await sleep(8000);
       tui.type('\x1b');
       await sleep(5000);
-      check(!answerOf() && records('executions')[0].state === 'running', 'after Esc the job is still running with no result');
-      await tui.submit(directives([['PROBE-CALL', 'companion_wait', { thread: threadOf().owner, max_wait_sec: 300 }]]));
+      check(!answerOf() && records('jobs')[0].state === 'running', 'after Esc the job is still running with no result');
+      await tui.submit(directives([['PROBE-CALL', 'companion_wait', { thread: threadOf().thread, max_wait_sec: 300 }]]));
       await until(() => answerOf(), 'the result', 300_000);
       await until(() => hostRequests().some(body => body.input.some(item => /_output$/.test(item.type ?? '') && JSON.stringify(item.output).includes('line 000001'))), 'the later wait', 120_000);
       tui.stop();
@@ -307,7 +307,7 @@ Later a message about that thread will arrive. Then reply WOKE, then the first l
     } else codexExec(directives([['PROBE-CALL', 'companion_send', job(task)], ['PROBE-CALL', 'companion_wait', { thread: '$THREAD', max_wait_sec: 120 }]]));
     const outputs = fs.readdirSync(path.join(dirs.model, 'model-requests')).map(file => fs.readFileSync(path.join(dirs.model, 'model-requests', file), 'utf8'));
     check(outputs.some(text => text.includes('RECURSION_REFUSED')), "the companion's own companion_send came back RECURSION_REFUSED");
-    check(records('conversations').length === 1, `only the lead's thread exists (${records('conversations').length})`);
+    check(records('threads').length === 1, `only the lead's thread exists (${records('threads').length})`);
   },
 });
 
@@ -337,7 +337,7 @@ Object.assign(scenarios, {
       tui.stop();
       check(true, 'the busy root got the answer in a turn after its call');
     }
-    check(receipt(answerOf().executionId) === 'hook', `the hook delivered it (${receipt(answerOf().executionId)})`);
+    check(receipt(answerOf().jobId) === 'hook', `the hook delivered it (${receipt(answerOf().jobId)})`);
   },
   // Two results finishing together: both reach the lead.
   async burst() {
@@ -345,15 +345,15 @@ Object.assign(scenarios, {
     if (host === 'claude') {
       const lead = claudeHost();
       lead.say(`Call mcp__agent-bridge__companion_send twice, each starting a new thread (no thread argument), both with cwd="${dirs.work}" and companion="codex": first task=${JSON.stringify(tasks[0])}, then task=${JSON.stringify(tasks[1])} (each \\n is a newline). Do not wait. Reply SENT and end your turn. ${wakeLine}`);
-      await until(() => resultsDone(2) && records('conversations').every(c => lead.said().includes(c.owner)), 'both wakes', 300_000);
+      await until(() => resultsDone(2) && records('threads').every(c => lead.said().includes(c.thread)), 'both wakes', 300_000);
       lead.close();
     } else {
       const tui = codexTui(directives(tasks.map(task => ['PROBE-CALL', 'companion_send', job(task)])), 600);
       await until(() => resultsDone(2), 'both results', 300_000);
-      await until(() => records('results').every(r => receipt(r.executionId) === 'hook'), 'both deliveries', 300_000);
+      await until(() => records('results').every(r => receipt(r.jobId) === 'hook'), 'both deliveries', 300_000);
       tui.stop();
     }
-    check(records('results').every(r => receipt(r.executionId) === 'hook'), 'both results were delivered by the hook');
+    check(records('results').every(r => receipt(r.jobId) === 'hook'), 'both results were delivered by the hook');
   },
   // After /clear, Claude wakes nothing for the old conversation; its thread stays on record for the companion page.
   // After /new, Codex keeps the conversation it left loaded until it has been idle about a minute with no client, then
@@ -371,22 +371,22 @@ Object.assign(scenarios, {
       await sleep(20_000);
       lead.close();
       check(lead.turns() === turns, `no turn after /clear (${turns} -> ${lead.turns()})`);
-      check(receipt(answerOf().executionId) === null && threadOf(), 'the result is undelivered and the thread stays on record');
+      check(receipt(answerOf().jobId) === null && threadOf(), 'the result is undelivered and the thread stays on record');
     } else {
       const tui = codexTui(directives([['PROBE-CALL', 'companion_send', job('PROBE-DELAY 20\nPROBE-ANSWER 300')],
         ['PROBE-CALL', 'companion_send', job('PROBE-DELAY 300\nPROBE-ANSWER 400')]]), 600);
       await until(() => codexToolOutputs().length >= 2, 'the two sends', 120_000);
-      const left = records('conversations')[0].lead.session;
+      const left = records('threads')[0].lead.session;
       await tui.submit('/new');
       await until(() => resultsDone(2), 'both results', 300_000);
       tui.stop();
       const [quick, long] = ['PROBE-DELAY 20', 'PROBE-DELAY 300'].map(task => records('results')
-        .find(r => records('executions').find(e => e.executionId === r.executionId)?.text?.startsWith(task)));
+        .find(r => records('jobs').find(e => e.jobId === r.jobId)?.text?.startsWith(task)));
       const bodies = requestsWith('line 000001').map(raw => JSON.parse(raw).body);
-      check(receipt(quick?.executionId) === 'hook' && bodies.length && bodies.every(body => body.prompt_cache_key === left),
+      check(receipt(quick?.jobId) === 'hook' && bodies.length && bodies.every(body => body.prompt_cache_key === left),
         'the job that ended within the minute woke the conversation left behind, and only that one');
       check(long?.outcome === 'stopped' && long?.cause === 'bridge_loss', `the job still running when Codex shut that conversation down was stopped (${long?.outcome} ${long?.cause})`);
-      check(records('conversations').length === 2, 'both threads stay on record');
+      check(records('threads').length === 2, 'both threads stay on record');
     }
   },
   // Two leads in one project: each receives only its own result.
@@ -397,16 +397,16 @@ Object.assign(scenarios, {
       leads.forEach((lead, i) => lead.say(`Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task=${JSON.stringify(tasks[i])} (the \\n is a newline). Do not wait. Reply SENT and end your turn. ${wakeLine}`));
       await until(() => resultsDone(2) && leads.every(woke), 'both wakes', 300_000);
       leads.forEach(lead => lead.close());
-      const own = lead => records('conversations').filter(c => c.lead.session === lead.session).map(c => c.owner);
+      const own = lead => records('threads').filter(c => c.lead.session === lead.session).map(c => c.thread);
       check(leads.every(lead => own(lead).length === 1 && lead.said().includes(own(lead)[0])
-        && records('conversations').every(c => own(lead).includes(c.owner) || !lead.said().includes(c.owner))), 'each lead was woken with its own thread only');
+        && records('threads').every(c => own(lead).includes(c.thread) || !lead.said().includes(c.thread))), 'each lead was woken with its own thread only');
     } else {
       const tuis = tasks.map((task, i) => codexTui(directives([['PROBE-CALL', 'companion_send', job(task)]]), 600, `lead-${i}`));
-      await until(() => resultsDone(2) && records('results').every(r => receipt(r.executionId) === 'hook'), 'both deliveries', 300_000);
+      await until(() => resultsDone(2) && records('results').every(r => receipt(r.jobId) === 'hook'), 'both deliveries', 300_000);
       tuis.forEach(tui => tui.stop());
       // Each root's conversation carries its own thread's answer, and no conversation carries both threads.
-      const threads = records('conversations').map(c => c.owner);
-      check(new Set(records('conversations').map(c => c.lead.session)).size === 2, 'two leads own one thread each');
+      const threads = records('threads').map(c => c.thread);
+      check(new Set(records('threads').map(c => c.lead.session)).size === 2, 'two leads own one thread each');
       check(threads.every(t => requestsWith(t).some(raw => raw.includes('line 000001'))), "each root received its thread's answer");
       check(!requestsWith(threads[0]).some(raw => raw.includes(threads[1])), "no root saw the other's thread");
     }
@@ -443,7 +443,7 @@ Object.assign(scenarios, {
     await until(() => since(0).includes('←foragents'), 'the prompt', 60_000);
     const task = 'Pane probe task\nPROBE-DELAY 60\nPROBE-ANSWER 300';
     await submit(`Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task=${JSON.stringify(task)} (each \\n is a newline). Do not wait. Reply SENT.`);
-    await until(() => records('executions').length, 'the send', 120_000);
+    await until(() => records('jobs').length, 'the send', 120_000);
     let mark = raw().length;
     await sleep(6000);
     check(since(mark).includes('Paneprobetask') && since(mark).includes('codex·'), 'the band lists the running thread: title and companion');
@@ -453,13 +453,13 @@ Object.assign(scenarios, {
     check(since(mark).includes('Paneprobetask'), 'the Companions pane lists the thread');
     // The terminal gets only the cells a frame changes, so the job view is known by the transcript child it starts.
     type('1');
-    const jobId = records('executions')[0].executionId;
+    const jobId = records('jobs')[0].jobId;
     const following = () => spawnSync('ps', ['-axo', 'command='], { encoding: 'utf8' }).stdout.split('\n')
       .some(line => line.includes('ui/follow.mjs') && line.includes(jobId));
     check(await until(following, 'the follow child', 15_000).catch(() => false), "the thread's card opens its job and follows the companion's transcript");
     await submit('also mention the word pane');
-    await until(() => records('executions')[0]?.interventions?.some(i => i.from === 'user'), 'the message from the pane', 30_000).catch(() => {});
-    const mine = records('executions')[0]?.interventions?.find(i => i.from === 'user');
+    await until(() => records('jobs')[0]?.interventions?.some(i => i.from === 'user'), 'the message from the pane', 30_000).catch(() => {});
+    const mine = records('jobs')[0]?.interventions?.find(i => i.from === 'user');
     check(mine && mine.state !== 'not_delivered', `a message typed in the pane reached the job (${mine?.mode} ${mine?.state})`);
     await until(() => resultsDone(1), 'the result', 180_000);
   },

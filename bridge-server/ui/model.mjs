@@ -25,7 +25,7 @@ const HELP = [['↑↓ j k', 'jobs, or transcript items when the transcript has 
   ['↑↓ PgUp PgDn', 'scroll the transcript'], ['ctrl+o', 'expand or fold all outputs'], ['ctrl+x', 'cancel the job, after one confirmation'],
   ['esc', 'back to the list, keeping the draft'], ['ctrl+c', 'clear the draft; on an empty box, quit']];
 const NAMES = COMPANION_NAMES, MODES = MODE_HINTS;
-const supported = job => supportedModes(job.execution);
+const supported = job => supportedModes(job.record);
 const REFUSED = { state: 'the job takes no more messages', capability: 'not supported by this companion', text_too_long: 'too long', request_too_large: 'too long' };
 // Typed or pasted text: a carriage return inside it is a new line; escapes and control characters go, as in native text.
 const draftText = text => clean(text.replace(/\r\n?/g, '\n'));
@@ -69,7 +69,7 @@ export class Model {
     let moved = false;
     for (const box of this.boxes.values()) for (const sent of box.sent) {
       if (sent.outcome) continue;
-      sent.outcome = takeOutcome(sent.dir, sent.executionId, sent.requestId);
+      sent.outcome = takeOutcome(sent.dir, sent.jobId, sent.requestId);
       if (!sent.outcome) continue;
       moved = true;
       if (!sent.outcome.ok && sent.text && !box.draft) box.draft = sent.text;
@@ -84,7 +84,7 @@ export class Model {
       const box = this.boxes.get(job.key);
       if (!box) continue;
       if (job.status !== 'running') { box.sent = []; box.confirm = false; continue; }
-      const recorded = new Set((job.execution.interventions ?? []).map(input => input.id));
+      const recorded = new Set((job.record.interventions ?? []).map(input => input.id));
       box.sent = box.sent.filter(sent => !(sent.outcome?.ok && recorded.has(sent.outcome.interventionId)));
     }
     const recent = job => job.status === 'running' || (job.finishedAt ?? job.startedAt) >= now - DAY;
@@ -96,12 +96,12 @@ export class Model {
       const caller = this.source.caller(job);
       const old = previous.get(job.key);
       // Keep identity when nothing shown changed, so a frame is skipped.
-      return old && old.execution === job.execution && old.result === job.result && old.status === job.status && old.caller.title === caller.title && old.caller.lead === caller.lead
+      return old && old.record === job.record && old.result === job.result && old.status === job.status && old.caller.title === caller.title && old.caller.lead === caller.lead
         ? old : { ...job, caller };
     });
     if (this.filter) {
       const needle = this.filter.toLowerCase();
-      listed = listed.filter(job => [job.caller.title, job.caller.lead, job.provider, job.project, job.execution.text]
+      listed = listed.filter(job => [job.caller.title, job.caller.lead, job.companion, job.project, job.record.text]
         .some(value => String(value ?? '').toLowerCase().includes(needle)));
     }
     this.jobs = listed;
@@ -118,14 +118,14 @@ export class Model {
     if (d?.key !== job.key) {
       d = this.detail = { key: job.key, job, transcript: new JobTranscript({ env: this.env, now: this.now }),
         list: [], preamble: [], top: 0, follow: job.status === 'running', cursor: null,
-        toggled: new Set(), expandAll: false, showPreamble: false, branch: branchOf(job.execution.cwd), pane: new Pane(),
+        toggled: new Set(), expandAll: false, showPreamble: false, branch: branchOf(job.record.cwd), pane: new Pane(),
         labels: new Map(), taken: new Set() };
       this.poll(true);
       return true;
     }
-    const turnMoved = d.job.execution.nativeTurnId !== job.execution.nativeTurnId
-      || d.job.execution.nativeTurnIds?.length !== job.execution.nativeTurnIds?.length
-      || d.job.execution.interventions?.length !== job.execution.interventions?.length;
+    const turnMoved = d.job.record.nativeTurnId !== job.record.nativeTurnId
+      || d.job.record.nativeTurnIds?.length !== job.record.nativeTurnIds?.length
+      || d.job.record.interventions?.length !== job.record.interventions?.length;
     const statusMoved = d.job !== job;
     d.job = job;
     const read = this.poll(false);
@@ -251,12 +251,12 @@ export class Model {
   // interventionModes comes from an older bridge, which reads no inbox.
   get typing() {
     const job = this.inJob && !this.help && !this.editing && !this.panel ? this.detail?.job : null;
-    return job?.status === 'running' && job.execution.interventionModes ? job : null;
+    return job?.status === 'running' && job.record.interventionModes ? job : null;
   }
   box(job) {
     let box = this.boxes.get(job.key);
     if (!box) {
-      const modes = supported(job), preferred = job.execution.interventionModes?.default;
+      const modes = supported(job), preferred = job.record.interventionModes?.default;
       this.boxes.set(job.key, box = { draft: '', mode: modes.includes(preferred) ? preferred : modes[0] ?? null, confirm: false, sent: [] });
     }
     return box;
@@ -298,7 +298,7 @@ export class Model {
   send(job, mode) {
     const box = this.box(job), cancel = mode === 'cancel';
     if (!cancel && (!mode || !box.draft.trim())) return;
-    const request = { requestId: randomUUID(), executionId: job.execution.executionId, mode, ...(cancel ? {} : { text: box.draft }), at: this.now() };
+    const request = { requestId: randomUUID(), jobId: job.record.jobId, mode, ...(cancel ? {} : { text: box.draft }), at: this.now() };
     // A refusal shows until the next send.
     box.sent = box.sent.filter(sent => sent.outcome?.ok !== false);
     let outcome = null;
@@ -356,7 +356,7 @@ export class Model {
     for (const job of this.jobs.slice(this.listTop, this.listTop + fits)) {
       const bg = job.key === this.selected;
       rows.push(cardHead(job, job.caller.title, now, w, bg));
-      rows.push(fitSegs([['   ', 'normal', bg], [cut(`${job.provider} · ${one(job.project)}`, w - 4), 'dim', bg]], w));
+      rows.push(fitSegs([['   ', 'normal', bg], [cut(`${job.companion} · ${one(job.project)}`, w - 4), 'dim', bg]], w));
       rows.push([]);
     }
     if (olderLine) { while (rows.length < h - 1) rows.push([]); rows.push([[` ${this.counts.older} older`, 'faint']]); }
@@ -367,10 +367,10 @@ export class Model {
     const margin = 2;
     const d = this.detail;
     if (!d) return [];
-    const { job } = d, { execution, result } = job;
+    const { job } = d, { record, result } = job;
     const used = result?.usage?.total_tokens;
     const parts = [HOSTS[job.host]?.displayName + (job.caller.lead ? ` › ${one(job.caller.lead)}` : ''),
-      jobModel(execution, result).map(one).join(' '), used != null ? `${tokens(used)} tokens` : '', d.branch ? one(d.branch) : ''];
+      jobModel(record, result).map(one).join(' '), used != null ? `${tokens(used)} tokens` : '', d.branch ? one(d.branch) : ''];
     const pad = ' '.repeat(margin);
     const header = [[pad + parts.filter(Boolean).join(' · '), 'dim']];
     const boxed = Boolean(this.typing);
@@ -393,7 +393,7 @@ export class Model {
   // yet in the transcript, the box, then the mode with the box's keys when focused.
   footer(job, w, h, focused) {
     if (job.status !== 'running') return [];
-    if (!job.execution.interventionModes) return [[['messages need the updated bridge; this job started on an older one', 'dim']]];
+    if (!job.record.interventionModes) return [[['messages need the updated bridge; this job started on an older one', 'dim']]];
     const box = this.box(job), room = Math.max(1, h - 3);
     const pending = this.pending(job).map(entry => layoutLine(pendingLine(entry), w)[0]);
     let content;
@@ -401,7 +401,7 @@ export class Model {
       content = layoutLine({ segs: [['Cancel this job?', 'bad'], [' The lead is told you cancelled it.', 'normal']],
         right: [['y', 'title'], [' yes  ', 'dim'], ['n', 'title'], [' no', 'dim']], wrap: false }, w - 4);
     } else if (!box.draft) {
-      const name = NAMES[job.provider] ?? clean(job.provider);
+      const name = NAMES[job.companion] ?? clean(job.companion);
       content = [[['› ', 'title'], [box.mode ? `Message ${name}…` : `${name} takes no messages while it works`, 'faint']]];
     } else content = layoutLine({ segs: [['› ', 'title'], [clean(box.draft), 'normal'], ...(focused ? [['▌', 'normal']] : [])], hang: 2 }, w - 4);
     const shown = pending.slice(-Math.max(0, Math.min(pending.length, room - 4)));
@@ -412,7 +412,7 @@ export class Model {
   // Messages waiting between the live line and the box: recorded ones the
   // transcript does not show yet, and this view's requests the record does not hold yet.
   pending(job) {
-    const out = pendingInputs(job.execution, this.detail.taken);
+    const out = pendingInputs(job.record, this.detail.taken);
     for (const { at, mode, text, outcome } of this.box(job).sent) {
       const [glyph, state, style] = !outcome ? ['◌', 'waiting for the bridge', 'warn']
         : outcome.status === 'not_written' ? ['✗', `not sent: ${clean(outcome.reason)}`, 'bad']
@@ -486,7 +486,7 @@ export class Model {
   }
   saveField() {
     const panel = this.panel, field = panel.edit, value = panel.draft.trim() || 'inherit';
-    const query = field.setting === 'companion' ? { target: value } : { companion: field.id, [field.setting]: value };
+    const query = field.setting === 'companion' ? { defaultCompanion: value } : { companion: field.id, [field.setting]: value };
     panel.busy = 'saving'; panel.error = null;
     this.load(panel, this.defaults(query, { env: this.env, signal: panel.controller.signal }), result => {
       const before = panel.result, scope = field.setting === 'companion' ? null : `companions.${field.id}.model`;
@@ -517,8 +517,8 @@ export class Model {
       if (editing && panel.busy) rows.push([['     ◌ saving…', 'faint']]);
       else if (editing && panel.error) rows.push([[`     ✗ ${panel.error}`, 'bad']]);
     };
-    const target = result.companion;
-    line('companion', value(target, `inherit → ${one(target.inherit ?? 'no default companion')}`));
+    const defaultCompanion = result.companion;
+    line('companion', value(defaultCompanion, `inherit → ${one(defaultCompanion.inherit ?? 'no default companion')}`));
     for (const [id, row] of Object.entries(result.companions ?? {})) {
       rows.push([], [[` ${id}`, 'title']]);
       line('model', value(row.model, inherit(row.inherit, 'model')));

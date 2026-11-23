@@ -1,7 +1,7 @@
 import { claudeTranscriptExists } from '../../lib/transcripts.mjs';
 export { claudeTranscriptExists } from '../../lib/transcripts.mjs';
-import { getTargetById } from '../../lib/target-registry.mjs';
-import { companionReady } from '../../lib/target-diagnostics.mjs';
+import { getCompanionById } from '../../lib/companion-registry.mjs';
+import { companionReady } from '../../lib/companion-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 import { randomUUID } from 'node:crypto';
 import { accessSync, constants, statSync } from 'node:fs';
@@ -27,11 +27,11 @@ function binaryFor(env, cwd) {
   throw failure('RuntimeUnavailable');
 }
 
-// One cold process per execution, potentially several native turns. Input UUID
+// One cold process per job, potentially several native turns. Input UUID
 // lifecycles, not elapsed time, determine whether another turn is pending.
 export class ClaudeAdapter {
   capabilities = Object.freeze({ followUp: true, modelSelection: true, loadsHistory: true,
-    interventions: getTargetById('claude').capabilities.interventions });
+    interventions: getCompanionById('claude').capabilities.interventions });
 
   constructor({ env = process.env, clock = systemClock, transcriptExists = claudeTranscriptExists } = {}) {
     this.env = env; this.clock = clock; this.transcriptExists = transcriptExists;
@@ -272,7 +272,7 @@ export class ClaudeAdapter {
 
 export function claudeProvider({ env = process.env } = {}) {
   return {
-    enabled: getTargetById('claude', env)?.implemented === true,
+    enabled: getCompanionById('claude', env)?.implemented === true,
     get ready() { return companionReady('claude', env); },
     modelAllowed: (model) => isModelAllowedFor('claude', model),
     create: () => new ClaudeAdapter({ env }),

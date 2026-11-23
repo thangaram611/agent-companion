@@ -2,11 +2,11 @@ import { realpathSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Records, buildResult, discardInterventions } from './records.mjs';
-import { getTargetById } from '../../lib/target-registry.mjs';
-import { probePermission } from '../../lib/target-diagnostics.mjs';
+import { getCompanionById } from '../../lib/companion-registry.mjs';
+import { probePermission } from '../../lib/companion-diagnostics.mjs';
 import { ProcessSupervisor } from './process-supervisor.mjs';
 import { systemClock, bounded } from './clock.mjs';
-import { cleanupExecution, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';
+import { cleanupJob, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';
 import { appendProviderError } from '../provider-error.mjs';
 import { locateTranscript, readTranscript } from '../../lib/transcripts.mjs';
 import { snapshotWorktree, diffWorktrees } from '../../lib/worktree-snapshot.mjs';
@@ -24,7 +24,7 @@ const deferred = () => {
 };
 
 // providers[id] = { enabled, ready, modelAllowed(model), create() }.
-// create() supplies the adapter for one execution.
+// create() supplies the adapter for one job.
 export class Controller {
   constructor({ providers, records = new Records(), clock = systemClock, env = process.env, createSupervisor = (opts) => new ProcessSupervisor(opts), launchWatcher = spawnCleanupWatcher, snapshot = snapshotWorktree, onProgress = () => {}, onResult = () => {} } = {}) {
     this.providers = providers;
@@ -38,49 +38,49 @@ export class Controller {
     this.onResult = onResult;
     this.live = new Map();
   }
-  _owner(owner) { if (!owner) throw error('NATIVE_OWNER_REQUIRED'); }
+  _requireThread(thread) { if (!thread) throw error('NATIVE_OWNER_REQUIRED'); }
   _persist(a) {
-    if (!a.handedOff && !this.records.writeExecution(a.record)) throw error('writer_fenced');
+    if (!a.handedOff && !this.records.writeJob(a.record)) throw error('writer_fenced');
   }
   _eventWrite(a) {
     try { this._persist(a); return true; }
     catch (err) { void Promise.resolve().then(() => this._abandon(a, err)); }
   }
-  async send({ owner, lead, title, provider, cwd, text, model, effort, savedEffortHint, hostSessionId }) {
-    this._owner(owner);
+  async send({ thread, lead, title, companion, cwd, text, model, effort, savedEffortHint, hostSessionId }) {
+    this._requireThread(thread);
     if (this.lost) throw error('bridge_loss');
     if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw error('INVALID_CWD');
     try { cwd = realpathSync(cwd); if (!statSync(cwd).isDirectory()) throw error('INVALID_CWD'); }
     catch { throw error('INVALID_CWD'); }
     if (typeof text !== 'string' || !text.length) throw error('INVALID_TEXT');
-    const conversation = this.records.readConversation(owner);
-    if (conversation && conversation.provider !== provider) throw error('provider_mismatch');
-    if (conversation && conversation.cwd !== cwd) throw error('cwd_mismatch');
-    const modelOverride = model === undefined ? conversation?.modelOverride : model;
-    const existing = conversation && this.live.get(conversation.executionId);
+    const threadRecord = this.records.readThread(thread);
+    if (threadRecord && threadRecord.companion !== companion) throw error('companion_mismatch');
+    if (threadRecord && threadRecord.cwd !== cwd) throw error('cwd_mismatch');
+    const modelOverride = model === undefined ? threadRecord?.modelOverride : model;
+    const existing = threadRecord && this.live.get(threadRecord.jobId);
     const effortOverride = effort === undefined
-      ? (existing && !existing.closed ? existing.record.effortOverride : conversation?.effortOverride) : effort;
+      ? (existing && !existing.closed ? existing.record.effortOverride : threadRecord?.effortOverride) : effort;
     if (existing && !existing.closed) {
       if (existing.record.text !== text || existing.record.modelOverride !== modelOverride || existing.record.effortOverride !== effortOverride) throw error('thread_busy');
       return existing.ready.promise;
     }
-    const selected = this.providers?.[provider];
+    const selected = this.providers?.[companion];
     if (!selected?.enabled) throw error('COMPANION_UNSUPPORTED');
     if (!selected.ready) throw error('CAPABILITY_UNAVAILABLE');
     if (modelOverride !== undefined && (typeof modelOverride !== 'string' || !selected.modelAllowed?.(modelOverride))) throw error('MODEL_NOT_ALLOWED');
-    const historyId = conversation?.historyId ?? null;
+    const historyId = threadRecord?.historyId ?? null;
     const adapter = selected.create();
     if (historyId && (!adapter.capabilities.loadsHistory || !adapter.capabilities.followUp)) throw error('FOLLOWUP_UNSUPPORTED');
-    const executionId = randomUUID();
-    const permissionMode = probePermission(getTargetById(provider), this.env)?.mode ?? null;
-    const record = this.records.begin({ owner, lead, title, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes: adapter.capabilities.interventions,
-      historyId, executionId, text, hostSessionId, now: this.clock.now() }, conversation?.generation ?? 0);
+    const jobId = randomUUID();
+    const permissionMode = probePermission(getCompanionById(companion), this.env)?.mode ?? null;
+    const record = this.records.begin({ thread, lead, title, companion, cwd, modelOverride, effortOverride, permissionMode, interventionModes: adapter.capabilities.interventions,
+      historyId, jobId, text, hostSessionId, now: this.clock.now() }, threadRecord?.generation ?? 0);
     const a = { record, adapter, savedEffortHint, held: [], waiters: new Set(), inboxRequests: new Set(), ready: deferred(), done: deferred() };
     a.supervisor = this.createSupervisor({ clock: this.clock, onRecord: (processes) => { a.record.processes = processes; this._eventWrite(a); } });
     a.done.promise.then(result => {
       for (const finish of a.waiters) finish(result);
     });
-    this.live.set(executionId, a);
+    this.live.set(jobId, a);
     this._schedule(a);
     void this._run(a).catch((err) => this._abandon(a, err));
     return a.ready.promise;
@@ -95,23 +95,23 @@ export class Controller {
       if (a.stopping) return;
       a.startSnapshot = this._snapshot(a);
       a.started = true;
-      await bounded(this.clock, () => a.adapter.start({ cwd: a.record.cwd, env: this.env, ...selection, supervisor: a.supervisor, historyId: this.records.readConversation(a.record.owner).historyId }), PROTOCOL_MS, 'runtime_unavailable');
+      await bounded(this.clock, () => a.adapter.start({ cwd: a.record.cwd, env: this.env, ...selection, supervisor: a.supervisor, historyId: this.records.readThread(a.record.thread).historyId }), PROTOCOL_MS, 'runtime_unavailable');
       if (a.stopping) return;
       phase = 'history_unavailable';
-      const conversation = this.records.readConversation(a.record.owner);
-      const history = await bounded(this.clock, () => a.adapter.openHistory({ historyId: conversation.historyId, ...selection }), PROTOCOL_MS, 'history_unavailable');
+      const threadRecord = this.records.readThread(a.record.thread);
+      const history = await bounded(this.clock, () => a.adapter.openHistory({ historyId: threadRecord.historyId, ...selection }), PROTOCOL_MS, 'history_unavailable');
       if (a.stopping) return;
-      if (!history?.historyId || (conversation.historyId && history.historyId !== conversation.historyId)) throw error('history_unavailable');
+      if (!history?.historyId || (threadRecord.historyId && history.historyId !== threadRecord.historyId)) throw error('history_unavailable');
       a.record.historyId = history.historyId;
       a.record.effectiveModel = history.effectiveModel;
       a.record.effectiveEffort = history.effectiveEffort;
-      this.records.writeConversation({ ...conversation, historyId: history.historyId, effortOverride: a.record.effortOverride });
+      this.records.writeThread({ ...threadRecord, historyId: history.historyId, effortOverride: a.record.effortOverride });
       a.record.nativeRefs = history.nativeRefs ?? {};
       a.record.startSnapshot = await a.startSnapshot;
       if (a.stopping) return;
       a.record.state = 'delivering'; this._persist(a); this.onProgress(a.record);
       phase = 'delivery_unknown'; a.nativeActive = true;
-      const ack = await this._deliver(a, { id: a.record.executionId, text: a.record.text });
+      const ack = await this._deliver(a, { id: a.record.jobId, text: a.record.text });
       if (a.stopping) return;
       a.record.nativeTurnId = ack.nativeTurnId ?? null;
       a.record.nativeRefs = { ...a.record.nativeRefs, ...ack.nativeRefs };
@@ -119,10 +119,10 @@ export class Controller {
       a.record.effectiveModel = ack.effectiveModel ?? a.record.effectiveModel;
       a.record.effectiveEffort = ack.effectiveEffort ?? a.record.effectiveEffort;
       a.record.state = 'running'; a.record.deliveredAt = this.clock.now(); this._persist(a);
-      a.ready.resolve({ executionId: a.record.executionId, generation: a.record.generation, state: 'running', acknowledged: true,
-        target: a.record.provider, selectedModel: a.record.modelOverride ?? null, selectedEffort: a.record.effortOverride ?? null,
+      a.ready.resolve({ jobId: a.record.jobId, generation: a.record.generation, state: 'running', acknowledged: true,
+        companion: a.record.companion, selectedModel: a.record.modelOverride ?? null, selectedEffort: a.record.effortOverride ?? null,
         effectiveModel: a.record.effectiveModel ?? null, effectiveEffort: a.record.effectiveEffort ?? null, permissionMode: a.record.permissionMode });
-      phase = 'provider_error';
+      phase = 'companion_error';
       let next = false;
       for (;;) {
         const terminal = await a.adapter.observe({ next, onProgress: (progress) => {
@@ -143,7 +143,7 @@ export class Controller {
         if (!['completed', 'failed', 'interrupted'].includes(terminal?.outcome)) throw error('invalid_native_outcome');
         a.nativeActive = false;
         // An acknowledgement may follow the native result. Account for every
-        // accepted write before deciding that this execution has no more work.
+        // accepted write before deciding that this job has no more work.
         if (!a.stopping && terminal.outcome !== 'failed') await this._settleInputs(a);
         if (a.closed || a.handedOff) return;
         this._recordTurn(a, terminal);
@@ -163,20 +163,20 @@ export class Controller {
             phase = 'delivery_unknown';
             await this._deliver(a, input);
             if (a.stopping) return;
-            phase = 'provider_error'; next = false; continue;
+            phase = 'companion_error'; next = false; continue;
           }
         }
         this._terminal(a, { ...terminal, cause: a.stopCause === 'user_cancel' ? 'user_cancel'
-          : terminal.outcome === 'completed' ? 'native_complete' : (a.stopCause || terminal.cause || 'provider_error') });
+          : terminal.outcome === 'completed' ? 'native_complete' : (a.stopCause || terminal.cause || 'companion_error') });
         await this._close(a, a.record.terminal.cause);
         break;
       }
     } catch (err) {
       if (a.stopping || a.handedOff || a.closed) return;
       this._pendingTurn(a);
-      this._terminal(a, { outcome: phase === 'delivery_unknown' ? 'delivery_unknown' : 'failed', cause: 'provider_error', detail: typeof err.code === 'string' && !['RuntimeUnavailable', 'HistoryUnavailable', 'DeliveryUnknown', 'ProviderLost'].includes(err.code) ? err.code : phase, error: err.code || err.name }, err);
+      this._terminal(a, { outcome: phase === 'delivery_unknown' ? 'delivery_unknown' : 'failed', cause: 'companion_error', detail: typeof err.code === 'string' && !['RuntimeUnavailable', 'HistoryUnavailable', 'DeliveryUnknown', 'ProviderLost'].includes(err.code) ? err.code : phase, error: err.code || err.name }, err);
       if (a.turn) this._recordTurn(a, { ...a.record.terminal, error: undefined });
-      await this._close(a, 'provider_error');
+      await this._close(a, 'companion_error');
     }
   }
   async _deliver(a, input) {
@@ -225,7 +225,7 @@ export class Controller {
     // Persist the native outcome before any close operation. Final result
     // publication waits for cleanup evidence; once published it is immutable.
     if (!a.record.terminal) {
-      if (terminal.cause === 'provider_error' && ['failed', 'delivery_unknown'].includes(terminal.outcome)) {
+      if (terminal.cause === 'companion_error' && ['failed', 'delivery_unknown'].includes(terminal.outcome)) {
         terminal = { ...terminal, text: appendProviderError(terminal.text ?? a.record.progress?.partialText, explanation) };
         if (a.savedEffortHint && ['EFFORT_NOT_ALLOWED', 'CAPABILITY_UNAVAILABLE'].includes(terminal.detail)) {
           terminal.text += ' ' + a.savedEffortHint;
@@ -237,18 +237,18 @@ export class Controller {
   _schedule(a) {
     a.timer = this.clock.setTimeout(() => {
       try { this._tick(a); }
-      catch (err) { a.record.monitorError = err.code || err.message; void this._close(a, 'provider_error'); }
+      catch (err) { a.record.monitorError = err.code || err.message; void this._close(a, 'companion_error'); }
       if (!a.stopping && !a.closed && !a.handedOff) this._schedule(a);
     }, TICK_MS);
     a.timer?.unref?.();
   }
   _tick(a) {
     if (a.stopping || a.closed || a.handedOff) return;
-    const executionId = a.record.executionId;
-    for (const { requestId, request, reason } of this.records.readInbox(executionId)) {
+    const jobId = a.record.jobId;
+    for (const { requestId, request, reason } of this.records.readInbox(jobId)) {
       if (a.inboxRequests.has(requestId)) continue;
-      const finish = outcome => this.records.finishInbox(executionId, requestId, outcome);
-      if (reason || request.executionId !== executionId || !this.live.has(request.executionId) || a.stopping) {
+      const finish = outcome => this.records.finishInbox(jobId, requestId, outcome);
+      if (reason || request.jobId !== jobId || !this.live.has(request.jobId) || a.stopping) {
         finish({ ok: false, status: 'intervention_unavailable', reason: reason ?? 'state' });
         continue;
       }
@@ -258,10 +258,10 @@ export class Controller {
         continue;
       }
       a.inboxRequests.add(requestId);
-      void this.intervene({ executionId, from: 'user', mode: request.mode, text: request.text }).then(response => {
+      void this.intervene({ jobId, from: 'user', mode: request.mode, text: request.text }).then(response => {
         finish(response.ok ? { ok: true, status: 'accepted', interventionId: response.id } : response);
       }, err => finish({ ok: false, status: 'intervention_unavailable', reason: err.code || 'delivery_failed' }))
-        .catch(err => { a.record.monitorError = err.code || err.message; void this._close(a, 'provider_error'); })
+        .catch(err => { a.record.monitorError = err.code || err.message; void this._close(a, 'companion_error'); })
         .finally(() => a.inboxRequests.delete(requestId));
     }
   }
@@ -288,15 +288,15 @@ export class Controller {
     }
   }
   async _abandon(a, err) {
-    // Storage/authority failure cannot strand the provider or leave a caller
+    // Storage/authority failure cannot strand the companion or leave a caller
     // awaiting an unhandled rejection. Do not write through a failed fence.
     a.stopping = true; a.handedOff = true;
     this.clock.clearTimeout(a.timer);
     const cleanup = await a.supervisor.terminate();
     a.closed = true;
-    this.records.removeInbox(a.record.executionId);
-    this.live.delete(a.record.executionId);
-    const response = { executionId: a.record.executionId, state: 'unknown', error: err.code || err.message, stopEvidence: cleanup };
+    this.records.removeInbox(a.record.jobId);
+    this.live.delete(a.record.jobId);
+    const response = { jobId: a.record.jobId, state: 'unknown', error: err.code || err.message, stopEvidence: cleanup };
     a.ready.resolve(response); a.done.resolve(response);
     return response;
   }
@@ -306,7 +306,7 @@ export class Controller {
   }
   _locate(a) {
     if (!a.record.transcript) {
-      try { a.record.transcript = locateTranscript({ companion: a.record.provider, historyId: a.record.historyId,
+      try { a.record.transcript = locateTranscript({ companion: a.record.companion, historyId: a.record.historyId,
         nativeRefs: a.record.nativeRefs, env: this.env }); }
       catch { a.record.transcript = null; }
     }
@@ -319,7 +319,7 @@ export class Controller {
     let transcript;
     try { if (a.record.transcript) transcript = readTranscript(a.record.transcript); }
     catch { transcript = { format: { detail: 'transcript_read_failed' }, items: [] }; }
-    const items = selectTurnItems(transcript?.items ?? [], { companion: a.record.provider,
+    const items = selectTurnItems(transcript?.items ?? [], { companion: a.record.companion,
       nativeTurnId: a.record.nativeTurnId, nativeTurnIds: a.record.nativeTurnIds, interventions: a.record.interventions,
       startedAt: a.record.startedAt, finishedAt: a.record.stopDecidedAt });
     const worktree = await diffWorktrees(a.record.cwd, a.record.startSnapshot, a.record.endSnapshot, { env: this.env });
@@ -341,7 +341,7 @@ export class Controller {
     if (a.handedOff) return a.done.promise;
     let terminal = a.record.terminal;
     if (terminal?.outcome === 'completed' && nativeError) {
-      terminal = a.record.terminal = { ...terminal, outcome: 'failed', cause: 'provider_error', detail: nativeError.type,
+      terminal = a.record.terminal = { ...terminal, outcome: 'failed', cause: 'companion_error', detail: nativeError.type,
         text: appendProviderError(terminal.text, nativeError.message) };
       this._recordTurn(a, terminal);
     }
@@ -354,23 +354,23 @@ export class Controller {
     if (!this.records.writeResult(result)) throw error('writer_fenced');
     a.record.state = cleanup.gone ? 'closed' : 'unknown'; this._persist(a);
     a.closed = true;
-    const saved = this.records.readResult(a.record.executionId);
+    const saved = this.records.readResult(a.record.jobId);
     this.onResult(a.record, saved);
-    this.live.delete(a.record.executionId);
+    this.live.delete(a.record.jobId);
     a.ready.resolve(saved); a.done.resolve(saved);
     return saved;
   }
-  async wait({ owner, executionId, signal, timeoutMs = 30_000 }) {
-    this._owner(owner);
-    const execution = this.records.readExecution(executionId);
-    if (!execution || execution.owner !== owner) throw error('execution_unknown');
-    if (signal?.aborted) return this.status({ executionId });
-    const result = this.records.readResult(executionId);
-    if (result) return this._userNotice(owner, executionId) ?? result;
+  async wait({ thread, jobId, signal, timeoutMs = 30_000 }) {
+    this._requireThread(thread);
+    const job = this.records.readJob(jobId);
+    if (!job || job.thread !== thread) throw error('execution_unknown');
+    if (signal?.aborted) return this.status({ jobId });
+    const result = this.records.readResult(jobId);
+    if (result) return this._userNotice(thread, jobId) ?? result;
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 1_200_000) throw error('invalid_wait');
-    const a = this.live.get(executionId);
-    if (!a || a.handedOff) return this._userNotice(owner, executionId) ?? this.status({ executionId });
-    const notice = this._userNotice(owner, executionId);
+    const a = this.live.get(jobId);
+    if (!a || a.handedOff) return this._userNotice(thread, jobId) ?? this.status({ jobId });
+    const notice = this._userNotice(thread, jobId);
     if (notice) return notice;
     return new Promise(resolve => {
       const finish = value => {
@@ -379,32 +379,32 @@ export class Controller {
         signal?.removeEventListener('abort', returnStatus);
         resolve(value);
       };
-      const returnStatus = () => finish(this.status({ executionId }));
+      const returnStatus = () => finish(this.status({ jobId }));
       const timer = this.clock.setTimeout(returnStatus, timeoutMs);
       a.waiters.add(finish);
       signal?.addEventListener('abort', returnStatus, { once: true });
     });
   }
-  _userNotice(owner, executionId) {
-    const intervention = this.records.takeUserIntervention(executionId, owner);
-    return intervention ? { status: 'user_intervened', executionId, intervention } : null;
+  _userNotice(thread, jobId) {
+    const intervention = this.records.takeUserIntervention(jobId, thread);
+    return intervention ? { status: 'user_intervened', jobId, intervention } : null;
   }
   _notifyUser(a) {
     for (const finish of a.waiters) {
-      const notice = this._userNotice(a.record.owner, a.record.executionId);
+      const notice = this._userNotice(a.record.thread, a.record.jobId);
       if (!notice) break;
       finish(notice);
     }
   }
-  async intervene({ executionId, from, owner, mode, text, signal }) {
+  async intervene({ jobId, from, thread, mode, text, signal }) {
     if (!['caller', 'user'].includes(from)) throw error('INVALID_SENDER');
     if (from === 'caller') {
-      this._owner(owner);
-      const execution = this.records.readExecution(executionId);
-      if (!execution || execution.owner !== owner) throw error('execution_unknown');
+      this._requireThread(thread);
+      const job = this.records.readJob(jobId);
+      if (!job || job.thread !== thread) throw error('execution_unknown');
     }
     if (typeof text !== 'string' || !text.length) throw error('INVALID_TEXT');
-    const a = this.live.get(executionId);
+    const a = this.live.get(jobId);
     if (mode === undefined) mode = a?.record.interventionModes.default;
     const unavailable = reason => ({ ok: false, status: 'intervention_unavailable', reason });
     const reason = interventionUnavailable(a, mode);
@@ -441,49 +441,49 @@ export class Controller {
     a.inputTail = operation.catch(() => {});
     return operation;
   }
-  async cancel({ owner, executionId }) {
-    this._owner(owner);
-    const execution = this.records.readExecution(executionId);
-    if (!execution || execution.owner !== owner) throw error('execution_unknown');
-    const result = this.records.readResult(executionId);
+  async cancel({ thread, jobId }) {
+    this._requireThread(thread);
+    const job = this.records.readJob(jobId);
+    if (!job || job.thread !== thread) throw error('execution_unknown');
+    const result = this.records.readResult(jobId);
     if (result) return result;
-    const a = this.live.get(executionId);
+    const a = this.live.get(jobId);
     if (!a || a.handedOff || a.closed) throw error('execution_unknown');
     return this._close(a, 'owner_stop');
   }
-  status({ executionId, owner } = {}) {
-    if (!executionId && owner) executionId = this.records.readConversation(owner)?.executionId;
-    if (!executionId) return null;
-    const execution = this.records.readExecution(executionId);
-    if (!execution) return null;
-    const result = this.records.readResult(executionId);
-    const live = this.live.get(executionId);
-    const interventions = { default: execution.interventionModes?.default ?? null,
+  status({ jobId, thread } = {}) {
+    if (!jobId && thread) jobId = this.records.readThread(thread)?.jobId;
+    if (!jobId) return null;
+    const job = this.records.readJob(jobId);
+    if (!job) return null;
+    const result = this.records.readResult(jobId);
+    const live = this.live.get(jobId);
+    const interventions = { default: job.interventionModes?.default ?? null,
       ...Object.fromEntries(['steer', 'queue', 'interrupt'].map(mode => [mode, !result && interventionUnavailable(live, mode) === null])) };
-    return { execution, result, interventions,
-      state: result?.stopEvidence?.gone || execution.cleanup?.gone ? 'closed' : live ? execution.state : 'unknown' };
+    return { job, result, interventions,
+      state: result?.stopEvidence?.gone || job.cleanup?.gone ? 'closed' : live ? job.state : 'unknown' };
   }
   // Explicit startup reconciliation, never invoked by an observer. It never
   // adopts or signals an old runtime: only positive absence permits recovery.
-  async recover({ owner }) {
-    this._owner(owner);
-    const conversation = this.records.readConversation(owner);
-    if (!conversation) return null;
-    const execution = this.records.readExecution(conversation.executionId);
-    if (!execution) return null;
-    const saved = this.records.readResult(execution.executionId);
-    if (this.live.has(execution.executionId) || saved?.stopEvidence?.gone || execution.cleanup?.gone || !execution.processes?.pid) return this.status({ owner });
-    const supervisor = this.createSupervisor({ record: execution.processes, clock: this.clock });
+  async recover({ thread }) {
+    this._requireThread(thread);
+    const threadRecord = this.records.readThread(thread);
+    if (!threadRecord) return null;
+    const job = this.records.readJob(threadRecord.jobId);
+    if (!job) return null;
+    const saved = this.records.readResult(job.jobId);
+    if (this.live.has(job.jobId) || saved?.stopEvidence?.gone || job.cleanup?.gone || !job.processes?.pid) return this.status({ thread });
+    const supervisor = this.createSupervisor({ record: job.processes, clock: this.clock });
     const stopEvidence = await supervisor.verifyGone();
-    if (!stopEvidence.gone) return this.status({ owner });
-    const terminal = execution.terminal;
-    discardInterventions(execution);
-    if (!saved) this.records.writeResult(buildResult(execution, {
+    if (!stopEvidence.gone) return this.status({ thread });
+    const terminal = job.terminal;
+    discardInterventions(job);
+    if (!saved) this.records.writeResult(buildResult(job, {
       outcome: terminal?.outcome || 'stopped', cause: 'bridge_loss', detail: terminal?.detail,
       stopEvidence, finishedAt: this.clock.now(),
-    }), execution.writer);
-    this.records.writeExecution({ ...execution, state: 'closed', cleanup: stopEvidence }, execution.writer);
-    return this.status({ owner });
+    }), job.writer);
+    this.records.writeJob({ ...job, state: 'closed', cleanup: stopEvidence }, job.writer);
+    return this.status({ thread });
   }
   async bridgeLost() {
     this.lost = true;
@@ -503,10 +503,10 @@ export class Controller {
         a.record.processes = a.supervisor.serialize();
         if (!this.records.handoff(a.record)) throw error('writer_fenced');
         let watcher;
-        try { watcher = await this.launchWatcher({ stateDir: this.records.dir, executionId: a.record.executionId }); }
-        catch { watcher = { result: await cleanupExecution({ records: this.records, execution: a.record, clock: this.clock, createSupervisor: this.createSupervisor }) }; }
+        try { watcher = await this.launchWatcher({ stateDir: this.records.dir, jobId: a.record.jobId }); }
+        catch { watcher = { result: await cleanupJob({ records: this.records, job: a.record, clock: this.clock, createSupervisor: this.createSupervisor }) }; }
         a.supervisor.detach();
-        const response = { executionId: a.record.executionId, state: 'cleanup_pending', watcher };
+        const response = { jobId: a.record.jobId, state: 'cleanup_pending', watcher };
         a.ready.resolve(response); a.done.resolve(response); handoffs.push(response);
       } catch (err) { handoffs.push(await this._abandon(a, err)); }
     }

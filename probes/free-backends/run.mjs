@@ -8,28 +8,28 @@ import { runEffortProbe } from '../smoke/effort.mjs';
 import { startProxy } from './proxy.mjs';
 
 export const repo = fileURLToPath(new URL('../..', import.meta.url));
-export const targets = ['codex', 'claude', 'copilot', 'opencode'];
+export const companions = ['codex', 'claude', 'copilot', 'opencode'];
 const localModel = 'gpt-oss:20b';
 const instructions = 'brew install ollama\nOLLAMA_CONTEXT_LENGTH=32768 ollama serve\nollama pull gpt-oss:20b';
 
-export function companionEnv({ root, target, proxyUrl, source = process.env }) {
-  if (!targets.includes(target)) throw new Error(`Unsupported free-backend companion: ${target}`);
-  const home = join(root, target, 'home');
+export function companionEnv({ root, companion, proxyUrl, source = process.env }) {
+  if (!companions.includes(companion)) throw new Error(`Unsupported free-backend companion: ${companion}`);
+  const home = join(root, companion, 'home');
   // Allowlist, never inherit provider credentials, instruction/config overrides,
   // proxy variables, NODE_OPTIONS or the operator's installed plugin settings.
   const env = { PATH: source.PATH || '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin', HOME: home,
-    LANG: 'en_US.UTF-8', TMPDIR: join(root, target, 'tmp'),
+    LANG: 'en_US.UTF-8', TMPDIR: join(root, companion, 'tmp'),
     CODEX_HOME: join(home, '.codex'), CLAUDE_CONFIG_DIR: join(home, '.claude'), COPILOT_HOME: join(home, '.copilot'),
     XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local/share'),
     XDG_STATE_HOME: join(home, '.local/state'), XDG_CACHE_HOME: join(home, '.cache'),
-    AGENT_COMPANION_HOME: join(root, target, 'bridge'), AGENT_COMPANION_HOST: 'codex' };
+    AGENT_COMPANION_HOME: join(root, companion, 'bridge'), AGENT_COMPANION_HOST: 'codex' };
   if (source.NODE_TEST_CONTEXT) env.NODE_TEST_CONTEXT = source.NODE_TEST_CONTEXT;
-  const binary = `${target.toUpperCase()}_BIN`;
+  const binary = `${companion.toUpperCase()}_BIN`;
   if (source[binary]) env[binary] = source[binary].includes('/') ? resolve(source[binary]) : source[binary];
-  if (target === 'claude') Object.assign(env, { ANTHROPIC_BASE_URL: proxyUrl, ANTHROPIC_AUTH_TOKEN: 'ollama' });
-  if (target === 'copilot') Object.assign(env, { COPILOT_PROVIDER_BASE_URL: `${proxyUrl}/v1`, COPILOT_PROVIDER_TYPE: 'openai',
+  if (companion === 'claude') Object.assign(env, { ANTHROPIC_BASE_URL: proxyUrl, ANTHROPIC_AUTH_TOKEN: 'ollama' });
+  if (companion === 'copilot') Object.assign(env, { COPILOT_PROVIDER_BASE_URL: `${proxyUrl}/v1`, COPILOT_PROVIDER_TYPE: 'openai',
     COPILOT_MODEL: localModel, COPILOT_OFFLINE: 'true' });
-  if (target === 'opencode') env.OPENCODE_DB = join(env.XDG_DATA_HOME, 'opencode', 'opencode.db');
+  if (companion === 'opencode') env.OPENCODE_DB = join(env.XDG_DATA_HOME, 'opencode', 'opencode.db');
   return env;
 }
 
@@ -46,22 +46,22 @@ export async function checkOllama({ signal, fetchImpl = fetch } = {}) {
   if (!tags.models?.some(model => (model.name ?? model.model) === localModel)) throw new Error(`Pull the local model first: ollama pull ${localModel}`);
 }
 
-function prepare({ root, target, env, proxyUrl }) {
-  const cwd = join(root, target, 'work');
+function prepare({ root, companion, env, proxyUrl }) {
+  const cwd = join(root, companion, 'work');
   for (const dir of [cwd, env.HOME, env.TMPDIR, env.CODEX_HOME, env.CLAUDE_CONFIG_DIR, env.COPILOT_HOME,
     env.XDG_CONFIG_HOME, env.XDG_DATA_HOME, env.XDG_STATE_HOME, env.XDG_CACHE_HOME, env.AGENT_COMPANION_HOME]) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (target === 'codex') writeFileSync(join(env.CODEX_HOME, 'config.toml'),
+  if (companion === 'codex') writeFileSync(join(env.CODEX_HOME, 'config.toml'),
     `model = "${localModel}"\nmodel_provider = "ollama-proxy"\n\n[model_providers.ollama-proxy]\nname = "Local Ollama probe"\nbase_url = "${proxyUrl}/v1"\nwire_api = "responses"\n`, { mode: 0o600 });
-  if (target === 'opencode') mkdirSync(join(env.XDG_DATA_HOME, 'opencode'), { recursive: true, mode: 0o700 });
-  const binary = env[`${target.toUpperCase()}_BIN`] || target;
+  if (companion === 'opencode') mkdirSync(join(env.XDG_DATA_HOME, 'opencode'), { recursive: true, mode: 0o700 });
+  const binary = env[`${companion.toUpperCase()}_BIN`] || companion;
   const candidates = binary.includes('/') ? [binary] : env.PATH.split(delimiter).map(dir => join(dir, binary));
-  if (!candidates.some(file => { try { accessSync(file, constants.X_OK); return true; } catch { return false; } })) throw new Error(`Install ${target} before running its probe (Homebrew); executable unavailable`);
+  if (!candidates.some(file => { try { accessSync(file, constants.X_OK); return true; } catch { return false; } })) throw new Error(`Install ${companion} before running its probe (Homebrew); executable unavailable`);
   return cwd;
 }
 
-export async function runFreeBackends({ selected = targets, source = process.env, signal, report = console.log } = {},
+export async function runFreeBackends({ selected = companions, source = process.env, signal, report = console.log } = {},
   { check = checkOllama, proxyStart = startProxy, bridgeStart = startBridge, probe = runEffortProbe } = {}) {
-  if (!selected.length || selected.some(target => !targets.includes(target))) throw new Error(`Usage: node probes/free-backends/run.mjs [${targets.join('|')} ...]`);
+  if (!selected.length || selected.some(companion => !companions.includes(companion))) throw new Error(`Usage: node probes/free-backends/run.mjs [${companions.join('|')} ...]`);
   await check({ signal });
   signal?.throwIfAborted();
   const root = mkdtempSync(join(tmpdir(), 'agentco-free-'));
@@ -71,17 +71,17 @@ export async function runFreeBackends({ selected = targets, source = process.env
   writeFileSync(logFile, '', { mode: 0o600 });
   const proxy = await proxyStart({ logFile });
   try {
-    for (const target of selected) {
+    for (const companion of selected) {
       signal?.throwIfAborted();
-      const env = companionEnv({ root, target, proxyUrl: proxy.url, source });
-      const cwd = prepare({ root, target, env, proxyUrl: proxy.url });
-      const session = `free-${target}-${Date.now()}`;
+      const env = companionEnv({ root, companion, proxyUrl: proxy.url, source });
+      const cwd = prepare({ root, companion, env, proxyUrl: proxy.url });
+      const session = `free-${companion}-${Date.now()}`;
       const bridge = await bridgeStart(session, { env, repo, signal });
       try {
-        await probe({ bridge, target, cwd, owner: `${session}-child`, report,
-          model: target === 'copilot' ? undefined : target === 'opencode' ? 'opencode/flint-40b-free' : localModel,
-          backendEffort: target === 'codex' ? 'low' : undefined,
-          readWire: target === 'opencode' ? undefined : () => readFileSync(logFile, 'utf8').split('\n').filter(Boolean).map(JSON.parse),
+        await probe({ bridge, companion, cwd, owner: `${session}-child`, report,
+          model: companion === 'copilot' ? undefined : companion === 'opencode' ? 'opencode/flint-40b-free' : localModel,
+          backendEffort: companion === 'codex' ? 'low' : undefined,
+          readWire: companion === 'opencode' ? undefined : () => readFileSync(logFile, 'utf8').split('\n').filter(Boolean).map(JSON.parse),
           record: (kind, id) => record(kind, id, env.AGENT_COMPANION_HOME) });
       } finally { await bridge.stop(); }
     }
@@ -95,7 +95,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const handler = () => { process.exitCode = [130, 143, 129][i]; abort.abort(new Error(`Stopped by ${name}`)); };
     process.on(name, handler); return [name, handler];
   });
-  try { await runFreeBackends({ selected: process.argv.length > 2 ? process.argv.slice(2) : targets, signal: abort.signal }); }
+  try { await runFreeBackends({ selected: process.argv.length > 2 ? process.argv.slice(2) : companions, signal: abort.signal }); }
   catch (err) { console.error(err.message); process.exitCode ||= 1; }
   finally { for (const [name, handler] of handlers) process.removeListener(name, handler); }
 }

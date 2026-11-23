@@ -1,12 +1,12 @@
 import '../../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getTargetById } from '../../lib/target-registry.mjs';
+import { getCompanionById } from '../../lib/companion-registry.mjs';
 import { fakeAcpDescriptor } from '../../test/fake-acp-agent.mjs';
 import { ACP_PROTOCOL_VERSION } from './acp-protocol.mjs';
 const FAKE = fakeAcpDescriptor();
-const COPILOT = getTargetById('copilot');
-const ANTIGRAVITY = getTargetById('antigravity');
+const COPILOT = getCompanionById('copilot');
+const ANTIGRAVITY = getCompanionById('antigravity');
 test('the Copilot spawn argv carries its permission flags and model selection uses the session', () => {
   assert.deepEqual(COPILOT.acp.args({ model: 'claude-sonnet-4.6', env: {} }), [
     '--acp',

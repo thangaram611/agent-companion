@@ -30,10 +30,10 @@ that started it. The lead can work on something else or end its turn.
 flowchart TD
   Lead[Lead conversation] -->|send task and cwd| Bridge[Session MCP bridge]
   Bridge -->|thread and job id| Lead
-  Bridge --> Controller[Execution controller]
+  Bridge --> Controller[Job controller]
   Controller --> Adapter[Provider protocol adapter]
   Adapter --> Provider[Per-job process group]
-  Controller --> Records[Thread, execution and result records]
+  Controller --> Records[Thread, job and result records]
   Records --> Delivery[Result delivery]
   Delivery -->|host wake or hook| Lead
   Records -->|wait or paged read| Lead
@@ -71,7 +71,7 @@ against duplicate or racing loss events before exit. The registered controller c
 the cleanup watcher and stops its own writers. The watcher terminates and verifies
 that tree, writes its immutable result, then exits; it owns no provider protocol.
 Uncatchable bridge SIGKILL cannot run this handoff. A new bridge never adopts
-a live execution and cannot claim cleanup until absence is verified.
+a live job and cannot claim cleanup until absence is verified.
 
 ## Private MCP Surface
 
@@ -113,20 +113,20 @@ exists, the send returns `COMPANION_UNCONFIGURED`. An explicit `model` overrides
 per-companion configuration; with no override or configured default, the native
 configuration is inherited. Codex receives no model key in that case.
 
-`effort` is a conversation override like `model`, stored as `effortOverride` on
-conversation and execution records. A new thread uses the requested effort,
+`effort` is a thread override like `model`, stored as `effortOverride` on
+thread and job records. A new thread uses the requested effort,
 then the companion's saved default, then native configuration. Follow-ups retain
 the override when effort is omitted. Both `start` and `openHistory` omit the key
 when inherited. Registry `capabilities.effortSelection`
 is true for all five companions. Claude has `capabilities.effortLevels` of `low`,
 `medium`, `high`, `xhigh`, `max`; its adapter passes `--effort`. Codex has null
 static levels: its adapter calls `model/list` with `includeHidden: true`, following
-`nextCursor` on the execution's connection only when an effort override exists.
+`nextCursor` on the job's connection only when an effort override exists.
 Before `thread/resume`, it validates levels against the explicit model override,
 or the saved `thread.model` from a non-loading `thread/read`. Resume persists
 config even without a turn, so a refused level must never reach it. Fresh
 `thread/start` validates levels against the response model; refused new threads
-are never saved on the conversation. Both paths send `config.model_reasoning_effort`
+are never saved on the thread. Both paths send `config.model_reasoning_effort`
 and check the response's reported `reasoningEffort`.
 Invalid levels for listed models refuse `EFFORT_NOT_ALLOWED` with a level hint;
 a reported effort mismatch refuses `CAPABILITY_UNAVAILABLE`.
@@ -170,11 +170,11 @@ Copilot receives no spawn effort flag. Its cold follow-up remains unsupported.
 Claude rejects off-enum effort before spawn. Its CLI selection persistence
 was not measured here.
 
-`records.begin` records the attempted effort on the execution and retains the
-conversation's previous effort. The controller saves the new override only after
+`records.begin` records the attempted effort on the job and retains the
+thread's previous effort. The controller saves the new override only after
 `openHistory` succeeds. A refused send therefore leaves omitted follow-ups on the
 previous override or inheritance. While validation is pending, duplicate sends
-compare against the active execution's effort. Refusals use the existing terminal
+compare against the active job's effort. Refusals use the existing terminal
 result: the code is `detail`, the explanation is `text`, projected as send/wait
 `meta.detail` and the answer text block, or status `detail` and `partial_text`. A send that fails
 before acknowledgement returns that terminal envelope immediately.
@@ -200,8 +200,8 @@ the server does not inspect adapters. Overrides are distinct from provider repor
 Claude's effective effort stays null; Copilot reports its session thought level. Results publish `selected_effort` alongside
 `effective_effort`; status also carries `selected_effort` and `permission_mode`.
 The pure exported `probePermission(descriptor, env)` is shared with diagnostics,
-catalog and the execution's permission snapshot; changing env later cannot change
-an existing execution's reported permission mode.
+catalog and the job's permission snapshot; changing env later cannot change
+an existing job's reported permission mode.
 
 Status adds `activity`. Claude reports `thinking` for thinking deltas/counters,
 `responding` for text, `running <command>` for an active Bash tool and `retrying`
@@ -210,21 +210,21 @@ activity; the server falls back to active command, then partial text, then null.
 An explicit native null is preserved, and terminal activity is null. Digest and
 progress publication are unchanged.
 
-New text on a running thread accepts `mode: steer|queue|interrupt`, defaulting to the execution's
+New text on a running thread accepts `mode: steer|queue|interrupt`, defaulting to the job's
 saved `interventionModes.default`. Unavailable modes return `intervention_unavailable` with reason
 `state` or `capability`, never a substitute mode. Status projects `interventions:
 { default, steer, queue, interrupt }`: the saved default and three booleans for
 modes usable now. All booleans are false after closure or when the bridge does
-not own the live execution. Catalog reports the registry's
+not own the live job. Catalog reports the registry's
 `capabilities.interventions`: supported modes, with queue `false`, `bridge` or
 `native`. Job status reports whether those modes are usable now.
 
 ### Turn loop, interventions and user inbox
 
-`intervene({ executionId, from: 'caller'|'user', mode, text })` records the sender,
+`intervene({ jobId, from: 'caller'|'user', mode, text })` records the sender,
 mode, text, acceptance time and delivery state before reaching the adapter.
-Record mutations take the conversation lock; native writes are serialized on
-the execution's input chain. The tool checks the caller's lead identity. The live view uses the job inbox. Unsupported modes and unavailable
+Record mutations take the thread lock; native writes are serialized on
+the job's input chain. The tool checks the caller's lead identity. The live view uses the job inbox. Unsupported modes and unavailable
 states are refused before recording input.
 
 After each native result, the controller settles accepted writes and continues
@@ -239,30 +239,30 @@ contains `{ from, mode, state, first_line }` for each message; the first line is
 capped at 80 characters.
 
 The user writes an atomic mode-0600 request to the owning host's state directory:
-`inbox/<executionId>/<requestId>.json`, containing
-`{ requestId, executionId, mode, text, at }`. Mode is steer, queue, interrupt or
-cancel; cancel omits text. On each live execution's tick, the controller processes its inbox. It reads regular
+`inbox/<jobId>/<requestId>.json`, containing
+`{ requestId, jobId, mode, text, at }`. Mode is steer, queue, interrupt or
+cancel; cancel omits text. On each live job's tick, the controller processes its inbox. It reads regular
 files only, without following symlinks, bounded to 64 KiB of JSON and 8000 text
 characters. Request identity, mode and timestamp are checked. Bad input returns
 a reason such as `invalid_file`, `invalid_request`, `request_too_large` or
-`text_too_long`; unavailable modes return `capability`, unavailable executions
+`text_too_long`; unavailable modes return `capability`, unavailable jobs
 return `state`. The controller applies valid messages as `from: 'user'` and
 cancels with cause `user_cancel`. Acceptance time comes from the controller clock.
 
 The outcome is an atomic mode-0600 `<requestId>.outcome.json` containing
 `{ requestId, ok, status, reason?, interventionId? }`; success is `accepted`
 (cancel: `cancelling`). The controller removes the request after writing the
-outcome. The view deletes read outcomes. Saving a terminal result removes the execution's
+outcome. The view deletes read outcomes. Saving a terminal result removes the job's
 whole inbox, including requests left behind, in normal close, recovery and watcher
-cleanup. Late native acknowledgements do not recreate it. Each execution saves
+cleanup. Late native acknowledgements do not recreate it. Each job saves
 its adapter's `interventions` as `interventionModes` at creation.
 
 An accepted user message resolves a pending wait with `status: user_intervened`
 and `intervention: { from, mode, text, at }`, without `content` or terminal `meta`.
 Acceptance is recorded before native acknowledgement, so this is a notice of
 input, not delivery or an answer. If no wait is pending, the next wait returns
-the notice first, even if the job has since closed. Under the conversation lock,
-`intervention-notices/<executionId>.json` records reported ids before returning
+the notice first, even if the job has since closed. Under the thread lock,
+`intervention-notices/<jobId>.json` records reported ids before returning
 them, independently of the runtime's writer fence and immutable result. Concurrent
 waits claim each notice once; status never consumes it. Cancel itself generates no such notice;
 its normal terminal result carries `user_cancel`, including a native completion
@@ -285,7 +285,7 @@ OpenCode validates the 2.x authenticated `/api` contract and runtime pid. Its
 bootstrap password stays only in adapter memory. The OS cwd and `PWD` both match
 the canonical requested directory; the historical 2.0.25 tool-runtime cwd issue
 is why both are set. Events are filtered by session id; terminal transcript
-projection is bounded by this execution's admitted user message and idle outcome.
+projection is bounded by this job's admitted user message and idle outcome.
 OpenCode 1.x is dropped. Permissions follow OpenCode's own server configuration.
 
 Codex selects an executable/helper pair before each runtime starts, using
@@ -330,22 +330,22 @@ loaded; `--bare` is never used. The adapter strips inherited `CLAUDECODE`,
 `--permission-prompts none` disables prompts; the registry resolves
 `AGENT_COMPANION_CLAUDE_PERMISSION`, defaulting to `bypassPermissions`.
 Tokens come from per-turn `result.usage`; cumulative `modelUsage` is not used.
-`total_cost_usd` is included only for fresh history, never for resumed executions.
+`total_cost_usd` is included only for fresh history, never for resumed jobs.
 
 ## Routing Contract
 
-The bridge mints a thread id on the first send. Its conversation record binds
+The bridge mints a thread id on the first send. Its thread record binds
 the id to the host, session and optional native subagent id. Every tool that takes a thread
 or job id checks that binding. A different lead gets `THREAD_NOT_YOURS`.
 
 The first send fixes the companion and canonical directory. Follow-ups retain
-both. A conflicting companion or cwd returns `provider_mismatch` or `cwd_mismatch`
+both. A conflicting companion or cwd returns `companion_mismatch` or `cwd_mismatch`
 with the bound route. Omit the thread to start independent work. Model and
 effort defaults apply on creation. An explicit selection can change for a
 later job on that thread.
 
 On a running thread, repeating the task with the same selections returns the
-existing acknowledgement. New text (up to 8,000 characters) uses the execution's
+existing acknowledgement. New text (up to 8,000 characters) uses the job's
 default intervention mode or the requested mode. An unavailable mode is refused.
 An attempt to change model or effort while the job runs returns `thread_busy`.
 
@@ -362,7 +362,7 @@ runtime and is never automatically resent.
 ## Companion Adapter Contract
 
 The controller owns processes, records and results. Adapters implement
-only the provider protocol; they never write durable execution state or kill
+only the provider protocol; they never write durable job state or kill
 processes. The provider factories create an adapter with this interface:
 
 | Method / property | Contract |
@@ -389,7 +389,7 @@ its JSON-RPC prompt id is retained as `nativeRefs.promptRequestId`. Retryable pr
 errors remain progress. Usage uses `lib/usage.mjs`'s shared counters and optional
 model/cost fields; absent usage is never invented as zero.
 
-Each execution gets its own supervisor: `spawn`, `recordDescendant`, `census`,
+Each job gets its own supervisor: `spawn`, `recordDescendant`, `census`,
 `terminate` and `verifyGone`. It records pid/pgid, samples descendants every 2 s,
 and includes protocol-reported command pids, adopting one only when the process
 it names is not older than the root (a reported pid is evidence, not identity).
@@ -397,7 +397,7 @@ A `ps` that fails or exceeds its 1 s cap while recording a reported pid is noted
 as `censusError`, as the periodic census notes its own, and never ends the job.
 Codex retries that pid on its next report. Before 2026-11-18 such a failure
 failed three healthy Codex jobs as `ProviderLost`.
-A previous execution still running elsewhere or never verified gone refuses the next send
+A previous job still running elsewhere or never verified gone refuses the next send
 with `previous_execution_unverified`. Closure attempts native interrupt
 and protocol close with bounded waits, then SIGTERM to the group and recorded
 pids, SIGKILL to survivors after 2 s, and absence verification by pid plus birth
@@ -425,12 +425,12 @@ produce a warning and block updates.
 | Path | Meaning |
 | --- | --- |
 | `companion-checks.json` | Last explicit readiness evidence; catalog/status read it without probing. |
-| `conversations/<thread>.json` | Lead (`host`, `session`, optional agent id), title, provider, canonical cwd, model/effort overrides, native history, generation and current execution id. The title defaults to the first task line. |
-| `executions/<id>.json` | Task, interventions, turns, native references, snapshots, process identities, progress and writer authority. |
-| `results/<id>.json` | Immutable answer, outcome, usage, work summary and cleanup evidence. |
-| `reads/<thread>.json` | Last fully read job id and generation. A separate cursor under the thread lock survives controller rewrites of the conversation. |
+| `threads/<thread>.json` | `thread`, `companion`, latest `jobId`, lead (`host`, `session`, optional agent id), title, canonical cwd, model/effort overrides, native history and generation. The title defaults to the first task line. |
+| `jobs/<id>.json` | `thread`, `jobId`, `companion`, task, interventions, turns, native references, snapshots, process identities, progress and writer authority. |
+| `results/<id>.json` | `thread`, `jobId`, `companion`, immutable answer, outcome, usage, work summary and cleanup evidence. |
+| `reads/<thread>.json` | Last fully read job id and generation. A separate cursor under the thread lock survives controller rewrites of the thread record. |
 | `locks/<thread>.lock` | Exclusive lock for thread mutations. A stale lock fails closed with `RECORD_BUSY`. |
-| `inbox/<id>/<requestId>.json`, `<requestId>.outcome.json` | User input and its outcome. Closing the execution removes its inbox. |
+| `inbox/<id>/<requestId>.json`, `<requestId>.outcome.json` | User input and its outcome. Closing the job removes its inbox. |
 | `intervention-notices/<id>.json` | User intervention ids already reported by waits. |
 | `results/<id>.json.delivery` | Exclusive receipt containing `tool` or `hook`, installed by the first claimant. |
 | `runtime/news/<session>` | Empty marker that prompts the hook to check for results. Unsafe session names are encoded. |
@@ -466,20 +466,20 @@ checks. `--plan` and omission of `--set-default` leave defaults untouched.
 `setup.sh --model` passes the choice through for each selected host. Codex does
 not forward shell model env knobs to the bridge; pin its model with a saved default.
 
-Record writes are atomic and private, with conversation-generation and writer
+Record writes are atomic and private, with thread-generation and writer
 fences. A native terminal outcome is persisted before cleanup; the final immutable
 result includes cleanup evidence. Startup reconciliation reads watcher results
 or verifies process absence. It never adopts old live work; until absence is
-proven, state stays `unknown` and a new execution is refused. Status does not
+proven, state stays `unknown` and a new job is refused. Status does not
 reconcile or publish a completion. The watcher writes only its
 fenced result; the startup scan restores pending news from stored results.
 
-`agent-digest://<executionId>` is rendered on demand by `lib/digest.mjs` from
-execution/result records and the companion's own transcript. Resource listing
-uses execution records; no digest file is written. The renderer uses the same
+`job-digest://<jobId>` is rendered on demand by `lib/digest.mjs` from
+job/result records and the companion's own transcript. Resource listing
+uses job records; no digest file is written. The renderer uses the same
 turn selection as the work summary, collapses preamble to a count, and caps each
 item's output at about 2 KB with a truncation marker and the native path for more.
-It presents task and execution metadata, final/partial answer, work summary and
+It presents task and job metadata, final/partial answer, work summary and
 ordered transcript items; running reads add the in-flight progress line. Missing
 or unrecognized transcripts are explicit. Terminal metadata includes `work_summary` and `digest_uri`.
 
@@ -505,8 +505,8 @@ unavailable sections. Unverified cleanup produces no end snapshot. The bridge-lo
 watcher does not compute a summary.
 
 Codex, Claude and OpenCode items are selected by the acknowledged native turn id;
-Copilot uses the whole execution-private session. Antigravity uses item creation
-times at or after execution start. Its live view, work summary and digest read
+Copilot uses the whole job-private session. Antigravity uses item creation
+times at or after job start. Its live view, work summary and digest read
 `~/.gemini/antigravity-cli/conversations/<sessionId>.db`, a SQLite database
 keyed by `cascade_id` with protobuf step payloads. Step 14 is user input, 15 a
 planner response, 132 any tool, 17 an error and 101 a system message. Status 2
@@ -515,7 +515,7 @@ approval. A subagent's commands and edits live in its own conversation. The
 parent job's work summary reads only the parent's transcript for those items.
 
 For any companion, a native error marked as ending the turn changes a completed
-outcome to `failed` with cause `provider_error` and the native error type and
+outcome to `failed` with cause `companion_error` and the native error type and
 message. On agy a corrupt image returned `end_turn` with
 `INVALID_ARGUMENT (code 400)` as reply text and a final error step. An error
 retried before an answer stays in the work summary and the turn stays completed.
@@ -524,7 +524,11 @@ Claude keeps its own transcripts under `~/.claude/projects` (or
 `CLAUDE_CONFIG_DIR/projects`). The bridge stores only the native session id as
 `historyId`, not a copy of the transcript; it does not remove native transcripts.
 
-Only the per-host defaults migration remains. Threads consist of executions in
+On first open per process, `Records` archives coexisting 0.x state under `legacy/`,
+moves 1.0.0 records into `threads/` and `jobs/`, and updates result fields in place.
+Existing destination records win. Delivery receipts keep their names and contents.
+
+Threads consist of jobs in
 generation order with their results and interventions. There is no second event log.
 
 ## Host budgets

@@ -1,4 +1,4 @@
-import { TARGETS } from '../lib/target-registry.mjs';
+import { COMPANIONS } from '../lib/companion-registry.mjs';
 import { codexProvider } from './adapters/codex.mjs';
 import { claudeProvider } from './adapters/claude.mjs';
 import { opencodeProvider } from './adapters/opencode.mjs';
@@ -12,6 +12,6 @@ const factories = {
 };
 
 export function createProviders(env) {
-  return Object.fromEntries(Object.values(TARGETS).map(({ id, runtime }) =>
+  return Object.fromEntries(Object.values(COMPANIONS).map(({ id, runtime }) =>
     [id, factories[runtime.adapterKind]({ env }, id)]));
 }

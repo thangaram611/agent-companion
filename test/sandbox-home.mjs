@@ -1,6 +1,6 @@
 // Import this FIRST in any suite whose static imports reach lib/state.mjs or
 // lib/runtime-paths.mjs — directly or through validation.mjs,
-// target-registry, onboard.mjs, the adapters, or server.mjs.
+// companion-registry, onboard.mjs, the adapters, or server.mjs.
 //
 //   import '../test/sandbox-home.mjs';
 //   import { validateAgentArgs } from './validation.mjs';

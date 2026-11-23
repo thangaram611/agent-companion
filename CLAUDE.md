@@ -57,7 +57,7 @@ Companion/model/effort refusals are `COMPANION_UNCONFIGURED`, `COMPANION_UNSUPPO
 `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`. ACP
 authentication refusals are `AUTH_REQUIRED`, with the descriptor's sign-in steps;
 they are setup problems, not reasons to retry or switch companion. Lead, history
-and execution refusals are separate: `LEAD_REQUIRED`, `THREAD_NOT_YOURS`,
+and job refusals are separate: `LEAD_REQUIRED`, `THREAD_NOT_YOURS`,
 `RECURSION_REFUSED` and `FOLLOWUP_UNSUPPORTED`. Omitted companion uses the
 configured default; omitted model inherits configuration unless the thread
 already has an override. Effort is a thread override too, supported by all five
@@ -94,12 +94,12 @@ Routing applies model defaults only on a new thread. Both hosts share
 `settings.json` and its one-shot migration in `lib/state.mjs`.
 
 **Interventions share one controller path.** New text sent to a running thread
-is an intervention with an optional `mode`; omission uses the execution's saved
+is an intervention with an optional `mode`; omission uses the job's saved
 `interventionModes.default`, and repeating the original send returns the
 existing job. Status reports per-mode `interventions` availability. The views'
-atomic, private `inbox/<executionId>/<requestId>.json` requests are read on the
+atomic, private `inbox/<jobId>/<requestId>.json` requests are read on the
 controller's tick. Outcomes are private atomic files; close removes that
-execution's inbox. An accepted user message wakes `companion_wait` with
+job's inbox. An accepted user message wakes `companion_wait` with
 `user_intervened`, never an answer; durable notice receipts prevent repeats,
 including after a wait gap. User cancel produces a terminal result with cause
 `user_cancel`. The terminal metadata's `interventions` lists each message's
@@ -123,8 +123,8 @@ sender, mode, state and first line, including `not_delivered` messages.
 | `lib/transcripts.mjs` and `lib/transcripts/` | Read-only native transcript location, format fingerprints, normalized in-memory items and live follow (`followTranscript`). |
 | `lib/work-summary.mjs` | Native turn selection and bounded commands, edits, errors and worktree summary projection. |
 | `lib/worktree-snapshot.mjs` | Bounded snapshots through a throwaway index and the diff-stat including any writer. |
-| `lib/digest.mjs` | Read-only, on-demand execution digest from native transcript and result records. |
-| `lib/target-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
+| `lib/digest.mjs` | Read-only, on-demand job digest from native transcript and result records. |
+| `lib/companion-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
 | `bridge-server/ui/jobs.mjs` | Both hosts' job lists, thread titles and lead session names. The pane lists the latest job per thread in its session. |
 | `bridge-server/ui/defaults.mjs` | The package-free `defaults` command and the live view's defaults panel (`d`): saved choices, native inheritance, validation, saves and legacy conflict resolution. |

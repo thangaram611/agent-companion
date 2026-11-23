@@ -7,7 +7,7 @@ import { codexDispatchFixture } from './controller/codex-dispatch-fixture.mjs';
 import { diskSnapshot, until } from './controller/helpers.mjs';
 import { note } from './codex-wire-frames.mjs';
 
-// Phase 3 mapping: a wait budget is not an execution timeout. Silence never
+// Phase 3 mapping: a wait budget is not a job timeout. Silence never
 // closes work: a cancel does, and a stopped result requires verified process absence.
 test('CONTRACT: timeout must stop work or avoid claiming process termination', async (t) => {
   const h = codexDispatchFixture(t);
@@ -33,8 +33,8 @@ test('CONTRACT: timeout must stop work or avoid claiming process termination', a
   assert.equal(terminal.meta.stop_evidence.gone, true);
 });
 
-// Phase 3 mapping: refusal allocates no execution; the old answer remains
-// attributable only to the original execution id, including its metadata.
+// Phase 3 mapping: refusal allocates no job; the old answer remains
+// attributable only to the original job id, including its metadata.
 test('CONTRACT: old native answer must not be labeled the successful result of an undelivered new task', async (t) => {
   const h = codexDispatchFixture(t);
   const first = await h.send();
@@ -45,7 +45,7 @@ test('CONTRACT: old native answer must not be labeled the successful result of a
   assert.equal(result.job_id, first.job_id);
   assert.equal(result.meta.job_id, first.job_id);
   assert.equal(result.content, 'OLD_ANSWER');
-  assert.deepEqual(h.records.listExecutions().map((e) => [e.executionId, e.text]), [[first.job_id, 'original']]);
+  assert.deepEqual(h.records.listJobs().map((e) => [e.jobId, e.text]), [[first.job_id, 'original']]);
 });
 
 async function retryFixture(t) {
@@ -74,13 +74,13 @@ test('CONTRACT: an older observer must not overwrite an already persisted termin
   const { job_id } = await h.send();
   const logs = [];
   const second = new Controller({ records: new Records({ dir: h.records.dir, log: (row) => logs.push(row) }) });
-  const stale = second.records.readExecution(job_id);
+  const stale = second.records.readJob(job_id);
   await h.complete(job_id);
   const result = h.records.readResult(job_id);
   assert.equal(second.records.writeResult({ ...result, outcome: 'failed' }), false);
-  const next = await h.send('follow-up', stale.owner);
+  const next = await h.send('follow-up', stale.thread);
   assert.notEqual(next.job_id, job_id);
-  assert.equal(second.records.writeExecution(stale), false);
+  assert.equal(second.records.writeJob(stale), false);
   assert.equal(second.records.writeResult({ ...result, outcome: 'failed' }), false);
   assert.equal(logs.filter((r) => r.code === 'stale_generation').length, 2);
   assert.deepEqual(h.records.readResult(job_id), result);
@@ -94,7 +94,7 @@ test('CONTRACT: status inactivity must reflect the just-received provider event'
   await h.emit(job_id, [note('item/agentMessage/delta', { threadId: 'T1', turnId: 'TURN1', itemId: 'part', delta: 'FRESH_EVENT' })]);
   const status = await h.call({ action: 'status', job_id });
   assert.equal(status.last_native_activity, h.clock.now());
-  assert.notEqual(status.last_native_activity, h.records.readExecution(job_id).startedAt);
+  assert.notEqual(status.last_native_activity, h.records.readJob(job_id).startedAt);
   assert.equal(status.partial_text, 'FRESH_EVENT');
 });
 
@@ -147,5 +147,5 @@ test('CONTROL: a second bridge has independent controller and records instances'
   const second = new Controller({ records });
   assert.notEqual(second.records, h.records);
   assert.notEqual(second.live, h.active.live);
-  assert.deepEqual(second.records.readExecution(job_id), h.records.readExecution(job_id));
+  assert.deepEqual(second.records.readJob(job_id), h.records.readJob(job_id));
 });

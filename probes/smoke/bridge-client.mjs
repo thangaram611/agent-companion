@@ -92,7 +92,7 @@ export async function startBridge(session, { env = process.env, repo: root = rep
         if (!result.ok) throw new Error(JSON.stringify(result));
         if (result.status !== 'still_running') return result;
       }
-      throw new Error(`execution ${job_id} exceeded probe wait budget`);
+      throw new Error(`job ${job_id} exceeded probe wait budget`);
     },
   };
 }

@@ -3,10 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { log, readJSON, writeJSON, recordPID } from './common.mjs';
+import { fixtureExecutions, log, readJSON, writeJSON, recordPID } from './common.mjs';
 
 const [dir, executionId, role = 'worker'] = process.argv.slice(2);
-const state = readJSON(path.join(dir, 'executions', executionId + '.json'));
+const state = readJSON(path.join(fixtureExecutions(dir), executionId + '.json'));
 const fields = { executionId, role, owner: state.owner, channel: state.channel, ppid: process.ppid, cwd: process.cwd() };
 const emit = (event, extra = {}) => log(dir, 'events.jsonl', event, { ...fields, ...extra });
 recordPID(dir, process.pid, role, fields);
@@ -23,7 +23,7 @@ let sequence = 0;
 const beat = () => {
   log(dir, 'heartbeats.jsonl', 'heartbeat', { ...fields, sequence: ++sequence });
   if (role === 'worker' && sequence % 4 === 1) {
-    writeJSON(path.join(dir, 'executions', executionId + '.partial.json'),
+    writeJSON(path.join(fixtureExecutions(dir), executionId + '.partial.json'),
       { executionId, historyId: state.historyId, sequence, t: Date.now(), fake: true });
   }
 };
@@ -31,7 +31,7 @@ beat();
 setInterval(beat, 250);
 // Planned fake completion only. Every process exits on its own timer, never by tree cleanup.
 setTimeout(() => {
-  if (role === 'worker') writeJSON(path.join(dir, 'executions', executionId + '.result.json'),
+  if (role === 'worker') writeJSON(path.join(fixtureExecutions(dir), executionId + '.result.json'),
     { executionId, historyId: state.historyId, fake: true, result: 'finished', t: Date.now() });
   emit('planned_finish');
   process.exit(0);

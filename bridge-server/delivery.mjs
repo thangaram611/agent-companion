@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { runtimeDir, writePrivateFile } from '../lib/runtime-paths.mjs';
 
-export function executionStatus(result) {
+export function jobStatus(result) {
   return ({ completed: 'completed', failed: 'failed', interrupted: 'cancelled', stopped: 'cancelled', delivery_unknown: 'failed' })[result.outcome];
 }
 
@@ -21,9 +21,9 @@ function mark(session) {
 
 const receipt = (records, id) => records.path('results', id) + '.delivery';
 
-export function publish(records, execution, result) {
-  const lead = records.readConversation(execution.owner)?.lead;
-  const path = receipt(records, result.executionId);
+export function publish(records, job, result) {
+  const lead = records.readThread(job.thread)?.lead;
+  const path = receipt(records, result.jobId);
   if (lead && !existsSync(path)) {
     mark(lead.session);
     // A tool may have claimed and cleared news between the check and mark.
@@ -50,11 +50,11 @@ function claim(records, id, by) {
 }
 
 function pending(records, lead) {
-  const threads = new Map(records.listConversations().filter(c =>
-    c.lead?.session === lead.session && c.lead.host === lead.host).map(c => [c.owner, c]));
+  const threads = new Map(records.listThreads().filter(c =>
+    c.lead?.session === lead.session && c.lead.host === lead.host).map(c => [c.thread, c]));
   if (!threads.size) return [];
-  return records.listExecutions().filter(e => threads.has(e.owner) && !existsSync(receipt(records, e.executionId)))
-    .map(e => ({ result: records.readResult(e.executionId), conversation: threads.get(e.owner) }))
+  return records.listJobs().filter(e => threads.has(e.thread) && !existsSync(receipt(records, e.jobId)))
+    .map(e => ({ result: records.readResult(e.jobId), threadRecord: threads.get(e.thread) }))
     .filter(row => row.result);
 }
 
@@ -66,14 +66,14 @@ export function unread(records, lead) {
     rows = pending(records, lead);
     if (rows.length) mark(lead.session);
   }
-  return rows.filter(({ conversation }) => conversation.lead.agent === lead.agent);
+  return rows.filter(({ threadRecord }) => threadRecord.lead.agent === lead.agent);
 }
 
 const reference = (thread, offset) =>
   `companion_read({ thread: ${JSON.stringify(thread)}${offset ? ', offset: ' + offset : ''} })`;
 
-export function wakeNotice(execution, result) {
-  return `agent-companion: ${execution.provider} finished thread ${result.owner} (${executionStatus(result)}), job ${result.executionId}. ${reference(result.owner)} reads it.`;
+export function wakeNotice(job, result) {
+  return `agent-companion: ${job.companion} finished thread ${result.thread} (${jobStatus(result)}), job ${result.jobId}. ${reference(result.thread)} reads it.`;
 }
 
 function excerpt(result, limit) {
@@ -81,22 +81,22 @@ function excerpt(result, limit) {
   if (answer.length <= limit) return answer;
   const chars = Array.from(answer);
   if (chars.length <= limit) return answer;
-  return `${chars.slice(0, limit).join('')}\n[… ${chars.length - limit} more characters. ${reference(result.owner, limit)} reads on.]`;
+  return `${chars.slice(0, limit).join('')}\n[… ${chars.length - limit} more characters. ${reference(result.thread, limit)} reads on.]`;
 }
 
 export function toolAnswer(records, result, signal) {
   if (!signal?.aborted) {
-    const winner = claim(records, result.executionId, 'tool');
-    const lead = records.readConversation(result.owner)?.lead;
+    const winner = claim(records, result.jobId, 'tool');
+    const lead = records.readThread(result.thread)?.lead;
     if (lead) unread(records, lead);
-    if (winner.by === 'hook') return { text: `Already delivered to this conversation by the completion hook. ${reference(result.owner)} reads it again.`, delivered_by: 'hook' };
+    if (winner.by === 'hook') return { text: `Already delivered to this conversation by the completion hook. ${reference(result.thread)} reads it again.`, delivered_by: 'hook' };
   }
   return { text: excerpt(result, 8000) };
 }
 
 export function hookAnswer(records, lead) {
-  const notices = unread(records, lead).map(({ result, conversation }) => ({
-    result, heading: `## ${result.executionId} · ${executionStatus(result)} · ${conversation.provider} · ${reference(result.owner)}`,
+  const notices = unread(records, lead).map(({ result, threadRecord }) => ({
+    result, heading: `## ${result.jobId} · ${jobStatus(result)} · ${threadRecord.companion} · ${reference(result.thread)}`,
   }));
   // Reserve a reference per result before spending the remaining space on
   // excerpts. If even the references do not fit, leave the rest for next time.
@@ -111,7 +111,7 @@ export function hookAnswer(records, lead) {
     const full = heading + '\n' + excerpt(result, 4000);
     const fits = Array.from(full).length + Math.max(0, reserved + 2) <= available;
     const notice = fits ? full : heading;
-    if (!claim(records, result.executionId, 'hook').won) continue;
+    if (!claim(records, result.jobId, 'hook').won) continue;
     lines.push(notice);
     length += separator + Array.from(notice).length;
   }

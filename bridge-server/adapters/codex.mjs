@@ -3,8 +3,8 @@ import { codexAppServerSandbox, resolveSteerConfirmMs } from './codex-protocol.m
 import { inspectCodexAppServerInstallation } from '../../lib/codex-install.mjs';
 import { connectionScopedNotificationMethods, routeNotification } from '../../lib/codex-app-server-contract.mjs';
 import { codexTurnBaseline, usageFromCodexTokenUsage } from '../../lib/usage.mjs';
-import { getTargetById } from '../../lib/target-registry.mjs';
-import { companionReady } from '../../lib/target-diagnostics.mjs';
+import { getCompanionById } from '../../lib/companion-registry.mjs';
+import { companionReady } from '../../lib/companion-diagnostics.mjs';
 import { isModelAllowedFor } from '../../lib/state.mjs';
 import { bounded, systemClock } from '../controller/clock.mjs';
 import { execFile } from 'node:child_process';
@@ -17,7 +17,7 @@ let contractStatus = 'unverified';
 let contractCheck;
 export const getCodexContractStatus = () => contractStatus;
 
-// One advisory schema dump per bridge process, even when executions overlap.
+// One advisory schema dump per bridge process, even when jobs overlap.
 // The probe never blocks a provider start and never refuses a drifting binary.
 export function checkCodexContract(installation, env) {
   return contractCheck ??= new Promise((resolve) => {
@@ -50,7 +50,7 @@ export function checkCodexContract(installation, env) {
 
 const PROTOCOL_MS = 10_000;
 const capabilities = Object.freeze({ followUp: true, modelSelection: true, loadsHistory: true,
-  interventions: getTargetById('codex').capabilities.interventions });
+  interventions: getCompanionById('codex').capabilities.interventions });
 const failure = (code, cause) => Object.assign(new Error(code, { cause }), { code, name: code });
 const deferred = () => {
   let resolve, reject;
@@ -64,7 +64,7 @@ export const validateCodexEffort = (models, model, effort) => {
   if (!levels.includes(effort)) throw Object.assign(new Error(`effort "${effort}" is not valid for Codex model "${model}". Use one of: ${levels.join(', ')}, or omit it to inherit configuration.`), { code: 'EFFORT_NOT_ALLOWED' });
 };
 
-// One execution, one stdio connection. The controller alone owns process
+// One job, one stdio connection. The controller alone owns process
 // lifetime, durable state, resends (there are none) and cleanup verification.
 export class CodexAdapter {
   capabilities = capabilities;
@@ -154,7 +154,7 @@ export class CodexAdapter {
       const id = result?.thread?.id;
       if (typeof id !== 'string' || !id || (historyId != null && id !== historyId)) throw new Error('thread identity not confirmed');
       // A busy resume must not turn into a second turn/start (measured to be
-      // accepted by Codex). The controller only cold-resumes closed executions.
+      // accepted by Codex). The controller only cold-resumes closed jobs.
       if (result.thread.status?.type === 'active' || result.thread.turns?.some((turn) => turn.status === 'inProgress')) throw new Error('thread already active');
       if (effort !== undefined) {
         if (historyId == null) validateCodexEffort(models, result.model, effort);
@@ -374,7 +374,7 @@ export class CodexAdapter {
 
 export function codexProvider({ env = process.env } = {}) {
   return {
-    enabled: getTargetById('codex', env)?.implemented === true,
+    enabled: getCompanionById('codex', env)?.implemented === true,
     // Registry-driven diagnostics already own readiness. Reading their cached
     // evidence is observational; installation selection happens only at start.
     get ready() { return companionReady('codex', env); },

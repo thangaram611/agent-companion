@@ -25,21 +25,21 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import readline from 'node:readline/promises';
 
-import { TARGET_IDS, getTargetById, modelHint } from '../lib/target-registry.mjs';
+import { COMPANION_IDS, getCompanionById, modelHint } from '../lib/companion-registry.mjs';
 import {
-  inspectTargets,
-  targetReadinessSummary,
+  inspectCompanions,
+  companionReadinessSummary,
   memoizeProbe,
   probeCommand,
-} from '../lib/target-diagnostics.mjs';
-import { migrateDefaults, previewDefaults, writeDefaultTarget, readDefaultTarget, writeTargetChecks,
+} from '../lib/companion-diagnostics.mjs';
+import { migrateDefaults, previewDefaults, writeDefaultCompanion, readDefaultCompanion, writeCompanionChecks,
   readDefaultModel, writeDefaultModel, clearDefaultModel, isModelAllowedFor } from '../lib/state.mjs';
 import { Controller } from '../bridge-server/controller/controller.mjs';
 import { createProviders } from '../bridge-server/providers.mjs';
-import { HOSTS } from '../lib/hosts/index.mjs';
+import { HOSTS, stateDirs } from '../lib/hosts/index.mjs';
 import { Records } from '../bridge-server/controller/records.mjs';
 const VALID_HOSTS = new Set([...Object.keys(HOSTS), 'both']);
-const VALID_TARGET_OPTS = new Set([...TARGET_IDS, 'auto', 'none']);
+const VALID_COMPANION_OPTS = new Set([...COMPANION_IDS, 'auto', 'none']);
 
 export function parseArgs(argv) {
   const opts = {
@@ -49,9 +49,9 @@ export function parseArgs(argv) {
     yes: false,
     json: false,
     smoke: false,
-    listTargets: false,
+    listCompanions: false,
     doctor: false,
-    noTargetCheck: false,
+    noCompanionCheck: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -66,9 +66,9 @@ export function parseArgs(argv) {
       case '--json': opts.json = true; break;
       case '--plan': opts.plan = true; break;
       case '--smoke': opts.smoke = true; break;
-      case '--list-companions': opts.listTargets = true; break;
+      case '--list-companions': opts.listCompanions = true; break;
       case '--doctor': opts.doctor = true; break;
-      case '--no-companion-check': opts.noTargetCheck = true; break;
+      case '--no-companion-check': opts.noCompanionCheck = true; break;
       case '-h': case '--help': opts.help = true; break;
       default: opts.unknown = a; break;
     }
@@ -86,7 +86,7 @@ export function planOnboard({ options, companions, configuration }) {
   const t = options.companion;
 
   if (options.model !== undefined) {
-    if (!TARGET_IDS.has(t)) return { kind: 'error', code: 'model_companion_required', message: '--model requires an explicit --companion <companion> (not auto or none).' };
+    if (!COMPANION_IDS.has(t)) return { kind: 'error', code: 'model_companion_required', message: '--model requires an explicit --companion <companion> (not auto or none).' };
     if (!options.model) return { kind: 'error', code: 'model_required', message: '--model requires a value: <id|inherit>.' };
     if (!companions[t]?.capabilities?.modelSelection) {
       return { kind: 'error', code: 'CAPABILITY_UNAVAILABLE', message: `companion "${t}" cannot select a model` };
@@ -98,14 +98,14 @@ export function planOnboard({ options, companions, configuration }) {
     }
   }
 
-  const current = companions[TARGET_IDS.has(t) ? t : configuration?.defaultCompanion?.companion]?.defaultModel;
+  const current = companions[COMPANION_IDS.has(t) ? t : configuration?.defaultCompanion?.companion]?.defaultModel;
   const model = { requested: options.model ?? null,
     action: options.model === undefined ? 'none' : options.model === 'inherit' ? 'clear' : 'set',
     current: current?.model ?? null, source: current?.source ?? 'unset' };
   if (t === 'none') return { kind: 'host-only', model };
   if (!t && configuration?.exists) return { kind: 'preserved', model };
 
-  if (t && TARGET_IDS.has(t)) {
+  if (t && COMPANION_IDS.has(t)) {
     if (options.setDefault && configuration) {
       if (configuration.defaultCompanion.source === 'env' && configuration.defaultCompanion.companion !== t) {
         return { kind: 'error', code: 'env_override', message: 'AGENT_COMPANION_DEFAULT_COMPANION overrides this choice. Change or unset it first.' };
@@ -115,8 +115,8 @@ export function planOnboard({ options, companions, configuration }) {
     return { kind: 'chosen', id: t, ready: !!report?.ready, report, writeDefault: options.setDefault, model };
   }
 
-  if (t && !VALID_TARGET_OPTS.has(t)) {
-    return { kind: 'error', code: 'unknown_companion', message: `unknown companion "${t}". Supported: ${[...TARGET_IDS].join(', ')}, auto, none.` };
+  if (t && !VALID_COMPANION_OPTS.has(t)) {
+    return { kind: 'error', code: 'unknown_companion', message: `unknown companion "${t}". Supported: ${[...COMPANION_IDS].join(', ')}, auto, none.` };
   }
 
   // t is 'auto' or undefined → choose by readiness.
@@ -146,9 +146,9 @@ function inspectConfiguration(defaultCompanion, companions) {
   return { exists: !!defaultCompanion.companion, defaultCompanion, summary };
 }
 
-function printTargetReport(report, { json } = {}) {
+function printCompanionReport(report, { json } = {}) {
   if (json) return; // JSON mode prints the whole object once at the end.
-  console.log(`\n${report.displayName} — ${targetReadinessSummary(report)}`);
+  console.log(`\n${report.displayName} — ${companionReadinessSummary(report)}`);
   if (report.defaultModel) console.log(`  default model: ${report.defaultModel.model || 'inherit'} (${report.defaultModel.source})`);
   if (report.binary) console.log(`  binary: ${report.binary}${report.version ? ` (${report.version})` : ''}`);
   for (const b of report.blockers || []) console.log(`  ✗ ${b.message}`);
@@ -164,7 +164,7 @@ function modelIntent(model) {
     : model?.action === 'clear' ? 'model inherit (clear saved default)' : 'model settings preserved';
 }
 
-// Opt-in smoke: one controller-owned execution, with a two-minute budget.
+// Opt-in smoke: one controller-owned job, with a two-minute budget.
 export async function runSmoke(id, env, controllerOptions = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'agent-onboard-smoke-')));
   const controller = new Controller({ env, records: new Records({ dir: join(dir, 'state') }),
@@ -172,13 +172,13 @@ export async function runSmoke(id, env, controllerOptions = {}) {
     ...controllerOptions });
   const abort = new AbortController();
   const timer = controller.clock.setTimeout(() => abort.abort(), 120_000);
-  const owner = `onboard-${process.pid}`;
-  let executionId;
+  const thread = `onboard-${process.pid}`;
+  let jobId;
   try {
-    ({ executionId } = await controller.send({ owner, provider: id, cwd: dir,
+    ({ jobId } = await controller.send({ thread, companion: id, cwd: dir,
       text: 'Reply with the single word: ready', signal: abort.signal }));
-    await controller.wait({ owner, executionId, timeoutMs: 120_000, signal: abort.signal });
-    const result = controller.status({ executionId })?.result;
+    await controller.wait({ thread, jobId, timeoutMs: 120_000, signal: abort.signal });
+    const result = controller.status({ jobId })?.result;
     const message = result?.text?.trim() || '';
     return { supported: true, passed: result?.outcome === 'completed' && /^ready[.!]?$/i.test(message),
       detail: message || result?.detail || result?.outcome || 'smoke budget expired' };
@@ -186,18 +186,18 @@ export async function runSmoke(id, env, controllerOptions = {}) {
     return { supported: true, passed: false, detail: String(err.message || 'smoke failed').trim() };
   } finally {
     controller.clock.clearTimeout(timer);
-    if (executionId) await controller.cancel({ owner, executionId });
+    if (jobId) await controller.cancel({ thread, jobId });
     rmSync(dir, { recursive: true, force: true });
   }
 }
 const HELP = `agent-companion onboarding
 
-  node scripts/onboard.mjs --companion ${[...VALID_TARGET_OPTS].join('|')} [--host ${[...VALID_HOSTS].join('|')}]
+  node scripts/onboard.mjs --companion ${[...VALID_COMPANION_OPTS].join('|')} [--host ${[...VALID_HOSTS].join('|')}]
                            [--model <id|inherit>] [--set-default] [--yes] [--json] [--plan] [--smoke] [--no-companion-check]
   node scripts/onboard.mjs --list-companions [--json]
   node scripts/onboard.mjs --doctor [--json]
 
-Attach your companion. Supported now: ${new Intl.ListFormat('en').format([...TARGET_IDS])}. Onboarding never
+Attach your companion. Supported now: ${new Intl.ListFormat('en').format([...COMPANION_IDS])}. Onboarding never
 asks for or stores provider secrets — authenticate with the vendor tools.
 With no --companion, existing configuration is preserved. --companion none also preserves it.
 --plan previews selection and readiness without writes or smoke tasks.
@@ -218,16 +218,21 @@ async function main() {
   }
 
   const settings = options.plan ? previewDefaults({ env }) : migrateDefaults({ env });
-  const defaultCompanion = readDefaultTarget(env, console.warn, settings);
+  if (!options.plan) {
+    for (const { dir, host } of stateDirs(env)) {
+      if (options.host === 'both' || options.host === host || env.AGENT_COMPANION_HOME) new Records({ dir });
+    }
+  }
+  const defaultCompanion = readDefaultCompanion(env, console.warn, settings);
   const run = memoizeProbe(probeCommand);
-  const companions = inspectTargets({ env, run, configuredTarget: defaultCompanion.companion });
+  const companions = inspectCompanions({ env, run, configuredCompanion: defaultCompanion.companion });
   for (const [id, report] of Object.entries(companions)) {
-    report.capabilities = getTargetById(id).capabilities;
+    report.capabilities = getCompanionById(id).capabilities;
     report.defaultModel = readDefaultModel(id, env, console.warn, settings);
   }
   const configuration = inspectConfiguration(defaultCompanion, companions);
   let plan = planOnboard({ options, companions, configuration });
-  if (options.model !== undefined && plan.kind === 'error' && (!options.plan || options.listTargets || options.doctor)) {
+  if (options.model !== undefined && plan.kind === 'error' && (!options.plan || options.listCompanions || options.doctor)) {
     console.error(`[FAIL] ${plan.code}: ${plan.message}`);
     process.exit(2);
   }
@@ -241,24 +246,24 @@ async function main() {
   }
 
   // --list-companions: readiness for every supported companion.
-  if (options.listTargets) {
+  if (options.listCompanions) {
     if (options.json) {
       console.log(JSON.stringify({ defaultCompanion, companions }, null, 2));
     } else {
       console.log(`default companion: ${defaultCompanion.companion || 'unset'} (${defaultCompanion.source})`);
-      for (const r of Object.values(companions)) printTargetReport(r);
+      for (const r of Object.values(companions)) printCompanionReport(r);
     }
     process.exit(0);
   }
 
   if (options.plan) {
     if (plan.kind === 'error') console.error(`[FAIL] ${plan.code}: ${plan.message}`);
-    const ok = plan.kind !== 'error' && plan.kind !== 'ask' && (plan.kind !== 'chosen' || plan.ready || options.noTargetCheck);
+    const ok = plan.kind !== 'error' && plan.kind !== 'ask' && (plan.kind !== 'chosen' || plan.ready || options.noCompanionCheck);
     if (options.json) console.log(JSON.stringify({ ok, plan, model: plan.model ?? { requested: options.model ?? null, action: 'none', current: null, source: 'unset' }, configuration, companions }, null, 2));
     else {
       console.log(`Current companion: ${configuration.summary}`);
       console.log(`Plan: ${plan.kind === 'chosen' ? `${plan.writeDefault ? 'set default to' : 'check'} ${plan.id}; ${modelIntent(plan.model)}` : plan.message || 'preserve configuration'}`);
-      for (const report of Object.values(companions)) printTargetReport(report);
+      for (const report of Object.values(companions)) printCompanionReport(report);
     }
     process.exit(ok ? 0 : plan.kind === 'chosen' ? 3 : 2);
   }
@@ -266,12 +271,12 @@ async function main() {
   // Interactive companion selection when required and a tty is available.
   if (plan.kind === 'ask') {
     if (!process.stdin.isTTY) {
-      console.error(`[FAIL] no --companion given and not a tty; pass --companion ${[...TARGET_IDS].join('|')}|none.`);
+      console.error(`[FAIL] no --companion given and not a tty; pass --companion ${[...COMPANION_IDS].join('|')}|none.`);
       process.exit(2);
     }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     console.log('Select a companion:');
-    for (const r of Object.values(companions)) printTargetReport(r);
+    for (const r of Object.values(companions)) printCompanionReport(r);
     const ans = (await rl.question(`\nCompanion [${plan.candidates.join('/')}/none]: `)).trim().toLowerCase();
     let model;
     if (companions[ans]?.capabilities.modelSelection) {
@@ -280,7 +285,7 @@ async function main() {
     }
     rl.close();
     if (ans === 'none') plan = planOnboard({ options: { ...options, companion: ans }, companions, configuration });
-    else if (TARGET_IDS.has(ans)) plan = planOnboard({ options: { ...options, companion: ans, model, setDefault: true }, companions, configuration });
+    else if (COMPANION_IDS.has(ans)) plan = planOnboard({ options: { ...options, companion: ans, model, setDefault: true }, companions, configuration });
     else { console.error(`[FAIL] invalid selection: ${ans}`); process.exit(2); }
   }
 
@@ -320,18 +325,18 @@ async function main() {
     }
   }
 
-  if (plan.writeDefault && (report.ready || options.noTargetCheck) && smoke?.passed !== false) {
-    if (readDefaultTarget({ ...env, AGENT_COMPANION_DEFAULT_COMPANION: '' }).companion !== id) {
-      writeDefaultTarget(id);
+  if (plan.writeDefault && (report.ready || options.noCompanionCheck) && smoke?.passed !== false) {
+    if (readDefaultCompanion({ ...env, AGENT_COMPANION_DEFAULT_COMPANION: '' }).companion !== id) {
+      writeDefaultCompanion(id);
       wrote = true;
     }
     if (plan.model.action === 'set') writeDefaultModel(plan.model.requested, id);
     if (plan.model.action === 'clear') clearDefaultModel(id);
     wroteModel = plan.model.action !== 'none';
-    writeTargetChecks(Object.fromEntries(Object.entries(companions).map(([id, check]) =>
+    writeCompanionChecks(Object.fromEntries(Object.entries(companions).map(([id, check]) =>
       [id, { ...check, checkedAt: new Date().toISOString() }])));
   }
-  const current = inspectConfiguration(readDefaultTarget(env), companions);
+  const current = inspectConfiguration(readDefaultCompanion(env), companions);
   const defaultModel = readDefaultModel(id, env);
   const model = { ...plan.model, current: defaultModel.model, source: defaultModel.source };
   report.defaultModel = defaultModel;
@@ -339,16 +344,16 @@ async function main() {
     console.log(JSON.stringify({ ok: report.ready && smoke?.passed !== false, host: options.host, companion: id, wroteDefault: wrote, model, autoSelected: !!plan.autoSelected, configuration: current, report, smoke }, null, 2));
   } else {
     if (plan.autoSelected) console.log(`[OK] auto-selected the only ready companion: ${id}`);
-    printTargetReport(report);
+    printCompanionReport(report);
     if (wrote) console.log(`\n[OK] wrote default companion: ${id}`);
     if (wroteModel) console.log(plan.model.action === 'set' ? `[OK] wrote default model for ${id}: ${plan.model.requested}` : `[OK] cleared saved default model for ${id}`);
     if (!wrote && !wroteModel) console.log(`\n[INFO] configuration unchanged; companion: ${current.summary}.`);
-    if (!report.ready && options.noTargetCheck) console.log('[WARN] readiness deferred by --no-companion-check; companion is not ready.');
+    if (!report.ready && options.noCompanionCheck) console.log('[WARN] readiness deferred by --no-companion-check; companion is not ready.');
     if (!smoke) console.log('[INFO] live companion response remains unverified (no smoke requested).');
     if (smoke) console.log(`\nsmoke: ${smoke.supported ? (smoke.passed === null ? 'skipped' : smoke.passed ? 'passed' : 'failed') : 'unsupported'} — ${smoke.detail}`);
   }
 
-  if (smoke?.passed === false || (!report.ready && !options.noTargetCheck)) process.exit(3);
+  if (smoke?.passed === false || (!report.ready && !options.noCompanionCheck)) process.exit(3);
   process.exit(0);
 }
 

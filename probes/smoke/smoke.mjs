@@ -20,12 +20,12 @@ try {
   assert.equal(sent.ok, true, JSON.stringify(sent));
   assert.equal(sent.status, 'still_running');
   // Send returns only after native acknowledgement; history is already saved.
-  const execution = record('executions', sent.job_id);
-  assert.ok(execution.historyId);
-  assert.ok(execution.nativeTurnId);
+  const job = record('jobs', sent.job_id);
+  assert.ok(job.historyId);
+  assert.ok(job.nativeTurnId);
   const status = await bridge.tool('companion_status', { job_id: sent.job_id }, owner);
   assert.equal(status.job_id, sent.job_id);
-  assert.equal(status.native_refs.historyId, execution.historyId);
+  assert.equal(status.native_refs.historyId, job.historyId);
   const final = await bridge.wait(sent.job_id, owner);
   assert.equal(final.status, 'completed', JSON.stringify(final));
   assert.match(final.content, /BANANA/i);
@@ -33,7 +33,7 @@ try {
   assert.equal(final.meta.usage.source, 'codex-app-server');
   assert.ok(final.meta.usage.input_tokens > 0 && final.meta.usage.output_tokens > 0);
   const digest = await bridge.readResource(final.meta.digest_uri);
-  assert.ok(digest.includes(execution.historyId));
+  assert.ok(digest.includes(job.historyId));
   assert.match(digest, /BANANA/i);
   console.log('PASS: Codex dispatch, persisted native identity, usage, digest and verified exit');
 } finally { await bridge.stop(); }

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, execFileSync } from 'node:child_process';
-import { ROOT, readJSON, writeJSON, rows, log, sleep, pidRecords, processInfo, snapshot,
+import { fixtureExecutions, ROOT, readJSON, writeJSON, rows, log, sleep, pidRecords, processInfo, snapshot,
   cleanup, signalPID } from './common.mjs';
 import { scenarios } from './scenarios.mjs';
 import { prepare, hostEnv } from './runner.mjs';
@@ -103,7 +103,7 @@ async function verify() {
     const tools = await client.request('tools/list', {}).promise;
     assert.deepEqual(tools.result.tools.map(t => t.name), ['catalog', 'send', 'wait', 'stop']);
     await client.call('catalog', { thread: 'forged' }, null).promise;
-    assert.equal(fs.readdirSync(dir + '/executions').length, 0);
+    assert.equal(fs.readdirSync(fixtureExecutions(dir)).length, 0);
     const refused = await client.call('send', { cwd: dir + '/child-workspace', thread: 'forged' }, null).promise;
     assert.equal(refused.result.isError, true);
     assert.equal(refused.result.content[0].text, 'NATIVE_OWNER_REQUIRED');

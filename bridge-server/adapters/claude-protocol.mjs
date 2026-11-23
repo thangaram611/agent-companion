@@ -1,4 +1,4 @@
-import { resolveClaudePermission } from '../../lib/target-registry.mjs';
+import { resolveClaudePermission } from '../../lib/companion-registry.mjs';
 import { usageFromClaudeResult } from '../../lib/usage.mjs';
 import { appendProviderError } from '../provider-error.mjs';
 

@@ -69,18 +69,18 @@ export function uiFixture(t) {
   const rateLimit = 'Failed to get response from the AI model; retried 5 times (total retry wait time: 5.00 seconds) Last error: 429 FIXTURE overloaded: HTTP 429';
 
   const locator = (companion, path, sessionId) => ({ companion, kind: 'jsonl', path, sessionId });
-  const execution = fields => ({ generation: 1, state: 'closed', writer: 'controller', ...fields });
+  const record = fields => ({ generation: 1, state: 'closed', writer: 'controller', ...fields });
   const records = {
     [claude]: [
-      [execution({ executionId: 'run-1', owner: 'th-run', hostSessionId: 'lead-1', provider: 'codex', cwd: repo, text: 'Step 1b-2 of the live-view plan',
+      [record({ jobId: 'run-1', thread: 'th-run', hostSessionId: 'lead-1', companion: 'codex', cwd: repo, text: 'Step 1b-2 of the live-view plan',
         startedAt: NOW - 4 * M - 12 * S, state: 'running', processes: { pid: 4242 }, historyId: 'thread-run', nativeTurnId: 'turn-2',
         effectiveModel: 'gpt-6-astra', effectiveEffort: 'high', transcript: locator('codex', running, 'thread-run'),
         interventionModes: { default: 'steer', steer: true, queue: 'bridge', interrupt: true }, interventions: [], turns: [], nativeTurnIds: ['turn-2'],
         progress: { activeCommand: 'node --test lib/digest.test.mjs', partialText: '', lastActivityAt: NOW - 18 * S } })],
-      [execution({ executionId: 'op-1', owner: 'th-op', hostSessionId: 'lead-1', provider: 'opencode', cwd: join(root, 'work/hermes'), text: 'Triage the restore spec',
+      [record({ jobId: 'op-1', thread: 'th-op', hostSessionId: 'lead-1', companion: 'opencode', cwd: join(root, 'work/hermes'), text: 'Triage the restore spec',
         startedAt: NOW - 41 * S, state: 'running', processes: { pid: 4343 }, effectiveModel: { providerID: 'opencode', id: 'flint-40b-free', variant: 'default' },
         transcript: null, progress: { partialText: 'Reading the restore spec', lastActivityAt: NOW - 2 * S } })],
-      [execution({ executionId: 'done-1', owner: 'th-done', hostSessionId: 'lead-2', provider: 'claude', cwd: web, text: 'Review the auth middleware for CSRF gaps and fix what you find.',
+      [record({ jobId: 'done-1', thread: 'th-done', hostSessionId: 'lead-2', companion: 'claude', cwd: web, text: 'Review the auth middleware for CSRF gaps and fix what you find.',
         startedAt: NOW - 12 * M - 362 * S, historyId: 'sess-done', nativeTurnId: 'u1', transcript: locator('claude', done, 'sess-done') }),
       { outcome: 'completed', cause: 'native_complete', finishedAt: NOW - 12 * M, text: answer, usage: { source: 'claude-result', total_tokens: 412_000 },
         effectiveModel: 'opus-5.5', effectiveEffort: 'xhigh', workSummary: {
@@ -88,14 +88,14 @@ export function uiFixture(t) {
           commands: [{ command: 'rg -n csrf src', exitCode: 0, status: 'completed' }, { command: 'npm test', exitCode: 1, status: 'failed' }, { command: 'npm run lint', exitCode: 0, status: 'completed' }],
           commandsOmitted: 0, edits: [{ path: join(web, 'src/auth.ts'), change: 'update' }], editsOmitted: 0, errors: [], errorsOmitted: 0,
           worktree: { available: true, files: [{ path: 'src/auth.ts', added: 18, deleted: 6 }, { path: 'src/auth.test.ts', added: 40, deleted: 0 }], filesOmitted: 0 } } }],
-      [execution({ executionId: 'old-1', owner: 'th-old', hostSessionId: 'lead-1', provider: 'antigravity', cwd: join(root, 'work/notes-app'), text: 'Scenario', startedAt: NOW - 2 * 24 * 60 * M }),
+      [record({ jobId: 'old-1', thread: 'th-old', hostSessionId: 'lead-1', companion: 'antigravity', cwd: join(root, 'work/notes-app'), text: 'Scenario', startedAt: NOW - 2 * 24 * 60 * M }),
         { outcome: 'completed', finishedAt: NOW - 2 * 24 * 60 * M + M, text: 'ok' }],
     ],
     [codex]: [
-      [execution({ executionId: 'fail-1', owner: 'th-fail', hostSessionId: 'root-1', provider: 'copilot', cwd: join(root, 'work/scratch'), text: 'Reply with the word FAILURE.',
+      [record({ jobId: 'fail-1', thread: 'th-fail', hostSessionId: 'root-1', companion: 'copilot', cwd: join(root, 'work/scratch'), text: 'Reply with the word FAILURE.',
         startedAt: NOW - 61 * M - 10 * S, historyId: '2bd1aa29-799a-478e-beb6-0108984d8d63', effectiveModel: 'fixture-mock',
         transcript: locator('copilot', failed, '2bd1aa29-799a-478e-beb6-0108984d8d63') }),
-      { outcome: 'failed', cause: 'provider_error', detail: 'rate_limit', finishedAt: NOW - 61 * M, text: rateLimit, workSummary: {
+      { outcome: 'failed', cause: 'companion_error', detail: 'rate_limit', finishedAt: NOW - 61 * M, text: rateLimit, workSummary: {
         transcript: { companion: 'copilot', path: failed, version: { version: 1 }, recognized: true, unrecognized: 0 },
         commands: [], commandsOmitted: 0, edits: [], editsOmitted: 0, errors: [{ type: 'rate_limit', message: rateLimit }], errorsOmitted: 0,
         worktree: { available: false, reason: 'not_a_git_repository', files: [], filesOmitted: 0 } } }],
@@ -105,11 +105,11 @@ export function uiFixture(t) {
   const titles = { 'run-1': 'Step 1b-2: digest on demand', 'op-1': 'Restore spec triage', 'done-1': 'Review auth middleware',
     'old-1': 'Antigravity scenario', 'fail-1': 'rate limit probe' };
   for (const [dir, jobs] of Object.entries(records)) for (const [record, result] of jobs) {
-    json(join(dir, 'executions', `${record.executionId}.json`), { ...record, owner: record.owner });
-    json(join(dir, 'conversations', `${record.owner}.json`), { owner: record.owner, generation: 1, executionId: record.executionId,
-      provider: record.provider, cwd: record.cwd, title: titles[record.executionId],
+    json(join(dir, 'jobs', `${record.jobId}.json`), record);
+    json(join(dir, 'threads', `${record.thread}.json`), { thread: record.thread, generation: 1, jobId: record.jobId,
+      companion: record.companion, cwd: record.cwd, title: titles[record.jobId],
       lead: { host: dir === claude ? 'claude' : 'codex', session: record.hostSessionId, agent: null } });
-    if (result) json(join(dir, 'results', `${record.executionId}.json`), { owner: record.owner, executionId: record.executionId, generation: 1, ...result });
+    if (result) json(join(dir, 'results', `${record.jobId}.json`), { thread: record.thread, jobId: record.jobId, companion: record.companion, generation: 1, ...result });
   }
   const dirs = [{ host: 'claude', dir: claude }, { host: 'codex', dir: codex }];
   return {
@@ -117,8 +117,8 @@ export function uiFixture(t) {
     model: ({ size = { columns: 150, rows: 26 }, now = () => NOW, defaults } = {}) =>
       new Model({ env, source: createJobSource({ dirs, env, alive: () => true }), now, size, ...(defaults ? { defaults } : {}) }),
     append: records => appendFileSync(running, jsonl(records)),
-    setExecution: (id, change) => {
-      const path = join(claude, 'executions', `${id}.json`);
+    setJob: (id, change) => {
+      const path = join(claude, 'jobs', `${id}.json`);
       const record = JSON.parse(readFileSync(path, 'utf8'));
       json(path, { ...record, ...change(record) });
     },

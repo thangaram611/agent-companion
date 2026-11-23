@@ -12,7 +12,7 @@ import { companionEnv } from '../../probes/free-backends/run.mjs';
 import { createScrubber } from '../../probes/acp-record/scrub.mjs';
 import { exerciseScenario, recordCopilot, SCENARIOS } from '../../probes/acp-record/record-copilot.mjs';
 import { ProcessSupervisor, pidAlive } from '../controller/process-supervisor.mjs';
-import { getTargetById } from '../../lib/target-registry.mjs';
+import { getCompanionById } from '../../lib/companion-registry.mjs';
 import { AcpAdapter } from './acp.mjs';
 import { writeDefaultModel, clearDefaultModel } from '../../lib/state.mjs';
 
@@ -62,13 +62,13 @@ function recording(t, selected = SCENARIOS, extraEnv = {}, options = {}) {
 function replay(t, fixture, { shiftIds = false, stderr = [] } = {}) {
   const dir = scratch();
   const [header] = lines(fixture);
-  const env = companionEnv({ root: dir, target: 'copilot', proxyUrl: 'http://127.0.0.1:11434', source: { PATH: process.env.PATH } });
+  const env = companionEnv({ root: dir, companion: 'copilot', proxyUrl: 'http://127.0.0.1:11434', source: { PATH: process.env.PATH } });
   env.COPILOT_BIN = fakeAcpAgentBin(dir);
   env.ACP_FAKE_REPLAY = fixture;
   if (header.model === null) delete env.COPILOT_MODEL;
   else env.COPILOT_MODEL = header.model;
   const supervisor = supervisorFor(t, {}, stderr);
-  const adapter = new AcpAdapter(getTargetById('copilot'), { env, log() {} });
+  const adapter = new AcpAdapter(getCompanionById('copilot'), { env, log() {} });
   if (shiftIds) {
     const start = adapter.start.bind(adapter);
     adapter.start = async options => { const result = await start(options); adapter.connection.requestId += 100; return result; };
@@ -96,7 +96,7 @@ test('Antigravity inherits the native model on new and loaded sessions when rout
     ];
     writeFileSync(path, frames.map(frame => JSON.stringify(frame)).join('\n'));
     const env = { ...process.env, ANTIGRAVITY_BIN: fakeAcpAgentBin(dir), ACP_FAKE_REPLAY: path };
-    const adapter = new AcpAdapter(getTargetById('antigravity'), { env, log() {} });
+    const adapter = new AcpAdapter(getCompanionById('antigravity'), { env, log() {} });
     try {
       await adapter.start({ cwd: dir, supervisor: supervisorFor(t) });
       const history = await adapter.openHistory({ historyId });

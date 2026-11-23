@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import pkg from './package.json' with { type: 'json' };
 import { log } from './validation.mjs';
 import { migrateDefaults } from '../lib/state.mjs';
-import { defaultTargetId, listTargetIds } from '../lib/target-registry.mjs';
+import { defaultCompanionId, listCompanionIds } from '../lib/companion-registry.mjs';
 import { tools, dispatch, createBridgeController, recoverController, listDigestResources, listDigestResourceTemplates, readDigestResource } from './tools.mjs';
 
 const controller = createBridgeController();
@@ -39,7 +39,7 @@ export const mcp = new Server({ name: 'agent-bridge', version: pkg.version }, {
     'Pass the returned thread to companion_send for a follow-up; new text on a running thread is an intervention (mode steer, queue or interrupt). ' +
     'You may end your turn: the result reaches you through the completion hook, or companion_wait blocks for it. ' +
     'companion_status with no arguments lists your threads; companion_cancel stops a job. ' +
-    `Default companion: ${defaultTargetId() || 'unset'}. Supported companions: ${listTargetIds().join(', ')}.`,
+    `Default companion: ${defaultCompanionId() || 'unset'}. Supported companions: ${listCompanionIds().join(', ')}.`,
 });
 
 mcp.setRequestHandler(ListResourcesRequestSchema, async () => ({

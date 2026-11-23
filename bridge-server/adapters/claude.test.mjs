@@ -13,15 +13,15 @@ import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
 import { bounded } from '../controller/clock.mjs';
 import { ClaudeAdapter, claudeTranscriptExists } from './claude.mjs';
-import { getTargetById } from '../../lib/target-registry.mjs';
+import { getCompanionById } from '../../lib/companion-registry.mjs';
 
 for (const scenario of ['errors-only', 'early-error']) test(`Claude failure explanation survives ${scenario}`, async t => {
   const h = setup(t, { scenario });
   const controller = new Controller({ env: h.env, records: new Records({ dir: join(h.dir, 'records') }), createSupervisor: h.createSupervisor,
     providers: { claude: { enabled: true, ready: true, create: () => h.create() } } });
   t.after(() => { for (const a of controller.live.values()) clearTimeout(a.timer); });
-  const sent = await controller.send({ owner: 'child', provider: 'claude', cwd: h.dir, text: 'hello' });
-  const result = sent.outcome ? sent : await controller.wait({ owner: 'child', executionId: sent.executionId });
+  const sent = await controller.send({ thread: 'child', companion: 'claude', cwd: h.dir, text: 'hello' });
+  const result = sent.outcome ? sent : await controller.wait({ thread: 'child', jobId: sent.jobId });
   assert.equal(result.outcome, scenario === 'early-error' ? 'delivery_unknown' : 'failed');
   assert.equal(result.text, scenario === 'early-error' ? 'Provider unavailable before init' : 'alpha\n\nProvider overloaded Try again later');
   assert.doesNotMatch(JSON.stringify(result), /SECRET_/);
@@ -65,15 +65,15 @@ test('fresh send and cold follow-up use new processes, saved history, exact text
   const controller = new Controller({ env: h.env, records, createSupervisor: h.createSupervisor,
     providers: { claude: { enabled: true, ready: true, modelAllowed: () => true, create: () => h.create() } } });
   t.after(() => { for (const a of controller.live.values()) controller.clock.clearTimeout(a.timer); });
-  const send = (text, model, effort) => controller.send({ owner: 'child', provider: 'claude', cwd: h.dir, text, model, effort });
+  const send = (text, model, effort) => controller.send({ thread: 'child', companion: 'claude', cwd: h.dir, text, model, effort });
   const first = await send('exact\n  whitespace ');
   assert.equal(first.acknowledged, true);
-  const one = await controller.wait({ owner: 'child', executionId: first.executionId });
+  const one = await controller.wait({ thread: 'child', jobId: first.jobId });
   const second = await send('follow-up', 'haiku', 'low');
   assert.equal(second.selectedEffort, 'low');
   assert.equal(second.effectiveModel, 'claude-haiku-5-5');
   assert.equal(second.effectiveEffort, null);
-  const two = await controller.wait({ owner: 'child', executionId: second.executionId });
+  const two = await controller.wait({ thread: 'child', jobId: second.jobId });
   assert.notEqual(h.supervisors[0].child.pid, h.supervisors[1].child.pid);
   assert.equal(one.nativeRefs.historyId, two.nativeRefs.historyId);
   assert.equal(two.outcome, 'completed'); assert.equal(two.text, 'alpha');
@@ -126,8 +126,8 @@ test('a terminal before observe is retained; close is idempotent and steer is ab
   assert.equal(terminal.text, 'alpha'); assert.equal(snapshots.at(-1).partialText, 'alpha');
   assert.equal(adapter.steer, undefined);
   assert.deepEqual(adapter.capabilities, { followUp: true, modelSelection: true, loadsHistory: true,
-    interventions: getTargetById('claude').capabilities.interventions });
-  assert.equal(adapter.capabilities.interventions, getTargetById('claude').capabilities.interventions);
+    interventions: getCompanionById('claude').capabilities.interventions });
+  assert.equal(adapter.capabilities.interventions, getCompanionById('claude').capabilities.interventions);
   const closing = adapter.close(); assert.equal(adapter.close(), closing); await closing;
   await adapter.close(); await adapter.interrupt();
 });
@@ -372,10 +372,10 @@ for (const scenario of ['tool', 'stream', 'now', 'now-tool']) test(`controller w
     providers: { claude: { enabled: true, ready: true, create: () => adapter } },
     createSupervisor: () => ({ terminate: async () => ({ gone: true }) }) });
   t.after(() => { for (const a of controller.live.values()) clearTimeout(a.timer); });
-  const { executionId } = await controller.send({ owner: 'child', provider: 'claude', cwd: dir, text: 'task' });
-  await controller.intervene({ executionId, from: 'user', mode: scenario.startsWith('now') ? 'interrupt' : 'queue', text: 'B' });
-  const [input] = records.readExecution(executionId).interventions;
-  const id = uuid => uuid === 'task' ? executionId : uuid === 'message' ? input.id : uuid;
+  const { jobId } = await controller.send({ thread: 'child', companion: 'claude', cwd: dir, text: 'task' });
+  await controller.intervene({ jobId, from: 'user', mode: scenario.startsWith('now') ? 'interrupt' : 'queue', text: 'B' });
+  const [input] = records.readJob(jobId).interventions;
+  const id = uuid => uuid === 'task' ? jobId : uuid === 'message' ? input.id : uuid;
   // Both results can be in the same stdout chunk, before the loop resumes.
   // Measured on 2.1.325: usage is per turn, total_cost_usd is cumulative.
   const usage = [{ total_cost_usd: 0.00004, usage: { input_tokens: 200, output_tokens: 40 } }, { total_cost_usd: 0.00006, usage: { input_tokens: 100, output_tokens: 20 } }];
@@ -383,15 +383,15 @@ for (const scenario of ['tool', 'stream', 'now', 'now-tool']) test(`controller w
   for (const frame of measured[scenario]) adapter._message({ ...frame, ...(frame.type === 'result' ? usage[results++] : {}),
     ...(frame.command_uuid ? { command_uuid: id(frame.command_uuid) } : {}),
     ...(frame.user_message_uuids ? { user_message_uuids: frame.user_message_uuids.map(id) } : {}) });
-  const result = await waitForResult(controller, { owner: 'child', executionId });
+  const result = await waitForResult(controller, { thread: 'child', jobId });
   assert.equal(result.outcome, 'completed'); assert.equal(result.turns.length, scenario === 'tool' ? 1 : 2);
-  assert.deepEqual(result.nativeTurnIds, scenario === 'tool' ? [executionId] : [executionId, input.id]);
+  assert.deepEqual(result.nativeTurnIds, scenario === 'tool' ? [jobId] : [jobId, input.id]);
   assert.equal(result.interventions[0].state, 'answered');
   if (result.turns.length > 1) {
     assert.match(result.text, /^Task\n/); assert.match(result.text, /User's message/);
     assert.ok(Math.abs(result.turns[1].usage.cost - 0.00002) < 1e-12, 'second turn reports only its own cost');
     assert.ok(Math.abs(result.usage.cost - 0.00006) < 1e-12); assert.equal(result.usage.input_tokens, 300);
   } else assert.doesNotMatch(result.text, /Task/);
-  assert.deepEqual(result.turns.at(-1).messages, scenario === 'tool' ? [executionId, input.id] : [input.id]);
+  assert.deepEqual(result.turns.at(-1).messages, scenario === 'tool' ? [jobId, input.id] : [input.id]);
   if (scenario.startsWith('now')) assert.equal(result.turns[0].text, 'interrupted before answering');
 });

@@ -4,6 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const ROOT = path.dirname(fileURLToPath(import.meta.url));
+// This qualification harness keeps its own evidence outside the bridge store.
+export const fixtureExecutions = dir => dir + '/executions';
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export const readJSON = (file, fallback = null) => {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }

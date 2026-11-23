@@ -33,15 +33,15 @@ async function rows(ui: { drawn: () => Promise<unknown> }): Promise<string[]> {
   return root?.type === 'Box' ? root.children.map((row: unknown) => text(row).trimEnd()) : []
 }
 
-const execution = (id: string, fields: Record<string, unknown> = {}) => ({
-  executionId: id, owner: 't', provider: 'codex', state: 'running', startedAt: START, cwd: '/work',
+const record = (id: string, fields: Record<string, unknown> = {}) => ({
+  jobId: id, thread: 't', companion: 'codex', state: 'running', startedAt: START, cwd: '/work',
   interventions: [], interventionModes: { default: 'steer', steer: true, queue: 'bridge', interrupt: true }, progress: {}, ...fields,
 })
 
 test("a send from the main conversation lists its thread above the prompt: title, companion · model, what it does, elapsed", async ($, on) => {
   const files: Record<string, unknown> = {
-    [`${DIR}/conversations/t1.json`]: { owner: 't1', title: 'Step 3b-2: adapters' },
-    [`${DIR}/executions/j1.json`]: execution('j1', { effectiveModel: 'gpt-6-astra', effortOverride: 'max',
+    [`${DIR}/threads/t1.json`]: { thread: 't1', title: 'Step 3b-2: adapters' },
+    [`${DIR}/jobs/j1.json`]: record('j1', { effectiveModel: 'gpt-6-astra', effortOverride: 'max',
       progress: { activeCommand: ['/bin/zsh', '-lc', 'node --test opencode.test.mjs'] } }),
   }
   const { clock, fs } = setup(on, files, [['t1', 'j1']], START + 400_000)
@@ -62,11 +62,11 @@ test("a send from the main conversation lists its thread above the prompt: title
 
 test("the person's queued message replaces the live line, titles line up, and an ended thread leaves the band", async ($, on) => {
   const files: Record<string, unknown> = {
-    [`${DIR}/executions/j3.json`]: execution('j3', { provider: 'claude', effectiveModel: 'opus-5.5', text: 'Second opinion on schema\nwith detail',
+    [`${DIR}/jobs/j3.json`]: record('j3', { companion: 'claude', effectiveModel: 'opus-5.5', text: 'Second opinion on schema\nwith detail',
       interventionModes: { default: 'queue', steer: false, queue: 'native', interrupt: true },
       interventions: [{ id: 'm1', from: 'user', mode: 'queue', state: 'delivered', text: 'also check the schema', at: START }],
       progress: { activity: 'thinking' } }),
-    [`${DIR}/executions/j4.json`]: execution('j4', { provider: 'opencode', text: 'Probe', progress: { partialText: 'Reading' } }),
+    [`${DIR}/jobs/j4.json`]: record('j4', { companion: 'opencode', text: 'Probe', progress: { partialText: 'Reading' } }),
   }
   const { clock } = setup(on, files, [['t3', 'j3'], ['t4', 'j4']], START + 125_000)
   // A subagent's send is listed as the main conversation's are.
@@ -78,8 +78,8 @@ test("the person's queued message replaces the live line, titles line up, and an
     'Second opinion on schema  claude · opus-5.5 · ◌ your message queued · 2:06',
     'Probe                     opencode · responding · 2:06',
   ])
-  files[`${DIR}/results/j3.json`] = { executionId: 'j3', outcome: 'failed', finishedAt: START + 62_000 }
-  files[`${DIR}/results/j4.json`] = { executionId: 'j4', outcome: 'completed', finishedAt: START + 62_000 }
+  files[`${DIR}/results/j3.json`] = { jobId: 'j3', outcome: 'failed', finishedAt: START + 62_000 }
+  files[`${DIR}/results/j4.json`] = { jobId: 'j4', outcome: 'completed', finishedAt: START + 62_000 }
   await clock.advance(1000)
   await ui.redraw()
   expect(await rows(ui)).toEqual([])
@@ -88,8 +88,8 @@ test("the person's queued message replaces the live line, titles line up, and an
 
 test('the band draws nothing with no thread running, yields to a survey, and cuts rows to its columns', async ($, on) => {
   const files: Record<string, unknown> = {
-    [`${DIR}/conversations/t5.json`]: { owner: 't5', title: 'Step 3b-2: adapters' },
-    [`${DIR}/executions/j5.json`]: execution('j5', { progress: { activeCommand: 'npm test -- --reporter spec' }, effectiveModel: 'gpt-6-astra' }),
+    [`${DIR}/threads/t5.json`]: { thread: 't5', title: 'Step 3b-2: adapters' },
+    [`${DIR}/jobs/j5.json`]: record('j5', { progress: { activeCommand: 'npm test -- --reporter spec' }, effectiveModel: 'gpt-6-astra' }),
   }
   const { clock, fs } = setup(on, files, [['t5', 'j5']])
   const empty = await $.ui.mount(band())

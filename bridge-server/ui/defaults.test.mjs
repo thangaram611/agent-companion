@@ -199,14 +199,14 @@ registerHooks({ resolve(id, ctx, next) {
   }
 });
 
-test('latest reported execution across both hosts supplies model, effort and age; an override isolates both hosts', async t => {
+test('latest reported job across both hosts supplies model, effort and age; an override isolates both hosts', async t => {
   const h = fixture(t);
   const now = Date.now();
-  const record = (dir, provider, msAgo, values) => put(join(dir, 'executions', provider + '-' + msAgo + '.json'),
-    JSON.stringify({ provider, startedAt: now - msAgo, ...values }));
+  const record = (dir, companion, msAgo, values) => put(join(dir, 'jobs', companion + '-' + msAgo + '.json'),
+    JSON.stringify({ companion, startedAt: now - msAgo, ...values }));
   for (const id of ['claude', 'copilot', 'antigravity']) {
     record(companionHomeDir('claude', h.env), id, 500_000, { effectiveModel: 'old', effectiveEffort: 'old' });
-    put(join(companionHomeDir('claude', h.env), 'executions', 'damaged.json'), '{');
+    put(join(companionHomeDir('claude', h.env), 'jobs', 'damaged.json'), '{');
     record(companionHomeDir('codex', h.env), id, 120_000, { effectiveModel: 'latest', effectiveEffort: id === 'claude' ? null : 'high',
       modelOverride: 'requested', effortOverride: 'requested' });
     record(companionHomeDir('claude', h.env), id, 0, { modelOverride: 'never-reported' });
@@ -252,7 +252,7 @@ test('local and native refusals preserve the settings file and both legacy confl
   paths.forEach((path, i) => put(path, 'legacy-' + i));
   await assert.rejects(h.run({ companion: 'codex', model: 'configured-model', effort: 'ultra' }), /not valid/);
   assert.equal(existsSync(h.file), false);
-  await h.run({ target: 'opencode' });
+  await h.run({ defaultCompanion: 'opencode' });
   const state = paths.concat(h.file);
   const snapshot = () => state.map(path => [statSync(path).ino, readFileSync(path, 'utf8')]);
   const before = snapshot();
@@ -284,7 +284,7 @@ test('lists both hosts and paths for each migration conflict and resolves only t
   assert.match(text, /Choose with agent-companion defaults copilot model=<id>/);
   await h.run({ companion: 'copilot', effort: 'high' });
   assert.ok(paths.flat().every(existsSync));
-  await h.run({ target: 'claude' });
+  await h.run({ defaultCompanion: 'claude' });
   assert.ok(paths[0].every(path => !existsSync(path)));
   assert.ok(paths[1].every(existsSync));
   assert.deepEqual((await h.run({ companion: 'copilot', model: 'inherit' })).conflicts, []);

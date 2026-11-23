@@ -12,17 +12,17 @@ const pane = (bodyRows = 18, bodyColumns = 64, isFocused = false) => ({
   plugin: 'agent-companion', surface: 'terminal' as const, component: 'Pane' as const, requestId: 'companions',
   props: { title: 'Companions', isFocused, bodyColumns, placement: 'dock' as const, scroll: { offset: 0, bodyRows }, view: {} },
 })
-const execution = (id: string, fields: Record<string, unknown> = {}) => ({
-  executionId: id, owner: 'a', provider: 'codex', state: 'running', startedAt: START, cwd: '/work',
+const record = (id: string, fields: Record<string, unknown> = {}) => ({
+  jobId: id, thread: 'a', companion: 'codex', state: 'running', startedAt: START, cwd: '/work',
   interventions: [], interventionModes: MODES, progress: {}, ...fields,
 })
 // Thread records naming each thread's title, as the bridge writes them.
 const titled = (titles: Record<string, string>) => Object.fromEntries(Object.entries(titles).map(([thread, title]) =>
-  [`${DIR}/conversations/${thread}.json`, { owner: thread, title }]))
+  [`${DIR}/threads/${thread}.json`, { thread, title }]))
 
 // What `launch-ui.sh jobs` prints for a session: each thread's newest job
 // (bridge-server/ui/jobs.mjs's sessionJobs), and the ids of its other jobs.
-type Listed = { jobs: { thread: string; title: string; status: string; execution: unknown; result: unknown }[]; older: string[] }
+type Listed = { jobs: { thread: string; title: string; status: string; record: unknown; result: unknown }[]; older: string[] }
 type Run = { exitCode: number; stdout: string; stderr: string }
 
 // The engine beneath the mod: the bridge's records from memory (`reads` counts
@@ -111,10 +111,10 @@ async function screen(ui: { drawn: () => Promise<unknown> }): Promise<string> {
 test("the list: this session's threads as cards, the main conversation's included, running first, and a card opens its job", async ($, on) => {
   const files: Record<string, unknown> = {
     ...titled({ a1: 'Step 3b-2: adapters', a2: 'Review auth middleware', a3: 'Second opinion on schema' }),
-    [`${DIR}/executions/j1.json`]: execution('j1', { effectiveModel: 'gpt-6-astra', progress: { activeCommand: ['/bin/zsh', '-lc', 'node --test opencode.test.mjs'] } }),
-    [`${DIR}/executions/j2.json`]: execution('j2', { provider: 'opencode', startedAt: START + 100_000 }),
-    [`${DIR}/results/j2.json`]: { executionId: 'j2', outcome: 'completed', finishedAt: START + 138_000 },
-    [`${DIR}/executions/j3.json`]: execution('j3', { provider: 'claude', startedAt: START + 275_000, interventionModes: { default: 'queue', queue: 'native', interrupt: true },
+    [`${DIR}/jobs/j1.json`]: record('j1', { effectiveModel: 'gpt-6-astra', progress: { activeCommand: ['/bin/zsh', '-lc', 'node --test opencode.test.mjs'] } }),
+    [`${DIR}/jobs/j2.json`]: record('j2', { companion: 'opencode', startedAt: START + 100_000 }),
+    [`${DIR}/results/j2.json`]: { jobId: 'j2', outcome: 'completed', finishedAt: START + 138_000 },
+    [`${DIR}/jobs/j3.json`]: record('j3', { companion: 'claude', startedAt: START + 275_000, interventionModes: { default: 'queue', queue: 'native', interrupt: true },
       interventions: [{ id: 'm1', from: 'user', mode: 'queue', state: 'delivered', text: 'also check the schema', at: START }] }),
   }
   const seen = engine(on, files, { a2: 'j2', a1: 'j1', a3: 'j3' }, START + 400_000)
@@ -169,13 +169,13 @@ test("a card shows its job: labels, folding, pending, the live line last; '← j
     { id: 'c:3', turnId: turn, at, kind: 'assistant', text: 'The steer test fails because the fake server never\nreports idle.' },
     { id: 'c:4', turnId: turn, at, kind: 'user', text: 'Lead steer.' },
   ]
-  const running = execution('j1', { effectiveModel: 'gpt-6-astra', effortOverride: 'max', progress: { activeCommand: 'node --test opencode.test.mjs' },
+  const running = record('j1', { effectiveModel: 'gpt-6-astra', effortOverride: 'max', progress: { activeCommand: 'node --test opencode.test.mjs' },
     interventions: [{ id: 'l0', from: 'caller', mode: 'steer', state: 'joined', text: 'Lead steer.', at: START },
       { id: 'u1', from: 'user', mode: 'queue', state: 'accepted', text: 'also check the schema', at: START + 1 }] })
-  const seen = engine(on, { ...titled({ a1: 'Step 3b-2: adapters', a2: 'Other' }), [`${DIR}/executions/j1.json`]: running,
-    [`${DIR}/executions/j2.json`]: execution('j2') }, { a1: 'j1', a2: 'j2' }, START + 400_000)
+  const seen = engine(on, { ...titled({ a1: 'Step 3b-2: adapters', a2: 'Other' }), [`${DIR}/jobs/j1.json`]: running,
+    [`${DIR}/jobs/j2.json`]: record('j2') }, { a1: 'j1', a2: 'j2' }, START + 400_000)
   const children = follows(on, {
-    j1: { lines: [{ job: { status: 'running', execution: running, result: null, branch: 'feat/claude-pane' } },
+    j1: { lines: [{ job: { status: 'running', record: running, result: null, branch: 'feat/claude-pane' } },
       { turn: { ids: items.map(item => item.id), earlier: 3, labels: { 'c:1': 'task', 'c:4': 'lead' }, taken: ['l0'], located: true, format: { version: '0.169.0', detail: 'native transcript' } }, items }] },
   })
   await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work' })
@@ -238,15 +238,15 @@ test("a card shows its job: labels, folding, pending, the live line last; '← j
 })
 
 test('an ended job opens on its outcome, and its child exits after the final read without being started again', { timeoutMs: 30_000 }, async ($, on) => {
-  const done = execution('j2', { provider: 'claude', state: 'closed', startedAt: START, cwd: '/work/web' })
-  const result = { executionId: 'j2', outcome: 'completed', finishedAt: START + 38_000, text: 'Added the CSRF guard and its tests.\nOne unrelated date test still fails.',
+  const done = record('j2', { companion: 'claude', state: 'closed', startedAt: START, cwd: '/work/web' })
+  const result = { jobId: 'j2', outcome: 'completed', finishedAt: START + 38_000, text: 'Added the CSRF guard and its tests.\nOne unrelated date test still fails.',
     effectiveModel: 'opus-5.5', workSummary: { commands: [{ command: 'npm test', exitCode: 1, status: 'failed' }, { command: 'rg csrf', exitCode: 0 }], commandsOmitted: 0,
       edits: [], errors: [], worktree: { available: true, files: [{ path: 'src/auth.ts', added: 18, deleted: 6 }], filesOmitted: 0 } } }
   const items = [{ id: 'c:1', kind: 'user', text: 'Review the auth middleware.' }, { id: 'c:2', kind: 'assistant', text: result.text }]
-  const seen = engine(on, { ...titled({ a2: 'Review auth middleware' }), [`${DIR}/executions/j2.json`]: done, [`${DIR}/results/j2.json`]: result },
+  const seen = engine(on, { ...titled({ a2: 'Review auth middleware' }), [`${DIR}/jobs/j2.json`]: done, [`${DIR}/results/j2.json`]: result },
     { a2: 'j2' }, START + 600_000)
   const children = follows(on, {
-    j2: { exits: true, lines: [{ job: { status: 'completed', execution: done, result, branch: 'auth-guard' } },
+    j2: { exits: true, lines: [{ job: { status: 'completed', record: done, result, branch: 'auth-guard' } },
       { turn: { ids: ['c:1', 'c:2'], earlier: 0, labels: { 'c:1': 'task' }, taken: [], located: true, format: { version: '2.1.325', detail: 'native transcript' } }, items }] },
   })
   await $.tool.call({ tool: SEND, task: 'review', cwd: '/work/web' })
@@ -294,13 +294,13 @@ test('/companion opens the pane at any width with the keys, no background of its
 // rest ended a minute apart, newest first.
 const listed = (count: number, session = 'r'): Listed['jobs'] => Array.from({ length: count }, (_, i) => ({
   thread: `${session}${i + 1}`, title: `Job ${session}${i + 1}`, status: i ? 'completed' : 'running',
-  execution: execution(`${session}j${i + 1}`, { owner: `${session}${i + 1}`, hostSessionId: session, startedAt: START - i * 60_000 }),
-  result: i ? { executionId: `${session}j${i + 1}`, outcome: 'completed', finishedAt: START - i * 60_000 + 30_000 } : null,
+  record: record(`${session}j${i + 1}`, { thread: `${session}${i + 1}`, hostSessionId: session, startedAt: START - i * 60_000 }),
+  result: i ? { jobId: `${session}j${i + 1}`, outcome: 'completed', finishedAt: START - i * 60_000 + 30_000 } : null,
 }))
 
 test("the session's list is rebuilt from the records for its own id, nine cards and an older line, and a job started since joins it", async ($, on) => {
   const older = Array.from({ length: 14 }, (_, i) => `old${i}`)
-  const seen = engine(on, { [`${DIR}/executions/jn.json`]: execution('jn', { text: 'New probe', startedAt: START + 50_000 }) }, { n1: 'jn' }, START + 60_000, {
+  const seen = engine(on, { [`${DIR}/jobs/jn.json`]: record('jn', { text: 'New probe', startedAt: START + 50_000 }) }, { n1: 'jn' }, START + 60_000, {
     sessions: { [SESSION]: { jobs: listed(9), older }, other: { jobs: listed(1, 'x'), older: [] } } })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
@@ -368,7 +368,7 @@ test("keys: the first card, then a running job's box, take the ring, each switch
 })
 
 test('a failed list says why, and the jobs the mod saw start stay', async ($, on) => {
-  const seen = engine(on, { [`${DIR}/executions/j1.json`]: execution('j1', { text: 'Probe the bridge' }) }, { a1: 'j1' }, START + 60_000,
+  const seen = engine(on, { [`${DIR}/jobs/j1.json`]: record('j1', { text: 'Probe the bridge' }) }, { a1: 'j1' }, START + 60_000,
     { run: { exitCode: 1, stdout: '', stderr: 'agent-companion: Node.js 26 or newer is required.\n' } })
   await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work' })
   await seen.clock.advance(1000)
@@ -384,9 +384,9 @@ test('a failed list says why, and the jobs the mod saw start stay', async ($, on
 
 // A running job opened from its card, as its follow child reports it, for the box's tests.
 async function boxed($: any, on: On, fields: Record<string, unknown> = {}, options: { outcome?: Record<string, unknown> | null } = {}) {
-  const running = execution('j1', fields)
-  const seen = engine(on, { [`${DIR}/executions/j1.json`]: running }, { a1: 'j1' }, START + 60_000, options)
-  follows(on, { j1: { lines: [{ job: { status: 'running', execution: running, result: null, branch: 'main' } },
+  const running = record('j1', fields)
+  const seen = engine(on, { [`${DIR}/jobs/j1.json`]: running }, { a1: 'j1' }, START + 60_000, options)
+  follows(on, { j1: { lines: [{ job: { status: 'running', record: running, result: null, branch: 'main' } },
     { turn: { ids: [], earlier: 0, labels: {}, taken: [], located: true, format: { version: '0.169.0', detail: 'native transcript' } }, items: [] }] } })
   await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work' })
   await seen.clock.advance(1000)
@@ -417,8 +417,8 @@ test('the box grows with its draft as the prompt does, from two rows to a third 
 
 test("a message from you or the lead shows whole in the job's transcript; the task stays folded", async ($, on) => {
   const items = [{ id: 'u1', kind: 'user', text: 'Do the task.\nStep one.\nStep two.' }, { id: 'u2', kind: 'user', text: 'first line\n\nlast line' }]
-  const seen = engine(on, { [`${DIR}/executions/j1.json`]: execution('j1') }, { a1: 'j1' }, START + 60_000)
-  follows(on, { j1: { lines: [{ job: { status: 'running', execution: execution('j1'), result: null, branch: null } },
+  const seen = engine(on, { [`${DIR}/jobs/j1.json`]: record('j1') }, { a1: 'j1' }, START + 60_000)
+  follows(on, { j1: { lines: [{ job: { status: 'running', record: record('j1'), result: null, branch: null } },
     { turn: { ids: ['u1', 'u2'], earlier: 0, labels: { u1: 'task', u2: 'you' }, taken: [], located: true, format: { version: '0.169.0', detail: 'native transcript' } }, items }] } })
   await $.tool.call({ tool: SEND, task: 'do it', cwd: '/work' })
   await seen.clock.advance(1000)
@@ -453,7 +453,7 @@ test('a refused message keeps its draft and says why once', async ($, on) => {
 })
 
 test("the mode cycles through the companion's own modes from its default; a bridge that does not answer is said", async ($, on) => {
-  const { seen, ui, last } = await boxed($, on, { provider: 'claude', interventionModes: { default: 'queue', steer: false, queue: 'native', interrupt: true } }, { outcome: null })
+  const { seen, ui, last } = await boxed($, on, { companion: 'claude', interventionModes: { default: 'queue', steer: false, queue: 'native', interrupt: true } }, { outcome: null })
   // The mode shows on the row under the box, the box's own hint leaving the field its room.
   expect((await ui.find({ key: 'message' }))?.props).toMatchObject({ placeholder: 'Message Claude Code…', submitLabel: 'send' })
   expect((await last(2))[0]).toBe('mode: queue ▸  runs after the current turn  cancel job  b: ← jobs')
@@ -484,7 +484,7 @@ test('cancel asks once, sends no text, and no takes it back', async ($, on) => {
 })
 
 test('Copilot takes cancel only: no box and no mode, cancel kept', async ($, on) => {
-  const copilot = await boxed($, on, { provider: 'copilot', interventionModes: { default: null, steer: false, queue: false, interrupt: false } })
+  const copilot = await boxed($, on, { companion: 'copilot', interventionModes: { default: null, steer: false, queue: false, interrupt: false } })
   expect(await copilot.ui.find({ key: 'message' })).toBeUndefined()
   expect(await copilot.ui.find({ key: 'mode' })).toBeUndefined()
   expect(await copilot.last(3)).toEqual(['Copilot takes no messages while it works · cancel only', 'cancel job  b: ← jobs', 'esc returns to the chat'])

@@ -8,9 +8,9 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync, existsSy
 import { dispatch } from './tools.mjs';
 import { Records } from './controller/records.mjs';
 import { mcp } from './server.mjs';
-import { BASE_DIR, writeTargetChecks, writeDefaultTarget, writeDefaultModel, writeCompanionDefaults } from '../lib/state.mjs';
+import { BASE_DIR, writeCompanionChecks, writeDefaultCompanion, writeDefaultModel, writeCompanionDefaults } from '../lib/state.mjs';
 import { companionHomeDir } from '../lib/hosts/index.mjs';
-import { getTargetById } from '../lib/target-registry.mjs';
+import { getCompanionById } from '../lib/companion-registry.mjs';
 
 function snapshot(path) {
   if (!existsSync(path)) return null;
@@ -42,24 +42,24 @@ test('catalog is ownerless, spawns no process and leaves cold and populated stat
   assert.equal(claude.model.model, null);
   assert.match(claude.model.description, /model id or alias/i);
   assert.equal(claude.model.enumeration, 'not enumerable without a session');
-  for (const target of first.companions) {
-    for (const field of [target.model, target.effort]) {
+  for (const companion of first.companions) {
+    for (const field of [companion.model, companion.effort]) {
       assert.equal(field.saved, null);
       assert.equal(field.last_run, null);
     }
-    const capabilities = getTargetById(target.id).capabilities;
-    assert.deepEqual(target.capabilities, {
+    const capabilities = getCompanionById(companion.id).capabilities;
+    assert.deepEqual(companion.capabilities, {
       interventions: capabilities.interventions, resume: capabilities.resume, cancel: capabilities.cancel,
       modelSelection: capabilities.modelSelection, effortSelection: capabilities.effortSelection,
     });
-    assert.deepEqual(Object.keys(target.capabilities.interventions).sort(), ['default', 'interrupt', 'queue', 'steer']);
+    assert.deepEqual(Object.keys(companion.capabilities.interventions).sort(), ['default', 'interrupt', 'queue', 'steer']);
   }
   assert.equal(Object.hasOwn(claude, 'contractStatus'), false);
   assert.equal(first.companions[0].readiness.ready, null);
 
-  writeDefaultTarget('codex');
+  writeDefaultCompanion('codex');
   writeDefaultModel('gpt-5.4', 'codex');
-  writeTargetChecks({ claude: { ready: true, version: 'claude cached', checkedAt: '2026-11-09T00:00:00Z' }, codex: { ready: true, version: 'codex-cli cached', checkedAt: '2026-11-05T00:00:00Z' } });
+  writeCompanionChecks({ claude: { ready: true, version: 'claude cached', checkedAt: '2026-11-09T00:00:00Z' }, codex: { ready: true, version: 'codex-cli cached', checkedAt: '2026-11-05T00:00:00Z' } });
   mkdirSync(join(BASE_DIR, 'jobs'), { recursive: true });
   writeFileSync(join(BASE_DIR, 'jobs', 'legacy-active.json'), JSON.stringify({ jobId: 'legacy-active', claudeSessionId: 'catalog-owner-b', target: 'copilot',
     thread: 'old-thread', companionSessionId: 'old-session', promptId: 'old-prompt', status: 'running', startedAt: Date.now() }));
@@ -85,30 +85,30 @@ test('catalog is ownerless, spawns no process and leaves cold and populated stat
 });
 
 test('catalog reports effort levels and permissions from the execution environment without probing', async () => {
-  const { probePermission } = await import('../lib/target-diagnostics.mjs');
-  const { getTarget } = await import('../lib/target-registry.mjs');
+  const { probePermission } = await import('../lib/companion-diagnostics.mjs');
+  const { getCompanion } = await import('../lib/companion-registry.mjs');
   const env = { AGENT_COMPANION_CLAUDE_PERMISSION: 'plan', AGENT_COMPANION_DEFAULT_COMPANION: 'claude' };
   const catalog = JSON.parse((await dispatch({ name: 'companion_catalog' }, { controller: { env } })).content[0].text);
   assert.equal(catalog.default_companion.companion, 'claude');
-  for (const target of catalog.companions) {
-    assert.equal(target.effort.selection, true);
-    if (['codex', 'opencode', 'antigravity', 'copilot'].includes(target.id)) assert.match(target.effort.description, /[Ll]evels depend on the model and are checked at send/);
+  for (const companion of catalog.companions) {
+    assert.equal(companion.effort.selection, true);
+    if (['codex', 'opencode', 'antigravity', 'copilot'].includes(companion.id)) assert.match(companion.effort.description, /[Ll]evels depend on the model and are checked at send/);
     const native = {
       codex: /~\/\.codex\/config\.toml.*trusted project.*\.codex\/config\.toml/i,
       opencode: /configured default model/i,
       claude: /Claude Code account default/i,
       copilot: /account's default/i,
       antigravity: /account's default/i,
-    }[target.id];
-    for (const field of [target.model, target.effort]) {
+    }[companion.id];
+    for (const field of [companion.model, companion.effort]) {
       assert.match(field.description, /omitted.*saved default/i);
       assert.match(field.description, native);
     }
-    assert.match(target.effort.description, /follow-up keeps.*effort/i);
-    assert.deepEqual(target.effort.levels, target.id === 'claude' ? ['low', 'medium', 'high', 'xhigh', 'max'] : null);
-    assert.equal(typeof target.effort.description, 'string');
-    const { mode, source, risk } = probePermission(getTarget(target.id), env);
-    assert.deepEqual(target.permission, { mode, source, risk });
+    assert.match(companion.effort.description, /follow-up keeps.*effort/i);
+    assert.deepEqual(companion.effort.levels, companion.id === 'claude' ? ['low', 'medium', 'high', 'xhigh', 'max'] : null);
+    assert.equal(typeof companion.effort.description, 'string');
+    const { mode, source, risk } = probePermission(getCompanion(companion.id), env);
+    assert.deepEqual(companion.permission, { mode, source, risk });
   }
 });
 
@@ -118,10 +118,10 @@ test('catalog reads saved defaults and each last reported field across hosts, sk
   writeCompanionDefaults('codex', { model: 'saved-model', effort: 'medium' }, env);
   const now = Date.UTC(2026, 10, 18);
   t.mock.method(Date, 'now', () => now);
-  function record(host, provider, age, values) {
-    const dir = join(companionHomeDir(host, env), 'executions');
+  function record(host, companion, age, values) {
+    const dir = join(companionHomeDir(host, env), 'jobs');
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, provider + '-' + age + '.json'), JSON.stringify({ provider, startedAt: now - age, ...values }));
+    writeFileSync(join(dir, companion + '-' + age + '.json'), JSON.stringify({ companion, startedAt: now - age, ...values }));
   }
   for (const id of ['codex', 'opencode', 'copilot', 'antigravity', 'claude']) {
     record('codex', id, 3000, { effectiveModel: 'old', progress: { effectiveEffort: id === 'claude' ? null : 'high' } });
@@ -130,13 +130,13 @@ test('catalog reads saved defaults and each last reported field across hosts, sk
       terminal: { effectiveModel: id === 'opencode' ? { source: 'selected', providerID: 'opencode', id: 'opencode-reported', variant: 'default' } : id + '-reported' } });
     record('codex', id, 1000, { modelOverride: 'selected-only', effortOverride: 'selected-only' });
   }
-  const dir = join(companionHomeDir('codex', env), 'executions');
+  const dir = join(companionHomeDir('codex', env), 'jobs');
   writeFileSync(join(dir, 'broken.json'), '{');
   record('codex', 'codex', 0, { effectiveModel: 'inaccessible' });
-  const readExecution = Records.prototype.readExecution;
-  t.mock.method(Records.prototype, 'readExecution', function(id) {
+  const readJob = Records.prototype.readJob;
+  t.mock.method(Records.prototype, 'readJob', function(id) {
     if (id === 'codex-0') throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
-    return readExecution.call(this, id);
+    return readJob.call(this, id);
   });
   const before = snapshot(BASE_DIR);
   const catalog = JSON.parse((await dispatch({ name: 'companion_catalog' }, { controller: { env } })).content[0].text);

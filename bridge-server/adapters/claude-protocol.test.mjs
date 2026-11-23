@@ -2,7 +2,7 @@ import '../../test/sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { claudeArgs, claudeEnv, parseClaudeFrame, claudeTerminal } from './claude-protocol.mjs';
-import { CLAUDE_PERMISSION_MODES, resolveClaudePermission } from '../../lib/target-registry.mjs';
+import { CLAUDE_PERMISSION_MODES, resolveClaudePermission } from '../../lib/companion-registry.mjs';
 
 test('Claude argv preserves literal denies, uses one history flag and omits inherited model', () => {
   const args = claudeArgs({ historyId: 'fresh', resume: false, env: {} });

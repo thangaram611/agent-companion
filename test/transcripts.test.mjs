@@ -570,20 +570,20 @@ test('antigravity: only the last step marks a terminal error, including across c
   assert.equal(follower.read().items.find(i => i.id === errors[2].id)?.terminal, false);
 });
 
-test('antigravity: live rows, follow and digest show planner calls, system messages and only this execution', async t => {
+test('antigravity: live rows, follow and digest show planner calls, system messages and only this record', async t => {
   const { JobTranscript } = await import('../bridge-server/ui/follow.mjs');
   const { itemLines } = await import('../bridge-server/ui/rows.mjs');
   const { renderDigest } = await import('../lib/digest.mjs');
-  const execution = { executionId: 'job', state: 'running', provider: 'antigravity', startedAt: 1800000000123, text: 'Run echo FIXTURE-OK', transcript: fixture(t, 'antigravity') };
+  const record = { jobId: 'job', state: 'running', companion: 'antigravity', startedAt: 1800000000123, text: 'Run echo FIXTURE-OK', transcript: fixture(t, 'antigravity') };
   const result = { outcome: 'completed', finishedAt: 1800000012123, text: 'DONE' };
-  const job = { execution, result, provider: execution.provider, status: result.outcome };
+  const job = { record, result, companion: record.companion, status: result.outcome };
   const follow = new JobTranscript();
   const running = { ...job, result: null, status: 'running' };
   assert.ok(follow.poll(running, true));
   assert.equal(follow.select(running).list.at(-1).error.type, 'INVALID_ARGUMENT');
   assert.ok(follow.poll(job, true), 'arrival of the end time reselects the turn even without new SQLite rows');
   const { list } = follow.select(job);
-  assert.equal(list[0].text, execution.text);
+  assert.equal(list[0].text, record.text);
   assert.equal(list.at(-1).command, 'sleep 5');
   const rendered = list.flatMap(i => itemLines(i)).flatMap(line => [...line.segs, ...(line.right ?? [])]).map(([text]) => text).join(' ');
   for (const fragment of ['run_command', 'write_file', 'Checked notes.', 'Task finished.', 'cancelled', 'refused', 'exit 1']) assert.ok(rendered.includes(fragment), fragment);
@@ -592,7 +592,7 @@ test('antigravity: live rows, follow and digest show planner calls, system messa
   const planner = list.find(i => i.toolCalls?.length);
   const withAnswer = itemLines({ ...planner, text: result.text }, { answer: result.text });
   assert.ok(withAnswer.some(line => line.segs.some(([value]) => value === 'write_file')));
-  const digest = renderDigest(execution, result, {});
+  const digest = renderDigest(record, result, {});
   for (const fragment of ['run_command', 'write_file', 'Checked notes.', 'Task finished.', 'exit 1']) assert.ok(digest.includes(fragment), fragment);
   assert.doesNotMatch(digest, /Recovered|INVALID_ARGUMENT|UNAVAILABLE/);
 });

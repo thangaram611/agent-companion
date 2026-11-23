@@ -1,4 +1,4 @@
-// Read-only job list for the live view: every execution in both hosts' state
+// Read-only job list for the live view: every record in both hosts' state
 // directories with its thread's title and its lead session's name, and one
 // Claude session's threads for Claude Code's Companions pane (the `jobs` entry
 // at the end). Nothing here writes a record, renews a lease or
@@ -17,17 +17,17 @@ export { stateDirs };
 
 // A result is final. Without one, an active record whose recorded process is
 // gone (the bridge was killed before any handoff) is `unknown`, not running.
-export function statusOf(execution, result, alive) {
+export function statusOf(record, result, alive) {
   if (result) return result.outcome;
-  return ACTIVE.has(execution.state) && (!execution.processes?.pid || alive(execution.processes.pid)) ? 'running' : 'unknown';
+  return ACTIVE.has(record.state) && (!record.processes?.pid || alive(record.processes.pid)) ? 'running' : 'unknown';
 }
 // Nothing more will be written: a result, or a record no longer active. A
 // stopping job's tree dies before its result is written (`unknown` for that
 // gap, measured on a user cancel); its result and last transcript writes follow.
-export const hasEnded = job => Boolean(job.result) || !ACTIVE.has(job.execution.state);
+export const hasEnded = job => Boolean(job.result) || !ACTIVE.has(job.record.state);
 
 // Records by path, parsed again only when the file changed, so an unchanged
-// record keeps its identity. Executions change while running; results are
+// record keeps its identity. Jobs change while running; results are
 // immutable once written (`final`). An unreadable record reads as null.
 export function recordReader() {
   const files = new Map();
@@ -53,21 +53,21 @@ export function createJobSource({ env = process.env, dirs = stateDirs(env), aliv
       const jobs = [];
       for (const { host, dir, records } of stores) {
         let names = [];
-        try { names = readdirSync(join(dir, 'executions')); } catch { /* host never used */ }
+        try { names = readdirSync(join(dir, 'jobs')); } catch { /* host never used */ }
         for (const name of names) {
           if (!name.endsWith('.json') || name.startsWith('.')) continue;
           const id = name.slice(0, -5);
-          let execution, result, conversation;
+          let record, result, threadRecord;
           try {
-            execution = read(records.path('executions', id));
-            result = execution && read(records.path('results', id), true);
-            conversation = execution && read(records.path('conversations', execution.owner));
+            record = read(records.path('jobs', id));
+            result = record && read(records.path('results', id), true);
+            threadRecord = record && read(records.path('threads', record.thread));
           } catch { continue; }
-          if (!execution?.executionId) continue;
-          const status = statusOf(execution, result, alive);
+          if (!record?.jobId) continue;
+          const status = statusOf(record, result, alive);
           // `dir` is the owning host's state dir, where the job's inbox lives.
-          jobs.push({ key: `${host}:${id}`, host, dir, execution, result, conversation, status, provider: execution.provider,
-            project: execution.cwd ? basename(execution.cwd) : '', startedAt: execution.startedAt,
+          jobs.push({ key: `${host}:${id}`, host, dir, record, result, threadRecord, status, companion: record.companion,
+            project: record.cwd ? basename(record.cwd) : '', startedAt: record.startedAt,
             finishedAt: result?.finishedAt ?? null });
         }
       }
@@ -80,7 +80,7 @@ export function createJobSource({ env = process.env, dirs = stateDirs(env), aliv
 
 // The session a job's lead belongs to; a job from before threads has only the
 // bridge's host session.
-const leadSession = job => job.conversation?.lead?.session ?? job.execution.hostSessionId;
+const leadSession = job => job.threadRecord?.lead?.session ?? job.record.hostSessionId;
 
 // One Claude Code session's threads for its Companions pane (hooks/mod.ts),
 // which has no Node and rebuilds its list from them: the newest job of each
@@ -92,10 +92,10 @@ export function sessionJobs({ dir, sessionId, limit, env = process.env, alive = 
   const source = createJobSource({ dirs: [{ host: HOSTS.claude.id, dir }], env, alive });
   const all = source.list().filter(job => leadSession(job) === sessionId);
   const threads = new Set();
-  const jobs = all.filter(job => !threads.has(job.execution.owner) && threads.add(job.execution.owner)).slice(0, limit)
-    .map(job => ({ thread: job.execution.owner, title: source.caller(job).title, status: job.status, execution: job.execution, result: job.result }));
-  const listed = new Set(jobs.map(job => job.execution.executionId));
-  return { jobs, older: all.flatMap(job => listed.has(job.execution.executionId) ? [] : [job.execution.executionId]) };
+  const jobs = all.filter(job => !threads.has(job.record.thread) && threads.add(job.record.thread)).slice(0, limit)
+    .map(job => ({ thread: job.record.thread, title: source.caller(job).title, status: job.status, record: job.record, result: job.result }));
+  const listed = new Set(jobs.map(job => job.record.jobId));
+  return { jobs, older: all.flatMap(job => listed.has(job.record.jobId) ? [] : [job.record.jobId]) };
 }
 
 const firstLine = text => String(text ?? '').split('\n').map(line => line.trim()).find(Boolean) ?? '';
@@ -144,7 +144,7 @@ export function createCallers(env = process.env) {
     const session = leadSession(job);
     let lead = null;
     try { lead = session ? names[job.host]?.(session) ?? null : null; } catch { /* unreadable host files: no name */ }
-    return { title: job.conversation?.title || firstLine(job.execution.text), lead };
+    return { title: job.threadRecord?.title || firstLine(job.record.text), lead };
   };
 }
 

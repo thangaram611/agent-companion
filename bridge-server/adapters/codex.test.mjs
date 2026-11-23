@@ -14,8 +14,8 @@ import { Controller } from '../controller/controller.mjs';
 import { Records } from '../controller/records.mjs';
 import { inspectCodexAppServerInstallation } from '../../lib/codex-install.mjs';
 import { codexAppServerContract, CODEX_PINNED_VERSION } from '../../lib/codex-app-server-contract.mjs';
-import { writeTargetChecks } from '../../lib/state.mjs';
-import { getTargetById } from '../../lib/target-registry.mjs';
+import { writeCompanionChecks } from '../../lib/state.mjs';
+import { getCompanionById } from '../../lib/companion-registry.mjs';
 import { CodexAdapter, codexProvider } from './codex.mjs';
 
 const treeFile = fileURLToPath(new URL('../../test/controller/process-tree.mjs', import.meta.url));
@@ -126,10 +126,10 @@ if (process.argv[2] === 'app-server') {
     await Promise.all(supervisors.map((s) => s.terminate({ graceMs: 0 })));
     await Promise.all(closing);
   });
-  const send = (args = {}) => controller.send({ owner: 'child', provider: 'codex', cwd: dir, text: 'exact text\n  with spaces ', ...args });
+  const send = (args = {}) => controller.send({ thread: 'child', companion: 'codex', cwd: dir, text: 'exact text\n  with spaces ', ...args });
   const rpc = (method, params, index = controls.length - 1) => controls[index](method, params);
   const emit = (...frames) => rpc('fake/emit', { frames });
-  const wait = (id) => waitForResult(controller, { owner: records.readExecution(id).owner, executionId: id, timeoutMs: 10_000 });
+  const wait = (id) => waitForResult(controller, { thread: records.readJob(id).thread, jobId: id, timeoutMs: 10_000 });
   const trace = () => { try { return readFileSync(env.CODEX_FAKE_TRACE, 'utf8').trim().split('\n').map(JSON.parse); } catch { return []; } };
   return { dir, env, clock, records, controller, adapters, supervisors, send, emit, rpc, wait, trace };
 }
@@ -143,14 +143,14 @@ test('new conversation and cold follow-up use new processes and exactly the save
   assert.equal(one.selectedEffort, null);
   assert.equal(one.permissionMode, 'workspace-write');
   await h.emit(terminal());
-  const first = await h.wait(one.executionId);
+  const first = await h.wait(one.jobId);
   assert.equal(first.outcome, 'completed');
   assert.equal(first.effectiveModel, 'configured-model');
   assert.equal(first.stopEvidence.gone, true);
   const two = await h.send({ text: 'follow up' });
   assert.notEqual(h.supervisors[0].child.pid, h.supervisors[1].child.pid);
   await h.emit(terminal());
-  const second = await h.wait(two.executionId);
+  const second = await h.wait(two.jobId);
   assert.equal(second.nativeRefs.threadId, first.nativeRefs.threadId);
   assert.equal(second.nativeRefs.threadId, 'T1');
   assert.deepEqual(h.trace().filter((m) => ['thread/start', 'thread/resume'].includes(m.method)).map((m) => [m.method, m.params.threadId]),
@@ -165,7 +165,7 @@ test('new conversation and cold follow-up use new processes and exactly the save
   const sent = h.trace().filter((m) => m.method === 'turn/start');
   assert.equal(sent[0].params.input[0].text, 'exact text\n  with spaces ');
   assert.deepEqual(sent[0].params.sandboxPolicy, { type: 'workspaceWrite', networkAccess: true });
-  assert.equal(h.records.readExecution(one.executionId).terminal.effectiveEffort, 'high');
+  assert.equal(h.records.readJob(one.jobId).terminal.effectiveEffort, 'high');
 });
 
 test('handshake opts out of exactly the pinned connection-scoped notifications', async (t) => {
@@ -174,16 +174,16 @@ test('handshake opts out of exactly the pinned connection-scoped notifications',
   assert.deepEqual(messages[0].params.capabilities.optOutNotificationMethods,
     codexAppServerContract().serverNotifications.filter((n) => n.routing === 'connection').map((n) => n.method));
   assert.deepEqual(messages.slice(0, 4).map((m) => m.method), ['initialize', 'initialized', 'thread/start', 'turn/start']);
-  await h.emit(terminal()); await h.wait(sent.executionId);
+  await h.emit(terminal()); await h.wait(sent.jobId);
 });
 
 test('explicit model persists across cold resume and network-off reaches turn/start', async (t) => {
   const h = setup(t, { env: { AGENT_COMPANION_CODEX_NETWORK: 'off', AGENT_COMPANION_CODEX_APPROVAL_POLICY: 'on-request' } });
   const first = await h.send({ model: 'chosen-model' });
-  await h.emit(terminal()); await h.wait(first.executionId);
+  await h.emit(terminal()); await h.wait(first.jobId);
   const second = await h.send({ text: 'again' });
   await h.emit(terminal());
-  assert.equal((await h.wait(second.executionId)).effectiveModel, 'chosen-model');
+  assert.equal((await h.wait(second.jobId)).effectiveModel, 'chosen-model');
   for (const m of h.trace().filter((m) => ['thread/start', 'thread/resume', 'turn/start'].includes(m.method))) {
     assert.equal(m.params.model, 'chosen-model');
     assert.equal(m.params.approvalPolicy, 'never');
@@ -196,12 +196,12 @@ for (const fault of ['missing-id', 'lost', 'late']) test(`delivery ${fault} reje
   await until(() => h.trace().some((m) => m.method === 'turn/start'));
   if (fault !== 'missing-id') {
     await h.emit(note('turn/started', { threadId: 'T1', turn: { id: 'TURN1' } }), terminal());
-    assert.equal(h.records.readResult(h.records.readConversation('child').executionId), null);
+    assert.equal(h.records.readResult(h.records.readThread('child').jobId), null);
     await h.clock.advance(10_000);
   }
   const result = await sending;
   assert.equal(result.outcome, 'delivery_unknown');
-  assert.equal(h.records.readExecution(result.executionId).terminal.error, 'DeliveryUnknown');
+  assert.equal(h.records.readJob(result.jobId).terminal.error, 'DeliveryUnknown');
   assert.equal(h.trace().filter((m) => m.method === 'turn/start').length, 1);
   if (fault === 'late') assert.ok(h.trace().some((m) => m.method === 'fake/lateAck'));
   assert.equal(result.nativeRefs.nativeTurnId, undefined);
@@ -210,7 +210,7 @@ for (const fault of ['missing-id', 'lost', 'late']) test(`delivery ${fault} reje
 
 test('completion before the turn/start response is retained until observe', async (t) => {
   const h = setup(t, { fault: 'early' }); const sent = await h.send();
-  const result = await h.wait(sent.executionId);
+  const result = await h.wait(sent.jobId);
   assert.equal(result.outcome, 'completed'); assert.equal(result.text, 'answer');
   assert.equal(result.nativeRefs.turnId, 'TURN1');
 });
@@ -219,11 +219,11 @@ test('turn progress reports effective model and effort without trusting the requ
   const h = setup(t); const sent = await h.send({ model: 'requested-model' });
   await h.emit(note('thread/settings/updated', { threadId: 'T1', threadSettings: { model: 'server-model', effort: 'medium' } }),
     note('model/rerouted', { threadId: 'T1', turnId: 'TURN1', fromModel: 'server-model', toModel: 'effective-model' }), terminal());
-  await h.wait(sent.executionId);
-  const execution = h.records.readExecution(sent.executionId);
-  assert.equal(execution.terminal.effectiveModel, 'effective-model');
-  assert.equal(execution.terminal.effectiveEffort, 'medium');
-  assert.equal(execution.progress.effectiveModel, 'effective-model');
+  await h.wait(sent.jobId);
+  const job = h.records.readJob(sent.jobId);
+  assert.equal(job.terminal.effectiveModel, 'effective-model');
+  assert.equal(job.terminal.effectiveEffort, 'medium');
+  assert.equal(job.progress.effectiveModel, 'effective-model');
 });
 
 test('willRetry stays progress; deltas, completed items and per-turn usage survive completion', async (t) => {
@@ -231,17 +231,17 @@ test('willRetry stays progress; deltas, completed items and per-turn usage survi
   const retry = { threadId: 'T1', turnId: 'TURN1', error: { message: 'reconnecting' }, willRetry: true };
   await h.emit(note('item/agentMessage/delta', { threadId: 'T1', turnId: 'TURN1', itemId: 'answer', delta: 'part' }),
     driftNote('turn/failed', retry), note('error', retry));
-  await until(() => h.records.readExecution(sent.executionId).progress?.retry);
-  const progress = h.records.readExecution(sent.executionId).progress;
+  await until(() => h.records.readJob(sent.jobId).progress?.retry);
+  const progress = h.records.readJob(sent.jobId).progress;
   assert.equal(progress.partialText, 'part');
   assert.equal(progress.retry.willRetry, true);
   assert.equal(progress.lastActivityAt, h.clock.now());
-  assert.equal(h.records.readResult(sent.executionId), null);
+  assert.equal(h.records.readResult(sent.jobId), null);
   const usage = (input, output) => ({ inputTokens: input, outputTokens: output, totalTokens: input + output });
   await h.emit(note('thread/tokenUsage/updated', { threadId: 'T1', turnId: 'TURN1', tokenUsage: { total: usage(110, 25), last: usage(10, 5) } }),
     note('thread/tokenUsage/updated', { threadId: 'T1', turnId: 'TURN1', tokenUsage: { total: usage(130, 32), last: usage(20, 7) } }),
     note('item/completed', { threadId: 'T1', turnId: 'TURN1', item: threadItem('agentMessage', { id: 'answer', text: 'answer', phase: 'final_answer' }) }), terminal());
-  const result = await h.wait(sent.executionId);
+  const result = await h.wait(sent.jobId);
   assert.equal(result.outcome, 'completed'); assert.equal(result.text, 'answer');
   assert.equal(result.usage.source, 'codex-app-server');
   assert.equal(result.usage.input_tokens, 30); assert.equal(result.usage.output_tokens, 12);
@@ -254,7 +254,7 @@ for (const method of ['error', 'turn/failed', 'turn/completed']) test(`${method}
   const completed = terminal('failed', 'partial');
   completed.params.turn.error = { message: 'fatal', codexErrorInfo: null, additionalDetails: 'SECRET_RESPONSE_BODY' };
   await h.emit(method === 'turn/completed' ? completed : method === 'error' ? note(method, params) : driftNote(method, params));
-  const result = await h.wait(sent.executionId);
+  const result = await h.wait(sent.jobId);
   assert.equal(result.outcome, 'failed');
   assert.equal(result.text, method === 'turn/completed' ? 'partial\n\nfatal' : 'fatal');
   assert.doesNotMatch(JSON.stringify(result), /SECRET_/);
@@ -264,12 +264,12 @@ test('interrupt uses the active turn, reports interrupted and removes the real p
   const h = setup(t, { fault: 'interrupt', tree: true }); const sent = await h.send();
   const supervisor = h.supervisors[0], pid = supervisor.fixture.commandPid;
   await h.emit(note('item/started', { threadId: 'T1', turnId: 'TURN1', item: threadItem('commandExecution', { id: 'cmd', command: 'fixture command', processId: String(pid) }) }));
-  await until(() => h.records.readExecution(sent.executionId).progress?.activeCommand);
-  assert.equal(h.records.readExecution(sent.executionId).progress.activeCommand, 'fixture command');
+  await until(() => h.records.readJob(sent.jobId).progress?.activeCommand);
+  assert.equal(h.records.readJob(sent.jobId).progress.activeCommand, 'fixture command');
   assert.ok(supervisor.reported.includes(pid));
   await h.emit(note('item/commandExecution/terminalInteraction', { threadId: 'T1', turnId: 'TURN1', itemId: 'cmd', processId: String(supervisor.fixture.rows.at(-1).pid), stdin: '' }));
   await until(() => supervisor.reported.length === 2);
-  const result = await h.controller.cancel({ owner: 'child', executionId: sent.executionId });
+  const result = await h.controller.cancel({ thread: 'child', jobId: sent.jobId });
   assert.equal(result.outcome, 'interrupted'); assert.equal(result.cause, 'owner_stop');
   assert.equal(result.stopEvidence.gone, true);
   assert.equal(supervisor.serialize().processes.length, 4);
@@ -289,7 +289,7 @@ test('a census that fails while recording a reported command pid keeps the job r
   await h.emit(note('item/commandExecution/terminalInteraction', { threadId: 'T1', turnId: 'TURN1', itemId: 'cmd', processId: String(pid), stdin: '' }));
   await until(() => supervisor.serialize().processes.some((p) => p.pid === pid));
   await h.emit(terminal());
-  const result = await h.wait(sent.executionId);
+  const result = await h.wait(sent.jobId);
   assert.equal(result.outcome, 'completed');
 });
 
@@ -298,7 +298,7 @@ test('interrupt accepts no-active-turn but propagates an active-turn mismatch', 
     const h = setup(t, { fault }); const sent = await h.send();
     if (fault === 'no-active') await h.adapters[0].interrupt();
     else await assert.rejects(h.adapters[0].interrupt(), /expected active turn id/);
-    await h.emit(terminal()); await h.wait(sent.executionId);
+    await h.emit(terminal()); await h.wait(sent.jobId);
   }
 });
 
@@ -313,12 +313,12 @@ test('unknown history fails HistoryUnavailable without starting a replacement', 
   const h = setup(t);
   const first = await h.send();
   await h.emit(terminal());
-  await h.wait(first.executionId);
+  await h.wait(first.jobId);
   rmSync(h.env.CODEX_TEST_HISTORY);
   const offset = h.trace().length;
   const result = await h.send();
   assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'history_unavailable');
-  assert.equal(h.records.readExecution(result.executionId).terminal.error, 'HistoryUnavailable');
+  assert.equal(h.records.readJob(result.jobId).terminal.error, 'HistoryUnavailable');
   assert.deepEqual(h.trace().slice(offset).filter((m) => m.method.startsWith('thread/')).map((m) => [m.method, m.params.threadId]), [['thread/resume', 'T1']]);
 });
 
@@ -326,9 +326,9 @@ test('transport death before terminal rejects ProviderLost and preserves partial
   const h = setup(t); const sent = await h.send();
   await h.emit(note('item/agentMessage/delta', { threadId: 'T1', turnId: 'TURN1', itemId: 'answer', delta: 'partial' }));
   h.supervisors[0].child.stdin.write(JSON.stringify({ method: 'fake/die' }) + '\n');
-  const result = await h.wait(sent.executionId);
+  const result = await h.wait(sent.jobId);
   assert.equal(result.outcome, 'failed'); assert.match(result.text, /^partial\n\napp-server (stdout ended|exited:)/);
-  assert.equal(h.records.readExecution(sent.executionId).terminal.error, 'ProviderLost');
+  assert.equal(h.records.readJob(sent.jobId).terminal.error, 'ProviderLost');
   assert.equal(result.stopEvidence.gone, true);
 });
 
@@ -346,21 +346,21 @@ test('steer distinguishes acknowledgement from a matching userMessage in the con
   await h.emit(note('item/completed', { threadId: 'T1', turnId: 'TURN1', item: threadItem('userMessage', { id: 'opening', content: [{ type: 'text', text: 'opening message' }] }) }));
   await h.clock.advance(5000);
   assert.equal((await unconfirmed).confirmed, false);
-  await h.emit(terminal()); await h.wait(sent.executionId);
+  await h.emit(terminal()); await h.wait(sent.jobId);
 });
 
 test('provider entry uses cached readiness, validates models and creates independent adapters without spawning', () => {
-  writeTargetChecks({ codex: { ready: false } });
+  writeCompanionChecks({ codex: { ready: false } });
   const provider = codexProvider({ env: { CODEX_BIN: '/nonexistent/codex' } });
   assert.equal(provider.enabled, true); assert.equal(provider.ready, false);
-  writeTargetChecks({ codex: { ready: true } });
+  writeCompanionChecks({ codex: { ready: true } });
   assert.equal(provider.ready, true);
   assert.equal(provider.modelAllowed('chosen-model'), true); assert.equal(provider.modelAllowed('two models'), false);
   assert.notEqual(provider.create(), provider.create());
   const { capabilities } = provider.create();
   assert.deepEqual(capabilities, { followUp: true, modelSelection: true, loadsHistory: true,
-    interventions: getTargetById('codex').capabilities.interventions });
-  assert.equal(capabilities.interventions, getTargetById('codex').capabilities.interventions);
+    interventions: getCompanionById('codex').capabilities.interventions });
+  assert.equal(capabilities.interventions, getCompanionById('codex').capabilities.interventions);
 });
 
 
@@ -370,7 +370,7 @@ test('delivery metadata refreshes reported effort without inventing a selected o
   assert.equal(sent.effectiveEffort, 'medium');
   assert.equal(sent.selectedEffort, null);
   await h.emit(terminal());
-  assert.equal((await h.wait(sent.executionId)).effectiveEffort, 'medium');
+  assert.equal((await h.wait(sent.jobId)).effectiveEffort, 'medium');
 });
 
 test('effort config is applied on start and cold resume, with paginated validation of the response model', async (t) => {
@@ -379,11 +379,11 @@ test('effort config is applied on start and cold resume, with paginated validati
   assert.equal(first.acknowledged, true);
   assert.equal(first.effectiveEffort, 'low');
   await h.emit(terminal());
-  assert.equal((await h.wait(first.executionId)).effectiveEffort, 'low');
+  assert.equal((await h.wait(first.jobId)).effectiveEffort, 'low');
   const next = await h.send({ text: 'follow-up', effort: 'medium' });
   assert.equal(next.effectiveEffort, 'medium');
   await h.emit(terminal());
-  assert.equal((await h.wait(next.executionId)).effectiveEffort, 'medium');
+  assert.equal((await h.wait(next.jobId)).effectiveEffort, 'medium');
   const frames = h.trace();
   assert.deepEqual(frames.filter((m) => ['thread/start', 'thread/resume'].includes(m.method)).map((m) => [m.method, m.params.config]), [
     ['thread/start', { model_reasoning_effort: 'low' }], ['thread/resume', { model_reasoning_effort: 'medium' }],
@@ -410,8 +410,8 @@ for (const [label, env, effort, code, message] of [
   assert.equal(refused.detail, code);
   assert.match(refused.text, message);
   assert.equal(h.trace().some((m) => m.method === 'turn/start'), false);
-  assert.equal(h.records.readConversation('child').historyId, null);
-  assert.equal(h.records.readConversation('child').effortOverride, undefined);
+  assert.equal(h.records.readThread('child').historyId, null);
+  assert.equal(h.records.readThread('child').effortOverride, undefined);
   assert.equal(refused.stopEvidence.gone, true);
 });
 
@@ -422,7 +422,7 @@ test('effort validation follows an explicitly selected response model, not the c
   assert.equal(sent.effectiveModel, 'catalog-model');
   assert.equal(sent.effectiveEffort, 'ultra');
   await h.emit(terminal());
-  await h.wait(sent.executionId);
+  await h.wait(sent.jobId);
 });
 
 test('fake saves resume effort without a turn and thread/read observes it without loading', async (t) => {
@@ -457,7 +457,7 @@ for (const model of [undefined, 'configured-model']) {
     const h = setup(t, { env: { CODEX_FAKE_MODEL: model ? 'catalog-model' : 'configured-model' } });
     const first = await h.send();
     assert.equal(first.effectiveEffort, 'high');
-    await h.emit(terminal()); await h.wait(first.executionId);
+    await h.emit(terminal()); await h.wait(first.jobId);
     const saved = readFileSync(h.env.CODEX_FAKE_HISTORY, 'utf8');
     // Config now differs from the saved thread; the read must use the latter.
     h.env.CODEX_FAKE_MODEL = 'catalog-model';
@@ -470,7 +470,7 @@ for (const model of [undefined, 'configured-model']) {
     const next = await h.send({ text: 'plain follow-up' });
     assert.equal(next.effectiveEffort, 'high', 'refused level must not persist in the provider');
     assert.equal(next.selectedEffort, null);
-    await h.emit(terminal()); await h.wait(next.executionId);
+    await h.emit(terminal()); await h.wait(next.jobId);
     assert.deepEqual(frames.map((frame) => frame.method), [
       'initialize', 'initialized', 'model/list', 'model/list', ...(model === undefined ? ['thread/read'] : []),
     ]);
@@ -487,14 +487,14 @@ for (const model of [undefined, 'configured-model']) {
 test('resume validates an explicit model before config and still rejects ignored effort', async (t) => {
   const h = setup(t);
   const first = await h.send();
-  await h.emit(terminal()); await h.wait(first.executionId);
+  await h.emit(terminal()); await h.wait(first.jobId);
   const offset = h.trace().length;
   const accepted = await h.send({ model: 'catalog-model', effort: 'ultra' });
   assert.equal(accepted.acknowledged, true);
   assert.equal(accepted.effectiveModel, 'catalog-model');
   assert.equal(accepted.effectiveEffort, 'ultra');
   assert.equal(h.trace().slice(offset).some((frame) => frame.method === 'thread/read'), false);
-  await h.emit(terminal()); await h.wait(accepted.executionId);
+  await h.emit(terminal()); await h.wait(accepted.jobId);
   const saved = readFileSync(h.env.CODEX_FAKE_HISTORY, 'utf8');
   h.env.CODEX_FAKE_IGNORE_EFFORT = '1';
   const refusalOffset = h.trace().length;
@@ -509,13 +509,13 @@ test('unlisted Codex model confirms effort on start and reads saved model before
   const h = setup(t, { env: { CODEX_FAKE_MODELS: '[]', CODEX_FAKE_MODEL: 'gpt-oss:20b' } });
   const first = await h.send({ effort: 'low' });
   assert.equal(first.acknowledged, true); assert.equal(first.effectiveEffort, 'low');
-  await h.emit(terminal()); await h.wait(first.executionId);
+  await h.emit(terminal()); await h.wait(first.jobId);
   const offset = h.trace().length;
   const second = await h.send({ text: 'follow-up', effort: 'high' });
   assert.equal(second.acknowledged, true); assert.equal(second.effectiveEffort, 'high');
   const methods = h.trace().slice(offset).map(f => f.method);
   assert.ok(methods.indexOf('thread/read') < methods.indexOf('thread/resume'));
-  await h.emit(terminal()); await h.wait(second.executionId);
+  await h.emit(terminal()); await h.wait(second.jobId);
   h.env.CODEX_FAKE_IGNORE_EFFORT = '1';
   const refused = await h.send({ effort: 'low' });
   assert.equal(refused.detail, 'CAPABILITY_UNAVAILABLE');
@@ -526,7 +526,7 @@ test('unlisted Codex model lets backend reject vocabulary and relays its message
   const sent = await h.send({ effort: 'bogus' });
   assert.equal(sent.acknowledged, true);
   await h.emit(note('error', { threadId: 'T1', turnId: 'TURN1', willRetry: false, error: { message: 'invalid reasoning value: bogus' } }));
-  const result = await h.wait(sent.executionId);
+  const result = await h.wait(sent.jobId);
   assert.equal(result.outcome, 'failed'); assert.equal(result.text, 'invalid reasoning value: bogus');
 });
 
@@ -545,16 +545,16 @@ test('thread start and resume expose the native rollout path', async () => {
 
 for (const mode of ['queue', 'interrupt']) test(`${mode} continues with a distinct turn on the same live thread`, async t => {
   const h = setup(t, { fault: mode === 'interrupt' ? 'interrupt' : '' });
-  const { executionId } = await h.send();
+  const { jobId } = await h.send();
   await h.emit(note('item/agentMessage/delta', { threadId: 'T1', turnId: 'TURN1', itemId: 'answer', delta: 'old partial' }));
-  await h.controller.intervene({ executionId, from: 'user', mode, text: 'ONLY-NEW-C' });
+  await h.controller.intervene({ jobId, from: 'user', mode, text: 'ONLY-NEW-C' });
   if (mode === 'queue') {
     assert.equal(h.trace().filter(f => f.method === 'turn/start').length, 1);
     await h.emit(terminal('completed', 'first answer'));
   }
   await until(() => h.trace().filter(f => f.method === 'turn/start').length === 2);
   await h.emit(terminal('completed', 'new answer', 'TURN2'));
-  const result = await h.wait(executionId);
+  const result = await h.wait(jobId);
   assert.deepEqual(result.nativeTurnIds, ['TURN1', 'TURN2']);
   assert.equal(result.turns[0].outcome, mode === 'interrupt' ? 'interrupted' : 'completed');
   assert.equal(result.turns[1].text, 'new answer');
@@ -567,15 +567,15 @@ for (const mode of ['queue', 'interrupt']) test(`${mode} continues with a distin
 });
 
 test('controller steer belongs to the active native turn and cannot create a second answer', async t => {
-  const h = setup(t), { executionId } = await h.send();
-  const reply = h.controller.intervene({ owner: 'child', executionId, text: 'STEER-B', from: 'caller', mode: 'steer' });
+  const h = setup(t), { jobId } = await h.send();
+  const reply = h.controller.intervene({ thread: 'child', jobId, text: 'STEER-B', from: 'caller', mode: 'steer' });
   await until(() => h.trace().some(f => f.method === 'turn/steer'));
   // Completion may arrive before the steer confirmation promise is settled.
   await h.emit(note('item/completed', { threadId: 'T1', turnId: 'TURN1',
     item: threadItem('userMessage', { id: 'input-b', content: [{ type: 'text', text: 'STEER-B' }] }) }), terminal());
   assert.equal((await reply).ok, true);
-  const result = await h.wait(executionId);
+  const result = await h.wait(jobId);
   assert.equal(result.turns.length, 1);
-  assert.deepEqual(result.turns[0].messages, [executionId, result.interventions[0].id]);
+  assert.deepEqual(result.turns[0].messages, [jobId, result.interventions[0].id]);
   assert.equal(result.interventions[0].state, 'answered');
 });

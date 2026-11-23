@@ -82,7 +82,7 @@ the design and stand once this plan is approved.
     later,** one host per milestone, under tracker decision 9's adoption check.
     Nothing in steps 0 to 8 depends on them.
 20. **Three registries, and nothing else lists their members:** companions
-    (`lib/target-registry.mjs`, exists), hosts (`lib/hosts/`, new) and tools
+    (`lib/companion-registry.mjs`, exists), hosts (`lib/hosts/`, new) and tools
     (`bridge-server/tools.mjs`, new). Every other list of companions, hosts or
     tools is derived from them.
 21. **One delivery implementation.** The completion queue, its receipts and the
@@ -275,11 +275,11 @@ do not hold a turn open.
   `lead = { session, agent }` over anything the model supplied, and still blocks
   the call if it cannot run. Codex: `thread_id`, `session_id` and `thread_source`
   from turn metadata. The thread reference is a short bridge-minted id.
-- **Store.** A thread is today's conversation record, keyed by the thread id
-  instead of the owner, with `lead` and `title` added. Its read cursor is a
+- **Store.** The record in `threads/<thread>.json` stores `thread`, `lead`, `title`,
+  `companion` and the latest `jobId`. Its read cursor is a
   sibling record, `reads/<thread>.json`, written under the thread's lock: the
-  controller rewrites the conversation record after awaits, which would drop a
-  cursor written in between. Its posts are its jobs in generation order
+  controller rewrites the thread record after awaits, which would drop a
+  cursor written in between. Its posts are the records in `jobs/` in generation order
   with their results and interventions. No new event log.
 - **Removed records:** `stops/`, `attachments/` and the "owner away" display.
 
@@ -483,7 +483,7 @@ deleted with their code.
 
 No behaviour changes in this step.
 
-- Derive every companion list from `lib/target-registry.mjs` (audit section 7a
+- Derive every companion list from `lib/companion-registry.mjs` (audit section 7a
   names the places).
 - Add `lib/hosts/` with the two descriptors and `hooks/host-paths.sh`; replace
   the host `if`s that only pick a path or a name (audit section 3).
@@ -498,7 +498,7 @@ Check: the guard passes; the affected suites pass unchanged.
 - The lead comes from the host descriptor: the hook field on Claude
   (`hooks/name-thread.sh` writes `lead` until step 4 replaces it), turn metadata
   on Codex. `callArgs` (`server.mjs:745-770`) goes.
-- Mint the thread reference; key the conversation record by it, with `lead` and
+- Mint the thread reference; key the thread record by it, with `lead` and
   `title`; check ownership on every call.
 - Fold `agent_reply` into `companion_send`. `companion_status` with no arguments lists
   the caller's threads.

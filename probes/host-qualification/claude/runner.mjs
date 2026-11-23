@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { ROOT, inside, log, rows, readJSON, writeJSON, sleep, recordPID, pidRecords,
+import { fixtureExecutions, ROOT, inside, log, rows, readJSON, writeJSON, sleep, recordPID, pidRecords,
   signalPID, cleanup, snapshot, phaseAt, processInfo } from './common.mjs';
 import { scenarios, configuration, prompt, settings } from './scenarios.mjs';
 import { analyze } from './analyze.mjs';
@@ -45,8 +45,9 @@ export function prepare(name, options = {}) {
   config.workSec = options.overrides?.workSec ?? config.wallSec + 120;
   for (const value of [config.wallSec, config.budget, config.waitSec, config.serverTimeoutMs, config.progressSec])
     if (!Number.isFinite(value) || value <= 0) throw Error('Durations and budget must be finite and positive');
-  for (const sub of ['', 'host-home/agents', 'workspace', 'child-workspace', 'executions'])
+  for (const sub of ['', 'host-home/agents', 'workspace', 'child-workspace'])
     fs.mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(fixtureExecutions(dir), { mode: 0o700 });
   fs.symlinkSync(path.join(dir, 'child-workspace'), path.join(dir, 'child-link'), 'dir');
   writeJSON(dir + '/scenario.json', config);
   const hookCommand = 'exec ' + [process.execPath, path.join(ROOT, 'hook.mjs'), dir].map(quote).join(' ');

@@ -12,11 +12,11 @@ export function fitSegs(segs: readonly Seg[], w: number, padStyle?: string): Seg
 export function layoutLine(line: Line, w: number): Seg[][]
 export function clock(ms: number): string
 export function cardHead(job: { status: string; startedAt: number; finishedAt?: number | null }, title: string, now: number, w: number, bg?: string): Seg[]
-export function outcomeLabel(job: { execution: any; result: any }): [text: string, style: string]
-export function liveLines(job: { execution: any }, options: { now: number; lastText?: string | null; activeAt?: number | null }): Line[]
-export function pendingInputs(execution: any, taken: ReadonlySet<string>): Pending[]
+export function outcomeLabel(job: { record: any; result: any }): [text: string, style: string]
+export function liveLines(job: { record: any }, options: { now: number; lastText?: string | null; activeAt?: number | null }): Line[]
+export function pendingInputs(record: any, taken: ReadonlySet<string>): Pending[]
 export function pendingLine(pending: Pending): Line
-export function jobBlocks(job: { status: string; execution: any; result?: any }, view: {
+export function jobBlocks(job: { status: string; record: any; result?: any }, view: {
   list: readonly any[]; preamble?: readonly any[]; labels?: ReadonlyMap<string, string>; located: boolean
   format?: { version?: unknown; detail?: string } | null; now: number; expanded?: (id: string) => boolean
   showPreamble?: boolean; pending?: readonly Line[]
@@ -28,4 +28,4 @@ export class Pane {
 }
 export const COMPANION_NAMES: Record<string, string>
 export const MODE_HINTS: Record<string, string>
-export function supportedModes(execution: any): string[]
+export function supportedModes(record: any): string[]

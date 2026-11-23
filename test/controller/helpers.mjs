@@ -55,7 +55,7 @@ export async function waitForResult(controller, args) {
 
 // Yield for actual child/ps I/O, never sleep for a lifecycle deadline. This
 // watchdog bounds external I/O; iteration counts starve children under full
-// suite load. All execution/lease/escalation timers still use ManualClock.
+// suite load. All job/lease/escalation timers still use ManualClock.
 export async function until(predicate, label = 'condition') {
   const deadline = performance.now() + 20_000;
   while (performance.now() < deadline) {
@@ -133,7 +133,7 @@ export function setupController(options = {}) {
   const dir = options.dir ?? mkdtempSync(join(SANDBOX_HOME, 'controller-'));
   const records = new Records({ dir, log() {} });
   const adapters = [], supervisors = [];
-  const provider = options.provider ?? 'fake';
+  const companion = options.companion ?? 'fake';
   const create = () => {
     const adapter = options.adapter ?? fakeAdapter(options);
     adapters.push(adapter);
@@ -153,18 +153,18 @@ export function setupController(options = {}) {
     return supervisor;
   };
   const config = { records, clock, createSupervisor, env: options.env ?? {},
-    providers: { [provider]: { enabled: true, ready: true, modelAllowed: model => ['a', 'b'].includes(model), create } },
+    providers: { [companion]: { enabled: true, ready: true, modelAllowed: model => ['a', 'b'].includes(model), create } },
     snapshot: options.snapshot ?? (async () => ({ available: false, reason: 'test_non_git' })),
     launchWatcher: options.launchWatcher ?? (async () => ({ pid: 123 })),
   };
   const controller = options.createController ? options.createController(config) : new Controller(config);
-  const send = (overrides = {}) => controller.send({ owner: 'child', provider, cwd: dir, text: 'verbatim text\nwith context', ...overrides });
-  const done = async (executionId) => {
+  const send = (overrides = {}) => controller.send({ thread: 'child', companion, cwd: dir, text: 'verbatim text\nwith context', ...overrides });
+  const done = async (jobId) => {
     await clock.flush();
-    return controller.wait({ owner: records.readExecution(executionId).owner, executionId });
+    return controller.wait({ thread: records.readJob(jobId).thread, jobId });
   };
-  const finish = async (executionId, outcome = { outcome: 'completed', text: 'answer' }, adapter = adapters[0]) => {
-    adapter.terminal.resolve(outcome); return done(executionId);
+  const finish = async (jobId, outcome = { outcome: 'completed', text: 'answer' }, adapter = adapters[0]) => {
+    adapter.terminal.resolve(outcome); return done(jobId);
   };
   return { controller, clock, records, dir, adapters, supervisors, send, done, finish };
 }

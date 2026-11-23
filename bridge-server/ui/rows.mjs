@@ -223,13 +223,13 @@ export function cardHead({ status, startedAt, finishedAt }, title, now, w, bg) {
 const OUTCOME = { completed: ['✓ done in', 'ok'], failed: ['✗ failed after', 'bad'], delivery_unknown: ['✗ delivery unknown after', 'bad'],
   stopped: ['■ stopped after', 'warn'], interrupted: ['■ interrupted after', 'warn'] };
 // A finished job's outcome and duration, as one segment: ['✓ done in 0:38', 'ok'].
-export function outcomeLabel({ result, execution }) {
+export function outcomeLabel({ result, record }) {
   const [label, style] = OUTCOME[result.outcome] ?? [`? ${result.outcome}`, 'warn'];
-  return [`${label} ${clock(result.finishedAt - execution.startedAt)}`, style];
+  return [`${label} ${clock(result.finishedAt - record.startedAt)}`, style];
 }
 // A finished job opens on its outcome: result line, git change list, errors, answer.
 export function outcomeLines(job, { expanded = false, items = 0 } = {}) {
-  const { result, execution } = job;
+  const { result, record } = job;
   const summary = result.workSummary;
   const first = [outcomeLabel(job)];
   if (summary) {
@@ -248,7 +248,7 @@ export function outcomeLines(job, { expanded = false, items = 0 } = {}) {
   const out = [{ segs: first, hang: 2 }];
   const tree = summary?.worktree;
   if (tree?.available && tree.files.length) {
-    const files = tree.files.map(f => `${relPath(f.path, execution.cwd)} ${f.binary ? 'binary' : `+${f.added}${f.deleted ? ` −${f.deleted}` : ''}`}`);
+    const files = tree.files.map(f => `${relPath(f.path, record.cwd)} ${f.binary ? 'binary' : `+${f.added}${f.deleted ? ` −${f.deleted}` : ''}`}`);
     if (tree.filesOmitted) files.push(`${tree.filesOmitted} more`);
     out.push({ segs: [['git, any writer: ' + files.join(' · '), 'dim']] });
   } else if (tree && !tree.available) out.push({ segs: [[`git: unavailable (${clean(tree.reason)})`, 'dim']] });
@@ -267,12 +267,12 @@ export function outcomeLines(job, { expanded = false, items = 0 } = {}) {
 // The in-flight line, once, as the transcript's last line; a reply still being
 // written (OpenCode stores text only when a step completes) comes just before it.
 export function liveLines(job, { now, lastText = null, activeAt = null }) {
-  const progress = job.execution.progress ?? {};
+  const progress = job.record.progress ?? {};
   const out = [];
   const partial = clean(progress.partialText ?? '').replace(/\n+$/, '');
   if (partial && partial.trim() !== (lastText ?? '').trim()) out.push(...lines(partial).map(line => ({ segs: [[line, 'normal']] })));
   const doing = progress.activeCommand ? `running $ ${commandText(progress.activeCommand)}`
-    : progress.activity ? clean(progress.activity) : partial ? 'responding' : job.execution.state === 'running' ? 'working' : clean(job.execution.state);
+    : progress.activity ? clean(progress.activity) : partial ? 'responding' : job.record.state === 'running' ? 'working' : clean(job.record.state);
   const segs = [[`● ${doing}`, 'ok']];
   if (progress.retry) segs.push([` · retrying${progress.retry.attempt ? ` (attempt ${progress.retry.attempt})` : ''}`, 'warn']);
   if (activeAt != null) segs.push([` · ${clock(now - activeAt)}`, 'ok']);
@@ -290,8 +290,8 @@ function pendingState({ state, mode }) {
   return [clean(state), ''];
 }
 // Recorded messages the transcript does not show yet (`taken` holds the ids it shows).
-export function pendingInputs(execution, taken) {
-  return (execution.interventions ?? []).filter(input => !taken.has(input.id) && input.state !== 'answered').map(input => {
+export function pendingInputs(record, taken) {
+  return (record.interventions ?? []).filter(input => !taken.has(input.id) && input.state !== 'answered').map(input => {
     const [state, hint] = pendingState(input);
     return { at: input.at, label: `${input.state === 'not_delivered' ? '✗' : '◌'} ${input.from === 'user' ? 'you' : 'lead'} · ${state}`, style: 'warn', text: input.text, hint };
   });
@@ -308,7 +308,7 @@ const COMPACT = new Set(['user', 'reasoning', 'edit', 'preamble']);
 // `pending` lines. `expanded(id)` says which blocks are open.
 export function jobBlocks(job, { list, preamble = [], labels = new Map(), located, format, now, expanded = () => false, showPreamble = false, pending = [] }) {
   const ended = job.status !== 'running';
-  const cwd = job.execution.cwd, answer = job.result?.text ? clean(job.result.text).trim() : null;
+  const cwd = job.record.cwd, answer = job.result?.text ? clean(job.result.text).trim() : null;
   const blocks = [];
   if (job.result) {
     const open = expanded('outcome');
@@ -334,13 +334,13 @@ export function jobBlocks(job, { list, preamble = [], labels = new Map(), locate
     previous = compact;
   }
   if (!ended) {
-    const progress = job.execution.progress ?? {};
+    const progress = job.record.progress ?? {};
     const lastText = list.findLast(item => item.kind === 'assistant')?.text ?? null;
     const active = progress.activeCommand && list.findLast(item => item.kind === 'command' && item.status === 'running'
       && commandText(item.command) === commandText(progress.activeCommand));
     const activeAt = active?.at ? Date.parse(active.at) : null;
     const waiting = pending.map(line => line.segs.map(([text]) => text).join('')).join('\n');
-    blocks.push({ key: 'live', source: job.execution, flags: `${activeAt == null ? '' : Math.floor((now - activeAt) / 1000)}|${lastText}|${waiting}`,
+    blocks.push({ key: 'live', source: job.record, flags: `${activeAt == null ? '' : Math.floor((now - activeAt) / 1000)}|${lastText}|${waiting}`,
       lines: () => [{ segs: [] }, ...pending, ...liveLines(job, { now, lastText, activeAt })] });
   }
   return blocks;
@@ -397,7 +397,7 @@ export class Pane {
 }
 
 // Both views' input boxes: each companion's own name, what each message mode
-// does, and the modes a job's companion takes (recorded on its execution).
+// does, and the modes a job's companion takes (recorded on its record).
 export const COMPANION_NAMES = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', antigravity: 'Antigravity', copilot: 'Copilot' };
 export const MODE_HINTS = { steer: 'joins the running turn now', queue: 'runs after the current turn', interrupt: 'stops this turn, then sends' };
-export const supportedModes = execution => ['steer', 'queue', 'interrupt'].filter(mode => execution?.interventionModes?.[mode]);
+export const supportedModes = record => ['steer', 'queue', 'interrupt'].filter(mode => record?.interventionModes?.[mode]);

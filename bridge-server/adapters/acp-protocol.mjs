@@ -174,7 +174,7 @@ export class AcpConnection {
       const kind = update.sessionUpdate;
       if (kind && !this._declaredKinds.has(kind) && !this._undeclaredKinds.has(kind)) {
         this._undeclaredKinds.add(kind);
-        this.log('WARN', `session/update kind '${kind}' not declared by the ${this.companion} descriptor (acp.updates) — parsed generically; if the agent changed, update lib/target-registry.mjs`);
+        this.log('WARN', `session/update kind '${kind}' not declared by the ${this.companion} descriptor (acp.updates) — parsed generically; if the agent changed, update lib/companion-registry.mjs`);
       }
       const collector = this.sessionCollectors.get(sessionId);
       if (!collector) return;

@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { symlinkSync, realpathSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { writeCompanionDefaults, writeTargetChecks } from '../lib/state.mjs';
+import { writeCompanionDefaults, writeCompanionChecks } from '../lib/state.mjs';
 import { hookAnswer } from '../bridge-server/delivery.mjs';
 import { decodeTool } from './tool-call.mjs';
 import { HOSTS } from '../lib/hosts/index.mjs';
@@ -17,7 +17,7 @@ const main = { session: 'session-a', agent: null };
 const task = '  First line.\n\nSecond line: `quoted` — keep whitespace.  \n';
 
 function fixture(options = {}) {
-  const h = setupController({ provider: 'claude', capabilities: { interventions: { default: 'steer', steer: true, queue: 'native', interrupt: true } }, ...options });
+  const h = setupController({ companion: 'claude', capabilities: { interventions: { default: 'steer', steer: true, queue: 'native', interrupt: true } }, ...options });
   h.controller.env.AGENT_COMPANION_HOME = h.dir;
   const raw = (action, args = {}, lead = main, extra = {}) =>
     dispatch({ name: 'companion_' + action, arguments: { lead, ...args } },
@@ -63,9 +63,9 @@ const scenarios = {
     const h = fixture();
     delete h.controller.env.AGENT_COMPANION_HOME;
     h.controller.env.HOME = h.dir;
-    const conversations = join(HOSTS.codex.stateDir(h.controller.env), 'conversations');
-    const saveHistory = historyId => writeFileSync(join(conversations, 'other.json'), JSON.stringify({ historyId }));
-    mkdirSync(conversations, { recursive: true }); writeFileSync(join(conversations, 'broken.json'), '{'); saveHistory('nested');
+    const threads = join(HOSTS.codex.stateDir(h.controller.env), 'threads');
+    const saveHistory = historyId => writeFileSync(join(threads, 'other.json'), JSON.stringify({ historyId }));
+    mkdirSync(threads, { recursive: true }); writeFileSync(join(threads, 'broken.json'), '{'); saveHistory('nested');
     const before = diskSnapshot(h.dir);
     assert.deepEqual([(await h.send({}, { session: 'nested' })).code, h.adapters.length], ['RECURSION_REFUSED', 0]);
     assert.deepEqual(diskSnapshot(h.dir), before);
@@ -122,8 +122,8 @@ const scenarios = {
     assert.deepEqual(diskSnapshot(h.dir), before);
     for (const [source, agent] of [['user', null], ['subagent', 'child']]) {
       const sent = await call('send', { companion: 'claude', task, cwd: h.dir }, source);
-      assert.deepEqual(h.records.readConversation(sent.thread).lead, { session: 'root', host: 'codex', agent });
-      assert.equal(h.records.readExecution(sent.job_id).hostSessionId, 'root');
+      assert.deepEqual(h.records.readThread(sent.thread).lead, { session: 'root', host: 'codex', agent });
+      assert.equal(h.records.readJob(sent.job_id).hostSessionId, 'root');
       assert.equal((await call('status', { job_id: sent.job_id }, agent ? 'user' : 'subagent')).code, 'THREAD_NOT_YOURS');
       assert.deepEqual((await call('status', {}, source)).threads.map(row => row.thread), [sent.thread]);
     }
@@ -139,9 +139,9 @@ const scenarios = {
     symlinkSync(h.dir, link);
     const { thread, job_id } = await h.send({ cwd: link });
     const bound = realpathSync(h.dir);
-    assert.equal(h.records.readConversation(thread).cwd, bound);
+    assert.equal(h.records.readThread(thread).cwd, bound);
     await h.finish(job_id);
-    for (const [change, code] of [[{ companion: 'codex' }, 'provider_mismatch'], [{ cwd: '/' }, 'cwd_mismatch']]) {
+    for (const [change, code] of [[{ companion: 'codex' }, 'companion_mismatch'], [{ cwd: '/' }, 'cwd_mismatch']]) {
       const response = await h.call('send', { task, thread, ...change });
       assert.equal(response.code, code);
       for (const fact of ['claude', bound, 'omit thread']) assert.ok(response.hint.toLowerCase().includes(fact.toLowerCase()));
@@ -164,7 +164,7 @@ const scenarios = {
     h.controller.providers.claude.ready = false;
     assert.equal((await h.send({ effort: 'low' })).code, 'CAPABILITY_UNAVAILABLE');
     assert.equal(h.adapters.length, 0);
-    assert.deepEqual(h.records.listConversations(), []);
+    assert.deepEqual(h.records.listThreads(), []);
   },
 
   async 'new thread selection respects explicit, environment and saved settings; resume retains accepted choices'() {
@@ -184,12 +184,12 @@ const scenarios = {
     assert.deepEqual(adapter.calls.find(([op]) => op === 'openHistory')[1], { model: 'a', effort: 'low', historyId: 'native-history' });
     await h.finish(next.job_id, undefined, adapter);
     assert.equal((await h.call('send', { thread: first.thread, task, model: 'b' })).selected_model, 'b');
-    assert.equal(h.records.readConversation(first.thread).title, task.split('\n')[0]);
+    assert.equal(h.records.readThread(first.thread).title, task.split('\n')[0]);
     const failure = fixture({ historyError: 'EFFORT_NOT_ALLOWED' });
     const rejected = await failure.send({ effort: 'low' });
     assert.equal(rejected.status, 'failed');
     assert.equal(rejected.meta.detail, 'EFFORT_NOT_ALLOWED');
-    assert.equal(failure.records.readConversation(rejected.thread).effortOverride, undefined);
+    assert.equal(failure.records.readThread(rejected.thread).effortOverride, undefined);
   },
 
   async 'live send reattaches identical work and delivers different text in the requested mode'() {
@@ -207,7 +207,7 @@ const scenarios = {
       assert.equal(ack.job_id, sent.job_id);
       assert.equal(ack.thread, sent.thread);
       assert.equal(ack.accepted, true);
-      const input = h.records.readExecution(ack.job_id).interventions.at(-1);
+      const input = h.records.readJob(ack.job_id).interventions.at(-1);
       assert.equal(input.id, ack.intervention_id);
       assert.equal(input.text, text);
     }
@@ -223,14 +223,14 @@ const scenarios = {
     const start = deferred();
     const h = fixture({ start: () => start.promise, capabilities: { interventions: { default: 'queue', queue: 'bridge' } } });
     const sending = h.send();
-    const [{ owner: thread }] = h.records.listConversations();
+    const [{ thread }] = h.records.listThreads();
     const follow = mode => h.call('send', { thread, task: 'new text', mode });
     const refused = reason => ({ ok: false, action: 'send', status: 'intervention_unavailable', reason });
     assert.deepEqual(await follow('queue'), refused('state'));
     start.resolve();
     await sending;
     assert.deepEqual(await follow('steer'), refused('capability'));
-    assert.deepEqual(h.records.listExecutions()[0].interventions, []);
+    assert.deepEqual(h.records.listJobs()[0].interventions, []);
   },
 
   async 'wait budgets and one-shot user inbox notifications work by either reference'() {
@@ -245,14 +245,14 @@ const scenarios = {
       const running = await wait;
       assert.equal(running.current_status, 'running');
       assert.equal(running.thread, thread);
-      assert.equal(running.digest_uri, 'agent-digest://' + job_id);
+      assert.equal(running.digest_uri, 'job-digest://' + job_id);
       assert.ok(running.age_s >= seconds && running.hint);
       assert.equal(Object.hasOwn(running, 'session_reborn'), false);
     }
     const wait = h.call('wait', { thread });
     const inbox = h.records.inboxPath(job_id);
     mkdirSync(inbox, { recursive: true });
-    writeFileSync(join(inbox, 'msg.json'), JSON.stringify({ executionId: job_id, requestId: 'msg', at: 1, text: 'human input', mode: 'queue' }));
+    writeFileSync(join(inbox, 'msg.json'), JSON.stringify({ jobId: job_id, requestId: 'msg', at: 1, text: 'human input', mode: 'queue' }));
     await h.clock.advance(1000);
     const notice = await wait;
     assert.equal(notice.status, 'user_intervened');
@@ -280,7 +280,7 @@ const scenarios = {
   async 'status projects progress and cached diagnostics, including reads from a second bridge'() {
     const h = fixture({ createController: createBridgeController });
     const { thread, job_id } = await h.send();
-    writeTargetChecks({ claude: { ready: true, checkedAt: 'cached' } });
+    writeCompanionChecks({ claude: { ready: true, checkedAt: 'cached' } });
     for (const [progress, expected] of [[{ partialText: 'recovering' }, 'responding'], [{ activeCommand: 'build' }, 'running build'],
       [{ activity: 'thinking' }, 'thinking'], [{ activity: null }, null]]) {
       h.adapters[0].progress({ ...progress, retry: { willRetry: true } });
@@ -321,17 +321,17 @@ const scenarios = {
       ['send', { task, cwd: h.dir, mode: 'unknown' }], ['send', { task, job_id: 'old' }], ['catalog', { action: 'send' }]]) {
       assert.equal((await h.call(action, args)).code, 'INVALID_ARGUMENTS', action);
     }
-    assert.deepEqual(h.records.listExecutions(), []);
+    assert.deepEqual(h.records.listJobs(), []);
   },
   async 'durable outcomes map to the original job and thread after restart'() {
     for (const [outcome, status] of [['completed', 'completed'], ['failed', 'failed'], ['interrupted', 'cancelled'],
       ['stopped', 'cancelled'], ['delivery_unknown', 'failed']]) {
       const h = fixture();
-      const e = h.records.begin({ owner: 'th-0123456789', lead: { ...main, host: 'claude' }, provider: 'claude',
-        cwd: h.dir, text: task, executionId: 'saved', now: h.clock.now() }, 0);
+      const e = h.records.begin({ thread: 'th-0123456789', lead: { ...main, host: 'claude' }, companion: 'claude',
+        cwd: h.dir, text: task, jobId: 'saved', now: h.clock.now() }, 0);
       h.records.writeResult({ ...e, outcome, text: 'saved output', detail: 'native detail', stopEvidence: { gone: true } });
-      const response = await h.call('wait', { job_id: e.executionId });
-      assert.deepEqual([response.thread, response.meta.thread, response.status, response.content], [e.owner, e.owner, status, 'saved output']);
+      const response = await h.call('wait', { job_id: e.jobId });
+      assert.deepEqual([response.thread, response.meta.thread, response.status, response.content], [e.thread, e.thread, status, 'saved output']);
       assert.equal(response.meta.detail, outcome === 'delivery_unknown' ? outcome : 'native detail');
     }
   },
@@ -387,7 +387,7 @@ test('tool and hook excerpts preserve raw text, include read references and boun
     assert.deepEqual(raw.content.map(b => b.type), ['text', 'text']);
     assert.equal(raw.content[0].text, n === 8000 ? answer : [...answer].slice(0, 8000).join('') + `\n[… 1 more characters. companion_read({ thread: "${thread}", offset: 8000 }) reads on.]`);
     const meta = JSON.parse(raw.content[1].text);
-    assert.equal(meta.meta.digest_uri, 'agent-digest://' + job_id);
+    assert.equal(meta.meta.digest_uri, 'job-digest://' + job_id);
     assert.equal('content' in meta, false);
   }
   const batch = [];
@@ -418,7 +418,7 @@ test('terminal metadata gives each undelivered message its mode, sender and shor
   const h = fixture();
   const { thread, job_id } = await h.send();
   await h.call('send', { thread, task: 'one\nsecond line', mode: 'steer' });
-  await h.controller.intervene({ executionId: job_id, from: 'user', mode: 'queue', text: 'x'.repeat(81) });
+  await h.controller.intervene({ jobId: job_id, from: 'user', mode: 'queue', text: 'x'.repeat(81) });
   const result = await h.call('cancel', { job_id });
   assert.deepEqual(result.meta.interventions, [
     { from: 'caller', mode: 'steer', state: 'not_delivered', first_line: 'one' },
