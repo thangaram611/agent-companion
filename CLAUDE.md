@@ -194,6 +194,11 @@ sender, mode, state and first line, including `not_delivered` messages.
   bundle before running any of its hooks and rejects symlinks: a `bridge-server/node_modules`
   link there made every hook fail. On Codex, `hooks/install-deps.sh` keeps dependencies in
   plugin data and `hooks/launch-agent-bridge.mjs` resolves the SDK imports from there.
+- **Codex waits for its bridge.** The Codex manifest marks agent-bridge
+  `required`. As an optional server, the first window on a cold daemon (or an
+  in-process one) started its first turn without the bridge's tools. The cost:
+  a bridge that cannot start keeps Codex from opening; fix the install
+  (`setup.sh --host codex`) rather than dropping the flag.
 - **Codex sandbox defaults are deliberately not codex's defaults** (`workspace-write` with
   network **on**), and in app-server `approvalPolicy: 'never'` is structural —
   accepting one approval was measured escalating past the sandbox. Do not make it configurable.

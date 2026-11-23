@@ -59,6 +59,9 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
   changes the delay (opt-in); Codex offers no way to tell whether a window
   still shows a conversation (openai/codex#58423).
 - A native subagent acting as lead gets no wake. Use `agent_wait`.
+- On Codex a bridge that cannot start keeps Codex from opening, because the
+  plugin marks it required so a first turn never runs without its tools.
+  Rerun `setup.sh --host codex`, or disable the plugin in `config.toml`.
 - Claude's inbox wake needs Claude Code 2.1.228 or later and the current
   session's socket and token. A relocated `CODEX_HOME` gets no Codex wake:
   the bridge does not inherit that setting. Use `agent_wait` there.

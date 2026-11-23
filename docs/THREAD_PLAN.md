@@ -189,6 +189,12 @@ OpenCode model or `gemini-3.8-flash-low`.
   call, and a watching window shows the reason. A second hook that blocked did
   not stop ours from claiming the result, so a block would have to live in
   `hooks/hook.mjs` and claim nothing. Not used.
+- **Optional MCP servers can miss the first turn** (2026-11-23). On a cold
+  daemon or in an in-process window, a prompt given at launch reached the model
+  before the bridge listed its tools ("omitting pending optional MCP server",
+  145 ms). The Codex manifest marks the bridge `required`: the first request
+  then carried all six tools, and a bridge that cannot start keeps Codex from
+  opening.
 - **Subagents** (2026-11-23). A native subagent gets its own MCP server and fires
   no SessionStart; its hooks carry the root's `session_id` and its own thread id
   as `agent_id`.
@@ -635,6 +641,8 @@ The tracker's terms note still applies to Antigravity: the bridge must not wrap
   (docs). Same fallback.
 - **A wake cannot be confirmed.** Neither host acknowledges it. Results stay
   unread until a hook, a wait or a read delivers them.
+- **A broken bridge install stops Codex from opening.** The cost of marking it
+  required; setup repairs it, and `enabled = false` turns the plugin off.
 - **Codex cuts large tool output silently** for models it has no metadata for.
   The 8,000-character page stays under the measured cut.
 - **Step 4 replaces a hook with a hard-won fork budget and race fixes.** Its

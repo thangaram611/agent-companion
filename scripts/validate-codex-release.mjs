@@ -111,6 +111,7 @@ function validateMarketplaceTree(marketplaceRoot) {
   assert(manifest.mcpServers?.['agent-bridge']?.cwd === '.', 'plugin MCP launcher cwd mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.env?.AGENT_COMPANION_HOST === 'codex', 'plugin MCP host mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.default_tools_approval_mode === 'approve', 'plugin MCP approval mode mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.required === true, 'plugin MCP bridge must be required');
   assert(manifest.mcpServers?.['agent-bridge']?.startup_timeout_sec === 120, 'plugin MCP startup timeout mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.tool_timeout_sec === 1320, 'plugin MCP tool timeout mismatch');
   assertExists(path.join(pluginRoot, 'hooks', 'hooks-codex.json'), 'Codex hook manifest');
@@ -152,6 +153,7 @@ function validateInstalledTree(codexHome, installedPath) {
   assert(manifest.hooks === './hooks/hooks-codex.json', 'installed plugin manifest hooks path mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.command === '/bin/bash', 'installed plugin MCP launcher mismatch');
   assert(manifest.mcpServers?.['agent-bridge']?.default_tools_approval_mode === 'approve', 'installed plugin MCP approval mode mismatch');
+  assert(manifest.mcpServers?.['agent-bridge']?.required === true, 'installed plugin MCP bridge must be required');
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'hooks-codex.json'), 'installed Codex hook manifest');
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'launch-agent-bridge.sh'), 'installed Codex bridge launcher');
   for (const file of ['hook.sh', 'hook.mjs']) assertExists(path.join(resolvedInstalledPath, 'hooks', file));

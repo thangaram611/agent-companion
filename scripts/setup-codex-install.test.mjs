@@ -322,6 +322,7 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
         AGENT_COMPANION_HOST: 'codex',
       },
       default_tools_approval_mode: 'approve',
+      required: true,
       startup_timeout_sec: 120,
       tool_timeout_sec: 1320,
     });

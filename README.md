@@ -392,6 +392,13 @@ It builds the local marketplace, registers it, atomically refreshes the
 installed plugin even at the same version and verifies the effective MCP registry.
 Start a fresh Codex session and re-trust the updated hooks.
 
+Codex waits for the bridge before a conversation's first turn: the plugin marks
+it required. If the bridge cannot start, Codex will not open and names
+`agent-bridge` in "required MCP servers failed to initialize". Rerun
+`bash setup.sh --host codex` to repair it, or set `enabled = false` under
+`[plugins."agent-companion@agent-companion"]` in `~/.codex/config.toml` to use
+Codex without the plugin.
+
 To change how long Codex keeps a conversation you left loaded, and with it the
 bridge and its jobs, add `--codex-unload-delay <seconds>`; `default` removes the
 setting. Codex's own config writer edits `~/.codex/config.toml`, keeping its

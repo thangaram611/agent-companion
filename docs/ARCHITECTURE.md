@@ -627,6 +627,14 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
   instead. The daemon reads the key at start; an override on `thread/resume`
   of a loaded conversation was ignored. At 0 the conversation unloaded 1.3 s
   after `/new` and its job stopped at 1.8 s.
+- **The Codex bridge is a required MCP server (2026-11-23).** As an optional
+  server, a prompt given at launch on a cold daemon, or in an in-process
+  window, reached the model without the bridge's tools: Codex logged "omitting
+  pending optional MCP server" and the bridge answered 145 ms later. A warm
+  daemon reused its cached tool catalog. With `required: true` the first
+  request carried all six tools. A bridge that cannot start then fails
+  `thread/start`, so Codex does not open; `-c` cannot disable a plugin, but
+  `enabled = false` in `config.toml` can.
 - **Codex subagents skip SessionStart (2026-11-23).** Each had its own MCP
   server. Its hooks carried the root session id and its own thread id as
   `agent_id`. Subagent leads own separate threads and use `agent_wait`.
