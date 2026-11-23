@@ -1,8 +1,7 @@
 # Threads: the lead talks to the companion without a subagent: plan
 
-Status: built on `feat/threads` (2026-11-23). Steps 0 to 8 are done and
-checked live on both hosts; the installed-form run on the user's hosts and the
-merge are next. Every fact under Evidence was measured
+Status: released as 1.0.0 (2026-11-23). Steps 0 to 8 are done, checked live on
+both hosts and in installed form, and merged to main. Every fact under Evidence was measured
 on 2026-11-22 unless it says otherwise.
 
 ## Goal
@@ -593,7 +592,7 @@ subagent.
 - Rewrite both plugin manifests' descriptions for the new contract and name all
   five companions.
 - Update `README.md`, `docs/ARCHITECTURE.md` (with the negative results above),
-  `CLAUDE.md` and `docs/MVP_TRACKER.md`. Version 0.3.0.
+  `CLAUDE.md` and `docs/MVP_TRACKER.md`. Version 0.3.0, released as 1.0.0 (2026-11-23).
 - Walk THREAD_FEATURES.md: each row holds or is in the table under Features, and
   names its pinning test.
 - `setup.sh --codex-unload-delay <seconds|default>` (decision 10), written

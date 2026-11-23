@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "MCP bridge for companion threads, job control and result delivery to the lead conversation.",
   "type": "module",
   "private": true,

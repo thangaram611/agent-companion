@@ -2,15 +2,16 @@
 
 Last updated: 2026-11-23
 
-Release metadata is `0.3.0` in both plugin manifests and the private bridge
+Release metadata is `1.0.0` in both plugin manifests and the private bridge
 package. Readiness requires the gates below on the reviewed candidate commit;
 installed versions and a matching wire fixture do not establish live transport
 qualification. Product vocabulary and supported capabilities belong in
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
-The current direction is the conversational, per-execution ownership design.
-In-flight bridge survival is retired; cold history resume, verified cleanup and
-native owner attribution are the acceptance contract. The
+Since 1.0.0 the lead calls the bridge itself: it owns threads, and results
+reach it by hook, `agent_wait` or a host wake ([THREAD_PLAN.md](THREAD_PLAN.md)).
+There is no subagent role. In-flight bridge survival stays retired; cold history
+resume, verified cleanup and host-identified leads are the acceptance contract. The
 [Claude report](../probes/host-qualification/claude/REPORT-2026-11-05.md) (2.1.318)
 and [Codex report](../probes/host-qualification/codex/REPORT-2026-11-05.md) (0.166.0)
 are measured host inputs, not installed-form cleanup qualification. Codex desktop,
@@ -20,21 +21,22 @@ not Claude as a companion.
 
 ## Source-Backed Compatibility Notes
 
-Installed versions from 2026-10-26, except for the Antigravity CLI measurement
-on 2026-11-22. These version checks do not establish release qualification.
+Installed versions on 2026-11-23, macOS, Node 26.13.0. These version checks do
+not establish release qualification.
 
 | Component | Version | Evidence |
 | --- | --- | --- |
-| Claude Code | 2.1.310 | `claude --version` |
-| Codex CLI | 0.164.0 | `/opt/homebrew/bin/codex --version` |
-| OpenCode | 2.1.4 | `opencode --version` |
-| GitHub Copilot CLI | 1.0.103 | `copilot --version` |
-| Antigravity CLI | 1.5.13 | `agy --version` on macOS |
+| Claude Code | 2.1.330 | `claude --version` |
+| Codex CLI | 0.171.0 | `codex --version` |
+| OpenCode | 2.3.2 | `opencode --version` |
+| GitHub Copilot CLI | 1.0.114 | `copilot --version` |
+| Antigravity CLI | 1.5.13 | `agy --version` |
 
 Claude Code plugins:
 
-- The installation materializes a standalone agent through
-  `hooks/install-agent.sh`. Its session-scoped plugin MCP boundary is documented in
+- The plugin registers the bridge at plugin scope and its hooks identify the
+  lead; there is no agent file since 1.0.0, and session start removes an old
+  sentinel-marked one. The MCP boundary is documented in
   [ARCHITECTURE.md](ARCHITECTURE.md#mcp-registration-boundary).
 
 Codex plugins:
@@ -46,10 +48,11 @@ Codex plugins:
   `hooks/hooks.json` path, and plugin-bundled hooks still go through trust
   review:
   <https://developers.openai.com/codex/hooks>.
-- Codex agent roles intentionally cannot add MCP authority: the bounded role
-  overlay omits `mcp_servers`, and the upstream regression test asserts that a
-  child retains the parent's MCP set. Agent Companion therefore declares its
-  bridge in the Codex-only plugin manifest, where the child inherits it:
+- Agent Companion declares its bridge in the Codex-only plugin manifest, so the
+  root conversation and any child inherit it, and marks it `required` (1.0.0)
+  so a first turn never starts without its tools; measured in
+  [Negative Results](ARCHITECTURE.md#negative-results). Codex agent roles
+  cannot add MCP authority:
   <https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/core/src/agent/role.rs#L33-L44>,
   <https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/core/src/agent/role_tests.rs#L497-L526>.
 - Codex 0.164.0 supports the inline native `mcpServers` object and resolves a
@@ -128,7 +131,8 @@ Claude companion implementation and qualification are tracked separately:
 | Gate | Status | Evidence / next check |
 | --- | --- | --- |
 | Hermetic adapter and integration suite | Done | 503 tests green at `c8612ae` on Node 22 and 26, including the supervisor pid guard and the normalized-model default fix. |
-| Role templates and documentation | Done | Both hosts name all five companions and agree on Claude cold resume, default reply modes and relayed follow-ups. Template/parity tests pin the wording. |
+| Documentation | Done 2026-11-23 | The role templates are gone in 1.0.0. Both manifests and the README name all five companions and describe threads; `docs/THREAD_FEATURES.md` walks every shipped behaviour to its pinning test or the plan's by-design table. |
+| Thread design on both hosts (1.0.0) | Done 2026-11-23 | `probes/direct-lead/live.mjs` scenarios on Claude Code 2.1.330 and Codex 0.171 (daemon mode), both idle hours, and installed-form runs on the operator's hosts; see the 1.0.0 record below. |
 | Live Claude companion smoke from Codex CLI | Done 2026-11-09 | [Report](../probes/host-qualification/claude-companion/REPORT-2026-11-09.md): installed branch plugin on codex-cli 0.167.0; send, relayed follow-up on the same history, refusal, interrupt verified gone. Codex does not forward the shell environment to the bridge, so model env knobs are inert there. |
 | Live Claude companion smoke from Claude Code | Done 2026-11-09 | Same report: nested Claude parent → Claude child, configured default model applied, follow-up relayed, TaskStop interrupt verified gone. |
 | Older Claude Code versions | UNVERIFIED | 2.1.319 measured; the 2.1.259 flag minimum is not full compatibility proof. |
@@ -201,9 +205,9 @@ Manual smoke gates before a public tag (real delegations spend model tokens):
     every stop/loss trigger, and suspend/wake. Record instruction/result accounting,
     stop detection separately from cleanup time, and process absence.
     Operator-only TUI actions and desktop cannot be inferred from headless CLI rows.
-12. Migrate quiescent legacy state, preserve history/results and refuse ambiguous
-    mappings. Verify installed artifacts and hooks, including Claude's plugin
-    namespace and both hosts' stop markers. No live legacy job may be adopted.
+12. Legacy history is not read since 1.0.0 (plan decision 22). Verify installed
+    artifacts and hooks, including Claude's plugin namespace and the removal of
+    the old agent files. No live legacy job may be adopted.
 
 For source installs, also verify that prerequisite failures precede installation,
 separate host defaults and legacy migration inputs survive reruns, and a partial install reports
@@ -219,3 +223,19 @@ while a required capability remains unqualified.
 Record the candidate commit, binary versions and results with the release.
 Use isolated state/runtime directories for smokes, stop probe-owned processes,
 and verify fresh CI on that exact commit before publication.
+
+## 1.0.0 record (2026-11-23)
+
+- Candidate: the merge of `feat/threads` into main plus the 1.0.0 version
+  commit; CI on that exact commit is required before publication.
+- Hermetic suite: 898/898 at `ecc9038` (402 s, Node 26.13.0); the required
+  Codex bridge change added suites run green (31/31). Release validator and
+  `claude plugin validate .` OK.
+- Installed form, operator hosts: Claude Code 2.1.330 lead sent to OpenCode's
+  free model, was woken through its inbox socket and got the result once by
+  hook. Codex 0.171 through its daemon: lead identity, `codex queue` wake, hook
+  delivery 0.6 s after the job ended, and `/quit` with
+  `thread_unload_delay_secs = 0` ending a running job in bridge loss after
+  3.5 s.
+- Open, as before: Codex desktop, Copilot cold load and older Claude Code
+  versions; gates 3, 4 and 7 to 11 were not rerun for this release.

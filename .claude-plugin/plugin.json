@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "Delegate from Claude Code to OpenCode, GitHub Copilot CLI, Codex CLI, Google Antigravity or Claude Code. Claude starts a thread with your task and an absolute repo or worktree path, follows up in that thread, and brings the result back to your conversation.",
   "author": {
     "name": "thangaram611",

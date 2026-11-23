@@ -201,7 +201,7 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
    `--permission-prompts` needs at least 2.1.259; that flag minimum does not
    qualify older versions of the complete integration.
 
-10. Both plugin manifests and the private bridge package declare `0.3.0`.
+10. Both plugin manifests and the private bridge package declare `1.0.0`.
     Build release artifacts from the reviewed commit; version metadata alone
     does not establish that the release gates pass.
 
