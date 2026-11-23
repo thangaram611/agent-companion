@@ -341,11 +341,11 @@ export const tools = [
   }, { required: ['thread'] }, readThread),
   tool('wait', 'Wait for a result, a user intervention, or the wait budget to expire.', {
     thread, job_id, max_wait_sec: field('number', number, { description: 'Default 480 seconds, maximum 1200.' }),
-  }, { oneOf: reference }, handleWait),
+  }, { anyOf: reference }, handleWait),
   tool('status', 'Inspect a thread or job; with neither, list your threads. Diagnostics adds every companion\'s details and cached checks.', {
     thread, job_id, diagnostics: field('boolean', boolean),
-  }, { not: { required: ['thread', 'job_id'] } }, handleStatus),
-  tool('cancel', 'Stop a job. A later send can resume its thread.', { thread, job_id }, { oneOf: reference }, handleCancel),
+  }, {}, handleStatus),
+  tool('cancel', 'Stop a job. A later send can resume its thread.', { thread, job_id }, { anyOf: reference }, handleCancel),
 ];
 
 // Each controller represents one bridge. A Codex session may have several native leads.
@@ -363,8 +363,7 @@ function attributedInput(tool, params, host, active) {
   const { lead: injected, ...publicArgs } = raw;
   const args = validateFields(publicArgs, tool);
   if (tool.action === 'send' && !args.thread && args.cwd === undefined) assertCwd(args.cwd);
-  if (args.thread && args.job_id) invalid('pass either thread or job_id');
-  if (tool.inputSchema.oneOf && !args.thread && !args.job_id) invalid('thread or job_id is required');
+  if ((tool.action === 'wait' || tool.action === 'cancel') && !args.thread && !args.job_id) invalid('thread or job_id is required');
   if (tool.action !== 'catalog' && HOSTS[host].bridgePerSession) adoptHostSessionId(active, lead.session);
   return { ...args, lead };
 }
@@ -377,16 +376,18 @@ export async function dispatch(params, { controller: active, host = detectHost()
   try {
     args = attributedInput(tool, params, host, active);
     let threadRecord;
-    if (args.job_id) {
-      const job = active.records.readJob(args.job_id);
-      if (!job) return refuse(action, 'job_unknown', { status: 'unknown_job', job_id: args.job_id });
-      args.thread = job.thread;
-    }
+    const job = args.job_id && active.records.readJob(args.job_id);
+    args.thread ??= job?.thread;
     if (args.thread) {
       threadRecord = active.records.readThread(args.thread);
       if (!threadRecord) return refuse(action, 'thread_unknown', { status: 'unknown_thread', thread: args.thread });
       if (!sameLead(threadRecord.lead, args.lead)) return refuse(action, 'THREAD_NOT_YOURS');
-      args.job_id ??= threadRecord.jobId;
+    }
+    if (args.job_id) {
+      if (!job) return refuse(action, 'job_unknown', { status: 'unknown_job', job_id: args.job_id });
+      if (job.thread !== args.thread) invalid('job_id does not belong to thread');
+    } else if (threadRecord) {
+      args.job_id = threadRecord.jobId;
     }
     return await tool.handler(args, active, { requestId, signal }, threadRecord);
   } catch (err) {

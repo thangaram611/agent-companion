@@ -35,6 +35,11 @@ const scenarios = {
     const listed = (await request('tools/list', {})).tools;
     assert.deepEqual(listed.map(t => t.name), ['catalog', 'send', 'read', 'wait', 'status', 'cancel'].map(action => 'companion_' + action));
     assert.ok(!listed.some(t => Object.hasOwn(t.inputSchema.properties, 'target')));
+    for (const action of ['wait', 'status', 'cancel']) {
+      const { type, properties, additionalProperties, ...conditions } =
+        listed.find(t => t.name === 'companion_' + action).inputSchema;
+      assert.deepEqual(conditions, action === 'status' ? {} : { anyOf: [{ required: ['thread'] }, { required: ['job_id'] }] });
+    }
     for (const tool of listed) {
       assert.equal(tool.inputSchema.additionalProperties, false);
       assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'lead'));
@@ -104,6 +109,25 @@ const scenarios = {
     assert.deepEqual((await h.call('status', {}, sub)).threads, [row(second, task.split('\n')[0])]);
     assert.deepEqual((await h.call('status', {}, { session: 'session-b' })).threads, []);
     assert.deepEqual(diskSnapshot(h.dir), before);
+  },
+
+  async 'paired references select the named generation and preserve thread ownership'() {
+    const h = fixture();
+    const first = await h.send();
+    await h.finish(first.job_id);
+    const latest = await h.send({ thread: first.thread, task: 'follow up' });
+    const sibling = await h.send();
+    const foreign = await h.send({}, { ...main, agent: 'child' });
+    for (const action of ['status', 'wait', 'cancel']) {
+      const call = (thread, job_id) => h.call(action, { thread, job_id });
+      assert.equal((await call(first.thread, first.job_id)).job_id, first.job_id);
+      assert.equal((await call(first.thread, sibling.job_id)).code, 'INVALID_ARGUMENTS');
+      assert.equal((await call(first.thread, foreign.job_id)).code, 'INVALID_ARGUMENTS');
+      assert.equal((await call(foreign.thread, first.job_id)).code, 'THREAD_NOT_YOURS');
+      assert.equal((await call(foreign.thread, foreign.job_id)).code, 'THREAD_NOT_YOURS');
+    }
+    assert.equal((await h.call('status', { thread: first.thread })).job_id, latest.job_id);
+    assert.equal((await h.call('cancel', { thread: first.thread, job_id: latest.job_id })).status, 'cancelled');
   },
 
   async 'Codex binds the metadata session and ignores a forged lead on every call'() {

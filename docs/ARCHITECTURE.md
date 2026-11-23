@@ -4,7 +4,7 @@ Last updated: 2026-11-23
 
 ## Goal
 
-The lead in Claude Code or Codex CLI calls the session's bridge directly. The
+The lead in Claude Code, Codex CLI, OpenCode or GitHub Copilot CLI calls the bridge directly. The
 companion receives the lead's task verbatim in the requested directory. The
 bridge keeps the thread, runs each job and returns the answer to the conversation
 that started it. The lead can work on something else or end its turn.
@@ -28,7 +28,7 @@ that started it. The lead can work on something else or end its turn.
 
 ```mermaid
 flowchart TD
-  Lead[Lead conversation] -->|send task and cwd| Bridge[Session MCP bridge]
+  Lead[Lead conversation] -->|send task and cwd| Bridge[Host MCP bridge]
   Bridge -->|thread and job id| Lead
   Bridge --> Controller[Job controller]
   Controller --> Adapter[Provider protocol adapter]
@@ -49,6 +49,11 @@ where supported. Each job has its own process group and protocol connection.
 [Illustrated job lifecycle](../assets/readme/architecture.png)
 
 ### MCP registration boundary
+
+The OpenCode plugin registers one bridge per open directory. Sessions share
+the process and identify each call with `_meta["ai.opencode/sessionID"]`.
+A managed-service bridge wakes a root session through its prompt API. Private
+servers and subagents use wait. [OpenCode host plan](OPENCODE_HOST_PLAN.md)
 
 The Copilot marketplace loads the checkout in place. A bridge belongs to its
 `COPILOT_AGENT_SESSION_ID`. The native pre-tool hook signs the event's session
@@ -84,7 +89,7 @@ lead identity gives `LEAD_REQUIRED`. Only the catalog is exempt.
 
 A native subagent can own threads and use `companion_wait` for results. Wakes target
 the main conversation only. Before starting work, the bridge checks recorded
-native companion sessions across both state homes. A matching caller gets
+native companion sessions across host state homes. A matching caller gets
 `RECURSION_REFUSED`.
 
 SIGINT, SIGTERM and stdin EOF share one awaited `onBridgeLoss()` hook, guarded
@@ -96,10 +101,13 @@ a live job and cannot claim cleanup until absence is verified.
 
 ## Private MCP Surface
 
-The lead uses the six tools defined in `bridge-server/tools.mjs`.
+The lead uses the six tools defined in `bridge-server/tools.mjs`. For wait,
+status and cancel, a thread alone selects its latest job. A job ID selects
+that specific run. If both are supplied, the job must belong to the thread.
+All three tools check thread ownership.
 
 - `companion_send` starts a thread, follows up or intervenes in a running job.
-- `companion_wait` takes exactly one of `thread` or `job_id` and an optional numeric
+- `companion_wait` requires `thread` or `job_id` and an optional numeric
   `max_wait_sec`. See [Host budgets](#host-budgets) for the default and cap. A result,
   a user intervention or the budget ending returns control to the lead.
 - `companion_read` takes a thread and optional `after` (job id), character `offset`
@@ -111,8 +119,7 @@ The lead uses the six tools defined in `bridge-server/tools.mjs`.
 - `companion_status` with no arguments lists the caller's threads, one short
   row each: `thread`, `title`, `companion`, `cwd`, `state`, `job_id`, `started_at`
   and `unread`. Running jobs sort first, then newest start time. The response
-  also carries `default_companion`. Either `thread` or `job_id` selects one
-  job. With `diagnostics: true` it adds `companions`, every companion's fixed details
+  also carries `default_companion`. With `diagnostics: true` it adds `companions`, every companion's fixed details
   (about 15 KB, which is why they are not in the default answer), and
   `diagnostics.companions`, the cached readiness checks.
 - `companion_cancel` takes a thread or job id and stops the job. The thread remains
@@ -123,7 +130,7 @@ The lead uses the six tools defined in `bridge-server/tools.mjs`.
 `permission: { mode, source, risk }` (null without a permission descriptor),
 intervention/resume/cancel/model/effort-selection capabilities, readiness and the installed version seen at the last check.
 Both `model` and `effort` include `saved` from `settings.json` and `last_run` from the
-newest job across both hosts that reported that field. Either can be null.
+newest job across hosts that reported that field. Either can be null.
 `last_run` contains `{ value, at, age_ms, host }`, with an ISO start time.
 `model.model` and `model.source` account for the environment override.
 Catalog requires no lead identity, starts no process and writes no state. If model enumeration needs a
@@ -463,20 +470,22 @@ alone is never proof of exit.
 
 ## State
 
-Both hosts share `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`,
+All hosts share `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`,
 or `$AGENT_COMPANION_HOME/settings.json` with the override set. `lib/state.mjs`
 stores the companion and per-companion model and effort there. Environment overrides
 apply to companion and model. The first bridge, onboarding run or
 `agent-companion defaults` command moves the former `target` settings key to `companion` and renames the host readiness cache to `companion-checks.json`. It also migrates `default-target` and `default-model*`. A value found on one host
-or agreed by both moves into the store. A disagreement leaves the setting unset
-and preserves both files. `launch-ui.sh defaults` lists the competing values
+or agreed across hosts moves into the store. A disagreement leaves the setting unset
+and preserves the source files. `launch-ui.sh defaults` lists the competing values
 and paths. Setting or clearing that default resolves the conflict. Setup previews this migration read-only.
 Settings writes atomically replace the private file. Unreadable or invalid settings
 produce a warning and block updates.
 
-`AGENT_COMPANION_HOME` overrides the state home; otherwise Claude uses
-`~/.claude/agent-companion/` and Codex uses `$CODEX_HOME/agent-companion/`
-(default `~/.codex/agent-companion/`).
+`AGENT_COMPANION_HOME` overrides the state home. Otherwise each host keeps
+records under `agent-companion/` in its config directory. The defaults are
+`~/.claude`, `~/.codex`, `~/.config/opencode` and `~/.copilot` for Claude, Codex, OpenCode
+and Copilot. Codex, OpenCode and Copilot honor `CODEX_HOME`, `XDG_CONFIG_HOME`
+and `COPILOT_HOME` respectively.
 
 | Path | Meaning |
 | --- | --- |
@@ -496,12 +505,12 @@ produce a warning and block updates.
 When a job finishes, `delivery.mjs` marks its lead's session as having news.
 Unless a live wait already covers that job, the finishing bridge attempts a
 wake. Claude writes to its current session's inbox socket. Codex runs
-`codex queue --thread <id> --message <notice>` for a root conversation. The
-notice gives the thread, job, companion, status and read reference. Sending it
+`codex queue --thread <id> --message <notice>` for a root conversation. OpenCode posts a session prompt and Copilot queues a
+message through the joined extension. The notice gives the thread, job, companion, status and read reference. Sending it
 does not claim delivery. The send acknowledgement's `delivery` field describes
 the available adapter and names `companion_wait` as fallback.
 
-Both hosts call `hooks/hook.sh` on SessionStart, UserPromptSubmit and PostToolUse.
+Claude and Codex call `hooks/hook.sh` on SessionStart, UserPromptSubmit and PostToolUse.
 On ordinary prompt and post-tool events with a recognizable session id and no
 news marker, the shell exits without starting a process. Otherwise
 `hooks/hook.mjs` checks the lead's unclaimed results. The wake itself fires
@@ -585,7 +594,7 @@ Claude keeps its own transcripts under `~/.claude/projects` (or
 
 ### Live view
 
-`agent-companion ui` reads both hosts' job records and follows the selected
+`agent-companion ui` reads all hosts' job records and follows the selected
 job's native transcript. The job title comes from the thread. The view writes
 user messages and cancels to the inbox and saves defaults through
 `bridge-server/ui/defaults.mjs`. In Claude Code, `hooks/mod.ts` lists running
@@ -644,6 +653,18 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
 
 **Direct lead calls and delivery** ([evidence and versions](THREAD_PLAN.md#evidence))
 
+- **A heartbeat cannot keep an idle OpenCode directory loaded (2026-11-23).**
+  The original plan assumed a durable session metadata event reset the timer.
+  With a one-minute timeout, repeated metadata PATCHes, session views and a held
+  `/api/shell` command all unloaded at 118–120 s alongside the idle control.
+  The bridge has no heartbeat. Set the directory timeout and reload OpenCode.
+  [OpenCode measurements](OPENCODE_HOST_PLAN.md)
+- **The shared launcher must ignore `AGENT_COMPANION_JOB` (2026-11-23).**
+  Codex requires the bridge at startup. Exiting the launcher in a marked Codex
+  companion would stop the job. OpenCode skips registration in its plugin, and
+  Copilot disables the MCP server in ACP and skips marked hooks and extensions.
+  The bridge also refuses delegation from recorded companion sessions.
+  [Copilot recursion measurements](COPILOT_HOST_PLAN.md)
 - **The main conversation can call the bridge itself (2026-11-22).** Claude
   Code 2.1.330 supplied a session id without an agent id. A 150-second OpenCode
   job returned to that lead and all owned processes exited. On Codex CLI

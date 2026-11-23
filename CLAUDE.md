@@ -48,7 +48,9 @@ refuses to adopt a live or unverified tree. A later job resumes supported
 native history in a fresh process.
 
 **The host identifies the lead.** Claude's PreToolUse hook writes `lead` from
-`session_id` and optional `agent_id`. Codex uses turn metadata. OpenCode supplies the session in MCP metadata. Copilot stamps the native hook identity and binds it to the bridge root and tool call. The bridge
+`session_id` and optional `agent_id`. Codex uses turn metadata. OpenCode uses
+`_meta["ai.opencode/sessionID"]`. Copilot's pre-tool hook stamps the native
+session and agent identity, bound to the bridge root and tool call. The bridge
 issues a thread id. A caller using another lead's thread gets `THREAD_NOT_YOURS`.
 Starting work from a recorded companion session gets `RECURSION_REFUSED`.
 
@@ -94,7 +96,7 @@ Copilot CLI 1.0.114 replayed saved history in a fresh process on local Ollama.
 The bridge requires replay, queues by default and supports interrupt. Steer is
 unavailable because a second prompt cancels the running turn. Each companion
 uses a fixed transport.
-Routing applies model defaults only on a new thread. Both hosts share
+Routing applies model defaults only on a new thread. All hosts share
 `settings.json` and its one-shot migration in `lib/state.mjs`.
 
 **Interventions share one controller path.** New text sent to a running thread
@@ -123,6 +125,16 @@ sender, mode, state and first line, including `not_delivered` messages.
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
 | `lib/state.mjs` | Shared companion, model and effort settings, atomic model/effort edits and one-shot migration of legacy defaults. |
 | `lib/hosts/` | Host registry, paths, lead identity, wake adapters and sandbox guard. |
+| `lib/hosts/opencode.mjs` | OpenCode paths, session identity and managed-service prompt wake. |
+| `lib/hosts/copilot.mjs` | Copilot paths, hook identity signing and verification, and wake selection. |
+| `lib/hosts/copilot-notice.mjs` | Per-session socket registration, notice delivery and acknowledgement. |
+| `lib/private-files.mjs` | Private file permissions, writes and atomic publication. |
+| `opencode-plugin/` | Registers the directory's bridge and skips companion jobs. |
+| `.github/plugin/plugin.json` | Bundles the Copilot bridge, timeout, hooks and notice extension. |
+| `hooks/hooks-copilot.json` | Maps Copilot hook events to the hook entry point. |
+| `hooks/copilot.mjs` | Stamps tool calls and delivers unread results to the owning lead. |
+| `extensions/notice/extension.mjs` | Joins the Copilot root session and forwards notices through `session.send`. |
+| `scripts/install-opencode-idle-timeout.mjs` | Sets or removes the global directory idle timeout while preserving JSONC comments. |
 | `hooks/hook.sh` and `hooks/hook.mjs` | Hook entry for Claude identity, session registration and delivery on session start, prompt submit and post-tool events. |
 | `lib/transcripts.mjs` and `lib/transcripts/` | Read-only native transcript location, format fingerprints, normalized in-memory items and live follow (`followTranscript`). |
 | `lib/work-summary.mjs` | Native turn selection and bounded commands, edits, errors and worktree summary projection. |
@@ -130,7 +142,7 @@ sender, mode, state and first line, including `not_delivered` messages.
 | `lib/digest.mjs` | Read-only, on-demand job digest from native transcript and result records. |
 | `lib/companion-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
-| `bridge-server/ui/jobs.mjs` | Both hosts' job lists, thread titles and lead session names. The pane lists the latest job per thread in its session. |
+| `bridge-server/ui/jobs.mjs` | Cross-host job lists, thread titles and lead session names. The pane lists the latest job per thread in its session. |
 | `bridge-server/ui/defaults.mjs` | The package-free `defaults` command and the live view's defaults panel (`d`): saved choices, native inheritance, validation, saves and legacy conflict resolution. |
 | `bridge-server/ui/rows.mjs` | Sanitizing native text, cell widths, item folding and wrapping, a job's transcript blocks, card head and pending lines for both views, and the cached row index. |
 | `bridge-server/ui/follow.mjs` | One job's transcript follow and turn selection for both views, and the `follow` entry that streams them to the Claude pane as JSON lines. |
@@ -151,7 +163,7 @@ sender, mode, state and first line, including `not_delivered` messages.
 - **Claude plugin tools are namespaced.** Claude names them
   `mcp__plugin_agent-companion_agent-bridge__*`; the identity hook and the mod
   match these as well as bare session tool names.
-- **Host parity is a test.** Both plugin manifests register the bridge. Claude
+- **Host parity is a test.** Each host plugin registers the bridge. Claude
   uses sibling `timeout` in milliseconds; Codex uses `tool_timeout_sec` in
   seconds. `test/hosts.test.mjs` pins their effective settings.
 - **The empty hook path starts no process.** On ordinary prompt and post-tool
@@ -172,7 +184,21 @@ sender, mode, state and first line, including `not_delivered` messages.
   a job still running. Nothing tells a watched conversation from a left one, so
   do not add a presence gate; `setup.sh --codex-unload-delay` is the one knob,
   read when Codex's daemon starts.
-- **The MCP wall is per call.** Both hosts cancelled at 1,320 s even with
+- **Give OpenCode probes their own port first.** Any `opencode` command can
+  start the managed service. Its fixed machine-wide port defaults to 49374.
+  A test service there blocks the user's OpenCode. Stop the probe's service on exit.
+- **An open OpenCode TUI can lose its bridge.** After `experimental.location_idle_timeout`
+  without session activity, the directory's services unload. No supported keep-alive
+  worked: metadata PATCHes, session views and a held `/api/shell` command all
+  unloaded with the control. Set `setup.sh --opencode-idle-timeout` and run `opencode reload`.
+- **Keep the job marker out of the shared launcher.** Exiting on `AGENT_COMPANION_JOB`
+  stops a marked Codex companion because its bridge is required. OpenCode's plugin
+  returns early. Copilot ACP gets `--disable-mcp-server agent-bridge`, and marked
+  hooks and extensions skip startup. `RECURSION_REFUSED` is the second line.
+- **Copilot's wake needs experimental mode.** Setup runs `copilot config experimental true`
+  profile-wide. Copilot hides MCP server instructions by default, so tool descriptions
+  must stand alone. Plugin calls time out at 180 s by default. Our manifest sets 1,320 s.
+- **The MCP wall is per call.** Claude and Codex cancelled at 1,320 s even with
   progress. Waits default to 480 s and cap at 1,200. Claude's mod must match
   only `companion_send` so a long main-conversation wait can move to the background.
 - **The live view lives in `bridge-server/ui/` for its imports.** ESM finds `ink`
@@ -232,6 +258,9 @@ sender, mode, state and first line, including `not_delivered` messages.
 | File | Use |
 | --- | --- |
 | `docs/THREAD_PLAN.md` | Thread contract, measured host behavior and future host adapters. |
+| `docs/OPENCODE_HOST_PLAN.md` | Directory bridge, session wake and measured idle lifetime. |
+| `docs/COPILOT_HOST_PLAN.md` | Hook identity, notice extension and installed-plugin measurements. |
+| `docs/VOCABULARY_PLAN.md` | Public tool names, arguments and product vocabulary. |
 | `docs/ARCHITECTURE.md` | Layer boundaries, routing contract, state layout, **Negative Results**. |
 | `docs/RELIABILITY_REMEDIATION.md` | Historical incident and protocol measurements; retired survival design explicitly labelled. |
 | `docs/MVP_TRACKER.md` | What is done, what the current limitations are, what is next. |
