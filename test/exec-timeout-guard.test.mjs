@@ -3,7 +3,7 @@
 // A binary that hangs — stalled on a TTY auth prompt, a wedged network call, a
 // unresponsive provider probe — therefore does not just stall the diagnostics call;
 // it wedges every in-flight job on that bridge, permanently. Both agent
-// templates instruct the subagent to call agent_status({diagnostics:true}), so
+// templates instruct the subagent to call companion_status({diagnostics:true}), so
 // this is a routine code path.
 //
 // The fix is a timeout, and the way a timeout gets lost is duplication: doctor

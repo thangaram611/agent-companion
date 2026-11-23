@@ -80,16 +80,17 @@ test('install adds missing permissions, preserves unrelated entries, and backs u
   });
 });
 
-test('stale session-scope names are replaced by the plugin-qualified names', () => {
+test('old bridge permissions in both namespaces are replaced', () => {
   withHome((home) => {
     mkdirSync(join(home, '.claude'), { recursive: true });
+    const stale = ['mcp__agent-bridge__', HOSTS.claude.toolPrefix].flatMap(prefix =>
+      ['send', 'wait', 'read', 'status', 'cancel', 'catalog', 'reply'].map(action => prefix + 'agent_' + action));
     writeFileSync(settingsPath(home), JSON.stringify({
-      permissions: { allow: ['Bash(git status:*)', 'mcp__agent-bridge__agent_send', 'mcp__agent-bridge__agent_wait', 'Agent(agent-companion)', HOSTS.claude.toolPrefix + 'agent_reply'] },
+      permissions: { allow: ['Bash(git status:*)', ...stale, 'Agent(agent-companion)'] },
     }));
     const r = runScript(home);
     assert.equal(r.code, 0, r.stderr);
     assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status:*)', ...REQUIRED_PERMISSIONS]);
-    assert.match(r.stdout, /removed stale mcp__agent-bridge__agent_send, mcp__agent-bridge__agent_wait/);
   });
 });
 

@@ -32,9 +32,8 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 
 // Claude registers the bridge at plugin scope, so the tool names carry the
-// plugin namespace. The bare session-scope names belong to the retired
-// registration and are removed when found.
-const STALE = /^mcp__agent-bridge__agent_/;
+// plugin namespace. Both namespaces can contain permissions from the old tool set.
+const STALE = /^mcp__(?:plugin_agent-companion_)?agent-bridge__agent_/;
 const args = process.argv.slice(2);
 const yes = args.includes('--yes') || args.includes('-y');
 
@@ -61,7 +60,7 @@ if (host === HOSTS.codex.id) {
 
 const SETTINGS = settingsFile(host);
 const PERMISSIONS = tools.map(({ name }) => HOSTS[host].toolPrefix + name);
-const isStale = p => STALE.test(p) || p === 'Agent(agent-companion)' || p === HOSTS[host].toolPrefix + 'agent_reply';
+const isStale = p => STALE.test(p) || p === 'Agent(agent-companion)';
 mkdirSync(path.dirname(SETTINGS), { recursive: true });
 
 let cfg = {};

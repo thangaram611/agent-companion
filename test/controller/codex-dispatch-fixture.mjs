@@ -50,7 +50,7 @@ if (process.argv[2] === 'app-server') {
   };
   const call = async (args, request = {}, controller = active) =>
     await callTool(args, { controller, ...request });
-  const send = (task = 'original', thread) => call({ action: 'send', target: 'codex', cwd: dir, task, ...(thread && { thread }) });
+  const send = (task = 'original', thread) => call({ action: 'send', companion: 'codex', cwd: dir, task, ...(thread && { thread }) });
   const adapter = (id) => active.live.get(id).adapter;
   const emit = (id, frames) => adapter(id)._call('fake/emit', { frames });
   const complete = async (id, text = 'native answer') => {

@@ -33,7 +33,7 @@ read_registry_ids() {
 
 # --- Argument parsing -------------------------------------------------------
 #
-# An omitted host is detected; an omitted target preserves existing configuration.
+# An omitted host is detected; an omitted companion preserves existing configuration.
 HOST=""
 TARGET=""
 MODEL=""
@@ -46,34 +46,34 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --host)   [ "$#" -ge 2 ] && [ -n "$2" ] || { fail "--host requires a value"; exit 2; }; HOST="$2"; shift 2 ;;
     --host=*) HOST="${1#--host=}"; [ -n "$HOST" ] || { fail "--host requires a value"; exit 2; }; shift ;;
-    --target) [ "$#" -ge 2 ] && [ -n "$2" ] || { fail "--target requires a value"; exit 2; }; TARGET="$2"; shift 2 ;;
-    --target=*) TARGET="${1#--target=}"; [ -n "$TARGET" ] || { fail "--target requires a value"; exit 2; }; shift ;;
+    --companion) [ "$#" -ge 2 ] && [ -n "$2" ] || { fail "--companion requires a value"; exit 2; }; TARGET="$2"; shift 2 ;;
+    --companion=*) TARGET="${1#--companion=}"; [ -n "$TARGET" ] || { fail "--companion requires a value"; exit 2; }; shift ;;
     --model) [ "$#" -ge 2 ] && [ -n "$2" ] && [[ "$2" != -* ]] || { fail "--model requires a value"; exit 2; }; MODEL="$2"; shift 2 ;;
     --model=*) MODEL="${1#--model=}"; [ -n "$MODEL" ] || { fail "--model requires a value"; exit 2; }; shift ;;
     --codex-unload-delay) [[ "${2:-}" =~ ^([0-9]+|default)$ ]] || { fail "--codex-unload-delay takes seconds or default"; exit 2; }; UNLOAD_DELAY="$2"; shift 2 ;;
     --codex-unload-delay=*) UNLOAD_DELAY="${1#--codex-unload-delay=}"; [[ "$UNLOAD_DELAY" =~ ^([0-9]+|default)$ ]] || { fail "--codex-unload-delay takes seconds or default"; exit 2; }; shift ;;
-    --no-target-check) NO_TARGET_CHECK=1; shift ;;
+    --no-companion-check) NO_TARGET_CHECK=1; shift ;;
     --skip-tests)      SKIP_TESTS=1; shift ;;
     --yes|-y) YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
       read_registry_ids
       cat <<EOF
-Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both] [--target ${TARGET_IDS// /|}|auto|none]
+Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both] [--companion ${TARGET_IDS// /|}|auto|none]
                         [--model <id|inherit>] [--codex-unload-delay <seconds|default>]
-                        [--no-target-check] [--skip-tests] [--yes] [--dry-run]
+                        [--no-companion-check] [--skip-tests] [--yes] [--dry-run]
 
-  --host ${HOST_IDS// /|}|both   install that harness surface (default: detect installed CLIs)
-  --target ${TARGET_IDS// /|}|auto|none
+  --host ${HOST_IDS// /|}|both   install that host surface (default: detect installed CLIs)
+  --companion ${TARGET_IDS// /|}|auto|none
                              choose a default companion (default: preserve existing config,
-                             otherwise select the only ready target). none preserves
-                             config; auto explicitly selects the only ready target.
+                             otherwise select the only ready companion). none preserves
+                             config; auto explicitly selects the only ready companion.
   --model <id|inherit>       save a model for an explicit companion; inherit clears it
   --codex-unload-delay <seconds|default>
                              how long Codex keeps a conversation you left loaded
                              (thread_unload_delay_secs, Codex default 60). Lower ends
                              its wakes and its running jobs sooner; default removes it.
-  --no-target-check          select the target without failing on not-ready
+  --no-companion-check       select the companion without failing on not-ready
   --skip-tests               skip the unit-test step
   --yes                      apply without interactive confirmation
   --dry-run                  preview changes without installing or writing config
@@ -99,12 +99,12 @@ if ! has_id "$HOST" "" $HOST_IDS both; then
   fail "--host must be one of: ${HOST_IDS// /, }, both (got: $HOST)"; exit 2
 fi
 if ! has_id "$TARGET" "" $TARGET_IDS auto none; then
-  fail "--target must be one of: ${TARGET_IDS// /, }, auto, none (got: $TARGET)"; exit 2
+  fail "--companion must be one of: ${TARGET_IDS// /, }, auto, none (got: $TARGET)"; exit 2
 fi
 
 if [ -n "$MODEL" ]; then
   case "$TARGET" in
-    ""|auto|none) fail "--model requires an explicit --target <companion> (not auto or none)."; exit 2 ;;
+    ""|auto|none) fail "--model requires an explicit --companion <companion> (not auto or none)."; exit 2 ;;
   esac
 fi
 
@@ -113,14 +113,14 @@ if [ -z "$HOST" ]; then
   DETECTED=()
   for h in $HOST_IDS; do command -v "$h" >/dev/null 2>&1 && DETECTED+=("$h"); done
   case "${#DETECTED[@]}" in
-    0) fail "No supported harness found. Install Claude Code or Codex CLI, then rerun with --host ${HOST_IDS// /|}."; exit 1 ;;
-    1) HOST="${DETECTED[0]}"; ok "detected harness: $HOST" ;;
+    0) fail "No supported host found. Install Claude Code or Codex CLI, then rerun with --host ${HOST_IDS// /|}."; exit 1 ;;
+    1) HOST="${DETECTED[0]}"; ok "detected host: $HOST" ;;
     *)
       if [ -t 0 ] && [ "$YES" = 0 ]; then
-        read -r -p "Installed harnesses: ${HOST_IDS// /, }. Install for [${HOST_IDS// /\/}/both]: " HOST
+        read -r -p "Installed hosts: ${HOST_IDS// /, }. Install for [${HOST_IDS// /\/}/both]: " HOST
         has_id "$HOST" $HOST_IDS both || { fail "Select ${HOST_IDS// /, } or both."; exit 2; }
       else
-        fail "Both harnesses are installed. Select --host ${HOST_IDS// /|}|both."; exit 2
+        fail "Both hosts are installed. Select --host ${HOST_IDS// /|}|both."; exit 2
       fi
       ;;
   esac
@@ -274,9 +274,9 @@ SELECTED_MODELS=()
 for h in "${HOSTS[@]}"; do
   MODEL_CHOICE="$MODEL"
   ONBOARD_ARGS=(--host "$h" --plan --json --set-default --yes)
-  [ -z "$TARGET" ] || ONBOARD_ARGS+=(--target "$TARGET")
+  [ -z "$TARGET" ] || ONBOARD_ARGS+=(--companion "$TARGET")
   [ -z "$MODEL_CHOICE" ] || ONBOARD_ARGS+=(--model "$MODEL_CHOICE")
-  [ "$NO_TARGET_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-target-check)
+  [ "$NO_TARGET_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-companion-check)
   PLAN_CODE=0
   AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
   if ! jq -e '.configuration and .plan' "$PLAN_DIR/$h.json" >/dev/null; then
@@ -285,11 +285,11 @@ for h in "${HOSTS[@]}"; do
   CURRENT="$(jq -r '.configuration.summary' "$PLAN_DIR/$h.json")"
   case "$h" in claude) CLAUDE_COMPANION="$CURRENT" ;; codex) CODEX_COMPANION="$CURRENT" ;; esac
   echo "Companion ($h): $CURRENT"
-  jq -r '.targets[] | "  \(.displayName): " + (if .ready then "ready" else "not ready" end), (.blockers[], .warnings[] | "    " + .message), (.nextSteps[] | "    Next: " + .)' "$PLAN_DIR/$h.json"
+  jq -r '.companions[] | "  \(.displayName): " + (if .ready then "ready" else "not ready" end), (.blockers[], .warnings[] | "    " + .message), (.nextSteps[] | "    Next: " + .)' "$PLAN_DIR/$h.json"
   if [ "$PLAN_CODE" != 0 ] && [ -t 0 ] && [ "$YES" = 0 ] \
-      && jq -e '.plan.code == "ambiguous_target" or .plan.code == "no_ready_target"' "$PLAN_DIR/$h.json" >/dev/null; then
+      && jq -e '.plan.code == "ambiguous_companion" or .plan.code == "no_ready_companion"' "$PLAN_DIR/$h.json" >/dev/null; then
     read -r -p "Shared default companion [${TARGET_IDS// /\/}/none]: " CHOICE
-    if jq -e --arg id "$CHOICE" '.targets[$id].capabilities.modelSelection == true' "$PLAN_DIR/$h.json" >/dev/null; then
+    if jq -e --arg id "$CHOICE" '.companions[$id].capabilities.modelSelection == true' "$PLAN_DIR/$h.json" >/dev/null; then
       read -r -p "Default model for $CHOICE [inherit]: " MODEL_CHOICE
       [ "$MODEL_CHOICE" != inherit ] || MODEL_CHOICE=""
       [ -z "$MODEL_CHOICE" ] || ONBOARD_ARGS+=(--model "$MODEL_CHOICE")
@@ -297,10 +297,10 @@ for h in "${HOSTS[@]}"; do
     TARGET="$CHOICE"
     MODEL="$MODEL_CHOICE"
     PLAN_CODE=0
-    AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" --target "$CHOICE" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
+    AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" --companion "$CHOICE" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
   fi
   if [ "$PLAN_CODE" != 0 ]; then
-    jq -r '.plan.message // "Selected companion is not ready. Fix its prerequisites, or explicitly use --no-target-check."' "$PLAN_DIR/$h.json"
+    jq -r '.plan.message // "Selected companion is not ready. Fix its prerequisites, or explicitly use --no-companion-check."' "$PLAN_DIR/$h.json"
     exit "$PLAN_CODE"
   fi
   CHOICE="$(jq -r 'if .plan.kind == "chosen" then .plan.id else "none" end' "$PLAN_DIR/$h.json")"
@@ -314,7 +314,7 @@ for h in "${HOSTS[@]}"; do
     else
       echo "Plan ($h): set default companion to $CHOICE; preserve model settings."
     fi
-    jq -r 'if .plan.ready then empty else "  Readiness deferred by --no-target-check; companion is not ready." end' "$PLAN_DIR/$h.json"
+    jq -r 'if .plan.ready then empty else "  Readiness deferred by --no-companion-check; companion is not ready." end' "$PLAN_DIR/$h.json"
   fi
   host_paths "$h" "$SCRIPT_DIR"
   if [ -f "$HOST_AGENT_FILE" ]; then
@@ -339,7 +339,7 @@ if [ "$DO_CODEX" = 1 ]; then
     *) echo "  Set thread_unload_delay_secs to $UNLOAD_DELAY in $HOST_CONFIG_DIR/config.toml (applies when Codex's daemon restarts)." ;;
   esac
 fi
-echo "  Write diagnostic install markers after each harness finishes."
+echo "  Write diagnostic install markers after each host finishes."
 if [ "$MODEL" = inherit ]; then
   echo "  Clear the shared default model for ${SELECTED_TARGETS[0]}."
 elif [ -n "$MODEL" ]; then
@@ -393,9 +393,9 @@ esac
 
 echo ""
 
-# --- Copilot-side reviewer agent (Copilot target only) --------------
+# --- Copilot-side reviewer agent (Copilot companion only) --------------
 #
-# This is Copilot-specific. Only set it up when Copilot is the selected target
+# This is Copilot-specific. Only set it up when Copilot is the selected companion
 # or is already installed (so existing Copilot users keep it); an OpenCode-only
 # install skips it entirely.
 
@@ -630,9 +630,9 @@ for i in "${!HOSTS[@]}"; do
   h="${HOSTS[$i]}"
   CHOICE="${SELECTED_TARGETS[$i]}"
   [ "$CHOICE" != none ] || continue
-  ONBOARD_ARGS=(--host "$h" --target "$CHOICE" --set-default --yes --json)
+  ONBOARD_ARGS=(--host "$h" --companion "$CHOICE" --set-default --yes --json)
   [ -z "${SELECTED_MODELS[$i]}" ] || ONBOARD_ARGS+=(--model "${SELECTED_MODELS[$i]}")
-  [ "$NO_TARGET_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-target-check)
+  [ "$NO_TARGET_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-companion-check)
   if AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" > "$PLAN_DIR/$h-result.json"; then
     CURRENT="$(jq -r '.configuration.summary' "$PLAN_DIR/$h-result.json")"
     jq -r 'if .ok then empty else "Companion readiness deferred; fix prerequisites before delegating." end' "$PLAN_DIR/$h-result.json"

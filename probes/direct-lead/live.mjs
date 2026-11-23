@@ -3,10 +3,10 @@
 // nothing; the Claude host is Haiku (budget-capped). The hooks are the plugin's own. Every home is a fresh temp dir.
 // Usage: node live.mjs <claude|codex> <scenario> [--wall SECONDS] [--idle SECONDS] [--inprocess 1]
 //   smoke     send, wait and the answer
-//   read70    a 70,000-character answer read in full through agent_read, compared with the stored result
-//   esc       a pending agent_wait is cancelled; the job runs on and a later wait returns its result
+//   read70    a 70,000-character answer read in full through companion_read, compared with the stored result
+//   esc       a pending companion_wait is cancelled; the job runs on and a later wait returns its result
 //   wake      the lead ends its turn; the finished job wakes it and the prompt hook brings the answer
-//   recurse   the companion has the bridge loaded and calls agent_send; it is refused
+//   recurse   the companion has the bridge loaded and calls companion_send; it is refused
 //   busy      the lead is in a long tool call when the job ends; it gets the answer after the call
 //   burst     two jobs end together; the hook delivers both
 //   clear     /clear (Claude) or /new (Codex) while a job runs; see the scenario for what each host does
@@ -164,7 +164,7 @@ function codexTui(prompt, wall = opt.wall, name = '') {
 // Every request the scripted model got from the host (its input carries the host's tool outputs and hook text).
 const hostRequests = () => fs.readdirSync(path.join(dirs.model, 'model-requests')).sort()
   .map(file => JSON.parse(fs.readFileSync(path.join(dirs.model, 'model-requests', file), 'utf8')).body)
-  .filter(body => JSON.stringify(body?.input ?? '').includes('agent_send'));
+  .filter(body => JSON.stringify(body?.input ?? '').includes('companion_send'));
 // Each tool output the host model was sent, in order, from the scripted model's request log.
 function codexToolOutputs() {
   const files = fs.readdirSync(path.join(dirs.model, 'model-requests')).sort();
@@ -187,7 +187,7 @@ async function until(predicate, label, ms = opt.wall * 1000) {
 const verdicts = [], cleanups = [];
 const check = (ok, what) => { verdicts.push([ok, what]); log(ok ? 'PASS' : 'FAIL', what); };
 
-// The rendered posts agent_read returned, footers removed, then the post's two header lines.
+// The rendered posts companion_read returned, footers removed, then the post's two header lines.
 function readBack(pages) {
   const text = pages.map(page => page.slice(0, page.lastIndexOf('\n['))).join('');
   return text.split('\n').slice(2).join('\n');
@@ -199,10 +199,10 @@ const scenarios = {
     const task = 'PROBE-ANSWER 2000';
     if (host === 'claude') {
       const lead = claudeHost();
-      lead.say(`Call mcp__agent-bridge__agent_send with cwd="${dirs.work}", target="codex" and task="${task}", then mcp__agent-bridge__agent_wait with the returned thread, then reply SMOKE-DONE.`);
+      lead.say(`Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task="${task}", then mcp__agent-bridge__companion_wait with the returned thread, then reply SMOKE-DONE.`);
       await until(() => lead.turns() >= 1, 'the lead');
       lead.close();
-    } else codexExec([`PROBE-CALL agent_send ${JSON.stringify({ cwd: dirs.work, target: 'codex', task })}`, 'PROBE-CALL agent_wait {"thread":"$THREAD","max_wait_sec":120}'].join('\n'));
+    } else codexExec([`PROBE-CALL companion_send ${JSON.stringify({ cwd: dirs.work, companion: 'codex', task })}`, 'PROBE-CALL companion_wait {"thread":"$THREAD","max_wait_sec":120}'].join('\n'));
     const [result] = records('results');
     check(result?.outcome === 'completed' && result.text.length === 2000, `the companion answered 2000 characters (${result?.outcome}, ${result?.text?.length})`);
   },
@@ -211,16 +211,16 @@ const scenarios = {
     if (host === 'claude') {
       const lead = claudeHost();
       lead.say(`This is an isolated measurement. Follow the steps exactly and do nothing else.
-1. Call mcp__agent-bridge__agent_send with cwd="${dirs.work}", target="codex" and task="${task}".
-2. Call mcp__agent-bridge__agent_wait with the returned thread and max_wait_sec=300.
-3. Call mcp__agent-bridge__agent_read with that thread. While the last line of its result names a next offset, call agent_read again with the thread and that offset. Stop when the last line starts with "[end".
+1. Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task="${task}".
+2. Call mcp__agent-bridge__companion_wait with the returned thread and max_wait_sec=300.
+3. Call mcp__agent-bridge__companion_read with that thread. While the last line of its result names a next offset, call companion_read again with the thread and that offset. Stop when the last line starts with "[end".
 4. Reply READ-DONE and nothing else.`);
       await until(() => lead.turns() >= 1, 'the lead to finish reading');
       lead.close();
-      var pages = lead.toolResults('agent_read');
+      var pages = lead.toolResults('companion_read');
     } else {
-      codexExec([`PROBE-CALL agent_send ${JSON.stringify({ cwd: dirs.work, target: 'codex', task })}`,
-        'PROBE-CALL agent_wait {"thread":"$THREAD","max_wait_sec":300}', 'PROBE-PAGES agent_read {"thread":"$THREAD"}'].join('\n'));
+      codexExec([`PROBE-CALL companion_send ${JSON.stringify({ cwd: dirs.work, companion: 'codex', task })}`,
+        'PROBE-CALL companion_wait {"thread":"$THREAD","max_wait_sec":300}', 'PROBE-PAGES companion_read {"thread":"$THREAD"}'].join('\n'));
       var pages = codexToolOutputs().slice(2);
     }
     const [result] = records('results');
@@ -231,7 +231,7 @@ const scenarios = {
 };
 
 const directives = lines => lines.map(([kind, tool, args]) => `${kind} ${tool} ${JSON.stringify(args)}`).join('\n');
-const job = (task, fields = {}) => ({ cwd: dirs.work, target: 'codex', task, ...fields });
+const job = (task, fields = {}) => ({ cwd: dirs.work, companion: 'codex', task, ...fields });
 const threadOf = () => records('conversations')[0];
 const answerOf = () => records('results')[0];
 
@@ -241,17 +241,17 @@ Object.assign(scenarios, {
     const task = `PROBE-DELAY ${opt.idle}\nPROBE-ANSWER 300`;
     if (host === 'claude') {
       const lead = claudeHost();
-      lead.say(`This is an isolated measurement. Call mcp__agent-bridge__agent_send with cwd="${dirs.work}", target="codex" and task=${JSON.stringify(task)} (the \\n is a newline). Do not call agent_wait. Reply SENT and end your turn.
+      lead.say(`This is an isolated measurement. Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task=${JSON.stringify(task)} (the \\n is a newline). Do not call companion_wait. Reply SENT and end your turn.
 Later a message about that thread will arrive. Then reply WOKE, then the first line of the companion's answer exactly as it reached you, then where it reached you from.`);
       await until(() => lead.turns() >= 1, 'the send turn');
-      const ack = JSON.parse(lead.toolResults('agent_send')[0]);
+      const ack = JSON.parse(lead.toolResults('companion_send')[0]);
       check(ack.delivery?.wake === 'inbox_socket', `the send says the inbox socket is armed (${JSON.stringify(ack.delivery)})`);
       await until(() => lead.turns() >= 2, 'the wake', (opt.idle + 300) * 1000);
       lead.close();
       const said = lead.messages.filter(m => m.type === 'assistant').flatMap(m => m.message.content.filter(b => b.type === 'text').map(b => b.text)).join('\n');
       check(/WOKE/.test(said) && said.includes('line 000001'), 'the lead woke and quoted the answer');
     } else {
-      const tui = codexTui(directives([['PROBE-CALL', 'agent_send', job(task)]]), opt.idle + 600);
+      const tui = codexTui(directives([['PROBE-CALL', 'companion_send', job(task)]]), opt.idle + 600);
       await until(() => codexToolOutputs().length >= 1, 'the send turn', 120_000);
       const ack = JSON.parse(codexToolOutputs()[0]);
       check(ack.delivery?.wake === 'codex_queue', `the send says codex queue is armed (${JSON.stringify(ack.delivery)})`);
@@ -268,26 +268,26 @@ Later a message about that thread will arrive. Then reply WOKE, then the first l
     const task = `PROBE-DELAY 45\nPROBE-ANSWER 300`;
     if (host === 'claude') {
       const lead = claudeHost();
-      lead.say(`Call mcp__agent-bridge__agent_send with cwd="${dirs.work}", target="codex" and task=${JSON.stringify(task)} (the \\n is a newline), then mcp__agent-bridge__agent_wait with the returned thread and max_wait_sec=300.`);
-      await until(() => lead.toolResults('agent_send').length && lead.messages.some(m => m.type === 'assistant' && m.message.content.some(b => b.type === 'tool_use' && b.name.endsWith('agent_wait'))), 'the pending wait', 120_000);
+      lead.say(`Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task=${JSON.stringify(task)} (the \\n is a newline), then mcp__agent-bridge__companion_wait with the returned thread and max_wait_sec=300.`);
+      await until(() => lead.toolResults('companion_send').length && lead.messages.some(m => m.type === 'assistant' && m.message.content.some(b => b.type === 'tool_use' && b.name.endsWith('companion_wait'))), 'the pending wait', 120_000);
       await sleep(5000);
       lead.interrupt();
       await until(() => lead.turns() >= 1, 'the interrupted turn', 60_000);
       await sleep(3000);
       check(!answerOf() && records('executions')[0].state === 'running', 'after the interrupt the job is still running with no result');
-      lead.say(`Call mcp__agent-bridge__agent_wait with thread="${threadOf().owner}" and max_wait_sec=300, then reply with the first line of the answer.`);
+      lead.say(`Call mcp__agent-bridge__companion_wait with thread="${threadOf().owner}" and max_wait_sec=300, then reply with the first line of the answer.`);
       await until(() => lead.turns() >= 2, 'the second wait', 300_000);
       lead.close();
-      const waited = lead.toolResults('agent_wait').at(-1) ?? '';
+      const waited = lead.toolResults('companion_wait').at(-1) ?? '';
       check(waited.startsWith('line 000001'), 'the later wait returned the answer');
     } else {
-      const tui = codexTui(directives([['PROBE-CALL', 'agent_send', job(task)], ['PROBE-CALL', 'agent_wait', { thread: '$THREAD', max_wait_sec: 300 }]]), 600);
+      const tui = codexTui(directives([['PROBE-CALL', 'companion_send', job(task)], ['PROBE-CALL', 'companion_wait', { thread: '$THREAD', max_wait_sec: 300 }]]), 600);
       await until(() => threadOf() && records('executions')[0]?.state === 'running', 'the job', 120_000);
       await sleep(8000);
       tui.type('\x1b');
       await sleep(5000);
       check(!answerOf() && records('executions')[0].state === 'running', 'after Esc the job is still running with no result');
-      await tui.submit(directives([['PROBE-CALL', 'agent_wait', { thread: threadOf().owner, max_wait_sec: 300 }]]));
+      await tui.submit(directives([['PROBE-CALL', 'companion_wait', { thread: threadOf().owner, max_wait_sec: 300 }]]));
       await until(() => answerOf(), 'the result', 300_000);
       await until(() => hostRequests().some(body => body.input.some(item => /_output$/.test(item.type ?? '') && JSON.stringify(item.output).includes('line 000001'))), 'the later wait', 120_000);
       tui.stop();
@@ -295,18 +295,18 @@ Later a message about that thread will arrive. Then reply WOKE, then the first l
     }
     check(answerOf().cause === 'native_complete', `the job ended on its own (${answerOf().cause})`);
   },
-  // The companion has the bridge loaded (as an installed plugin would give it) and calls agent_send: refused.
+  // The companion has the bridge loaded (as an installed plugin would give it) and calls companion_send: refused.
   async recurse() {
-    const inner = JSON.stringify({ cwd: dirs.work, target: 'codex', task: 'PROBE-ANSWER 10' });
-    const task = `PROBE-CALL agent_send ${inner}`;
+    const inner = JSON.stringify({ cwd: dirs.work, companion: 'codex', task: 'PROBE-ANSWER 10' });
+    const task = `PROBE-CALL companion_send ${inner}`;
     if (host === 'claude') {
       const lead = claudeHost();
-      lead.say(`Call mcp__agent-bridge__agent_send with cwd="${dirs.work}", target="codex" and task=${JSON.stringify(task)}, then mcp__agent-bridge__agent_wait with the returned thread and max_wait_sec=120, then reply DONE.`);
+      lead.say(`Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task=${JSON.stringify(task)}, then mcp__agent-bridge__companion_wait with the returned thread and max_wait_sec=120, then reply DONE.`);
       await until(() => lead.turns() >= 1, 'the lead', 300_000);
       lead.close();
-    } else codexExec(directives([['PROBE-CALL', 'agent_send', job(task)], ['PROBE-CALL', 'agent_wait', { thread: '$THREAD', max_wait_sec: 120 }]]));
+    } else codexExec(directives([['PROBE-CALL', 'companion_send', job(task)], ['PROBE-CALL', 'companion_wait', { thread: '$THREAD', max_wait_sec: 120 }]]));
     const outputs = fs.readdirSync(path.join(dirs.model, 'model-requests')).map(file => fs.readFileSync(path.join(dirs.model, 'model-requests', file), 'utf8'));
-    check(outputs.some(text => text.includes('RECURSION_REFUSED')), "the companion's own agent_send came back RECURSION_REFUSED");
+    check(outputs.some(text => text.includes('RECURSION_REFUSED')), "the companion's own companion_send came back RECURSION_REFUSED");
     check(records('conversations').length === 1, `only the lead's thread exists (${records('conversations').length})`);
   },
 });
@@ -326,12 +326,12 @@ Object.assign(scenarios, {
     const task = 'PROBE-DELAY 10\nPROBE-ANSWER 300';
     if (host === 'claude') {
       const lead = claudeHost();
-      lead.say(`Call mcp__agent-bridge__agent_send with cwd="${dirs.work}", target="codex" and task=${JSON.stringify(task)} (the \\n is a newline). Then run the shell command \`perl -e 'sleep 40'\` with Bash in the foreground. Then reply DONE and end your turn. ${wakeLine}`);
+      lead.say(`Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task=${JSON.stringify(task)} (the \\n is a newline). Then run the shell command \`perl -e 'sleep 40'\` with Bash in the foreground. Then reply DONE and end your turn. ${wakeLine}`);
       await until(() => resultsDone(1) && woke(lead), 'the wake after the busy call', 300_000);
       lead.close();
       check(lead.said().includes('line 000001'), 'the busy lead got the answer after its call');
     } else {
-      const tui = codexTui(directives([['PROBE-CALL', 'agent_send', job(task)], ['PROBE-CALL', 'exec_command', { cmd: 'sleep 40', yield_time_ms: 60000 }]]), 600);
+      const tui = codexTui(directives([['PROBE-CALL', 'companion_send', job(task)], ['PROBE-CALL', 'exec_command', { cmd: 'sleep 40', yield_time_ms: 60000 }]]), 600);
       await until(() => resultsDone(1), 'the result', 300_000);
       await until(() => requestsWith('line 000001').length, 'the woken turn', 300_000);
       tui.stop();
@@ -344,11 +344,11 @@ Object.assign(scenarios, {
     const tasks = ['PROBE-DELAY 25\nPROBE-ANSWER 300', 'PROBE-DELAY 25\nPROBE-ANSWER 400'];
     if (host === 'claude') {
       const lead = claudeHost();
-      lead.say(`Call mcp__agent-bridge__agent_send twice, each starting a new thread (no thread argument), both with cwd="${dirs.work}" and target="codex": first task=${JSON.stringify(tasks[0])}, then task=${JSON.stringify(tasks[1])} (each \\n is a newline). Do not wait. Reply SENT and end your turn. ${wakeLine}`);
+      lead.say(`Call mcp__agent-bridge__companion_send twice, each starting a new thread (no thread argument), both with cwd="${dirs.work}" and companion="codex": first task=${JSON.stringify(tasks[0])}, then task=${JSON.stringify(tasks[1])} (each \\n is a newline). Do not wait. Reply SENT and end your turn. ${wakeLine}`);
       await until(() => resultsDone(2) && records('conversations').every(c => lead.said().includes(c.owner)), 'both wakes', 300_000);
       lead.close();
     } else {
-      const tui = codexTui(directives(tasks.map(task => ['PROBE-CALL', 'agent_send', job(task)])), 600);
+      const tui = codexTui(directives(tasks.map(task => ['PROBE-CALL', 'companion_send', job(task)])), 600);
       await until(() => resultsDone(2), 'both results', 300_000);
       await until(() => records('results').every(r => receipt(r.executionId) === 'hook'), 'both deliveries', 300_000);
       tui.stop();
@@ -362,7 +362,7 @@ Object.assign(scenarios, {
   async clear() {
     if (host === 'claude') {
       const lead = claudeHost();
-      lead.say(`Call mcp__agent-bridge__agent_send with cwd="${dirs.work}", target="codex" and task=${JSON.stringify('PROBE-DELAY 30\nPROBE-ANSWER 300')} (the \\n is a newline). Do not wait. Reply SENT and end your turn.`);
+      lead.say(`Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task=${JSON.stringify('PROBE-DELAY 30\nPROBE-ANSWER 300')} (the \\n is a newline). Do not wait. Reply SENT and end your turn.`);
       await until(() => lead.turns() >= 1, 'the send turn', 120_000);
       lead.say('/clear');
       await until(() => lead.messages.some(m => m.type === 'system' && m.subtype === 'init' && m.session_id !== lead.session), 'the cleared session', 60_000).catch(() => {});
@@ -373,8 +373,8 @@ Object.assign(scenarios, {
       check(lead.turns() === turns, `no turn after /clear (${turns} -> ${lead.turns()})`);
       check(receipt(answerOf().executionId) === null && threadOf(), 'the result is undelivered and the thread stays on record');
     } else {
-      const tui = codexTui(directives([['PROBE-CALL', 'agent_send', job('PROBE-DELAY 20\nPROBE-ANSWER 300')],
-        ['PROBE-CALL', 'agent_send', job('PROBE-DELAY 300\nPROBE-ANSWER 400')]]), 600);
+      const tui = codexTui(directives([['PROBE-CALL', 'companion_send', job('PROBE-DELAY 20\nPROBE-ANSWER 300')],
+        ['PROBE-CALL', 'companion_send', job('PROBE-DELAY 300\nPROBE-ANSWER 400')]]), 600);
       await until(() => codexToolOutputs().length >= 2, 'the two sends', 120_000);
       const left = records('conversations')[0].lead.session;
       await tui.submit('/new');
@@ -394,14 +394,14 @@ Object.assign(scenarios, {
     const tasks = ['PROBE-DELAY 20\nPROBE-ANSWER 300', 'PROBE-DELAY 25\nPROBE-ANSWER 400'];
     if (host === 'claude') {
       const leads = ['lead-a', 'lead-b'].map(name => claudeHost(name));
-      leads.forEach((lead, i) => lead.say(`Call mcp__agent-bridge__agent_send with cwd="${dirs.work}", target="codex" and task=${JSON.stringify(tasks[i])} (the \\n is a newline). Do not wait. Reply SENT and end your turn. ${wakeLine}`));
+      leads.forEach((lead, i) => lead.say(`Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task=${JSON.stringify(tasks[i])} (the \\n is a newline). Do not wait. Reply SENT and end your turn. ${wakeLine}`));
       await until(() => resultsDone(2) && leads.every(woke), 'both wakes', 300_000);
       leads.forEach(lead => lead.close());
       const own = lead => records('conversations').filter(c => c.lead.session === lead.session).map(c => c.owner);
       check(leads.every(lead => own(lead).length === 1 && lead.said().includes(own(lead)[0])
         && records('conversations').every(c => own(lead).includes(c.owner) || !lead.said().includes(c.owner))), 'each lead was woken with its own thread only');
     } else {
-      const tuis = tasks.map((task, i) => codexTui(directives([['PROBE-CALL', 'agent_send', job(task)]]), 600, `lead-${i}`));
+      const tuis = tasks.map((task, i) => codexTui(directives([['PROBE-CALL', 'companion_send', job(task)]]), 600, `lead-${i}`));
       await until(() => resultsDone(2) && records('results').every(r => receipt(r.executionId) === 'hook'), 'both deliveries', 300_000);
       tuis.forEach(tui => tui.stop());
       // Each root's conversation carries its own thread's answer, and no conversation carries both threads.
@@ -442,7 +442,7 @@ Object.assign(scenarios, {
     if (since(0).includes('Itrustthisfolder')) { type('\x1b[B'); await sleep(500); type('\r'); }
     await until(() => since(0).includes('←foragents'), 'the prompt', 60_000);
     const task = 'Pane probe task\nPROBE-DELAY 60\nPROBE-ANSWER 300';
-    await submit(`Call mcp__agent-bridge__agent_send with cwd="${dirs.work}", target="codex" and task=${JSON.stringify(task)} (each \\n is a newline). Do not wait. Reply SENT.`);
+    await submit(`Call mcp__agent-bridge__companion_send with cwd="${dirs.work}", companion="codex" and task=${JSON.stringify(task)} (each \\n is a newline). Do not wait. Reply SENT.`);
     await until(() => records('executions').length, 'the send', 120_000);
     let mark = raw().length;
     await sleep(6000);

@@ -3,7 +3,7 @@ import type { On } from 'claude-code'
 
 const HOME = '/home/tester'
 const DIR = `${HOME}/.claude/agent-companion`
-const SEND = 'mcp__plugin_agent-companion_agent-bridge__agent_send'
+const SEND = 'mcp__plugin_agent-companion_agent-bridge__companion_send'
 const START = 1_800_000_000_000
 const MODES = { default: 'steer', steer: true, queue: 'bridge', interrupt: true }
 const SESSION = 'a21965f1-06a4-4c8f-ac00-d38abcaac9b2'
@@ -26,7 +26,7 @@ type Listed = { jobs: { thread: string; title: string; status: string; execution
 type Run = { exitCode: number; stdout: string; stderr: string }
 
 // The engine beneath the mod: the bridge's records from memory (`reads` counts
-// them), agent_send answering each send with the next of `jobs` (thread → job),
+// them), companion_send answering each send with the next of `jobs` (thread → job),
 // `launch-ui.sh jobs` answering each session's list (`sessions`, or `run` in
 // its place), the session's id, the pane's opens and closes (`up` while open),
 // the debug log, and the session's commands (`commands`; `registers` counts
@@ -46,7 +46,7 @@ function engine(on: On, files: Record<string, unknown>, jobs: Record<string, str
   })
   on('tool.call', () => {
     const [thread, job_id] = sends.shift()!
-    return { result: {}, text: JSON.stringify({ ok: true, status: 'still_running', thread, job_id, target: 'codex' }) }
+    return { result: {}, text: JSON.stringify({ ok: true, status: 'still_running', thread, job_id, companion: 'codex' }) }
   })
   on('session.id', () => ({ value: SESSION }))
   on('process.run', (_, e) => {

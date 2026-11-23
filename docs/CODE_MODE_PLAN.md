@@ -1,5 +1,7 @@
 # Code Mode and browser parameters for companions: plan
 
+Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
+
 Status: backlog (2026-11-20). Nothing here is built. The work is parked to see
 whether Claude Code ships a browser for Code Mode itself. Before building, run
 [Re-verify first](#re-verify-first): Code Mode changes in almost every release.

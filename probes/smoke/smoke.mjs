@@ -13,9 +13,9 @@ const bridge = await startBridge(session);
 try {
   const tools = await bridge.rpc('tools/list', {});
   assert.deepEqual(tools.tools.map((t) => t.name).sort(), registry.map(t => t.name).sort());
-  const refusal = await bridge.tool('agent_send', { target: 'codex', model: 'invalid model', task: 'noop', cwd: work }, `${owner}-refusal`);
+  const refusal = await bridge.tool('companion_send', { companion: 'codex', model: 'invalid model', task: 'noop', cwd: work }, `${owner}-refusal`);
   assert.equal(refusal.code, 'MODEL_NOT_ALLOWED');
-  const sent = await bridge.tool('agent_send', { target: 'codex', cwd: work,
+  const sent = await bridge.tool('companion_send', { companion: 'codex', cwd: work,
     task: 'Read README.md and reply with ONLY the magic word it names.' }, owner);
   assert.equal(sent.ok, true, JSON.stringify(sent));
   assert.equal(sent.status, 'still_running');
@@ -23,7 +23,7 @@ try {
   const execution = record('executions', sent.job_id);
   assert.ok(execution.historyId);
   assert.ok(execution.nativeTurnId);
-  const status = await bridge.tool('agent_status', { job_id: sent.job_id }, owner);
+  const status = await bridge.tool('companion_status', { job_id: sent.job_id }, owner);
   assert.equal(status.job_id, sent.job_id);
   assert.equal(status.native_refs.historyId, execution.historyId);
   const final = await bridge.wait(sent.job_id, owner);

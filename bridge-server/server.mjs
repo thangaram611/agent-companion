@@ -32,13 +32,13 @@ if (isMain) {
 
 export const mcp = new Server({ name: 'agent-bridge', version: pkg.version }, {
   capabilities: { tools: {}, resources: {} },
-  instructions: 'Delegate work to a companion coding agent: for a second opinion or a review from another model, ' +
+  instructions: 'Delegate work to a companion: for a second opinion or a review from another model, ' +
     'for independent work that can run in the background, or whenever the user names a companion. ' +
-    'agent_send with the task and the absolute repo or worktree path (cwd) starts a thread and returns at once. ' +
+    'companion_send with the task and the absolute repo or worktree path (cwd) starts a thread and returns at once. ' +
     'The companion receives the task verbatim and sees nothing else of this conversation, so state the goal, what is known and what done looks like. ' +
-    'Pass the returned thread to agent_send for a follow-up; new text on a running thread is an intervention (mode steer, queue or interrupt). ' +
-    'You may end your turn: the result reaches you through the completion hook, or agent_wait blocks for it. ' +
-    'agent_status with no arguments lists your threads; agent_cancel stops a job. ' +
+    'Pass the returned thread to companion_send for a follow-up; new text on a running thread is an intervention (mode steer, queue or interrupt). ' +
+    'You may end your turn: the result reaches you through the completion hook, or companion_wait blocks for it. ' +
+    'companion_status with no arguments lists your threads; companion_cancel stops a job. ' +
     `Default companion: ${defaultTargetId() || 'unset'}. Supported companions: ${listTargetIds().join(', ')}.`,
 });
 

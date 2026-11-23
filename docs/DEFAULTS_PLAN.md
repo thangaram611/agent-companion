@@ -1,5 +1,7 @@
 # User defaults for companion model and effort: plan
 
+Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
+
 Status: done (2026-11-18). Steps 1 to 9 are merged to main, along with the census
 fix 6200b0c found on the way.
 

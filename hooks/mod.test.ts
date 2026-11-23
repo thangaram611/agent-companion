@@ -3,11 +3,11 @@ import type { On } from 'claude-code'
 
 const HOME = '/home/tester'
 const DIR = `${HOME}/.claude/agent-companion`
-const SEND = 'mcp__plugin_agent-companion_agent-bridge__agent_send'
+const SEND = 'mcp__plugin_agent-companion_agent-bridge__companion_send'
 const START = 1_800_000_000_000
 
 // The bridge's records, served to $.fs.read from memory (`reads` counts the
-// reads), and agent_send answering each send with the next thread and job.
+// reads), and companion_send answering each send with the next thread and job.
 function setup(on: On, files: Record<string, unknown>, sends: [string, string][], now = START) {
   mock.env(on, { HOME })
   const state = { reads: 0 }
@@ -17,7 +17,7 @@ function setup(on: On, files: Record<string, unknown>, sends: [string, string][]
   })
   on('tool.call', () => {
     const [thread, job_id] = sends.shift()!
-    return { result: {}, text: JSON.stringify({ ok: true, status: 'still_running', thread, job_id, target: 'codex' }) }
+    return { result: {}, text: JSON.stringify({ ok: true, status: 'still_running', thread, job_id, companion: 'codex' }) }
   })
   return { clock: mock.clock(on, { now }), fs: state }
 }

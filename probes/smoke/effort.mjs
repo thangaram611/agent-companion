@@ -10,7 +10,7 @@ const invalidEffort = '__unsupported_effort_probe__';
 export async function runEffortProbe({ bridge, target, model, cwd, owner, record, report = console.log, readWire, backendEffort }) {
   let step = backendEffort ? 'a: backend rejects unsupported effort' : 'a: unsupported effort refuses before delivery';
   try {
-    assert.ok(targets.includes(target), `Unknown target: ${target}`);
+    assert.ok(targets.includes(target), `Unknown companion: ${target}`);
     assert.ok(!backendEffort || target === 'codex', 'backend-validated effort mode is only for unlisted Codex models');
     const wire = { codex: ['/v1/responses', row => row.reasoning?.effort], claude: ['/v1/messages', row => row.output_config?.effort],
       copilot: ['/v1/chat/completions', row => row.reasoning_effort] }[target];
@@ -23,12 +23,12 @@ export async function runEffortProbe({ bridge, target, model, cwd, owner, record
       assert.ok(requests.length, 'turn must have a fresh proxy request');
       for (const row of requests) assert.equal(wire[1](row), effort, 'wire effort must match this turn');
     };
-    const catalog = await bridge.tool('agent_catalog', {});
-    const entry = catalog.targets?.find(t => t.id === target);
+    const catalog = await bridge.tool('companion_catalog', {});
+    const entry = catalog.companions?.find(t => t.id === target);
     assert.equal(entry?.effort.selection, true, 'catalog must advertise effort selection');
-    const selection = { target, cwd, ...(model ? { model } : {}) };
+    const selection = { companion: target, cwd, ...(model ? { model } : {}) };
     const offset = checkpoint();
-    let refusal = await bridge.tool('agent_send', { ...selection, effort: invalidEffort, task: 'Reply with exactly: OK' }, `${owner}-refusal`);
+    let refusal = await bridge.tool('companion_send', { ...selection, effort: invalidEffort, task: 'Reply with exactly: OK' }, `${owner}-refusal`);
     if (backendEffort) {
       if (refusal.status === 'still_running') refusal = await bridge.wait(refusal.job_id, `${owner}-refusal`);
       assert.equal(refusal.status, 'failed');
@@ -37,7 +37,7 @@ export async function runEffortProbe({ bridge, target, model, cwd, owner, record
       assert.equal(refusal.meta.stop_evidence?.gone, true);
       checkWire(offset, invalidEffort);
     } else {
-      if (refusal.status === 'still_running') await bridge.tool('agent_cancel', { job_id: refusal.job_id }, `${owner}-refusal`);
+      if (refusal.status === 'still_running') await bridge.tool('companion_cancel', { job_id: refusal.job_id }, `${owner}-refusal`);
       assert.equal(refusal.code ?? refusal.meta?.detail, 'EFFORT_NOT_ALLOWED', JSON.stringify(refusal));
       assert.notEqual(refusal.status, 'still_running');
       assert.ok(!refusal.meta?.native_refs?.nativeTurnId, 'refusal must have no native turn');
@@ -57,7 +57,7 @@ export async function runEffortProbe({ bridge, target, model, cwd, owner, record
 
     const send = async (args) => {
       const offset = checkpoint();
-      const sent = await bridge.tool('agent_send', args, owner);
+      const sent = await bridge.tool('companion_send', args, owner);
       assert.equal(sent.ok, true, JSON.stringify(sent));
       const result = sent.status === 'still_running' ? await bridge.wait(sent.job_id, owner) : sent;
       assert.equal(result.status, 'completed', JSON.stringify(result));

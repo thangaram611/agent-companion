@@ -89,7 +89,7 @@ export function codexAppServerSandbox(env = process.env) {
     mode,
     network: exec.network,
     // The union that goes on `turn/start`. Reported here too, because the
-    // sandbox an operator reads in `agent_status` should be the object that
+    // sandbox an operator reads in `companion_status` should be the object that
     // reached the wire and not a paraphrase of it.
     policy: sandboxPolicyFor(mode, exec.network),
     // True since the param was measured: the policy above is sent on every

@@ -436,7 +436,7 @@ export class Model {
     return fitSegs(short, w);
   }
 
-  // The defaults panel (d): the default target and each companion's model and
+  // The defaults panel (d): the default companion and each companion's model and
   // effort, saved or what inherit resolves to, read and saved through
   // defaults.mjs (which validates natively). Closing it aborts a read or save.
   openPanel() {
@@ -458,11 +458,11 @@ export class Model {
   }
   fields() {
     const result = this.panel.result;
-    return result ? [{ setting: 'target' }, ...Object.keys(result.companions ?? {}).flatMap(id => [{ id, setting: 'model' }, { id, setting: 'effort' }])] : [];
+    return result ? [{ setting: 'companion' }, ...Object.keys(result.companions ?? {}).flatMap(id => [{ id, setting: 'model' }, { id, setting: 'effort' }])] : [];
   }
   saved(field) {
     const { result } = this.panel;
-    return field.setting === 'target' ? result.target?.saved : result.companions?.[field.id]?.[field.setting]?.saved;
+    return field.setting === 'companion' ? result.companion?.saved : result.companions?.[field.id]?.[field.setting]?.saved;
   }
   panelKey(input, key) {
     const panel = this.panel;
@@ -486,11 +486,11 @@ export class Model {
   }
   saveField() {
     const panel = this.panel, field = panel.edit, value = panel.draft.trim() || 'inherit';
-    const query = field.setting === 'target' ? { target: value } : { companion: field.id, [field.setting]: value };
+    const query = field.setting === 'companion' ? { target: value } : { companion: field.id, [field.setting]: value };
     panel.busy = 'saving'; panel.error = null;
     this.load(panel, this.defaults(query, { env: this.env, signal: panel.controller.signal }), result => {
-      const before = panel.result, scope = field.setting === 'target' ? null : `companions.${field.id}.model`;
-      return { ...before, ...(result.target ? { target: result.target } : {}),
+      const before = panel.result, scope = field.setting === 'companion' ? null : `companions.${field.id}.model`;
+      return { ...before, ...(result.companion ? { companion: result.companion } : {}),
         companions: { ...before.companions, ...result.companions },
         conflicts: scope ? [...before.conflicts.filter(entry => entry.setting !== scope), ...result.conflicts] : result.conflicts,
         warnings: [...new Set([...(before.warnings ?? []), ...(result.warnings ?? [])])] };
@@ -512,13 +512,13 @@ export class Model {
     const line = (label, text) => {
       const selected = at++ === panel.at, editing = selected && panel.edit;
       if (selected) selectedRow = rows.length;
-      rows.push([[selected ? ' ▸ ' : '   ', selected ? 'edit' : 'normal', selected], [label.padEnd(8), 'dim', selected],
+      rows.push([[selected ? ' ▸ ' : '   ', selected ? 'edit' : 'normal', selected], [label.padEnd(10), 'dim', selected],
         ...(editing ? [['› ', 'title', selected], [panel.draft, 'normal', selected], ['▌', 'normal', selected]] : [[text, 'normal', selected]])]);
       if (editing && panel.busy) rows.push([['     ◌ saving…', 'faint']]);
       else if (editing && panel.error) rows.push([[`     ✗ ${panel.error}`, 'bad']]);
     };
-    const target = result.target;
-    line('target', value(target, `inherit → ${one(target.inherit ?? 'no default companion')}`));
+    const target = result.companion;
+    line('companion', value(target, `inherit → ${one(target.inherit ?? 'no default companion')}`));
     for (const [id, row] of Object.entries(result.companions ?? {})) {
       rows.push([], [[` ${id}`, 'title']]);
       line('model', value(row.model, inherit(row.inherit, 'model')));

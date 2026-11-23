@@ -13,7 +13,7 @@ const localModel = 'gpt-oss:20b';
 const instructions = 'brew install ollama\nOLLAMA_CONTEXT_LENGTH=32768 ollama serve\nollama pull gpt-oss:20b';
 
 export function companionEnv({ root, target, proxyUrl, source = process.env }) {
-  if (!targets.includes(target)) throw new Error(`Unsupported free-backend target: ${target}`);
+  if (!targets.includes(target)) throw new Error(`Unsupported free-backend companion: ${target}`);
   const home = join(root, target, 'home');
   // Allowlist, never inherit provider credentials, instruction/config overrides,
   // proxy variables, NODE_OPTIONS or the operator's installed plugin settings.

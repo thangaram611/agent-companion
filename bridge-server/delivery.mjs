@@ -70,7 +70,7 @@ export function unread(records, lead) {
 }
 
 const reference = (thread, offset) =>
-  `agent_read({ thread: ${JSON.stringify(thread)}${offset ? ', offset: ' + offset : ''} })`;
+  `companion_read({ thread: ${JSON.stringify(thread)}${offset ? ', offset: ' + offset : ''} })`;
 
 export function wakeNotice(execution, result) {
   return `agent-companion: ${execution.provider} finished thread ${result.owner} (${executionStatus(result)}), job ${result.executionId}. ${reference(result.owner)} reads it.`;

@@ -39,7 +39,7 @@ write live runtime state. They are outside `node --test`; see `probes/README.md`
 
 ## Architecture
 
-**One controller owns each execution.** Each job starts a cold provider runtime
+**One controller owns each job.** Each job starts a cold companion runtime
 in its own process group and loops over native turns while accepted input remains.
 The controller owns the process tree, history reference and terminal result.
 SIGINT, SIGTERM or stdin EOF hands the recorded tree to the cleanup watcher for
@@ -53,12 +53,12 @@ issues a thread id. A caller using another lead's thread gets `THREAD_NOT_YOURS`
 Starting work from a recorded companion session gets `RECURSION_REFUSED`.
 
 **No silent fallback.** A thread keeps its companion and canonical cwd.
-Target/model/effort refusals are `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`,
+Companion/model/effort refusals are `COMPANION_UNCONFIGURED`, `COMPANION_UNSUPPORTED`,
 `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`. ACP
 authentication refusals are `AUTH_REQUIRED`, with the descriptor's sign-in steps;
 they are setup problems, not reasons to retry or switch companion. Lead, history
 and execution refusals are separate: `LEAD_REQUIRED`, `THREAD_NOT_YOURS`,
-`RECURSION_REFUSED` and `FOLLOWUP_UNSUPPORTED`. Omitted target uses the
+`RECURSION_REFUSED` and `FOLLOWUP_UNSUPPORTED`. Omitted companion uses the
 configured default; omitted model inherits configuration unless the thread
 already has an override. Effort is a thread override too, supported by all five
 companions. Claude has static levels `low`, `medium`, `high`, `xhigh`, `max`.
@@ -78,9 +78,9 @@ configuration. Copilot's spawn effort flag is removed; the option is validated
 before a config write. Local Ollama BYOK makes Copilot testable; GitHub-hosted
 model qualification still hits this account's `session/new` 403. The isolated
 free-backend harness is in `probes/free-backends/`; never use the operator's live
-homes for it. Send acknowledgements expose the job, thread, target,
+homes for it. Send acknowledgements expose the job, thread, companion,
 selected/effective model and effort, resolved permission mode and which wake is
-armed; effective effort is null unless the provider reports it. Status adds
+armed; effective effort is null unless the companion reports it. Status adds
 activity (thinking, responding, running a command or retrying for Claude)
 without retaining thinking content. The bridge delivers task text verbatim.
 
@@ -90,7 +90,7 @@ stream-json protocol; cold follow-up via the saved session. Codex, OpenCode and
 Antigravity default to steer and support queue and interrupt. Claude defaults to
 queue and supports interrupt. Copilot supports cancel only. There are no
 transport-selection knobs. Copilot cold follow-up is refused until qualified.
-Routing applies model defaults only on a new conversation. Both hosts share
+Routing applies model defaults only on a new thread. Both hosts share
 `settings.json` and its one-shot migration in `lib/state.mjs`.
 
 **Interventions share one controller path.** New text sent to a running thread
@@ -99,7 +99,7 @@ is an intervention with an optional `mode`; omission uses the execution's saved
 existing job. Status reports per-mode `interventions` availability. The views'
 atomic, private `inbox/<executionId>/<requestId>.json` requests are read on the
 controller's tick. Outcomes are private atomic files; close removes that
-execution's inbox. An accepted user message wakes `agent_wait` with
+execution's inbox. An accepted user message wakes `companion_wait` with
 `user_intervened`, never an answer; durable notice receipts prevent repeats,
 including after a wait gap. User cancel produces a terminal result with cause
 `user_cancel`. The terminal metadata's `interventions` lists each message's
@@ -117,7 +117,7 @@ sender, mode, state and first line, including `not_delivered` messages.
 | `bridge-server/controller/process-supervisor.mjs` | Owned process groups, descendant census, termination and PID/birth-identity verification. |
 | `bridge-server/adapters/{codex,opencode,acp,claude}.mjs` | Provider protocols, history loading, delivery acknowledgement, native progress, usage and model selection. |
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
-| `lib/state.mjs` | Shared target, model and effort settings, atomic model/effort edits and one-shot migration of legacy defaults. |
+| `lib/state.mjs` | Shared companion, model and effort settings, atomic model/effort edits and one-shot migration of legacy defaults. |
 | `lib/hosts/` | Host registry, paths, lead identity, wake adapters and sandbox guard. |
 | `hooks/hook.sh` and `hooks/hook.mjs` | Hook entry for Claude identity, session registration and delivery on session start, prompt submit and post-tool events. |
 | `lib/transcripts.mjs` and `lib/transcripts/` | Read-only native transcript location, format fingerprints, normalized in-memory items and live follow (`followTranscript`). |
@@ -139,7 +139,7 @@ sender, mode, state and first line, including `not_delivered` messages.
 
 - **Silence never ends a job.** A quiet companion may be thinking or retrying
   offline for hours (Claude's retry watchdog), which no gap can tell from a
-  stopped one. A job ends on its native turn's end, `agent_cancel`, a user
+  stopped one. A job ends on its native turn's end, `companion_cancel`, a user
   cancel or bridge loss. Esc and a cancelled or stopped wait never end it.
 - **Claude identity must fail closed.** PreToolUse replaces any supplied lead
   before send, wait, read, status or cancel. Keep `onFailure: "block"` for a
@@ -156,8 +156,8 @@ sender, mode, state and first line, including `not_delivered` messages.
 - **One delivery module arbitrates the hook/tool race.** Use `delivery.mjs`
   for both. A result is claimed once: after a hook delivery a tool call returns
   a note and `delivered_by: "hook"` in place of the text; after a tool delivery
-  repeated calls return the text again. A wake attempt, `agent_status` and
-  `agent_read` never claim. The read cursor lives in a separate record so a
+  repeated calls return the text again. A wake attempt, `companion_status` and
+  `companion_read` never claim. The read cursor lives in a separate record so a
   controller rewrite cannot roll it back.
 - **Claude needs two JSON lines on the inbox socket.** Send the auth object,
   then `{"type":"user","message":{"role":"user","content":"…"}}`. Plain text
@@ -170,7 +170,7 @@ sender, mode, state and first line, including `not_delivered` messages.
   read when Codex's daemon starts.
 - **The MCP wall is per call.** Both hosts cancelled at 1,320 s even with
   progress. Waits default to 480 s and cap at 1,200. Claude's mod must match
-  only `agent_send` so a long main-conversation wait can move to the background.
+  only `companion_send` so a long main-conversation wait can move to the background.
 - **The live view lives in `bridge-server/ui/` for its imports.** ESM finds `ink`
   and `react` by walking up to `bridge-server/node_modules` (Claude's link); on
   Codex, `hooks/resolve-codex-deps.mjs` relocates bare package imports only from
@@ -203,7 +203,7 @@ sender, mode, state and first line, including `not_delivered` messages.
   network **on**), and in app-server `approvalPolicy: 'never'` is structural —
   accepting one approval was measured escalating past the sandbox. Do not make it configurable.
 - **The ACP adapter answers `session/request_permission` itself.** Passing an
-  approval flag does not guarantee an agent will stop asking. The answer comes
+  approval flag does not guarantee a companion will stop asking. The answer comes
   from the descriptor's `acp.permission(env)`; leaving a request unanswered hangs
   the turn. Do not send MCP's `notifications/initialized` on ACP.
 - **Claude companion startup and results need their native semantics.** The child

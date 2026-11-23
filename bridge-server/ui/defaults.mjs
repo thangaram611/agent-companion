@@ -70,12 +70,12 @@ function validateQuery(query) {
   const { companion, model, target, effort } = query;
   for (const [key, value] of Object.entries(query)) {
     if (!['companion', 'model', 'target', 'effort'].includes(key)) throw new Error('unknown setting ' + key);
-    if (typeof value !== 'string' || !value.trim()) throw new Error('empty ' + key);
+    if (typeof value !== 'string' || !value.trim()) throw new Error('empty ' + (key === 'target' ? 'companion' : key));
   }
   if (companion !== undefined && !TARGET_IDS.has(companion)) throw new Error('unknown companion ' + companion);
   if (target !== undefined) {
-    if (Object.keys(query).length !== 1) throw new Error('set target on its own');
-    if (target !== 'inherit' && !TARGET_IDS.has(target)) throw new Error('unknown target ' + target);
+    if (Object.keys(query).length !== 1) throw new Error('set the default companion on its own');
+    if (target !== 'inherit' && !TARGET_IDS.has(target)) throw new Error('unknown companion ' + target);
   }
   if ((model !== undefined || effort !== undefined) && !companion) throw new Error('name a companion before model or effort');
   if (model !== undefined && model !== 'inherit' && !isModelAllowedFor(companion, model)) {
@@ -173,7 +173,7 @@ export async function defaults(query = {}, {
     if (target === 'inherit') clearDefaultTarget(env);
     else if (target) writeDefaultTarget(target, env);
     else writeCompanionDefaults(companion, changes, env);
-    const resolved = target ? 'target' : Object.hasOwn(changes, 'model') ? 'companions.' + companion + '.model' : null;
+    const resolved = target ? 'companion' : Object.hasOwn(changes, 'model') ? 'companions.' + companion + '.model' : null;
     conflicts = conflicts.filter(entry => {
       if (entry.setting !== resolved) return true;
       try { rmSync(entry.path, { force: true }); return false; }
@@ -183,8 +183,8 @@ export async function defaults(query = {}, {
   }
 
   const result = { settingsFile: settingsPath(env) };
-  if (!companion) result.target = { ...field(settings.target, readDefaultTarget(env, log, settings), 'target'),
-    inherit: readDefaultTarget(env, log, {}).target };
+  if (!companion) result.companion = { ...field(settings.companion, readDefaultTarget(env, log, settings), 'companion'),
+    inherit: readDefaultTarget(env, log, {}).companion };
   for (const [id, native] of natives) {
     result.companions ??= {};
     result.companions[id] = companionRow(id, settings, env, native);
@@ -200,10 +200,11 @@ function parseArgs(args) {
   const query = {};
   if (words.length && !words[0].includes('=')) query.companion = words.shift();
   for (const word of words) {
-    const match = /^(target|model|effort)=([\s\S]*)$/.exec(word);
-    if (!match) throw new Error('expected target=<companion>, model=<id>, or effort=<level>');
-    const [, key, value] = match;
-    if (Object.hasOwn(query, key)) throw new Error('duplicate ' + key);
+    const match = /^(companion|model|effort)=([\s\S]*)$/.exec(word);
+    if (!match) throw new Error('expected companion=<id>, model=<id>, or effort=<level>');
+    const [, setting, value] = match;
+    const key = setting === 'companion' ? 'target' : setting;
+    if (Object.hasOwn(query, key)) throw new Error('duplicate ' + setting);
     query[key] = value;
   }
   return query;
@@ -217,7 +218,7 @@ function describe(field) {
 
 export function formatDefaults(result) {
   const lines = ['Settings: ' + result.settingsFile];
-  if (result.target) lines.push('target: ' + describe(result.target) + '  inherit: ' + (result.target.inherit ?? 'no default companion'));
+  if (result.companion) lines.push('companion: ' + describe(result.companion) + '  inherit: ' + (result.companion.inherit ?? 'no default companion'));
   for (const [id, row] of Object.entries(result.companions ?? {})) {
     lines.push(id + '  model: ' + describe(row.model) + '  effort: ' + describe(row.effort));
     const { model, effort, reason, source, ageMs, host } = row.inherit;
@@ -228,7 +229,7 @@ export function formatDefaults(result) {
   for (const [setting, entries] of Object.entries(Object.groupBy(result.conflicts, e => e.setting))) {
     lines.push('Conflict: ' + setting);
     for (const e of entries) lines.push('  ' + e.host + ': ' + e.value + ' (' + e.path + ')');
-    lines.push('  Choose with agent-companion defaults ' + (setting === 'target' ? 'target=<companion>' : setting.split('.')[1] + ' model=<id>'));
+    lines.push('  Choose with agent-companion defaults ' + (setting === 'companion' ? 'companion=<id>' : setting.split('.')[1] + ' model=<id>'));
   }
   for (const warning of result.warnings ?? []) lines.push('Warning: ' + warning);
   return lines.map(one).join('\n');

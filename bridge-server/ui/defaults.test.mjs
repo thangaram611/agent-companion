@@ -69,12 +69,12 @@ test('listing migrates shared settings, resolves both native defaults and shows 
   put(legacy, 'saved-model\n');
   put(join(companionHomeDir('codex', h.env), 'default-target'), 'copilot\n');
   h.env.AGENT_COMPANION_CODEX_MODEL = 'env-model';
-  h.env.AGENT_COMPANION_DEFAULT_TARGET = 'claude';
+  h.env.AGENT_COMPANION_DEFAULT_COMPANION = 'claude';
   h.env.CODEX_FAKE_CONFIG = JSON.stringify({ model: 'configured-model', model_reasoning_effort: 'xhigh' });
   const result = await h.run({});
   assert.equal(existsSync(legacy), false);
   assert.equal(h.settings().companions.codex.model, 'saved-model');
-  assert.deepEqual(result.target, { saved: 'copilot', value: 'claude', source: 'env', inherit: 'claude' });
+  assert.deepEqual(result.companion, { saved: 'copilot', value: 'claude', source: 'env', inherit: 'claude' });
   assert.deepEqual(Object.keys(result.companions).sort(), ['antigravity', 'claude', 'codex', 'copilot', 'opencode']);
   assert.deepEqual(result.companions.codex.model, { saved: 'saved-model', value: 'env-model', source: 'env' });
   assert.deepEqual(result.companions.codex.inherit, { model: 'configured-model', effort: 'xhigh', source: 'config/read' });
@@ -162,13 +162,13 @@ for (const id of ['claude', 'copilot', 'antigravity']) test(id + ' sets and clea
   assert.deepEqual(h.http(), []);
 });
 
-test('target round-trips on both hosts and clearing shows the underlying environment choice', t => {
+test('default companion round-trips on both hosts and clearing shows the underlying environment choice', t => {
   const h = fixture(t);
   h.env.AGENT_COMPANION_HOST = 'codex';
-  assert.equal(JSON.parse(h.cli('target=opencode', '--json').stdout).target.saved, 'opencode');
+  assert.equal(JSON.parse(h.cli('companion=opencode', '--json').stdout).companion.saved, 'opencode');
   h.env.AGENT_COMPANION_HOST = 'claude';
-  h.env.AGENT_COMPANION_DEFAULT_TARGET = 'claude';
-  assert.deepEqual(JSON.parse(h.cli('--json', 'target=inherit').stdout).target,
+  h.env.AGENT_COMPANION_DEFAULT_COMPANION = 'claude';
+  assert.deepEqual(JSON.parse(h.cli('--json', 'companion=inherit').stdout).companion,
     { saved: null, value: 'claude', source: 'env', inherit: 'claude' });
   assert.deepEqual(h.settings(), {});
 });
@@ -192,7 +192,7 @@ registerHooks({ resolve(id, ctx, next) {
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stderr, '');
     const result = JSON.parse(r.stdout);
-    assert.equal(result.target.source, 'unset');
+    assert.equal(result.companion.source, 'unset');
     assert.equal(Object.keys(result.companions).length, 5);
     assert.match(result.companions.codex.inherit.reason, /executable/);
     assert.match(result.companions.opencode.inherit.reason, /ENOENT/);
@@ -230,7 +230,7 @@ test('CLI refusals have one-line reasons and leave an unmigrated home untouched'
   const h = fixture(t);
   const legacy = join(companionHomeDir('codex', h.env), 'default-target');
   put(legacy, 'claude\n');
-  for (const args of [['unknown'], ['target=unknown'], ['target=codex', 'effort=low'], ['model=foo'], ['claude', 'model='],
+  for (const args of [['unknown'], ['companion=unknown'], ['companion=codex', 'effort=low'], ['model=foo'], ['claude', 'model='],
     ['claude', 'bad=field'], ['claude', 'effort=high', 'effort=low'], ['claude', 'model=two models'],
     ['claude', 'model=sonnet', 'effort=unsupported']]) {
     const r = h.cli(...args);
@@ -240,8 +240,8 @@ test('CLI refusals have one-line reasons and leave an unmigrated home untouched'
     assert.equal(readFileSync(legacy, 'utf8'), 'claude\n');
     assert.equal(existsSync(h.file), false);
   }
-  const r = h.cli('--json', 'target=missing');
-  assert.match(JSON.parse(r.stderr).error, /unknown target/);
+  const r = h.cli('--json', 'companion=missing');
+  assert.match(JSON.parse(r.stderr).error, /unknown companion/);
   assert.equal(r.status, 1);
   assert.equal(existsSync(h.file), false);
 });
@@ -269,18 +269,18 @@ test('lists both hosts and paths for each migration conflict and resolves only t
     return path;
   }));
   const result = await h.run({});
-  assert.equal(result.target.saved, null);
+  assert.equal(result.companion.saved, null);
   assert.equal(result.conflicts.length, 4);
   const text = formatDefaults(result);
   for (const [i, pair] of paths.entries()) {
     for (const [j, path] of pair.entries()) {
       const host = ['claude', 'codex'][j];
       assert.deepEqual(result.conflicts.find(c => c.path === path),
-        { path, host, setting: ['target', 'companions.copilot.model'][i], value: host });
+        { path, host, setting: ['companion', 'companions.copilot.model'][i], value: host });
       assert.ok(text.includes(path));
     }
   }
-  assert.match(text, /Choose with agent-companion defaults target=<companion>/);
+  assert.match(text, /Choose with agent-companion defaults companion=<id>/);
   assert.match(text, /Choose with agent-companion defaults copilot model=<id>/);
   await h.run({ companion: 'copilot', effort: 'high' });
   assert.ok(paths.flat().every(existsSync));
@@ -289,7 +289,7 @@ test('lists both hosts and paths for each migration conflict and resolves only t
   assert.ok(paths[1].every(existsSync));
   assert.deepEqual((await h.run({ companion: 'copilot', model: 'inherit' })).conflicts, []);
   assert.ok(paths[1].every(path => !existsSync(path)));
-  assert.deepEqual(h.settings(), { target: 'claude', companions: { copilot: { effort: 'high' } } });
+  assert.deepEqual(h.settings(), { companion: 'claude', companions: { copilot: { effort: 'high' } } });
 });
 
 test('failed native reads give a short reason, allow independent settings, and refuse saves requiring the missing evidence', async t => {

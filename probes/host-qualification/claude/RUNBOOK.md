@@ -1,5 +1,7 @@
 # Claude host qualification (Phase 2)
 
+Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
+
 This is an operator-run measurement harness, not a lifecycle controller. It calls
 Claude Code only when you pass `--execute` or use `execute RUN`. The downstream
 provider is entirely fake. No production module imports these files, and none is

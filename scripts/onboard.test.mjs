@@ -16,83 +16,83 @@ import { parseArgs, planOnboard } from './onboard.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'onboard.mjs');
 
-function target(id, ready, extra = {}) {
+function companion(id, ready, extra = {}) {
   return { id, displayName: id, ready, installed: ready, blockers: [], warnings: [], nextSteps: [], ...extra };
 }
 
 test('parseArgs reads flags, inline values, and toggles', () => {
-  const o = parseArgs(['--host', 'codex', '--target=opencode', '--set-default', '--yes', '--json']);
+  const o = parseArgs(['--host', 'codex', '--companion=opencode', '--set-default', '--yes', '--json']);
   assert.equal(o.host, 'codex');
-  assert.equal(o.target, 'opencode');
+  assert.equal(o.companion, 'opencode');
   assert.equal(o.setDefault, true);
   assert.equal(o.yes, true);
   assert.equal(o.json, true);
-  assert.equal(parseArgs(['--list-targets']).listTargets, true);
+  assert.equal(parseArgs(['--list-companions']).listTargets, true);
   assert.equal(parseArgs(['--bogus']).unknown, '--bogus');
 });
 
-test('planOnboard: explicit target none → host-only', () => {
-  const plan = planOnboard({ options: parseArgs(['--target', 'none']), targets: {} });
+test('planOnboard: explicit companion none → host-only', () => {
+  const plan = planOnboard({ options: parseArgs(['--companion', 'none']), companions: {} });
   assert.equal(plan.kind, 'host-only');
 });
 
-test('planOnboard: explicit ready target is chosen', () => {
-  const targets = { opencode: target('opencode', true), copilot: target('copilot', false) };
-  const plan = planOnboard({ options: parseArgs(['--target', 'opencode', '--set-default']), targets });
+test('planOnboard: explicit ready companion is chosen', () => {
+  const companions = { opencode: companion('opencode', true), copilot: companion('copilot', false) };
+  const plan = planOnboard({ options: parseArgs(['--companion', 'opencode', '--set-default']), companions });
   assert.equal(plan.kind, 'chosen');
   assert.equal(plan.id, 'opencode');
   assert.equal(plan.ready, true);
   assert.equal(plan.writeDefault, true);
 });
 
-test('planOnboard: explicit not-ready target is still chosen (write intent), ready=false', () => {
-  const targets = { opencode: target('opencode', false), copilot: target('copilot', false) };
-  const plan = planOnboard({ options: parseArgs(['--target', 'opencode']), targets });
+test('planOnboard: explicit not-ready companion is still chosen (write intent), ready=false', () => {
+  const companions = { opencode: companion('opencode', false), copilot: companion('copilot', false) };
+  const plan = planOnboard({ options: parseArgs(['--companion', 'opencode']), companions });
   assert.equal(plan.kind, 'chosen');
   assert.equal(plan.ready, false);
   assert.equal(plan.writeDefault, false);
 });
 
-test('planOnboard: explicit ready codex target is chosen', () => {
-  const targets = { opencode: target('opencode', false), copilot: target('copilot', false), codex: target('codex', true) };
-  const plan = planOnboard({ options: parseArgs(['--target', 'codex', '--set-default']), targets });
+test('planOnboard: explicit ready codex companion is chosen', () => {
+  const companions = { opencode: companion('opencode', false), copilot: companion('copilot', false), codex: companion('codex', true) };
+  const plan = planOnboard({ options: parseArgs(['--companion', 'codex', '--set-default']), companions });
   assert.equal(plan.kind, 'chosen');
   assert.equal(plan.id, 'codex');
   assert.equal(plan.ready, true);
   assert.equal(plan.writeDefault, true);
 });
 
-test('planOnboard: unknown target errors', () => {
-  const plan = planOnboard({ options: parseArgs(['--target', 'goose']), targets: {} });
+test('planOnboard: unknown companion errors', () => {
+  const plan = planOnboard({ options: parseArgs(['--companion', 'goose']), companions: {} });
   assert.equal(plan.kind, 'error');
-  assert.equal(plan.code, 'unknown_target');
+  assert.equal(plan.code, 'unknown_companion');
 });
 
-test('planOnboard: auto picks the single ready target', () => {
-  const targets = { opencode: target('opencode', true), copilot: target('copilot', false) };
-  const plan = planOnboard({ options: parseArgs(['--target', 'auto', '--set-default']), targets });
+test('planOnboard: auto picks the single ready companion', () => {
+  const companions = { opencode: companion('opencode', true), copilot: companion('copilot', false) };
+  const plan = planOnboard({ options: parseArgs(['--companion', 'auto', '--set-default']), companions });
   assert.equal(plan.kind, 'chosen');
   assert.equal(plan.id, 'opencode');
   assert.equal(plan.autoSelected, true);
 });
 
 test('planOnboard: auto with both ready under --yes is ambiguous', () => {
-  const targets = { opencode: target('opencode', true), copilot: target('copilot', true) };
-  const plan = planOnboard({ options: parseArgs(['--target', 'auto', '--yes']), targets });
+  const companions = { opencode: companion('opencode', true), copilot: companion('copilot', true) };
+  const plan = planOnboard({ options: parseArgs(['--companion', 'auto', '--yes']), companions });
   assert.equal(plan.kind, 'error');
-  assert.equal(plan.code, 'ambiguous_target');
+  assert.equal(plan.code, 'ambiguous_companion');
 });
 
 test('planOnboard: auto with none ready under --yes errors', () => {
-  const targets = { opencode: target('opencode', false), copilot: target('copilot', false) };
-  const plan = planOnboard({ options: parseArgs(['--target', 'auto', '--yes']), targets });
+  const companions = { opencode: companion('opencode', false), copilot: companion('copilot', false) };
+  const plan = planOnboard({ options: parseArgs(['--companion', 'auto', '--yes']), companions });
   assert.equal(plan.kind, 'error');
-  assert.equal(plan.code, 'no_ready_target');
+  assert.equal(plan.code, 'no_ready_companion');
 });
 
-test('planOnboard: no target, interactive → ask', () => {
-  const targets = { opencode: target('opencode', true), copilot: target('copilot', true) };
-  const plan = planOnboard({ options: parseArgs([]), targets });
+test('planOnboard: no companion, interactive → ask', () => {
+  const companions = { opencode: companion('opencode', true), copilot: companion('copilot', true) };
+  const plan = planOnboard({ options: parseArgs([]), companions });
   assert.equal(plan.kind, 'ask');
   assert.deepEqual(plan.candidates.sort(), ['copilot', 'opencode']);
 });
@@ -124,66 +124,66 @@ function run(args, env = {}, files = {}) {
   }
 }
 
-function saved(target, models = {}) {
+function saved(companion, models = {}) {
   const companions = Object.fromEntries(Object.entries(models).map(([id, model]) => [id, { model }]));
-  return { 'settings.json': JSON.stringify({ target, companions }) };
+  return { 'settings.json': JSON.stringify({ companion, companions }) };
 }
 
 test('CLI previews a legacy default without consuming it, then migrates it on startup', () => {
   const files = { 'default-target': 'copilot\n' };
-  const args = ['--target', 'none', '--yes', '--json'];
+  const args = ['--companion', 'none', '--yes', '--json'];
   const preview = run(['--plan', ...args], {}, files);
   assert.equal(preview.code, 0, preview.stderr);
-  assert.equal(JSON.parse(preview.stdout).configuration.defaultTarget.target, 'copilot');
+  assert.equal(JSON.parse(preview.stdout).configuration.defaultCompanion.companion, 'copilot');
   assert.deepEqual(preview.stored, files);
   assert.equal(preview.hasSettings, false);
   const actual = run(args, {}, files);
   assert.equal(actual.code, 0, actual.stderr);
-  assert.deepEqual(actual.settings, { target: 'copilot' });
+  assert.deepEqual(actual.settings, { companion: 'copilot' });
   assert.equal(actual.stored['default-target'], null);
 });
 
-test('CLI --list-targets --json exits 0 with target readiness', () => {
-  const r = run(['--list-targets', '--json']);
+test('CLI --list-companions --json exits 0 with companion readiness', () => {
+  const r = run(['--list-companions', '--json']);
   assert.equal(r.code, 0, r.stderr);
   const out = JSON.parse(r.stdout);
-  assert.ok(out.targets.opencode);
-  assert.ok(out.targets.copilot);
-  assert.ok(out.targets.codex);
-  assert.ok(out.targets.claude);
-  assert.deepEqual(out.targets.antigravity.nextSteps, ['brew install --cask antigravity-cli']);
-  assert.equal(Object.keys(out.targets).length, 5);
-  assert.equal(out.defaultTarget.target, null);
+  assert.ok(out.companions.opencode);
+  assert.ok(out.companions.copilot);
+  assert.ok(out.companions.codex);
+  assert.ok(out.companions.claude);
+  assert.deepEqual(out.companions.antigravity.nextSteps, ['brew install --cask antigravity-cli']);
+  assert.equal(Object.keys(out.companions).length, 5);
+  assert.equal(out.defaultCompanion.companion, null);
 });
 
-test('CLI --target none --yes is host-only and exits 0', () => {
-  const r = run(['--target', 'none', '--yes', '--json']);
+test('CLI --companion none --yes is host-only and exits 0', () => {
+  const r = run(['--companion', 'none', '--yes', '--json']);
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(JSON.parse(r.stdout).target, null);
+  assert.equal(JSON.parse(r.stdout).companion, null);
 });
 
 
-test('CLI unknown target exits 2', () => {
-  const r = run(['--target', 'goose', '--yes']);
+test('CLI unknown companion exits 2', () => {
+  const r = run(['--companion', 'goose', '--yes']);
   assert.equal(r.code, 2);
-  assert.match(r.stderr, /unknown target/);
+  assert.match(r.stderr, /unknown companion/);
 });
 
-test('CLI unavailable target fails without replacing an existing default', () => {
-  const r = run(['--target', 'opencode', '--set-default', '--yes', '--json'], {}, saved('copilot'));
+test('CLI unavailable companion fails without replacing an existing default', () => {
+  const r = run(['--companion', 'opencode', '--set-default', '--yes', '--json'], {}, saved('copilot'));
   assert.equal(r.code, 3, r.stderr);
   const out = JSON.parse(r.stdout);
-  assert.equal(out.target, 'opencode');
+  assert.equal(out.companion, 'opencode');
   assert.equal(out.wroteDefault, false);
   assert.equal(out.report.ready, false);
-  assert.equal(r.settings.target, 'copilot');
+  assert.equal(r.settings.companion, 'copilot');
 });
 
-test('CLI explicit --no-target-check allows deferred configuration and labels it unready', () => {
-  const r = run(['--target', 'opencode', '--set-default', '--no-target-check', '--yes', '--json']);
+test('CLI explicit --no-companion-check allows deferred configuration and labels it unready', () => {
+  const r = run(['--companion', 'opencode', '--set-default', '--no-companion-check', '--yes', '--json']);
   assert.equal(r.code, 0, r.stderr);
   assert.equal(JSON.parse(r.stdout).ok, false);
-  assert.equal(r.settings.target, 'opencode');
+  assert.equal(r.settings.companion, 'opencode');
 });
 
 test('CLI plan and ordinary reruns preserve existing defaults, models and profiles', () => {
@@ -191,7 +191,7 @@ test('CLI plan and ordinary reruns preserve existing defaults, models and profil
     ...saved('copilot', { copilot: 'custom-model' }),
     'profiles.json': '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n',
   };
-  for (const args of [['--plan'], [], ['--target', 'none']]) {
+  for (const args of [['--plan'], [], ['--companion', 'none']]) {
     const r = run([...args, '--set-default', '--yes', '--json'], {}, files);
     assert.equal(r.code, 0, r.stderr);
     assert.deepEqual(r.stored, files);
@@ -209,11 +209,11 @@ test('failed smoke and read-only plans never commit a default', () => {
     process.exit(0);
   `, { mode: 0o700 });
   try {
-    for (const flags of [['--smoke'], ['--smoke', '--no-target-check'], ['--plan']]) {
-      const r = run(['--target', 'codex', '--model', 'gpt-5.4', '--set-default', '--yes', '--json', ...flags],
+    for (const flags of [['--smoke'], ['--smoke', '--no-companion-check'], ['--plan']]) {
+      const r = run(['--companion', 'codex', '--model', 'gpt-5.4', '--set-default', '--yes', '--json', ...flags],
         { CODEX_BIN: bin }, saved('copilot', { codex: 'previous-model' }));
       assert.equal(r.code, flags.includes('--plan') ? 0 : 3, r.stderr);
-      assert.equal(r.settings.target, 'copilot');
+      assert.equal(r.settings.companion, 'copilot');
       assert.equal(r.settings.companions.codex.model, 'previous-model');
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -221,7 +221,7 @@ test('failed smoke and read-only plans never commit a default', () => {
 
 test('plans explain an overriding environment default and never read legacy profiles', () => {
   const files = { ...saved('copilot'), 'profiles.json': '{bad json\n' };
-  const r = run(['--plan', '--target', 'codex', '--set-default', '--yes', '--json'], { AGENT_COMPANION_DEFAULT_TARGET: 'opencode' }, files);
+  const r = run(['--plan', '--companion', 'codex', '--set-default', '--yes', '--json'], { AGENT_COMPANION_DEFAULT_COMPANION: 'opencode' }, files);
   assert.equal(r.code, 2, r.stderr);
   assert.equal(JSON.parse(r.stdout).plan.code, 'env_override');
   for (const [name, bytes] of Object.entries(files)) assert.equal(r.stored[name], bytes);
@@ -232,7 +232,7 @@ test('plans explain an overriding environment default and never read legacy prof
 });
 
 
-test('Claude onboarding persists a ready target without a smoke turn and rejects logged-out auth', () => {
+test('Claude onboarding persists a ready companion without a smoke turn and rejects logged-out auth', () => {
   const dir = mkdtempSync(join(tmpdir(), 'onboard-claude-'));
   const bin = join(dir, 'claude');
   writeFileSync(bin, `#!${process.execPath}
@@ -243,13 +243,13 @@ test('Claude onboarding persists a ready target without a smoke turn and rejects
   `, { mode: 0o700 });
   try {
     for (const loggedIn of ['1', '0']) {
-      const r = run(['--host', 'claude', '--target', 'claude', '--set-default', '--yes', '--json'],
+      const r = run(['--host', 'claude', '--companion', 'claude', '--set-default', '--yes', '--json'],
         { CLAUDE_BIN: bin, FAKE_LOGGED_IN: loggedIn }, saved('copilot'));
       assert.equal(r.code, loggedIn === '1' ? 0 : 3, r.stderr);
       const out = JSON.parse(r.stdout);
       assert.equal(out.report.authenticated, loggedIn === '1');
       assert.equal(out.report.smoke.run, false);
-      assert.equal(r.settings.target, loggedIn === '1' ? 'claude' : 'copilot');
+      assert.equal(r.settings.companion, loggedIn === '1' ? 'claude' : 'copilot');
       assert.equal(out.report.permission.risk, 'dangerous');
     }
     const help = run(['--help']);
@@ -264,29 +264,29 @@ test('parseArgs accepts separate and inline model values', () => {
 
 test('model plans describe set, clear and preserve without writes', () => {
   for (const [requested, action] of [['haiku', 'set'], ['inherit', 'clear'], [undefined, 'none']]) {
-    const options = parseArgs(['--target', 'claude', '--set-default', ...(requested ? ['--model', requested] : [])]);
-    const targets = { claude: target('claude', true, {
+    const options = parseArgs(['--companion', 'claude', '--set-default', ...(requested ? ['--model', requested] : [])]);
+    const companions = { claude: companion('claude', true, {
       capabilities: { modelSelection: true }, defaultModel: { model: 'sonnet', source: 'config' },
     }) };
     const model = { requested: requested ?? null, action, current: 'sonnet', source: 'config' };
-    assert.deepEqual(planOnboard({ options, targets }).model, model);
-    const r = run(['--plan', '--json', '--no-target-check', ...['--target', 'claude', '--set-default'],
+    assert.deepEqual(planOnboard({ options, companions }).model, model);
+    const r = run(['--plan', '--json', '--no-companion-check', ...['--companion', 'claude', '--set-default'],
       ...(requested ? ['--model', requested] : [])], {}, saved(undefined, { claude: 'sonnet' }));
     assert.equal(r.code, 0, r.stderr);
     assert.deepEqual(JSON.parse(r.stdout).model, model);
     assert.equal(r.settings.companions?.claude?.model, 'sonnet');
-    assert.equal(r.settings.target, undefined);
+    assert.equal(r.settings.companion, undefined);
   }
 });
 
-test('model requires an explicit supported target and a nonempty value', () => {
-  for (const args of [[], ['--target', 'auto'], ['--target', 'none'], ['--target', 'goose']]) {
+test('model requires an explicit supported companion and a nonempty value', () => {
+  for (const args of [[], ['--companion', 'auto'], ['--companion', 'none'], ['--companion', 'goose']]) {
     const r = run([...args, '--model', 'haiku']);
     assert.equal(r.code, 2, r.stderr);
-    assert.match(r.stderr, /\[FAIL\].*--model requires.*--target/);
+    assert.match(r.stderr, /\[FAIL\].*--model requires.*--companion/);
   }
   for (const args of [['--model'], ['--model='], ['--model', '   '], ['--model', '--yes']]) {
-    const r = run(['--target', 'claude', ...args]);
+    const r = run(['--companion', 'claude', ...args]);
     assert.equal(r.code, 2, r.stderr);
     assert.match(r.stderr, /\[FAIL\].*--model requires a value/);
   }
@@ -294,8 +294,8 @@ test('model requires an explicit supported target and a nonempty value', () => {
 
 test('model capability refusal uses the bridge wording', () => {
   for (const model of ['haiku', 'inherit']) {
-    const plan = planOnboard({ options: parseArgs(['--target', 'claude', '--model', model]),
-      targets: { claude: target('claude', true, { capabilities: { modelSelection: false } }) } });
+    const plan = planOnboard({ options: parseArgs(['--companion', 'claude', '--model', model]),
+      companions: { claude: companion('claude', true, { capabilities: { modelSelection: false } }) } });
     assert.equal(plan.code, 'CAPABILITY_UNAVAILABLE');
     assert.equal(plan.message, 'companion "claude" cannot select a model');
   }
@@ -308,22 +308,22 @@ test('invalid model ids fail with companion-specific bridge hints', () => {
     ['opencode', 'haiku', /Use a provider\/model id\./],
     ['copilot', 'two words', /Model ids must contain no whitespace\./],
   ]) {
-    const r = run(['--target', id, '--model', model, '--set-default', '--no-target-check']);
+    const r = run(['--companion', id, '--model', model, '--set-default', '--no-companion-check']);
     assert.equal(r.code, 2, r.stderr);
     assert.match(r.stderr, /\[FAIL\].*MODEL_NOT_ALLOWED/);
     assert.match(r.stderr, hint);
-    assert.equal(r.settings.target, undefined);
+    assert.equal(r.settings.companion, undefined);
   }
 });
 
-test('model writes and clears share the target readiness gate, including an unchanged target', () => {
+test('model writes and clears share the companion readiness gate, including an unchanged companion', () => {
   const files = saved('claude', { claude: 'sonnet' });
   for (const model of ['haiku', 'inherit']) {
-    const args = ['--target', 'claude', '--model', model, '--set-default', '--json'];
+    const args = ['--companion', 'claude', '--model', model, '--set-default', '--json'];
     const blocked = run(args, {}, files);
     assert.equal(blocked.code, 3, blocked.stderr);
     assert.equal(blocked.settings.companions.claude.model, 'sonnet');
-    const r = run([...args, '--no-target-check'], {}, files);
+    const r = run([...args, '--no-companion-check'], {}, files);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.settings.companions?.claude?.model, model === 'inherit' ? undefined : 'haiku');
     assert.equal(JSON.parse(r.stdout).wroteDefault, false);
@@ -334,30 +334,30 @@ test('model writes and clears share the target readiness gate, including an unch
     const preview = run(args.filter((a) => a !== '--set-default'), {}, files);
     assert.equal(preview.settings.companions.claude.model, 'sonnet');
   }
-  const fresh = run(['--target', 'claude', '--model', 'haiku', '--set-default', '--no-target-check']);
+  const fresh = run(['--companion', 'claude', '--model', 'haiku', '--set-default', '--no-companion-check']);
   assert.equal(fresh.code, 0, fresh.stderr);
-  assert.equal(fresh.settings.target, 'claude');
+  assert.equal(fresh.settings.companion, 'claude');
   assert.equal(fresh.settings.companions.claude.model, 'haiku');
   assert.match(fresh.stdout, /wrote default model for claude: haiku/);
 });
 
-test('list-targets reports per-companion model and source in JSON and text', () => {
+test('list-companions reports per-companion model and source in JSON and text', () => {
   const files = saved(undefined, { claude: 'haiku' });
-  const r = run(['--list-targets', '--json'], {}, files);
+  const r = run(['--list-companions', '--json'], {}, files);
   assert.equal(r.code, 0, r.stderr);
-  const targets = JSON.parse(r.stdout).targets;
-  assert.deepEqual(targets.claude.defaultModel, { model: 'haiku', source: 'config' });
-  assert.deepEqual(targets.codex.defaultModel, { model: null, source: 'unset' });
-  assert.equal(targets.claude.capabilities.modelSelection, true);
-  assert.match(run(['--list-targets'], {}, files).stdout, /default model: haiku \(config\)/);
-  const overridden = run(['--plan', '--target', 'claude', '--model', 'inherit', '--no-target-check', '--json'],
+  const companions = JSON.parse(r.stdout).companions;
+  assert.deepEqual(companions.claude.defaultModel, { model: 'haiku', source: 'config' });
+  assert.deepEqual(companions.codex.defaultModel, { model: null, source: 'unset' });
+  assert.equal(companions.claude.capabilities.modelSelection, true);
+  assert.match(run(['--list-companions'], {}, files).stdout, /default model: haiku \(config\)/);
+  const overridden = run(['--plan', '--companion', 'claude', '--model', 'inherit', '--no-companion-check', '--json'],
     { AGENT_COMPANION_CLAUDE_MODEL: 'opus' }, files);
   assert.equal(JSON.parse(overridden.stdout).model.source, 'env');
 });
 
 test('human model plans explain set and clear, even without --set-default', () => {
   for (const [model, text] of [['haiku', /; model haiku/], ['inherit', /; model inherit \(clear saved default\)/]]) {
-    const r = run(['--target', 'claude', '--model', model, '--no-target-check']);
+    const r = run(['--companion', 'claude', '--model', model, '--no-companion-check']);
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, text);
     assert.equal(r.settings.companions?.claude?.model, undefined);
@@ -367,11 +367,11 @@ test('human model plans explain set and clear, even without --set-default', () =
 test('each companion saves its model in shared settings and keeps environment precedence', () => {
   for (const [id, model] of [['copilot', 'byok-model:latest'], ['codex', 'gpt-5.4'],
     ['opencode', 'anthropic/claude-haiku-4-5'], ['antigravity', 'gemini-3.8-flash']]) {
-    const r = run(['--target', id, '--model', model, '--set-default', '--no-target-check', '--json']);
+    const r = run(['--companion', id, '--model', model, '--set-default', '--no-companion-check', '--json']);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.settings.companions[id].model, model);
   }
-  const r = run(['--target', 'claude', '--model', 'inherit', '--set-default', '--no-target-check', '--json'],
+  const r = run(['--companion', 'claude', '--model', 'inherit', '--set-default', '--no-companion-check', '--json'],
     { AGENT_COMPANION_CLAUDE_MODEL: 'opus' }, saved(undefined, { claude: 'haiku' }));
   assert.equal(r.code, 0, r.stderr);
   assert.equal(r.settings.companions?.claude?.model, undefined);

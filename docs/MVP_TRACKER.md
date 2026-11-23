@@ -11,19 +11,19 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
   tools directly. A send with a task and absolute cwd starts a thread. The lead
   uses its id for follow-ups and in-flight interventions.
 - A session hook, a host wake or a bounded wait brings the result back.
-  `agent_read` pages long answers. Status lists the lead's threads.
+  `companion_read` pages long answers. Status lists the lead's threads.
   Claude's band and `/companion` pane show the running work. [Thread plan](THREAD_PLAN.md)
 - The catalog reports companions, defaults, saved and last-reported model and
   effort, capabilities, cached readiness and the last checked version.
 - Defaults (2026-11-18, docs/DEFAULTS_PLAN.md): one `settings.json` for both hosts
   holds the default companion and each companion's model and effort.
-  - A new conversation uses the host's explicit choice, then the model env knob,
+  - A new thread uses the lead's explicit choice, then the model env knob,
     then the saved default, then the companion's own configuration; follow-ups
     keep theirs.
   - `agent-companion defaults` and the live view's `d` panel list, validate, save
     and clear them, and show what inherit resolves to.
-  - Onboarding and setup still save the target and model with
-    `--target <companion> --model <id|inherit>`.
+  - Onboarding and setup still save the companion and model with
+    `--companion <companion> --model <id|inherit>`.
   - Copilot's model is selected through the session's model option.
 - The bridge sends the lead's task verbatim. Refusals preserve the requested route.
 - Claude Code and Codex CLI support OpenCode, Copilot, Codex, Google
@@ -58,16 +58,16 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
   conversation delivers unread results. `setup.sh --codex-unload-delay`
   changes the delay (opt-in); Codex offers no way to tell whether a window
   still shows a conversation (openai/codex#58423).
-- A native subagent acting as lead gets no wake. Use `agent_wait`.
+- A native subagent acting as lead gets no wake. Use `companion_wait`.
 - On Codex a bridge that cannot start keeps Codex from opening, because the
   plugin marks it required so a first turn never runs without its tools.
   Rerun `setup.sh --host codex`, or disable the plugin in `config.toml`.
 - Claude's inbox wake needs Claude Code 2.1.228 or later and the current
   session's socket and token. A relocated `CODEX_HOME` gets no Codex wake:
-  the bridge does not inherit that setting. Use `agent_wait` there.
+  the bridge does not inherit that setting. Use `companion_wait` there.
 
 - All five companions accept conversation-level effort, and a saved effort
-  default applies to a new conversation when the host names none. Codex catalog models, OpenCode and Antigravity validate
+  default applies to a new thread when the lead names none. Codex catalog models, OpenCode and Antigravity validate
   advertised levels before delivery and verify the reported selection. Levels are
   unverified for models outside Codex's catalog: start/resume confirms the reported
   effort, with vocabulary checked by the backend during the turn. Resume can persist
@@ -205,7 +205,7 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
     Build release artifacts from the reviewed commit; version metadata alone
     does not establish that the release gates pass.
 
-11. **Direction, 2026-11-19.** The USP: any agent talks to any other agent
+11. **Direction, 2026-11-19.** The USP: a lead in any host delegates to any companion
     natively, from whichever host the owner starts in. About 20% of 300 recent
     jobs used something OpenAI's codex-plugin-cc lacks (follow-ups to a thread
     other than the repo's latest, non-Codex companions, Codex as host). The claim
@@ -236,14 +236,14 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
 - Walk-away reliability (decision 11):
   1. Outage through the bridge, 8 and 50 min, Codex companion first (`codex exec`
      waited for the network; app-server through the adapter is unmeasured).
-  2. Suspend/wake mid-`agent_wait`, including a cancel right after wake.
+  2. Suspend/wake mid-`companion_wait`, including a cancel right after wake.
   3. Confirm the Claude companion child inherits `CLAUDE_CODE_RETRY_WATCHDOG`.
   4. Vigil must count a running delegated job as work so a closed Mac stays awake
      for it; measured 2026-11-19 as only sometimes. Tracked in vigil's ROADMAP Open.
   5. Check the Claude adapter's wait for a queued input's final lifecycle event
      (`bridge-server/adapters/claude.mjs` ~116) for an unbounded wait.
 - Code Mode and browser parameters for companions (`code_mode`, `browser` on
-  `agent_send`): researched and decided 2026-11-20, then parked to see whether
+  `companion_send`): researched and decided 2026-11-20, then parked to see whether
   Claude Code ships a browser for Code Mode. Decisions, measurements, open
   decisions and steps are in the [Code Mode plan](CODE_MODE_PLAN.md); run its
   re-verify list before building.
@@ -288,7 +288,7 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
   enabling follow-up; a capability advertisement is insufficient.
 - Phase 5: include a workspace-diff summary on failure, with explicit observation
   limits; partial assistant text does not establish what changed on disk.
-- Permission mirroring remains a separate decision: align called-agent access
+- Permission mirroring remains a separate decision: align companion access
   with the caller only after the desired policy and acceptance checks are agreed.
 - Defaults from inside a host (deferred 2026-11-18; the CLI and the live-view
   panel come first, see [Defaults plan](DEFAULTS_PLAN.md)):
@@ -307,14 +307,14 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
      (`.claude-plugin/types/claude-code/index.d.ts:2112`). It runs with no
      model turn and would call `launch-ui.sh defaults …` through
      `$.process.run`. Plain `/companion` keeps opening the pane.
-- Generic ACP companions (deferred 2026-11-17): run any agent from the
+- Generic ACP companions (deferred 2026-11-17): run a companion from the
   [ACP registry](https://agentclientprotocol.com/get-started/registry) (about 45,
   e.g. Gemini, Goose, Cursor, Qwen) or a local ACP command through the shared ACP
   adapter, as t3code does ([providers-acp.md](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-acp.md)).
-  Each agent's quirks are per-agent facts (see Negative Results: approval flags,
-  advertised `loadSession`, usage shapes), so an unqualified agent would get
+  Each companion has its own quirks (see Negative Results: approval flags,
+  advertised `loadSession`, usage shapes), so an unqualified companion would get
   conservative defaults: no cold follow-up, cancel only, no usage. Needs decision
-  9's adoption check and a named agent the user would actually use.
+  9's adoption check and a named companion the user would actually use.
 
 ## Validation Commands
 

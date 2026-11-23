@@ -190,7 +190,7 @@ a live provider run.
 | `orphan.mjs` | Bridge EOF hands work to the cleanup watcher; verified stopped result survives restart, and status preserves the digest and result. Spends one Codex turn. Does not test uncatchable SIGKILL. |
 | `acp-antigravity.mjs` | Completion with prompt usage and a digest, cold history reuse in a new process, default steer during a command, cancel, a background command's file and final reply, confirmed model selection and bridge-loss cleanup. Logs whether the model waited in the prompt or the bridge kept the turn open. Starts seven jobs. Requires a signed-in `agy` CLI and an available model id. |
 | `claude.mjs` | Catalog/readiness, invalid-model refusal, fresh usage/cost, cold history reuse in a new process without cost, unsupported reply then cancel, and read-only transcript presence. Requires `claude` installed and signed in; budget four Haiku turns. Writes native transcripts into the operator's `~/.claude/projects` for the temporary cwd. |
-| `effort.mjs <target> [model]` | Invalid effort refused before delivery, lowest advertised level with selected/effective metadata, then cold follow-up omitting effort in a new process. Two trivial turns; Copilot skips unsupported cold follow-up and spends at most one. Refreshes target readiness; not run as part of implementation. |
+| `effort.mjs <companion> [model]` | Invalid effort refused before delivery, lowest advertised level with selected/effective metadata, then cold follow-up omitting effort in a new process. Two trivial turns; Copilot skips unsupported cold follow-up and spends at most one. Refreshes companion readiness; not run as part of implementation. |
 | `bridge-client.mjs` | Shared stdio MCP client, owner attribution, bounded waits and durable-record reader; no standalone probe. |
 
 The probes use the selected host's state home, or `AGENT_COMPANION_HOME` when
@@ -203,7 +203,7 @@ for its bridge records. Native Claude transcripts are not cleaned up by the prob
 Run readiness checks before spending tokens:
 
 ```sh
-AGENT_COMPANION_HOST=claude node scripts/onboard.mjs --list-targets
+AGENT_COMPANION_HOST=claude node scripts/onboard.mjs --list-companions
 AGENT_COMPANION_HOST=claude node probes/smoke/smoke.mjs
 AGENT_COMPANION_HOST=claude node probes/smoke/orphan.mjs
 AGENT_COMPANION_HOST=claude node probes/smoke/acp-antigravity.mjs <available-model-id>

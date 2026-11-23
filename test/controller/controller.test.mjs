@@ -219,7 +219,7 @@ test('validate owner, canonical cwd, provider, model before start', async () => 
   const h = setup();
   await assert.rejects(h.send({ owner: '' }), { code: 'NATIVE_OWNER_REQUIRED' });
   await assert.rejects(h.send({ cwd: 'relative' }), { code: 'INVALID_CWD' });
-  await assert.rejects(h.send({ provider: 'absent' }), { code: 'TARGET_UNSUPPORTED' });
+  await assert.rejects(h.send({ provider: 'absent' }), { code: 'COMPANION_UNSUPPORTED' });
   await assert.rejects(h.send({ model: 'not-allowed' }), { code: 'MODEL_NOT_ALLOWED' });
   const link = join(h.dir, 'alias'); symlinkSync(h.dir, link);
   const sent = await h.send({ cwd: link });

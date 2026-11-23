@@ -1,5 +1,7 @@
 # Codex CLI host qualification — Phase 2
 
+Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
+
 Passive, hand-run measurements for **codex-cli 0.166.0**. No live Codex host was
 run while building this harness. `ready` means a runnable definition exists,
 not that Codex passed. Nothing here is imported by production or named for

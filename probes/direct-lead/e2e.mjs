@@ -46,9 +46,9 @@ fs.writeFileSync(run + '/mcp.json', JSON.stringify({ mcpServers: { 'agent-bridge
 const task = `Run these shell commands one at a time, in this order, each as its own command: ${Array(opt.sleeps).fill('`sleep 50`').join(', ')}, then \`shasum -a 256 seed.txt\`.
 Then answer with exactly two lines: the line PROBE-DONE, and the complete output line of the shasum command. Do not edit any file.`;
 const prompt = `This is an isolated measurement. Follow the steps exactly.
-1. Call mcp__agent-bridge__agent_send with cwd="${work}", target="opencode", model="opencode/flint-40b-free", and task set to exactly the text between the <task> tags, copied character for character.
+1. Call mcp__agent-bridge__companion_send with cwd="${work}", companion="opencode", model="opencode/flint-40b-free", and task set to exactly the text between the <task> tags, copied character for character.
 <task>${task}</task>
-2. Call mcp__agent-bridge__agent_wait exactly once with the returned job_id and max_wait_sec=600.
+2. Call mcp__agent-bridge__companion_wait exactly once with the returned job_id and max_wait_sec=600.
 3. If that call is moved to the background, reply "BACKGROUNDED" and end your turn. Do not poll and do not call anything else.
 4. When the job's result reaches you (now or in a later turn), reply "RESULT-RECEIVED", then the companion's answer exactly as it reached you, then one line saying in what form it reached you (inline tool result, task notification, or a saved file).`;
 fs.writeFileSync(run + '/prompt.txt', prompt);

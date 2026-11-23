@@ -26,23 +26,23 @@ test('catalog is ownerless, spawns no process and leaves cold and populated stat
   syncBuiltinESMExports();
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const call = (sid) => mcp._requestHandlers.get('tools/call')({ method: 'tools/call', params: {
-    name: 'agent_catalog', arguments: {}, _meta: { 'x-codex-turn-metadata': { session_id: sid, thread_id: 'catalog-caller' } },
+    name: 'companion_catalog', arguments: {}, _meta: { 'x-codex-turn-metadata': { session_id: sid, thread_id: 'catalog-caller' } },
   } });
   rmSync(BASE_DIR, { recursive: true, force: true });
   rmSync(process.env.AGENT_RUNTIME_DIR, { recursive: true, force: true });
   const cold = [snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)];
   const first = JSON.parse((await call('catalog-owner-a')).content[0].text);
   assert.deepEqual([snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)], cold);
-  assert.equal(first.targets.length, 5);
-  assert.equal(first.targets.find((t) => t.id === 'antigravity').model.enumeration, 'not enumerable without a session');
-  const copilot = first.targets.find(t => t.id === 'copilot');
+  assert.equal(first.companions.length, 5);
+  assert.equal(first.companions.find((t) => t.id === 'antigravity').model.enumeration, 'not enumerable without a session');
+  const copilot = first.companions.find(t => t.id === 'copilot');
   assert.equal(copilot.model.enumeration, 'not enumerable without a session');
   assert.equal(Object.hasOwn(copilot.model, 'allowed'), false);
-  const claude = first.targets.find((t) => t.id === 'claude');
+  const claude = first.companions.find((t) => t.id === 'claude');
   assert.equal(claude.model.model, null);
   assert.match(claude.model.description, /model id or alias/i);
   assert.equal(claude.model.enumeration, 'not enumerable without a session');
-  for (const target of first.targets) {
+  for (const target of first.companions) {
     for (const field of [target.model, target.effort]) {
       assert.equal(field.saved, null);
       assert.equal(field.last_run, null);
@@ -55,7 +55,7 @@ test('catalog is ownerless, spawns no process and leaves cold and populated stat
     assert.deepEqual(Object.keys(target.capabilities.interventions).sort(), ['default', 'interrupt', 'queue', 'steer']);
   }
   assert.equal(Object.hasOwn(claude, 'contractStatus'), false);
-  assert.equal(first.targets[0].readiness.ready, null);
+  assert.equal(first.companions[0].readiness.ready, null);
 
   writeDefaultTarget('codex');
   writeDefaultModel('gpt-5.4', 'codex');
@@ -71,10 +71,10 @@ test('catalog is ownerless, spawns no process and leaves cold and populated stat
   }
   const before = [snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)];
   const result = JSON.parse((await call('catalog-owner-b')).content[0].text);
-  assert.equal(result.targets.find((t) => t.id === 'claude').installed_version, 'claude cached');
-  assert.equal(result.targets.find((t) => t.id === 'claude').readiness.ready, true);
-  assert.equal(result.default_target.target, 'codex');
-  const codex = result.targets.find((t) => t.id === 'codex');
+  assert.equal(result.companions.find((t) => t.id === 'claude').installed_version, 'claude cached');
+  assert.equal(result.companions.find((t) => t.id === 'claude').readiness.ready, true);
+  assert.equal(result.default_companion.companion, 'codex');
+  const codex = result.companions.find((t) => t.id === 'codex');
   assert.equal(codex.model.model, 'gpt-5.4');
   assert.equal(codex.model.saved, 'gpt-5.4');
   assert.equal(codex.model.source, 'config');
@@ -87,10 +87,10 @@ test('catalog is ownerless, spawns no process and leaves cold and populated stat
 test('catalog reports effort levels and permissions from the execution environment without probing', async () => {
   const { probePermission } = await import('../lib/target-diagnostics.mjs');
   const { getTarget } = await import('../lib/target-registry.mjs');
-  const env = { AGENT_COMPANION_CLAUDE_PERMISSION: 'plan', AGENT_COMPANION_DEFAULT_TARGET: 'claude' };
-  const catalog = JSON.parse((await dispatch({ name: 'agent_catalog' }, { controller: { env } })).content[0].text);
-  assert.equal(catalog.default_target.target, 'claude');
-  for (const target of catalog.targets) {
+  const env = { AGENT_COMPANION_CLAUDE_PERMISSION: 'plan', AGENT_COMPANION_DEFAULT_COMPANION: 'claude' };
+  const catalog = JSON.parse((await dispatch({ name: 'companion_catalog' }, { controller: { env } })).content[0].text);
+  assert.equal(catalog.default_companion.companion, 'claude');
+  for (const target of catalog.companions) {
     assert.equal(target.effort.selection, true);
     if (['codex', 'opencode', 'antigravity', 'copilot'].includes(target.id)) assert.match(target.effort.description, /[Ll]evels depend on the model and are checked at send/);
     const native = {
@@ -139,14 +139,14 @@ test('catalog reads saved defaults and each last reported field across hosts, sk
     return readExecution.call(this, id);
   });
   const before = snapshot(BASE_DIR);
-  const catalog = JSON.parse((await dispatch({ name: 'agent_catalog' }, { controller: { env } })).content[0].text);
-  assert.equal(catalog.targets.length, 5);
-  for (const { id, model, effort } of catalog.targets) {
+  const catalog = JSON.parse((await dispatch({ name: 'companion_catalog' }, { controller: { env } })).content[0].text);
+  assert.equal(catalog.companions.length, 5);
+  for (const { id, model, effort } of catalog.companions) {
     assert.deepEqual(model.last_run, { value: (id === 'opencode' ? 'opencode/' : '') + id + '-reported', at: new Date(now - 2000).toISOString(), age_ms: 2000, host: 'claude' });
     assert.deepEqual(effort.last_run, id === 'claude' ? null
       : { value: 'high', at: new Date(now - 3000).toISOString(), age_ms: 3000, host: 'codex' });
   }
-  const codex = catalog.targets.find(t => t.id === 'codex');
+  const codex = catalog.companions.find(t => t.id === 'codex');
   assert.equal(codex.model.saved, 'saved-model');
   assert.equal(codex.model.model, 'env-model');
   assert.equal(codex.model.source, 'env');

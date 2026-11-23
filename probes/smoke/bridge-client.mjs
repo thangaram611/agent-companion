@@ -75,7 +75,7 @@ export async function startBridge(session, { env = process.env, repo: root = rep
       ...(owner ? { _meta: { 'x-codex-turn-metadata': { thread_id: owner, thread_source: 'subagent', session_id: session } } } : {}) });
     const [first, metadata] = response.content;
     if (metadata) return { ...JSON.parse(metadata.text), content: first.text };
-    return name === 'agent_read' && !response.isError ? first.text : JSON.parse(first.text);
+    return name === 'companion_read' && !response.isError ? first.text : JSON.parse(first.text);
   };
   try {
     await rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'phase3-smoke', version: '1' } });
@@ -88,7 +88,7 @@ export async function startBridge(session, { env = process.env, repo: root = rep
     },
     async wait(job_id, owner) {
       for (let i = 0; i < 12; i++) {
-        const result = await tool('agent_wait', { job_id, max_wait_sec: 60 }, owner);
+        const result = await tool('companion_wait', { job_id, max_wait_sec: 60 }, owner);
         if (!result.ok) throw new Error(JSON.stringify(result));
         if (result.status !== 'still_running') return result;
       }

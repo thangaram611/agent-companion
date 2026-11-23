@@ -112,7 +112,7 @@ test('importing lib/state.mjs unsandboxed throws at import under test; AGENT_COM
 test('settings access checks the XDG path per call even with a sandboxed state import', () => {
   const sandbox = mkdtempSync(join(tmpdir(), 'guard-settings-'));
   try {
-    const env = { ...baseEnv(), AGENT_COMPANION_HOME: sandbox, AGENT_COMPANION_DEFAULT_TARGET: '', XDG_CONFIG_HOME: join(REAL_HOME, '.config') };
+    const env = { ...baseEnv(), AGENT_COMPANION_HOME: sandbox, AGENT_COMPANION_DEFAULT_COMPANION: '', XDG_CONFIG_HOME: join(REAL_HOME, '.config') };
     for (const call of ["m.readDefaultTarget()", "m.writeDefaultModel('x')", 'm.migrateDefaults()']) {
       const child = runNode(`const m = await import('./lib/state.mjs'); delete process.env.AGENT_COMPANION_HOME; ${call};`, env);
       assert.notEqual(child.status, 0);

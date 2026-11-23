@@ -1,5 +1,7 @@
 # Codex delegation — reliability evidence
 
+Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
+
 Measured constraints behind the Codex adapters, detached broker and recovery guards.
 The experiments used codex-cli 0.147.0 and Claude Code 2.1.226 in August 2026 unless
 another version or date is named. These are dated observations, not fresh measurements

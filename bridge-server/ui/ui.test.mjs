@@ -278,7 +278,7 @@ test('a long or many-line draft wraps inside the box; every row fits and none ho
 // and sources, and what inherit resolves to, natively or from a last run.
 const DEFAULTS = () => ({
   settingsFile: '/home/tester/.config/agent-companion/settings.json',
-  target: { saved: 'codex', value: 'codex', source: 'config', inherit: null },
+  companion: { saved: 'codex', value: 'codex', source: 'config', inherit: null },
   companions: {
     codex: { model: { saved: null, value: null, source: 'unset' }, effort: { saved: 'high', value: 'high', source: 'config' },
       inherit: { model: 'gpt-6.2-astra', effort: 'xhigh', source: 'config/read' } },
@@ -296,7 +296,7 @@ function fakeDefaults() {
     calls.push(query);
     if (query.effort === 'turbo') throw new Error('effort "turbo" is not valid for Codex model "gpt-6.2-astra". Use one of: low, medium, high, xhigh, max, ultra');
     const result = DEFAULTS();
-    if (query.target) return { settingsFile: result.settingsFile, target: { ...result.target, saved: query.target === 'inherit' ? null : query.target }, conflicts: [] };
+    if (query.target) return { settingsFile: result.settingsFile, companion: { ...result.companion, saved: query.target === 'inherit' ? null : query.target }, conflicts: [] };
     if (query.companion) {
       const row = result.companions[query.companion];
       for (const key of ['model', 'effort']) if (query[key]) row[key] = query[key] === 'inherit'
@@ -318,7 +318,7 @@ test('d opens the defaults panel: saved values and what inherit resolves to, nat
   const text = screen(model);
   for (const row of text.split('\n')) assert.ok(row.length <= 110, row);
   assert.match(text, /Defaults {2}\/home\/tester\/\.config\/agent-companion\/settings\.json/);
-  assert.match(text, /target +codex \(saved\)/);
+  assert.match(text, /companion +codex \(saved\)/);
   assert.match(text, /model +inherit → gpt-6\.2-astra \(config\/read\)/);
   assert.match(text, /effort +high \(saved\)/);
   assert.match(text, /model +inherit → claude-opus-5-5 \(codex last run, 3d ago\)/);
@@ -358,7 +358,7 @@ test('editing a default: ⏎ edits the selected field, ⏎ saves through default
   // esc leaves an edit without saving, then closes the panel.
   press(model, 'upArrow', 'return'); type(model, 'opencode'); press(model, 'escape');
   assert.equal(defaults.calls.length, 4);
-  assert.match(screen(model), /target +codex \(saved\)/);
+  assert.match(screen(model), /companion +codex \(saved\)/);
   press(model, 'escape');
   assert.equal(model.panel, null);
 });

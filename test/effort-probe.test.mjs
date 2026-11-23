@@ -9,8 +9,8 @@ function fixture(target, { acceptInvalid = false, effectiveEffort, effectiveMode
   const bridge = {
     async tool(name, args, owner) {
       calls.push({ name, args, owner });
-      if (name === 'agent_catalog') return { targets: [{ id: target, effort: { selection: true, levels: null } }] };
-      if (name === 'agent_cancel') return { ok: true };
+      if (name === 'companion_catalog') return { companions: [{ id: target, effort: { selection: true, levels: null } }] };
+      if (name === 'companion_cancel') return { ok: true };
       if (args.effort?.startsWith('__')) return acceptInvalid ? { status: 'still_running', job_id: 'bad' } :
         { status: 'failed', content: 'Use one of: high, low, medium, or omit effort.', meta: { detail: 'EFFORT_NOT_ALLOWED' } };
       selectedModel = args.model ?? selectedModel;
@@ -31,7 +31,7 @@ function fixture(target, { acceptInvalid = false, effectiveEffort, effectiveMode
 for (const target of ['claude', 'codex', 'opencode', 'antigravity', 'copilot']) test(`effort probe ${target}: refusal, lowest level, truthful reports and cold follow-up scope`, async () => {
   const h = fixture(target);
   await runEffortProbe({ ...h, model: target === 'antigravity' ? 'gpt-oss-120b-medium' : undefined });
-  const sends = h.calls.filter(c => c.name === 'agent_send');
+  const sends = h.calls.filter(c => c.name === 'companion_send');
   assert.equal(sends[1].args.effort, 'low');
   assert.equal(sends[1].args.task, 'Reply with exactly: OK');
   if (target === 'copilot') {
@@ -47,15 +47,15 @@ for (const target of ['claude', 'codex', 'opencode', 'antigravity', 'copilot']) 
 test('effort probe cancels unexpected acceptance and spends no subsequent turns', async () => {
   const h = fixture('codex', { acceptInvalid: true });
   await assert.rejects(runEffortProbe(h));
-  assert.equal(h.calls.at(-1).name, 'agent_cancel');
-  assert.equal(h.calls.filter(c => c.name === 'agent_send').length, 1);
+  assert.equal(h.calls.at(-1).name, 'companion_cancel');
+  assert.equal(h.calls.filter(c => c.name === 'companion_send').length, 1);
   assert.match(h.reports.at(-1), /^FAIL a:/);
 });
 
 test('effort probe fails on a provider-reported mismatch before follow-up', async () => {
   const h = fixture('antigravity', { effectiveEffort: 'high' });
   await assert.rejects(runEffortProbe(h), /high.*low/s);
-  assert.equal(h.calls.filter(c => c.name === 'agent_send').length, 2);
+  assert.equal(h.calls.filter(c => c.name === 'companion_send').length, 2);
   assert.match(h.reports.at(-1), /^FAIL b:/);
 });
 
@@ -75,7 +75,7 @@ test('wire assertion rejects a mismatch before cold follow-up', async () => {
   const h = fixture('claude'), rows = [], wait = h.bridge.wait;
   h.bridge.wait = async id => { rows.push({ path: '/v1/messages', output_config: { effort: 'high' } }); return wait(id); };
   await assert.rejects(runEffortProbe({ ...h, readWire: () => rows }), /wire effort/);
-  assert.equal(h.calls.filter(c => c.name === 'agent_send').length, 2);
+  assert.equal(h.calls.filter(c => c.name === 'companion_send').length, 2);
 });
 
 test('unlisted Codex probe waits for backend vocabulary failure and verifies all three wire turns', async () => {
@@ -86,5 +86,5 @@ test('unlisted Codex probe waits for backend vocabulary failure and verifies all
   };
   await runEffortProbe({ ...h, backendEffort: 'low', readWire: () => rows });
   assert.equal(rows.length, 3);
-  assert.equal(h.calls.some(c => c.name === 'agent_cancel'), false);
+  assert.equal(h.calls.some(c => c.name === 'companion_cancel'), false);
 });

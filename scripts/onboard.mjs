@@ -2,22 +2,22 @@
 // onboard.mjs — first-class companion onboarding for agent-companion.
 //
 // "Attach your companion." This is the
-// one place that selects today's target id, explains how to get it ready, and
+// one place that selects today's companion id, explains how to get it ready, and
 // (with --set-default) persists the choice and optional per-companion model. It never prompts for or stores
 // provider secrets — auth is delegated to the vendor tools (`opencode` /connect,
 // `copilot login`, `agy acp --login`).
 //
 // Usage:
-//   node scripts/onboard.mjs --host <host|both> --target <id|auto|none> [--model <id|inherit>] [--set-default] [--yes] [--json]
-//   node scripts/onboard.mjs --list-targets [--json]
+//   node scripts/onboard.mjs --host <host|both> --companion <id|auto|none> [--model <id|inherit>] [--set-default] [--yes] [--json]
+//   node scripts/onboard.mjs --list-companions [--json]
 //   node scripts/onboard.mjs --doctor [--json]
-//   node scripts/onboard.mjs --target opencode --smoke
+//   node scripts/onboard.mjs --companion opencode --smoke
 //
 // Exit codes: 0 ready / host-only / informational; 1 --doctor reported not-ok,
 // or an unhandled error; 2 usage error
-// (unknown target, ambiguous --target auto under --yes, missing target under
-// --yes); 3 target chosen but not ready (actionable next steps printed),
-// unless --no-target-check is passed.
+// (unknown companion, ambiguous --companion auto under --yes, missing companion under
+// --yes); 3 companion chosen but not ready (actionable next steps printed),
+// unless --no-companion-check is passed.
 
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,7 +44,7 @@ const VALID_TARGET_OPTS = new Set([...TARGET_IDS, 'auto', 'none']);
 export function parseArgs(argv) {
   const opts = {
     host: 'both',
-    target: undefined,
+    companion: undefined,
     setDefault: false,
     yes: false,
     json: false,
@@ -59,16 +59,16 @@ export function parseArgs(argv) {
     const [flag, inline] = a.includes('=') ? [a.slice(0, a.indexOf('=')), a.slice(a.indexOf('=') + 1)] : [a, undefined];
     switch (flag) {
       case '--host': opts.host = valueOf(inline); break;
-      case '--target': opts.target = String(valueOf(inline) || '').trim().toLowerCase(); break;
+      case '--companion': opts.companion = String(valueOf(inline) || '').trim().toLowerCase(); break;
       case '--model': opts.model = String(inline ?? (argv[i + 1]?.startsWith('-') ? '' : argv[++i]) ?? '').trim(); break;
       case '--set-default': opts.setDefault = true; break;
       case '--yes': case '-y': opts.yes = true; break;
       case '--json': opts.json = true; break;
       case '--plan': opts.plan = true; break;
       case '--smoke': opts.smoke = true; break;
-      case '--list-targets': opts.listTargets = true; break;
+      case '--list-companions': opts.listTargets = true; break;
       case '--doctor': opts.doctor = true; break;
-      case '--no-target-check': opts.noTargetCheck = true; break;
+      case '--no-companion-check': opts.noTargetCheck = true; break;
       case '-h': case '--help': opts.help = true; break;
       default: opts.unknown = a; break;
     }
@@ -76,19 +76,19 @@ export function parseArgs(argv) {
   return opts;
 }
 
-// Pure planner: given parsed options + inspected target readiness, decide the
+// Pure planner: given parsed options + inspected companion readiness, decide the
 // outcome without performing any IO. Returns one of:
 //   { kind: 'host-only' }
 //   { kind: 'chosen', id, ready, report, writeDefault }
 //   { kind: 'ask', candidates }            // interactive selection required
 //   { kind: 'error', code, message, candidates? }
-export function planOnboard({ options, targets, configuration }) {
-  const t = options.target;
+export function planOnboard({ options, companions, configuration }) {
+  const t = options.companion;
 
   if (options.model !== undefined) {
-    if (!TARGET_IDS.has(t)) return { kind: 'error', code: 'model_target_required', message: '--model requires an explicit --target <companion> (not auto or none).' };
+    if (!TARGET_IDS.has(t)) return { kind: 'error', code: 'model_companion_required', message: '--model requires an explicit --companion <companion> (not auto or none).' };
     if (!options.model) return { kind: 'error', code: 'model_required', message: '--model requires a value: <id|inherit>.' };
-    if (!targets[t]?.capabilities?.modelSelection) {
+    if (!companions[t]?.capabilities?.modelSelection) {
       return { kind: 'error', code: 'CAPABILITY_UNAVAILABLE', message: `companion "${t}" cannot select a model` };
     }
     if (options.model !== 'inherit' && !isModelAllowedFor(t, options.model)) {
@@ -98,7 +98,7 @@ export function planOnboard({ options, targets, configuration }) {
     }
   }
 
-  const current = targets[TARGET_IDS.has(t) ? t : configuration?.defaultTarget?.target]?.defaultModel;
+  const current = companions[TARGET_IDS.has(t) ? t : configuration?.defaultCompanion?.companion]?.defaultModel;
   const model = { requested: options.model ?? null,
     action: options.model === undefined ? 'none' : options.model === 'inherit' ? 'clear' : 'set',
     current: current?.model ?? null, source: current?.source ?? 'unset' };
@@ -107,43 +107,43 @@ export function planOnboard({ options, targets, configuration }) {
 
   if (t && TARGET_IDS.has(t)) {
     if (options.setDefault && configuration) {
-      if (configuration.defaultTarget.source === 'env' && configuration.defaultTarget.target !== t) {
-        return { kind: 'error', code: 'env_override', message: 'AGENT_COMPANION_DEFAULT_TARGET overrides this choice. Change or unset it first.' };
+      if (configuration.defaultCompanion.source === 'env' && configuration.defaultCompanion.companion !== t) {
+        return { kind: 'error', code: 'env_override', message: 'AGENT_COMPANION_DEFAULT_COMPANION overrides this choice. Change or unset it first.' };
       }
     }
-    const report = targets[t];
+    const report = companions[t];
     return { kind: 'chosen', id: t, ready: !!report?.ready, report, writeDefault: options.setDefault, model };
   }
 
   if (t && !VALID_TARGET_OPTS.has(t)) {
-    return { kind: 'error', code: 'unknown_target', message: `unknown target "${t}". Supported: ${[...TARGET_IDS].join(', ')}, auto, none.` };
+    return { kind: 'error', code: 'unknown_companion', message: `unknown companion "${t}". Supported: ${[...TARGET_IDS].join(', ')}, auto, none.` };
   }
 
   // t is 'auto' or undefined → choose by readiness.
-  const readyIds = Object.values(targets).filter((r) => r.ready).map((r) => r.id);
+  const readyIds = Object.values(companions).filter((r) => r.ready).map((r) => r.id);
   if (readyIds.length === 1) {
     const id = readyIds[0];
-    return { ...planOnboard({ options: { ...options, target: id }, targets, configuration }), autoSelected: true };
+    return { ...planOnboard({ options: { ...options, companion: id }, companions, configuration }), autoSelected: true };
   }
   if (readyIds.length === 0) {
     if (options.yes) {
-      return { kind: 'error', code: 'no_ready_target', message: 'no target is ready. Install/authenticate one, use --target none for harness-only setup, or explicitly defer readiness with --target <id> --no-target-check. See --list-targets.' };
+      return { kind: 'error', code: 'no_ready_companion', message: 'no companion is ready. Install/authenticate one, use --companion none for host-only setup, or explicitly defer readiness with --companion <id> --no-companion-check. See --list-companions.' };
     }
-    return { kind: 'ask', candidates: Object.keys(targets) };
+    return { kind: 'ask', candidates: Object.keys(companions) };
   }
   // Multiple ready.
   if (options.yes) {
-    return { kind: 'error', code: 'ambiguous_target', message: `multiple targets ready (${readyIds.join(', ')}). Pass --target <id>.`, candidates: readyIds };
+    return { kind: 'error', code: 'ambiguous_companion', message: `multiple companions ready (${readyIds.join(', ')}). Pass --companion <id>.`, candidates: readyIds };
   }
   return { kind: 'ask', candidates: readyIds };
 }
 
-function inspectConfiguration(defaultTarget, targets) {
-  const ready = defaultTarget.target ? !!targets[defaultTarget.target]?.ready : null;
-  const summary = defaultTarget.target
-    ? `${defaultTarget.target} (${defaultTarget.source})${ready === false ? '; needs attention' : ''}`
+function inspectConfiguration(defaultCompanion, companions) {
+  const ready = defaultCompanion.companion ? !!companions[defaultCompanion.companion]?.ready : null;
+  const summary = defaultCompanion.companion
+    ? `${defaultCompanion.companion} (${defaultCompanion.source})${ready === false ? '; needs attention' : ''}`
     : 'no default; select a companion before delegating';
-  return { exists: !!defaultTarget.target, defaultTarget, summary };
+  return { exists: !!defaultCompanion.companion, defaultCompanion, summary };
 }
 
 function printTargetReport(report, { json } = {}) {
@@ -192,19 +192,19 @@ export async function runSmoke(id, env, controllerOptions = {}) {
 }
 const HELP = `agent-companion onboarding
 
-  node scripts/onboard.mjs --target ${[...VALID_TARGET_OPTS].join('|')} [--host ${[...VALID_HOSTS].join('|')}]
-                           [--model <id|inherit>] [--set-default] [--yes] [--json] [--plan] [--smoke] [--no-target-check]
-  node scripts/onboard.mjs --list-targets [--json]
+  node scripts/onboard.mjs --companion ${[...VALID_TARGET_OPTS].join('|')} [--host ${[...VALID_HOSTS].join('|')}]
+                           [--model <id|inherit>] [--set-default] [--yes] [--json] [--plan] [--smoke] [--no-companion-check]
+  node scripts/onboard.mjs --list-companions [--json]
   node scripts/onboard.mjs --doctor [--json]
 
 Attach your companion. Supported now: ${new Intl.ListFormat('en').format([...TARGET_IDS])}. Onboarding never
 asks for or stores provider secrets — authenticate with the vendor tools.
-With no --target, existing configuration is preserved. --target none also preserves it.
+With no --companion, existing configuration is preserved. --companion none also preserves it.
 --plan previews selection and readiness without writes or smoke tasks.
---model requires an explicit companion target; inherit clears its saved default.
+--model requires an explicit companion; inherit clears its saved default.
 Without --set-default, model changes are previewed only.
-Defaults are written only after readiness/smoke succeeds; --no-target-check explicitly
-allows an unready target, but never overrides a failed smoke.`;
+Defaults are written only after readiness/smoke succeeds; --no-companion-check explicitly
+allows an unready companion, but never overrides a failed smoke.`;
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
@@ -218,15 +218,15 @@ async function main() {
   }
 
   const settings = options.plan ? previewDefaults({ env }) : migrateDefaults({ env });
-  const defaultTarget = readDefaultTarget(env, console.warn, settings);
+  const defaultCompanion = readDefaultTarget(env, console.warn, settings);
   const run = memoizeProbe(probeCommand);
-  const targets = inspectTargets({ env, run, configuredTarget: defaultTarget.target });
-  for (const [id, report] of Object.entries(targets)) {
+  const companions = inspectTargets({ env, run, configuredTarget: defaultCompanion.companion });
+  for (const [id, report] of Object.entries(companions)) {
     report.capabilities = getTargetById(id).capabilities;
     report.defaultModel = readDefaultModel(id, env, console.warn, settings);
   }
-  const configuration = inspectConfiguration(defaultTarget, targets);
-  let plan = planOnboard({ options, targets, configuration });
+  const configuration = inspectConfiguration(defaultCompanion, companions);
+  let plan = planOnboard({ options, companions, configuration });
   if (options.model !== undefined && plan.kind === 'error' && (!options.plan || options.listTargets || options.doctor)) {
     console.error(`[FAIL] ${plan.code}: ${plan.message}`);
     process.exit(2);
@@ -240,13 +240,13 @@ async function main() {
     process.exit(report.ok ? 0 : 1);
   }
 
-  // --list-targets: readiness for every supported target.
+  // --list-companions: readiness for every supported companion.
   if (options.listTargets) {
     if (options.json) {
-      console.log(JSON.stringify({ defaultTarget, targets }, null, 2));
+      console.log(JSON.stringify({ defaultCompanion, companions }, null, 2));
     } else {
-      console.log(`default target: ${defaultTarget.target || 'unset'} (${defaultTarget.source})`);
-      for (const r of Object.values(targets)) printTargetReport(r);
+      console.log(`default companion: ${defaultCompanion.companion || 'unset'} (${defaultCompanion.source})`);
+      for (const r of Object.values(companions)) printTargetReport(r);
     }
     process.exit(0);
   }
@@ -254,33 +254,33 @@ async function main() {
   if (options.plan) {
     if (plan.kind === 'error') console.error(`[FAIL] ${plan.code}: ${plan.message}`);
     const ok = plan.kind !== 'error' && plan.kind !== 'ask' && (plan.kind !== 'chosen' || plan.ready || options.noTargetCheck);
-    if (options.json) console.log(JSON.stringify({ ok, plan, model: plan.model ?? { requested: options.model ?? null, action: 'none', current: null, source: 'unset' }, configuration, targets }, null, 2));
+    if (options.json) console.log(JSON.stringify({ ok, plan, model: plan.model ?? { requested: options.model ?? null, action: 'none', current: null, source: 'unset' }, configuration, companions }, null, 2));
     else {
       console.log(`Current companion: ${configuration.summary}`);
       console.log(`Plan: ${plan.kind === 'chosen' ? `${plan.writeDefault ? 'set default to' : 'check'} ${plan.id}; ${modelIntent(plan.model)}` : plan.message || 'preserve configuration'}`);
-      for (const report of Object.values(targets)) printTargetReport(report);
+      for (const report of Object.values(companions)) printTargetReport(report);
     }
     process.exit(ok ? 0 : plan.kind === 'chosen' ? 3 : 2);
   }
 
-  // Interactive target selection when required and a tty is available.
+  // Interactive companion selection when required and a tty is available.
   if (plan.kind === 'ask') {
     if (!process.stdin.isTTY) {
-      console.error(`[FAIL] no --target given and not a tty; pass --target ${[...TARGET_IDS].join('|')}|none.`);
+      console.error(`[FAIL] no --companion given and not a tty; pass --companion ${[...TARGET_IDS].join('|')}|none.`);
       process.exit(2);
     }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    console.log('Select a target:');
-    for (const r of Object.values(targets)) printTargetReport(r);
-    const ans = (await rl.question(`\nTarget [${plan.candidates.join('/')}/none]: `)).trim().toLowerCase();
+    console.log('Select a companion:');
+    for (const r of Object.values(companions)) printTargetReport(r);
+    const ans = (await rl.question(`\nCompanion [${plan.candidates.join('/')}/none]: `)).trim().toLowerCase();
     let model;
-    if (targets[ans]?.capabilities.modelSelection) {
+    if (companions[ans]?.capabilities.modelSelection) {
       const answer = (await rl.question(`Model for ${ans} [inherit]: `)).trim();
       if (answer && answer !== 'inherit') model = answer;
     }
     rl.close();
-    if (ans === 'none') plan = planOnboard({ options: { ...options, target: ans }, targets, configuration });
-    else if (TARGET_IDS.has(ans)) plan = planOnboard({ options: { ...options, target: ans, model, setDefault: true }, targets, configuration });
+    if (ans === 'none') plan = planOnboard({ options: { ...options, companion: ans }, companions, configuration });
+    else if (TARGET_IDS.has(ans)) plan = planOnboard({ options: { ...options, companion: ans, model, setDefault: true }, companions, configuration });
     else { console.error(`[FAIL] invalid selection: ${ans}`); process.exit(2); }
   }
 
@@ -291,7 +291,7 @@ async function main() {
 
   if (plan.kind === 'host-only' || plan.kind === 'preserved') {
     const msg = `configuration preserved; companion: ${configuration.summary}.`;
-    if (options.json) console.log(JSON.stringify({ ok: true, host: options.host, target: null, wroteDefault: false,
+    if (options.json) console.log(JSON.stringify({ ok: true, host: options.host, companion: null, wroteDefault: false,
       model: plan.model, configuration, note: msg }, null, 2));
     else console.log(`[OK] ${msg}`);
     process.exit(0);
@@ -308,7 +308,7 @@ async function main() {
   let smoke = null;
   if (options.smoke) {
     if (!report.ready) {
-      smoke = { supported: false, passed: null, detail: 'target not ready; skipping smoke.' };
+      smoke = { supported: false, passed: null, detail: 'companion not ready; skipping smoke.' };
     } else {
       if (!options.yes && process.stdin.isTTY) {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -321,29 +321,29 @@ async function main() {
   }
 
   if (plan.writeDefault && (report.ready || options.noTargetCheck) && smoke?.passed !== false) {
-    if (readDefaultTarget({ ...env, AGENT_COMPANION_DEFAULT_TARGET: '' }).target !== id) {
+    if (readDefaultTarget({ ...env, AGENT_COMPANION_DEFAULT_COMPANION: '' }).companion !== id) {
       writeDefaultTarget(id);
       wrote = true;
     }
     if (plan.model.action === 'set') writeDefaultModel(plan.model.requested, id);
     if (plan.model.action === 'clear') clearDefaultModel(id);
     wroteModel = plan.model.action !== 'none';
-    writeTargetChecks(Object.fromEntries(Object.entries(targets).map(([id, check]) =>
+    writeTargetChecks(Object.fromEntries(Object.entries(companions).map(([id, check]) =>
       [id, { ...check, checkedAt: new Date().toISOString() }])));
   }
-  const current = inspectConfiguration(readDefaultTarget(env), targets);
+  const current = inspectConfiguration(readDefaultTarget(env), companions);
   const defaultModel = readDefaultModel(id, env);
   const model = { ...plan.model, current: defaultModel.model, source: defaultModel.source };
   report.defaultModel = defaultModel;
   if (options.json) {
-    console.log(JSON.stringify({ ok: report.ready && smoke?.passed !== false, host: options.host, target: id, wroteDefault: wrote, model, autoSelected: !!plan.autoSelected, configuration: current, report, smoke }, null, 2));
+    console.log(JSON.stringify({ ok: report.ready && smoke?.passed !== false, host: options.host, companion: id, wroteDefault: wrote, model, autoSelected: !!plan.autoSelected, configuration: current, report, smoke }, null, 2));
   } else {
-    if (plan.autoSelected) console.log(`[OK] auto-selected the only ready target: ${id}`);
+    if (plan.autoSelected) console.log(`[OK] auto-selected the only ready companion: ${id}`);
     printTargetReport(report);
-    if (wrote) console.log(`\n[OK] wrote default target: ${id}`);
+    if (wrote) console.log(`\n[OK] wrote default companion: ${id}`);
     if (wroteModel) console.log(plan.model.action === 'set' ? `[OK] wrote default model for ${id}: ${plan.model.requested}` : `[OK] cleared saved default model for ${id}`);
     if (!wrote && !wroteModel) console.log(`\n[INFO] configuration unchanged; companion: ${current.summary}.`);
-    if (!report.ready && options.noTargetCheck) console.log('[WARN] readiness deferred by --no-target-check; companion is not ready.');
+    if (!report.ready && options.noTargetCheck) console.log('[WARN] readiness deferred by --no-companion-check; companion is not ready.');
     if (!smoke) console.log('[INFO] live companion response remains unverified (no smoke requested).');
     if (smoke) console.log(`\nsmoke: ${smoke.supported ? (smoke.passed === null ? 'skipped' : smoke.passed ? 'passed' : 'failed') : 'unsupported'} — ${smoke.detail}`);
   }

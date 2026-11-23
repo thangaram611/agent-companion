@@ -1,5 +1,7 @@
 # Direction Assessment
 
+Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
+
 Last updated: 2026-11-05
 
 ## 1. Direction

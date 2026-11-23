@@ -45,7 +45,7 @@ type Follow = {
   pane: Pane
 }
 
-const SEND = /^mcp__(plugin_agent-companion_)?agent-bridge__agent_send$/
+const SEND = /^mcp__(plugin_agent-companion_)?agent-bridge__companion_send$/
 // Record ids as records.mjs accepts them; anything else names no record.
 const isId = (id: unknown): id is string => typeof id === 'string' && /^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(id)
 const TICK_MS = 1000
@@ -353,7 +353,7 @@ export const register: Register = on => {
     return {}
   })
 
-  // The bridge answers agent_send with the thread and the job it started,
+  // The bridge answers companion_send with the thread and the job it started,
   // for the main conversation and its subagents alike; a terminal answer
   // carries them in its metadata block, the last line. A start opens nothing.
   on('tool.call', { tool: SEND }, async ($, e, next) => {

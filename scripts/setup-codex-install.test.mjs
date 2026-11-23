@@ -221,7 +221,7 @@ function seedLegacyHooks(codexHome) {
 }
 
 function runSetup(sourceRoot, home, codexHome, binDir, logPath, extraEnv = {}, args = [
-  '--host', 'codex', '--target', 'none', '--skip-tests',
+  '--host', 'codex', '--companion', 'none', '--skip-tests',
 ]) {
   return spawnSync('/bin/bash', [
     path.join(sourceRoot, 'setup.sh'),
@@ -390,7 +390,7 @@ test('setup discovers the same test files as root discovery, including cross-cut
       }
     `);
     const result = runSetup(source, home, path.join(home, '.codex'), bin, path.join(tmp, 'calls'), {}, [
-      '--host', 'codex', '--target', 'none',
+      '--host', 'codex', '--companion', 'none',
     ]);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const found = JSON.parse(readFileSync(capture)).map((f) => path.relative(realpathSync(source), f)).sort();
@@ -471,17 +471,17 @@ function setupFixture(t) {
   };
 }
 
-test('clean setup detects the only harness/companion, previews changes and preserves its default on rerun', (t) => {
+test('clean setup detects the only host/companion, previews changes and preserves its default on rerun', (t) => {
   const f = setupFixture(t);
   const first = f.run(['--skip-tests']);
   assert.equal(first.status, 0, first.stdout + first.stderr);
-  assert.match(first.stdout, /detected harness: codex/);
+  assert.match(first.stdout, /detected host: codex/);
   assert.ok(first.stdout.indexOf('Intended installation changes:') < first.stdout.indexOf('Installing bridge server dependencies'));
   assert.match(first.stdout, /companion: codex \(config\)/);
   assert.match(first.stdout, /Unverified: live delegation/);
   assert.match(first.stdout, /Approve.*plugin hooks/);
   const file = f.settingsFile;
-  assert.equal(f.settings().target, 'codex');
+  assert.equal(f.settings().companion, 'codex');
   const time = new Date('2020-01-02T03:04:05Z');
   utimesSync(file, time, time);
   const second = f.run(['--skip-tests']);
@@ -491,15 +491,15 @@ test('clean setup detects the only harness/companion, previews changes and prese
   assert.ok(readCalls(f.log).every(({ args }) => !['exec', 'app-server'].includes(args[0])));
 });
 
-test('preflight refuses missing harnesses, missing authentication and ambiguous companions without installation', async (t) => {
-  for (const scenario of ['missing harness', 'authentication', 'multiple companions', 'none ready', 'both harnesses']) {
+test('preflight refuses missing hosts, missing authentication and ambiguous companions without installation', async (t) => {
+  for (const scenario of ['missing host', 'authentication', 'multiple companions', 'none ready', 'both hosts']) {
     await t.test(scenario, (t) => {
       const f = setupFixture(t);
-      let args = ['--host', 'codex', '--target', 'codex', '--skip-tests'];
+      let args = ['--host', 'codex', '--companion', 'codex', '--skip-tests'];
       const env = {};
       let message;
-      if (scenario === 'missing harness') {
-        args = ['--host', 'claude', '--target', 'none']; message = /claude.*not found/;
+      if (scenario === 'missing host') {
+        args = ['--host', 'claude', '--companion', 'none']; message = /claude.*not found/;
       } else if (scenario === 'authentication' || scenario === 'none ready') {
         env.FAKE_CODEX_AUTH_FAIL = '1';
         if (scenario === 'none ready') args = ['--host', 'codex', '--skip-tests'];
@@ -507,10 +507,10 @@ test('preflight refuses missing harnesses, missing authentication and ambiguous 
       } else if (scenario === 'multiple companions') {
         writeExecutable(path.join(f.bin, 'copilot'), '#!/bin/sh\necho copilot-fake\n');
         env.COPILOT_BIN = path.join(f.bin, 'copilot');
-        args = ['--host', 'codex', '--skip-tests']; message = /multiple targets ready/;
+        args = ['--host', 'codex', '--skip-tests']; message = /multiple companions ready/;
       } else {
         writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
-        args = ['--target', 'none', '--yes']; message = /Both harnesses are installed/;
+        args = ['--companion', 'none', '--yes']; message = /Both hosts are installed/;
       }
       const r = f.run(args, env);
       assert.notEqual(r.status, 0, r.stdout + r.stderr);
@@ -521,27 +521,27 @@ test('preflight refuses missing harnesses, missing authentication and ambiguous 
   }
 });
 
-test('dry-run previews a clean install and --no-target-check explicitly defers authentication', (t) => {
+test('dry-run previews a clean install and --no-companion-check explicitly defers authentication', (t) => {
   const f = setupFixture(t);
-  const preview = f.run(['--host', 'codex', '--target', 'codex', '--dry-run']);
+  const preview = f.run(['--host', 'codex', '--companion', 'codex', '--dry-run']);
   assert.equal(preview.status, 0, preview.stdout + preview.stderr);
   assert.match(preview.stdout, /Plan \(codex\): set default companion to codex/);
   assert.match(preview.stdout, /Preview only/);
   assert.match(preview.stdout, /Next: brew install --cask antigravity-cli/);
   f.assertNoInstall();
-  const deferred = f.run(['--host', 'codex', '--target', 'codex', '--no-target-check', '--skip-tests'], { FAKE_CODEX_AUTH_FAIL: '1' });
+  const deferred = f.run(['--host', 'codex', '--companion', 'codex', '--no-companion-check', '--skip-tests'], { FAKE_CODEX_AUTH_FAIL: '1' });
   assert.equal(deferred.status, 0, deferred.stdout + deferred.stderr);
   assert.match(deferred.stdout, /Readiness deferred/);
   assert.match(deferred.stdout, /companion: codex \(config\); needs attention/);
-  assert.equal(f.settings().target, 'codex');
+  assert.equal(f.settings().companion, 'codex');
 });
 
-test('both harnesses preserve the shared default, legacy profiles and unrelated host settings', (t) => {
+test('both hosts preserve the shared default, legacy profiles and unrelated host settings', (t) => {
   const f = setupFixture(t);
   writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
   const profiles = '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n';
   writeFileSync(path.join(f.state(), 'profiles.json'), profiles);
-  f.seedSettings({ target: 'opencode' });
+  f.seedSettings({ companion: 'opencode' });
   f.state('claude');
   const settings = path.join(f.home, '.claude/settings.json');
   writeFileSync(settings, JSON.stringify({ theme: 'dark', permissions: { allow: ['Bash(custom)'], deny: ['Bash(blocked)'] } }));
@@ -550,7 +550,7 @@ test('both harnesses preserve the shared default, legacy profiles and unrelated 
   assert.match(result.stdout, /companion: opencode \(config\); needs attention/);
   assert.match(result.stdout, /Claude: permissions installed; companion: opencode/);
   assert.equal(readFileSync(path.join(f.state(), 'profiles.json'), 'utf8'), profiles);
-  assert.deepEqual(f.settings(), { target: 'opencode' });
+  assert.deepEqual(f.settings(), { companion: 'opencode' });
   const saved = JSON.parse(readFileSync(settings));
   assert.equal(saved.theme, 'dark');
   assert.ok(saved.permissions.allow.includes('Bash(custom)'));
@@ -573,33 +573,33 @@ test('setup installs dependencies without emptying the target of a linked node_m
 test('partial installation reports completed stages, preserves defaults and succeeds on rerun', (t) => {
   const f = setupFixture(t);
   writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
-  f.seedSettings({ target: 'copilot' });
-  const args = ['--host', 'both', '--target', 'codex', '--skip-tests'];
+  f.seedSettings({ companion: 'copilot' });
+  const args = ['--host', 'both', '--companion', 'codex', '--skip-tests'];
   const failed = f.run(args, { FAKE_CODEX_BAD_MCP: '1' });
   assert.equal(failed.status, 1, failed.stdout + failed.stderr);
   assert.match(failed.stdout, /Setup incomplete: Codex plugin installation/);
   assert.match(failed.stdout, /Claude: permissions installed/);
   assert.match(failed.stdout, /Codex: plugin installed; MCP and hooks pending verification/);
   assert.match(failed.stdout, /rerun the same command/);
-  assert.equal(f.settings().target, 'copilot');
+  assert.equal(f.settings().companion, 'copilot');
   const repaired = f.run(args);
   assert.equal(repaired.status, 0, repaired.stdout + repaired.stderr);
-  assert.equal(f.settings().target, 'codex');
+  assert.equal(f.settings().companion, 'codex');
 });
 
 test('setup preserves user-owned roles and applies settings only after installation succeeds', async (t) => {
   for (const owned of [false, true]) await t.test(owned ? 'user-owned agent' : 'npm failure', (t) => {
     const f = setupFixture(t);
-    f.seedSettings({ target: 'copilot' });
+    f.seedSettings({ companion: 'copilot' });
     const agent = path.join(f.codexHome, 'agents/agent-companion.toml');
     if (owned) {
       mkdirSync(path.dirname(agent), { recursive: true });
       writeFileSync(agent, '# user-owned\n');
     }
-    const r = f.run(['--host', 'codex', '--target', 'codex', '--skip-tests'], owned ? {} : { FAKE_NPM_EXIT: '1' });
+    const r = f.run(['--host', 'codex', '--companion', 'codex', '--skip-tests'], owned ? {} : { FAKE_NPM_EXIT: '1' });
     assert.equal(r.status, owned ? 0 : 1, r.stdout + r.stderr);
     assert.match(r.stdout, owned ? /User-owned agent preserved/ : /Setup incomplete: bridge dependencies/);
-    assert.equal(f.settings().target, owned ? 'codex' : 'copilot');
+    assert.equal(f.settings().companion, owned ? 'codex' : 'copilot');
     if (owned) assert.equal(readFileSync(agent, 'utf8'), '# user-owned\n');
     assert.equal(existsSync(installedPluginRoot(f.codexHome)), owned);
   });
@@ -607,13 +607,13 @@ test('setup preserves user-owned roles and applies settings only after installat
 
 test('readiness lost after installation is explained without replacing the previous default', (t) => {
   const f = setupFixture(t);
-  f.seedSettings({ target: 'copilot' });
-  const r = f.run(['--host', 'codex', '--target', 'codex', '--skip-tests'], { FAKE_CODEX_AUTH_EXPIRES: '1' });
+  f.seedSettings({ companion: 'copilot' });
+  const r = f.run(['--host', 'codex', '--companion', 'codex', '--skip-tests'], { FAKE_CODEX_AUTH_EXPIRES: '1' });
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /Setup incomplete: companion configuration/);
   assert.match(r.stdout, /Codex CLI has no configured authentication/);
   assert.match(r.stdout, /codex login/);
-  assert.equal(f.settings().target, 'copilot');
+  assert.equal(f.settings().companion, 'copilot');
 });
 
 
@@ -625,7 +625,7 @@ test('setup accepts independent Claude host and companion selections without a s
   const retired = path.join(f.home, '.claude', 'agents', 'agent-companion.md');
   mkdirSync(path.dirname(retired), { recursive: true });
   writeFileSync(retired, '---\n# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent.sh)\n');
-  const args = ['--host', 'claude', '--target', 'claude'];
+  const args = ['--host', 'claude', '--companion', 'claude'];
   const preview = f.run([...args, '--dry-run'], { CLAUDE_BIN: claude });
   assert.equal(preview.status, 0, preview.stdout + preview.stderr);
   assert.match(preview.stdout, /authentication could not be verified/);
@@ -638,7 +638,7 @@ test('setup accepts independent Claude host and companion selections without a s
   `);
   const result = f.run([...args, '--skip-tests'], { CLAUDE_BIN: claude });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.equal(f.settings().target, 'claude');
+  assert.equal(f.settings().companion, 'claude');
   assert.equal(existsSync(retired), false);
   assert.equal(existsSync(path.join(f.codexHome, 'agent-companion/default-target')), false);
   assert.match(result.stdout, /Claude: permissions installed; companion: claude/);
@@ -646,13 +646,13 @@ test('setup accepts independent Claude host and companion selections without a s
 
 test('setup rejects model arguments without an explicit companion before preflight', (t) => {
   const f = setupFixture(t);
-  for (const args of [[], ['--target', 'auto'], ['--target', 'none']]) {
+  for (const args of [[], ['--companion', 'auto'], ['--companion', 'none']]) {
     const r = f.run(['--host', 'codex', ...args, '--model', 'haiku', '--dry-run']);
     assert.equal(r.status, 2, r.stdout + r.stderr);
-    assert.match(r.stdout, /\[FAIL\].*--model requires.*--target/);
+    assert.match(r.stdout, /\[FAIL\].*--model requires.*--companion/);
   }
   for (const args of [['--model'], ['--model='], ['--model', '--dry-run']]) {
-    const r = f.run(['--host', 'codex', '--target', 'claude', ...args]);
+    const r = f.run(['--host', 'codex', '--companion', 'claude', ...args]);
     assert.equal(r.status, 2, r.stdout + r.stderr);
     assert.match(r.stdout, /--model requires a value/);
   }
@@ -672,7 +672,7 @@ test('setup passes model to plan and apply, previews intent, and clears a saved 
     process.exit(r.status ?? 1);
   `);
   writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
-  const args = ['--host', 'both', '--target', 'codex'];
+  const args = ['--host', 'both', '--companion', 'codex'];
   const legacy = ['claude', 'codex'].map(host => path.join(f.state(host), 'default-target'));
   for (const file of legacy) writeFileSync(file, 'copilot\n');
   const preview = f.run([...args, '--model=gpt-5.4', '--dry-run']);
@@ -685,7 +685,7 @@ test('setup passes model to plan and apply, previews intent, and clears a saved 
     const result = f.run([...args, '--model', model, '--skip-tests']);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     for (const file of legacy) assert.equal(existsSync(file), false);
-    assert.equal(f.settings().target, 'codex');
+    assert.equal(f.settings().companion, 'codex');
     assert.equal(f.settings().companions?.codex?.model, model === 'inherit' ? undefined : model);
   }
   const calls = readCalls(capture);

@@ -65,7 +65,7 @@ export class Controller {
       return existing.ready.promise;
     }
     const selected = this.providers?.[provider];
-    if (!selected?.enabled) throw error('TARGET_UNSUPPORTED');
+    if (!selected?.enabled) throw error('COMPANION_UNSUPPORTED');
     if (!selected.ready) throw error('CAPABILITY_UNAVAILABLE');
     if (modelOverride !== undefined && (typeof modelOverride !== 'string' || !selected.modelAllowed?.(modelOverride))) throw error('MODEL_NOT_ALLOWED');
     const historyId = conversation?.historyId ?? null;

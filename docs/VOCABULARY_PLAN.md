@@ -115,8 +115,8 @@ notices, instructions, hook matchers, the permission installer (it also
 removes the old `agent_*` entries), the mod, setup and onboard, settings with
 its migration, the views' labels, docs and probes.
 
-Check: the touched suites; `claude plugin test .`; `bash -n`; no `agent_send`
-or `target` left in the tool schemas (one test reads `tools` and asserts the
+Check: the touched suites; `claude plugin test .`; `bash -n`; only `companion_*` tools
+and `companion` in the send schema (one test reads `tools` and asserts the
 names).
 
 ### Step 2: Names in the code and on disk

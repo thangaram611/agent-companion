@@ -20,10 +20,10 @@ function fixture(options = {}) {
   const h = setupController({ provider: 'claude', capabilities: { interventions: { default: 'steer', steer: true, queue: 'native', interrupt: true } }, ...options });
   h.controller.env.AGENT_COMPANION_HOME = h.dir;
   const raw = (action, args = {}, lead = main, extra = {}) =>
-    dispatch({ name: 'agent_' + action, arguments: { lead, ...args } },
+    dispatch({ name: 'companion_' + action, arguments: { lead, ...args } },
       { controller: h.controller, host: 'claude', ...extra });
   const call = async (...args) => decodeTool(await raw(...args));
-  const send = (args = {}, lead = main) => call('send', { task, target: 'claude', cwd: h.dir, ...args }, lead);
+  const send = (args = {}, lead = main) => call('send', { task, companion: 'claude', cwd: h.dir, ...args }, lead);
   return { ...h, call, raw, send };
 }
 
@@ -33,8 +33,8 @@ const scenarios = {
     const init = await request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
     assert.equal(init.serverInfo.version, pkg.version);
     const listed = (await request('tools/list', {})).tools;
-    assert.deepEqual(listed.map(t => t.name), tools.map(t => t.name));
-    assert.ok(!listed.some(t => t.name === 'agent_reply'));
+    assert.deepEqual(listed.map(t => t.name), ['catalog', 'send', 'read', 'wait', 'status', 'cancel'].map(action => 'companion_' + action));
+    assert.ok(!listed.some(t => Object.hasOwn(t.inputSchema.properties, 'target')));
     for (const tool of listed) {
       assert.equal(tool.inputSchema.additionalProperties, false);
       assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'lead'));
@@ -47,8 +47,8 @@ const scenarios = {
     const sent = await h.send();
     assert.match(sent.thread, /^th-[a-f0-9]{10}$/);
     assert.deepEqual(sent, { ok: true, status: 'still_running', thread: sent.thread, job_id: sent.job_id,
-      target: 'claude', selected_model: null, selected_effort: null, effective_model: 'effective-model',
-      effective_effort: null, permission_mode: 'bypassPermissions', delivery: { wake: null, reason: 'missing_socket', fallback: 'agent_wait' } });
+      companion: 'claude', selected_model: null, selected_effort: null, effective_model: 'effective-model',
+      effective_effort: null, permission_mode: 'bypassPermissions', delivery: { wake: null, reason: 'missing_socket', fallback: 'companion_wait' } });
     assert.deepEqual(h.adapters[0].calls.filter(([name]) => name === 'deliver').map(([, input]) => input.text), [task]);
   },
   async 'host identity gates every protected call before work'() {
@@ -96,7 +96,7 @@ const scenarios = {
       assert.equal(r.code, 'thread_unknown');
       assert.equal(r.status, 'unknown_thread');
     }
-    const row = (s, title) => ({ thread: s.thread, unread: 0, title, target: 'claude', cwd: realpathSync(h.dir), state: 'running',
+    const row = (s, title) => ({ thread: s.thread, unread: 0, title, companion: 'claude', cwd: realpathSync(h.dir), state: 'running',
       job_id: s.job_id, started_at: new Date(h.clock.now()).toISOString() });
     assert.deepEqual((await h.call('status')).threads, [row(first, 'Review')]);
     assert.deepEqual((await h.call('status', {}, sub)).threads, [row(second, task.split('\n')[0])]);
@@ -107,13 +107,13 @@ const scenarios = {
   async 'Codex binds the metadata session and ignores a forged lead on every call'() {
     const h = fixture();
     const call = async (action, args, source = 'user', session = 'root') => decodeTool(await dispatch({
-      name: 'agent_' + action, arguments: { ...args, lead: main },
+      name: 'companion_' + action, arguments: { ...args, lead: main },
       _meta: { 'x-codex-turn-metadata': { session_id: session, thread_source: source, thread_id: source === 'user' ? session : 'child' } },
     }, { controller: h.controller, host: 'codex' }));
     const before = diskSnapshot(h.dir);
     assert.equal((await h.call('status', {}, main, { host: 'codex' })).code, 'LEAD_REQUIRED');
     for (const thread_id of [null, undefined, '']) {
-      const malformed = await dispatch({ name: 'agent_status', arguments: { lead: main }, _meta: {
+      const malformed = await dispatch({ name: 'companion_status', arguments: { lead: main }, _meta: {
         'x-codex-turn-metadata': { session_id: 'root', thread_source: 'subagent', thread_id },
       } }, { controller: h.controller, host: 'codex' });
       assert.equal(decodeTool(malformed).code, 'LEAD_REQUIRED');
@@ -121,7 +121,7 @@ const scenarios = {
     assert.equal((await call('catalog', {}, 'user', 'other')).ok, true);
     assert.deepEqual(diskSnapshot(h.dir), before);
     for (const [source, agent] of [['user', null], ['subagent', 'child']]) {
-      const sent = await call('send', { target: 'claude', task, cwd: h.dir }, source);
+      const sent = await call('send', { companion: 'claude', task, cwd: h.dir }, source);
       assert.deepEqual(h.records.readConversation(sent.thread).lead, { session: 'root', host: 'codex', agent });
       assert.equal(h.records.readExecution(sent.job_id).hostSessionId, 'root');
       assert.equal((await call('status', { job_id: sent.job_id }, agent ? 'user' : 'subagent')).code, 'THREAD_NOT_YOURS');
@@ -141,7 +141,7 @@ const scenarios = {
     const bound = realpathSync(h.dir);
     assert.equal(h.records.readConversation(thread).cwd, bound);
     await h.finish(job_id);
-    for (const [change, code] of [[{ target: 'codex' }, 'provider_mismatch'], [{ cwd: '/' }, 'cwd_mismatch']]) {
+    for (const [change, code] of [[{ companion: 'codex' }, 'provider_mismatch'], [{ cwd: '/' }, 'cwd_mismatch']]) {
       const response = await h.call('send', { task, thread, ...change });
       assert.equal(response.code, code);
       for (const fact of ['claude', bound, 'omit thread']) assert.ok(response.hint.toLowerCase().includes(fact.toLowerCase()));
@@ -151,12 +151,12 @@ const scenarios = {
   async 'new sends use live routing refusals and start no adapter on refusal'() {
     const h = fixture();
     const send = args => h.call('send', { task, cwd: h.dir, ...args });
-    assert.equal((await send({})).code, 'TARGET_UNCONFIGURED');
-    assert.equal((await send({ target: 'absent' })).code, 'TARGET_UNSUPPORTED');
-    const model = await send({ target: 'opencode', model: 'no-provider' });
+    assert.equal((await send({})).code, 'COMPANION_UNCONFIGURED');
+    assert.equal((await send({ companion: 'absent' })).code, 'COMPANION_UNSUPPORTED');
+    const model = await send({ companion: 'opencode', model: 'no-provider' });
     assert.equal(model.code, 'MODEL_NOT_ALLOWED');
     assert.match(model.hint, /provider\/model/i);
-    const effort = await send({ target: 'claude', effort: 'minimal' });
+    const effort = await send({ companion: 'claude', effort: 'minimal' });
     assert.equal(effort.code, 'EFFORT_NOT_ALLOWED');
     assert.match(effort.hint, /low, medium, high, xhigh, max/);
     writeCompanionDefaults('claude', { effort: 'invalid' }, h.controller.env);
@@ -179,7 +179,7 @@ const scenarios = {
     assert.equal(h.controller.live.size, 3);
     await h.finish(first.job_id);
     const next = await h.call('send', { thread: first.thread, task: 'follow-up' });
-    assert.deepEqual([next.thread, next.target, next.selected_model, next.selected_effort], [first.thread, 'claude', 'a', 'low']);
+    assert.deepEqual([next.thread, next.companion, next.selected_model, next.selected_effort], [first.thread, 'claude', 'a', 'low']);
     const adapter = h.adapters.at(-1);
     assert.deepEqual(adapter.calls.find(([op]) => op === 'openHistory')[1], { model: 'a', effort: 'low', historyId: 'native-history' });
     await h.finish(next.job_id, undefined, adapter);
@@ -291,7 +291,7 @@ const scenarios = {
     }
     const before = diskSnapshot(h.dir);
     const status = await h.call('status', { thread, diagnostics: true });
-    assert.deepEqual(status.diagnostics.targets.claude, { ready: true, checkedAt: 'cached' });
+    assert.deepEqual(status.diagnostics.companions.claude, { ready: true, checkedAt: 'cached' });
     const second = createBridgeController({ records: h.records, env: h.controller.env });
     assert.equal((await h.call('status', { job_id }, main, { controller: second })).status, 'unknown');
     assert.deepEqual(diskSnapshot(h.dir), before);
@@ -353,7 +353,7 @@ test('read pages stay anchored as the cursor advances, and never claim delivery'
   const chars = [...posts.join('\n\n')];
   const page = (start, end) => chars.slice(start, end).join('');
   assert.equal(await unread(), 2);
-  const footer = (end, from, first, last) => `\n[posts ${first}–${last} of 2 · characters ${from}–${end} of ${chars.length} · next: agent_read({ thread: "${a.thread}", after: "", offset: ${end} })]`;
+  const footer = (end, from, first, last) => `\n[posts ${first}–${last} of 2 · characters ${from}–${end} of ${chars.length} · next: companion_read({ thread: "${a.thread}", after: "", offset: ${end} })]`;
   assert.equal(await read(), page(0, 8000) + footer(8000, 0, 1, 2));
   assert.equal(await unread(), 1);
   assert.equal(await read({ after: '', offset: 8000, limit: 40000 }), page(8000, 48000) + footer(48000, 8000, 2, 2));
@@ -385,7 +385,7 @@ test('tool and hook excerpts preserve raw text, include read references and boun
     const raw = await h.raw('wait', { job_id });
     assert.deepEqual(Object.keys(raw), ['content']);
     assert.deepEqual(raw.content.map(b => b.type), ['text', 'text']);
-    assert.equal(raw.content[0].text, n === 8000 ? answer : [...answer].slice(0, 8000).join('') + `\n[… 1 more characters. agent_read({ thread: "${thread}", offset: 8000 }) reads on.]`);
+    assert.equal(raw.content[0].text, n === 8000 ? answer : [...answer].slice(0, 8000).join('') + `\n[… 1 more characters. companion_read({ thread: "${thread}", offset: 8000 }) reads on.]`);
     const meta = JSON.parse(raw.content[1].text);
     assert.equal(meta.meta.digest_uri, 'agent-digest://' + job_id);
     assert.equal('content' in meta, false);
@@ -395,13 +395,13 @@ test('tool and hook excerpts preserve raw text, include read references and boun
   const injection = hookAnswer(h.records, lead);
   assert.ok(injection.length < 9000);
   for (const { thread, job_id } of batch) {
-    assert.ok(injection.includes(`agent_read({ thread: "${thread}"`));
+    assert.ok(injection.includes(`companion_read({ thread: "${thread}"`));
     assert.equal((await h.call('wait', { job_id })).meta.delivered_by, 'hook');
   }
   for (const n of [4000, 4001]) {
     const { thread, answer } = await finish(n);
     const text = hookAnswer(h.records, lead);
-    assert.ok(text.endsWith(n === 4000 ? answer : [...answer].slice(0, 4000).join('') + `\n[… 1 more characters. agent_read({ thread: "${thread}", offset: 4000 }) reads on.]`));
+    assert.ok(text.endsWith(n === 4000 ? answer : [...answer].slice(0, 4000).join('') + `\n[… 1 more characters. companion_read({ thread: "${thread}", offset: 4000 }) reads on.]`));
   }
 });
 

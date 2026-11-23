@@ -38,7 +38,7 @@ test('Claude stamps the host lead on every protected tool and preserves the requ
   const matcher = new RegExp(group.matcher);
   for (const prefix of ['', 'mcp__agent-bridge__', HOSTS.claude.toolPrefix]) {
     for (const { name, action } of tools) assert.equal(matcher.test(prefix + name), action !== 'catalog');
-    assert.ok(!matcher.test(prefix + 'agent_send_extra'));
+    assert.ok(!matcher.test(prefix + 'companion_send_extra'));
   }
   for (const agent of [null, 'native-child']) {
     const input = { thread: 'th-123', task: 'review', lead: { session: 'invented' } };
@@ -102,7 +102,7 @@ test('racing hook and terminal tool calls deliver once and preserve sibling news
   const call = (action, args, options) => callTool({ action, lead, ...args }, { controller: h.controller, ...options });
   const marker = join(env.AGENT_RUNTIME_DIR, 'news', lead.session);
   for (let i = 0; i < 16; i++) {
-    const { thread, job_id } = await call('send', { cwd: h.dir, task: 'race', target: 'opencode' });
+    const { thread, job_id } = await call('send', { cwd: h.dir, task: 'race', companion: 'opencode' });
     const answer = 'unescaped answer\n' + job_id;
     await h.finish(job_id, { outcome: 'completed', text: answer }, h.adapters.at(-1));
     const path = h.records.path('results', job_id) + '.delivery';

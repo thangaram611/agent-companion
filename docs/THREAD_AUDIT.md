@@ -1,5 +1,7 @@
 # Code and test layout before the thread redesign
 
+Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
+
 Audit taken 2026-11-22 from the tracked files on main, read-only, before any
 redesign work. It is the evidence for the Structure and Tests sections of
 [THREAD_PLAN.md](THREAD_PLAN.md). Line counts are `wc -l`. "Test-only" means no

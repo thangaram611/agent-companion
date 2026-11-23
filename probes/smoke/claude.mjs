@@ -17,9 +17,9 @@ const readiness = inspectTarget('claude');
 writeTargetChecks(lastTargetChecks());
 const bridge = await startBridge(session);
 try {
-  const catalog = await bridge.tool('agent_catalog', {});
+  const catalog = await bridge.tool('companion_catalog', {});
   assert.equal(catalog.ok, true);
-  const claude = catalog.targets.find((target) => target.id === 'claude');
+  const claude = catalog.companions.find((target) => target.id === 'claude');
   assert.ok(claude, 'catalog must list claude');
   assert.deepEqual(claude.capabilities, {
     interventions: { default: 'queue', steer: false, queue: 'native', interrupt: true },
@@ -32,13 +32,13 @@ try {
     console.log('SKIP: Claude is not ready or login is unverified; install claude and sign in, then rerun. No model work sent.');
   } else {
     // The invalid-model assertion is the sole exception to the Haiku pin.
-    const refusal = await bridge.tool('agent_send', { target: 'claude', model: 'invalid model',
+    const refusal = await bridge.tool('companion_send', { companion: 'claude', model: 'invalid model',
       cwd: work, task: 'noop' }, `${owner}-refusal`);
     assert.equal(refusal.ok, false);
     assert.equal(refusal.code, 'MODEL_NOT_ALLOWED');
     console.log('PASS: Claude invalid model refused');
 
-    const sent = await bridge.tool('agent_send', { target: 'claude', model: 'haiku', cwd: work,
+    const sent = await bridge.tool('companion_send', { companion: 'claude', model: 'haiku', cwd: work,
       task: 'Read README.md and reply with ONLY the magic word it names.' }, owner);
     assert.equal(sent.ok, true, JSON.stringify(sent));
     assert.equal(sent.status, 'still_running');
@@ -56,7 +56,7 @@ try {
     assert.match(first.meta.effective_model, /^claude-/);
     console.log('PASS: Claude fresh send, native identity, usage, cost and verified exit');
 
-    const followup = await bridge.tool('agent_send', { thread: sent.thread,
+    const followup = await bridge.tool('companion_send', { thread: sent.thread,
       task: 'What magic word did you just report? Reply from memory; do not read any file.' }, owner);
     assert.equal(followup.ok, true, JSON.stringify(followup));
     const secondExecution = record('executions', followup.job_id);
@@ -71,16 +71,16 @@ try {
     console.log('PASS: Claude cold follow-up recalls history in a new process with usage and no cost');
 
     const cancelOwner = `${session}-cancel`;
-    const long = await bridge.tool('agent_send', { target: 'claude', model: 'haiku', cwd: work,
+    const long = await bridge.tool('companion_send', { companion: 'claude', model: 'haiku', cwd: work,
       task: 'Write a 1500-word essay about the history of mathematics. Do not use any tools.' }, cancelOwner);
     assert.equal(long.ok, true, JSON.stringify(long));
     assert.equal(long.status, 'still_running');
-    assert.equal((await bridge.tool('agent_status', { job_id: long.job_id }, cancelOwner)).status, 'running');
-    const reply = await bridge.tool('agent_send', { thread: long.thread, task: 'Reply PIVOT instead.' }, cancelOwner);
+    assert.equal((await bridge.tool('companion_status', { job_id: long.job_id }, cancelOwner)).status, 'running');
+    const reply = await bridge.tool('companion_send', { thread: long.thread, task: 'Reply PIVOT instead.' }, cancelOwner);
     assert.equal(reply.ok, false);
     assert.equal(reply.status, 'reply_unavailable');
     assert.equal(reply.reason, 'capability');
-    const cancel = await bridge.tool('agent_cancel', { job_id: long.job_id }, cancelOwner);
+    const cancel = await bridge.tool('companion_cancel', { job_id: long.job_id }, cancelOwner);
     assert.equal(cancel.status, 'cancelled', JSON.stringify(cancel));
     assert.equal(cancel.meta.stop_evidence.gone, true);
     console.log('PASS: Claude running reply refused and cancellation verified gone');

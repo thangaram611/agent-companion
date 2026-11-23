@@ -1,5 +1,7 @@
 # Live view and interventions: plan
 
+Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
+
 Status: agreed 2026-11-15. Step 0 landed as 4e536d0; Step 1 as 2222e9b, 229b310
 and 2c9577b; Step 2 as 37e7b0e through 497a740. Step 3 is built and probed
 on `feat/interventions` (outcome below). Step 4 is not started.

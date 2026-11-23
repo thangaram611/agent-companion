@@ -8,6 +8,6 @@ export function decodeTool({ content }) {
 
 export async function callTool({ action, ...args }, options) {
   const { session, agent } = testLead;
-  return decodeTool(await dispatch({ name: 'agent_' + action, arguments: { lead: { session, agent }, ...args } },
+  return decodeTool(await dispatch({ name: 'companion_' + action, arguments: { lead: { session, agent }, ...args } },
     { host: 'claude', ...options }));
 }

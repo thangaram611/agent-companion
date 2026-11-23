@@ -9,7 +9,7 @@ qualification. Product vocabulary and supported capabilities belong in
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Since 1.0.0 the lead calls the bridge itself: it owns threads, and results
-reach it by hook, `agent_wait` or a host wake ([THREAD_PLAN.md](THREAD_PLAN.md)).
+reach it by hook, `companion_wait` or a host wake ([THREAD_PLAN.md](THREAD_PLAN.md)).
 There is no subagent role. In-flight bridge survival stays retired; cold history
 resume, verified cleanup and host-identified leads are the acceptance contract. The
 [Claude report](../probes/host-qualification/claude/REPORT-2026-11-05.md) (2.1.318)
@@ -171,14 +171,14 @@ It checks README asset presence, not content; regenerate images from
 
 Manual smoke gates before a public tag (real delegations spend model tokens):
 
-1. Claude Code source checkout install with `bash setup.sh --host claude --target none`.
-2. Codex CLI source checkout install with `bash setup.sh --host codex --target none`.
-3. OpenCode default-target onboarding and one real delegated send.
-4. Copilot default-target onboarding and one real delegated send.
+1. Claude Code source checkout install with `bash setup.sh --host claude --companion none`.
+2. Codex CLI source checkout install with `bash setup.sh --host codex --companion none`.
+3. OpenCode default companion onboarding and one real delegated send.
+4. Copilot default companion onboarding and one real delegated send.
 5. Codex marketplace build/install: the release-only Codex validator above is
    this gate.
 6. Claude marketplace install or `claude --plugin-dir` smoke.
-7. Codex CLI companion (downstream target) default-target onboarding and one
+7. Codex CLI default companion onboarding and one
    real delegated send, including a network-using step (e.g. a trivial
    `npm install`/fetch inside the sandbox) to prove the
    `AGENT_COMPANION_CODEX_NETWORK` override actually reaches the sandbox — not

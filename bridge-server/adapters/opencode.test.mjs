@@ -288,7 +288,7 @@ for (const [model, effort, message] of [
   await h.finish(await h.send({ model: 'fixture/first#high' }));
   const saved = readFileSync(join(h.dir, 'history.json'), 'utf8');
   const offset = h.requests().length;
-  const refused = await h.settle(callTool({ action: 'send', target: 'opencode', thread: 'child', cwd: h.dir,
+  const refused = await h.settle(callTool({ action: 'send', companion: 'opencode', thread: 'child', cwd: h.dir,
     task: 'refuse', effort, ...(model ? { model } : {}) }, { controller: h.controller }));
   assert.equal(refused.status, 'failed'); assert.equal(refused.meta.detail, 'EFFORT_NOT_ALLOWED');
   assert.match(refused.content, message);
@@ -317,7 +317,7 @@ test('OpenCode effort overrides an older variant, accepts matching aliases, and 
 
 test('OpenCode effort selects a variant on its configured model', async t => {
   const h = setup(t, { AGENT_COMPANION_OPENCODE_MODEL: 'fixture/chosen#fast' });
-  const sent = await h.settle(callTool({ action: 'send', target: 'opencode', cwd: h.dir,
+  const sent = await h.settle(callTool({ action: 'send', companion: 'opencode', cwd: h.dir,
     task: 'select high', effort: 'high' }, { controller: h.controller }));
   assert.equal(sent.status, 'still_running');
   assert.equal(sent.effective_effort, 'high');
@@ -338,7 +338,7 @@ for (const [mode, code] of [
 
 test('OpenCode effort overrides the variant named on the same send', async t => {
   const h = setup(t);
-  const sent = await h.settle(callTool({ action: 'send', target: 'opencode', cwd: h.dir,
+  const sent = await h.settle(callTool({ action: 'send', companion: 'opencode', cwd: h.dir,
     task: 'select low', model: 'fixture/first#high', effort: 'low' }, { controller: h.controller }));
   assert.equal(sent.status, 'still_running');
   assert.equal(sent.selected_model, 'fixture/first#high');
@@ -354,7 +354,7 @@ for (const effort of [undefined, 'low']) test(`routing keeps OpenCode's starting
   const h = setup(t, { AGENT_COMPANION_OPENCODE_MODEL: 'fixture/first#high' });
   let thread;
   const send = async args => {
-    const sent = await h.settle(callTool({ action: 'send', target: 'opencode', ...(thread && { thread }),
+    const sent = await h.settle(callTool({ action: 'send', companion: 'opencode', ...(thread && { thread }),
       cwd: h.dir, task: 'hello', ...args }, { controller: h.controller }));
     thread = sent.thread;
     assert.equal(sent.selected_model, 'fixture/first#high');

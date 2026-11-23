@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^(mcp__(plugin_agent-companion_)?agent-bridge__)?agent_(send|wait|cancel|status|read)$",
+        "matcher": "^(mcp__(plugin_agent-companion_)?agent-bridge__)?companion_(send|wait|cancel|status|read)$",
         "hooks": [
           {
             "type": "command",

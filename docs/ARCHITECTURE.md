@@ -13,16 +13,16 @@ that started it. The lead can work on something else or end its turn.
 
 | Product term | Current implementation term | Meaning |
 | --- | --- | --- |
-| Harness | host | Parent coding-agent surface, currently Claude Code or Codex CLI. |
+| Host | `host` | The app the user talks to, currently Claude Code or Codex CLI. |
 | Lead | `lead` | Calling host conversation, identified by the host on each call. |
 | Thread | `thread` | Bridge-issued id for a linear conversation with one companion in one directory. |
-| Companion | target | Downstream agent runtime, currently OpenCode, GitHub Copilot CLI, Codex CLI, Google Antigravity, or Claude Code. |
-| Model preference | optional `agent_send` `model` | An explicit choice for this conversation; a new thread uses configured defaults when omitted. |
-| Catalog | `agent_catalog` | Read-only companion/model configuration, capabilities and readiness. |
+| Companion | `companion` | The runtime that does the work, currently OpenCode, GitHub Copilot CLI, Codex CLI, Google Antigravity, or Claude Code. |
+| Job | `job_id` | One run on a thread, from send to result. |
+| Model preference | optional `companion_send` `model` | An explicit choice for this thread; a new thread uses configured defaults when omitted. |
+| Catalog | `companion_catalog` | Read-only companion/model configuration, capabilities and readiness. |
 
-The CLI and private tool schema keep `host` and `target`:
-`setup.sh --host claude|codex|both` selects harness surfaces, and
-`agent_send({ target })` names a companion runtime directly (see Private MCP Surface).
+`setup.sh --host claude|codex|both` selects the host, and
+`companion_send({ companion })` names a companion runtime directly (see Private MCP Surface).
 
 ## Flow
 
@@ -42,7 +42,7 @@ flowchart TD
   Watcher -->|fenced result| Records
 ```
 
-A job runs native turns on its own provider process while accepted input remains.
+A job runs native turns on its own companion process while accepted input remains.
 A later send to the thread starts a new process and loads its saved history
 where supported. Each job has its own process group and protocol connection.
 
@@ -61,7 +61,7 @@ PreToolUse replaces any supplied `lead` with the hook's `session_id` and optiona
 `thread_source` of `subagent` also binds the caller's `thread_id`. Missing
 lead identity gives `LEAD_REQUIRED`. Only the catalog is exempt.
 
-A native subagent can own threads and use `agent_wait` for results. Wakes target
+A native subagent can own threads and use `companion_wait` for results. Wakes target
 the main conversation only. Before starting work, the bridge checks recorded
 native companion sessions across both state homes. A matching caller gets
 `RECURSION_REFUSED`.
@@ -77,43 +77,44 @@ a live execution and cannot claim cleanup until absence is verified.
 
 The lead uses the six tools defined in `bridge-server/tools.mjs`.
 
-- `agent_send` starts a thread, follows up or intervenes in a running job.
-- `agent_wait` takes a thread or job id and an optional wait budget. A result,
+- `companion_send` starts a thread, follows up or intervenes in a running job.
+- `companion_wait` takes a thread or job id and an optional wait budget. A result,
   a user intervention or the budget ending returns control to the lead.
-- `agent_read` takes a thread and optional `after` (job id), character `offset`
+- `companion_read` takes a thread and optional `after` (job id), character `offset`
   and `limit`. It reads posts in generation order. The default page is 8,000
   characters and the maximum is 40,000. Continue with the footer's exact
   `after` and `offset`, even when an earlier page advanced the read cursor.
-- `agent_status` with no arguments lists the caller's threads, with title,
-  companion, state and unread count. A thread or job id selects one execution.
-  `diagnostics` includes cached target checks.
-- `agent_cancel` takes a thread or job id and stops the job. The thread remains
+- `companion_status` with no arguments lists the caller's threads, with title,
+  companion, state and unread count. It also returns `default_companion` and
+  `companions`. A thread or job id selects one job. With `diagnostics: true`,
+  `diagnostics.companions` contains the cached readiness checks.
+- `companion_cancel` takes a thread or job id and stops the job. The thread remains
   available for a supported follow-up.
 
-`agent_catalog` takes no arguments. It reports enabled companions, the default,
-per-companion model configuration, effort selection and levels,
+`companion_catalog` takes no arguments. It returns `default_companion` with its source. Each entry in
+`companions` includes model configuration, effort selection and levels,
 `permission: { mode, source, risk }` (null without a permission descriptor),
 intervention/resume/cancel/model/effort-selection capabilities, readiness and the installed version seen at the last check.
 Both `model` and `effort` include `saved` from `settings.json` and `last_run` from the
-newest execution across both hosts that reported that field. Either can be null.
+newest job across both hosts that reported that field. Either can be null.
 `last_run` contains `{ value, at, age_ms, host }`, with an ISO start time.
 `model.model` and `model.source` account for the environment override.
-The ownerless call starts no process and writes no state. If model enumeration needs a
+Catalog requires no lead identity, starts no process and writes no state. If model enumeration needs a
 session, it reports "not enumerable without a session". A missing catalog entry
 alone does not prove an explicitly requested model invalid.
 
-`agent_send` requires `task` and an absolute existing `cwd` to start a thread.
-Optional fields are `target`, `model`, `effort` and `title`. Pass the returned
+`companion_send` requires `task` and an absolute existing `cwd` to start a thread.
+Optional fields are `companion`, `model`, `effort` and `title`. Pass the returned
 `thread` to continue. A send with new text to a running thread can also specify
 `mode`. The companion sees the exact task text.
-The bridge adds no task instructions or required answer format. On a new conversation,
-omitted `target` uses `AGENT_COMPANION_DEFAULT_TARGET`, then the shared settings file. If neither
-exists, the send returns `TARGET_UNCONFIGURED`. An explicit `model` overrides
+The bridge adds no task instructions or required answer format. On a new thread,
+omitted `companion` uses `AGENT_COMPANION_DEFAULT_COMPANION`, then the shared settings file. If neither
+exists, the send returns `COMPANION_UNCONFIGURED`. An explicit `model` overrides
 per-companion configuration; with no override or configured default, the native
 configuration is inherited. Codex receives no model key in that case.
 
 `effort` is a conversation override like `model`, stored as `effortOverride` on
-conversation and execution records. A new conversation uses the requested effort,
+conversation and execution records. A new thread uses the requested effort,
 then the companion's saved default, then native configuration. Follow-ups retain
 the override when effort is omitted. Both `start` and `openHistory` omit the key
 when inherited. Registry `capabilities.effortSelection`
@@ -192,7 +193,7 @@ error, and retains that turn's latest nonempty assistant text. Codex supplies
 turn/error notification messages; ACP supplies prompt errors.
 Claude supplies `result.result` and `errors[]`, including failures before init.
 
-The send acknowledgement includes `thread`, `job_id`, `delivery`, `target`, `selected_model`, `selected_effort`,
+The send acknowledgement includes `thread`, `job_id`, `delivery`, `companion`, `selected_model`, `selected_effort`,
 `effective_model`, `effective_effort` and `permission_mode`. The controller resolves
 these from records and history/delivery metadata, including Claude's init model;
 the server does not inspect adapters. Overrides are distinct from provider reports:
@@ -334,11 +335,11 @@ Tokens come from per-turn `result.usage`; cumulative `modelUsage` is not used.
 ## Routing Contract
 
 The bridge mints a thread id on the first send. Its conversation record binds
-the id to the host, session and optional agent. Every tool that takes a thread
+the id to the host, session and optional native subagent id. Every tool that takes a thread
 or job id checks that binding. A different lead gets `THREAD_NOT_YOURS`.
 
 The first send fixes the companion and canonical directory. Follow-ups retain
-both. A conflicting target or cwd returns `provider_mismatch` or `cwd_mismatch`
+both. A conflicting companion or cwd returns `provider_mismatch` or `cwd_mismatch`
 with the bound route. Omit the thread to start independent work. Model and
 effort defaults apply on creation. An explicit selection can change for a
 later job on that thread.
@@ -348,7 +349,7 @@ existing acknowledgement. New text (up to 8,000 characters) uses the execution's
 default intervention mode or the requested mode. An unavailable mode is refused.
 An attempt to change model or effort while the job runs returns `thread_busy`.
 
-Target/model refusals include `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`,
+Companion/model refusals include `COMPANION_UNCONFIGURED`, `COMPANION_UNSUPPORTED`,
 `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`. The bridge returns the refusal to the lead.
 ACP authentication refusals use `AUTH_REQUIRED`: relay them as setup problems
 with the sign-in steps; do not retry or switch companion.
@@ -372,7 +373,7 @@ processes. The provider factories create an adapter with this interface:
 | `observe({ next, onProgress, onInput })` | Resolve one native outcome (`completed`, `failed`, `interrupted`) with text, usage, native refs and cause. `next` observes an already queued native turn; `onInput` reports message lifecycle. Progress carries `lastActivityAt`, `activeCommand`, `retry`, `partialText` and optional `activity` (string or null). Transport loss throws `ProviderLost`. |
 | `interrupt({ drain } = {})` | Request native turn interruption; `drain: true` waits for the turn boundary before another prompt. Stop-time interruption acknowledges promptly. Never signal a process. |
 | `close()` | Close protocol channels; process termination belongs to the supervisor. |
-| `capabilities` | `{ followUp, modelSelection, loadsHistory, interventions }`; `interventions` references the target registry's `{ default, steer, queue, interrupt }`, with queue `false`, `bridge` or `native`. Unsupported history load refuses follow-up. |
+| `capabilities` | `{ followUp, modelSelection, loadsHistory, interventions }`; `interventions` references the companion registry's `{ default, steer, queue, interrupt }`, with queue `false`, `bridge` or `native`. Unsupported history load refuses follow-up. |
 | `steer({ text, id })` | Supported by Codex, OpenCode and Antigravity. Codex reports acceptance separately from observed confirmation. |
 | `intervene(input)`, `hasPendingInput()` | Native queue/interrupt delivery and pending-turn observation, used for Claude. Other supported queues are held by the controller. |
 
@@ -408,9 +409,9 @@ alone is never proof of exit.
 
 Both hosts share `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`,
 or `$AGENT_COMPANION_HOME/settings.json` with the override set. `lib/state.mjs`
-stores the target and per-companion model and effort there. Environment overrides
-apply to target and model. The first bridge, onboarding run or
-`agent-companion defaults` command migrates `default-target` and `default-model*`. A value found on one host
+stores the companion and per-companion model and effort there. Environment overrides
+apply to companion and model. The first bridge, onboarding run or
+`agent-companion defaults` command moves the former `target` settings key to `companion` and renames the host readiness cache to `companion-checks.json`. It also migrates `default-target` and `default-model*`. A value found on one host
 or agreed by both moves into the store. A disagreement leaves the setting unset
 and preserves both files. `launch-ui.sh defaults` lists the competing values
 and paths. Setting or clearing that default resolves the conflict. Setup previews this migration read-only.
@@ -423,7 +424,7 @@ produce a warning and block updates.
 
 | Path | Meaning |
 | --- | --- |
-| `target-checks.json` | Last explicit readiness evidence; catalog/status read it without probing. |
+| `companion-checks.json` | Last explicit readiness evidence; catalog/status read it without probing. |
 | `conversations/<thread>.json` | Lead (`host`, `session`, optional agent id), title, provider, canonical cwd, model/effort overrides, native history, generation and current execution id. The title defaults to the first task line. |
 | `executions/<id>.json` | Task, interventions, turns, native references, snapshots, process identities, progress and writer authority. |
 | `results/<id>.json` | Immutable answer, outcome, usage, work summary and cleanup evidence. |
@@ -442,7 +443,7 @@ wake. Claude writes to its current session's inbox socket. Codex runs
 `codex queue --thread <id> --message <notice>` for a root conversation. The
 notice gives the thread, job, companion, status and read reference. Sending it
 does not claim delivery. The send acknowledgement's `delivery` field describes
-the available adapter and names `agent_wait` as fallback.
+the available adapter and names `companion_wait` as fallback.
 
 Both hosts call `hooks/hook.sh` on SessionStart, UserPromptSubmit and PostToolUse.
 On ordinary prompt and post-tool events with a recognizable session id and no
@@ -456,11 +457,11 @@ makes later terminal calls return a read reference and `meta.delivered_by` of
 `hook`. A tool win suppresses the hook, and repeat calls can still read the
 answer. An aborted tool call leaves the receipt available. Terminal tools
 return two text blocks: the answer (up to 8,000 characters) or reference, then
-JSON metadata. Status observes. Only `agent_read` advances the paging cursor
+JSON metadata. Status observes. Only `companion_read` advances the paging cursor
 used for the thread listing's unread count.
 
-`onboard.mjs --target <companion> --model <id|inherit> --set-default` saves or
-clears that companion's model default after the target passes readiness/smoke
+`onboard.mjs --companion <companion> --model <id|inherit> --set-default` saves or
+clears that companion's model default after the companion passes readiness/smoke
 checks. `--plan` and omission of `--set-default` leave defaults untouched.
 `setup.sh --model` passes the choice through for each selected host. Codex does
 not forward shell model env knobs to the bridge; pin its model with a saved default.
@@ -591,7 +592,7 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
 - **A mod matcher can keep a Claude wait in the foreground.** The 2026-11-22
   probe saw a direct wait move to the background at 120 s and wake the idle
   lead at completion. Claude's mod API types specify that any tool a mod hook
-  can match loses that behavior. The mod matches only `agent_send`.
+  can match loses that behavior. The mod matches only `companion_send`.
 - **Codex needs an explicit wake (2026-11-22).** A root tool call blocked the
   turn and a background shell exit started no turn. `codex queue` woke an idle
   root at once, or started a new turn after a busy one. Two queues gave two
@@ -599,7 +600,7 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
 - **Codex can silently cut tool output (2026-11-22).** Of 71.8k characters,
   a model unknown to Codex saw about 12k, with the middle replaced and no
   recovery file. A tool output limit of 40,000 tokens delivered the whole
-  sample. The default `agent_read` page is 8,000 characters.
+  sample. The default `companion_read` page is 8,000 characters.
 - **Adding `structuredContent` hides the answer.** The Codex source read
   recorded on 2026-11-22 showed that `structuredContent` replaces the text
   the model reads. Terminal results use text blocks only, including metadata.
@@ -637,7 +638,7 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
   `enabled = false` in `config.toml` can.
 - **Codex subagents skip SessionStart (2026-11-23).** Each had its own MCP
   server. Its hooks carried the root session id and its own thread id as
-  `agent_id`. Subagent leads own separate threads and use `agent_wait`.
+  `agent_id`. Subagent leads own separate threads and use `companion_wait`.
 
 **Antigravity ACP (measured 2026-11-22 on agy 1.5.13, macOS)**
 
@@ -664,7 +665,7 @@ full measurements remain in [RELIABILITY_REMEDIATION.md](RELIABILITY_REMEDIATION
   `ask_question` holds the turn. Once nothing is open, a `usage_update` with
   no subsequent tool call ends the turn after 3 s of quiet. A reply that ends
   as text with no usage update, as an upstream error does, ends the turn after
-  120 s of quiet. Silence with no reply text never ends it: the agent may be
+  120 s of quiet. Silence with no reply text never ends it: the companion may be
   retrying upstream. Interrupt sends `session/cancel` and ends the turn. The
   CLI killed the command without a reply.
 - **A successful `session/load` can open an empty session.** A fresh process
@@ -958,7 +959,7 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   own (Copilot runs `--allow-all-paths`; codex `workspace-write` confines writes, not reads;
   OpenCode is unsandboxed) — and the caller is the subagent, which has `Bash` and copies the
   file in anyway. Measured 2026-08-28: the check cost one bounced dispatch per scratchpad plan
-  plus a duplicate under `~/.claude/plans` that the harness then edited out of sync with the
+  plus a duplicate under `~/.claude/plans` that the host then edited out of sync with the
   copy the companion reviewed. An explicit `plan_path` is accepted anywhere (still
   absolute, existing, a file, and realpath-canonicalised); the plans dir remains only the
   lookup scope for `plan_path: "latest"`.
@@ -971,11 +972,11 @@ These passive fixtures establish host signals, not the shipped cleanup implement
 - **Config inheritance works — do not pin the model.** Omit the key unless a
   request or configuration selects an override; see
   [`RELIABILITY_REMEDIATION.md` §2](RELIABILITY_REMEDIATION.md#sandbox-and-configuration).
-- **An agent's yolo flag is not yolo.** Measured 2026-09-11 on Gemini CLI 0.59.0 under
+- **A companion's yolo flag is not yolo.** Measured 2026-09-11 on Gemini CLI 0.59.0 under
   `--acp`: "Approval mode
   overridden to \"default\" because the current folder is not trusted", after which
   every edit and shell call arrives as a `session/request_permission` request. A
-  client that only passes a flag hangs its agent on the first tool; the ACP adapter
+  client that only passes a flag leaves its companion waiting on the first tool; the ACP adapter
   therefore answers the request itself, from the descriptor's policy, whatever any
   flag said.
 - **`notifications/initialized` is not ACP.** It is MCP's post-handshake notification.
@@ -994,11 +995,11 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   thought and total tokens. The bridge includes cache reads in input.
   Work continuing after `end_turn` has no further prompt
   counters, so the bridge marks usage partial. The corrupt-image turn had no usage.
-- **An agent advertising `loadSession: true` does not mean its sessions survive its
+- **A companion advertising `loadSession: true` does not mean its sessions survive its
   process.** Copilot CLI 1.0.83 advertises it (measured) and its sessions are
   process-local (github/copilot-cli#1767). Which is why `session/load` is a
-  descriptor decision (`acp.loadSession`) ANDed with the agent's advertisement, not
-  the advertisement alone: Copilot false; the fake agent's descriptor true; Antigravity
+  descriptor decision (`acp.loadSession`) ANDed with the companion's advertisement, not
+  the advertisement alone: Copilot false; the fake companion's descriptor true; Antigravity
   true, and measured to mean it — a fresh `agy_acp_server.par` process loads the id,
   replays twelve updates of history and answers the follow-up from memory.
   **Superseded 2026-11-22:** `agy acp` replays its own saved histories. A load

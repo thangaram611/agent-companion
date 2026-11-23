@@ -70,7 +70,7 @@ await cleanupExecution({ records, execution: records.readExecution(process.argv[
       return { pid: watcher.pid };
     } });
   const call = (args) => callTool(args, { controller: active });
-  const send = task => call({ action: 'send', target: 'codex', cwd: dir, task });
+  const send = task => call({ action: 'send', companion: 'codex', cwd: dir, task });
   t.after(async () => {
     for (const supervisor of supervisors) await supervisor.terminate({ graceMs: 0 });
     if (watcher && watcher.exitCode === null) await once(watcher, 'exit');
@@ -184,7 +184,7 @@ test('dispatch wires the Claude provider through fake native send and cold resum
   const answers = [];
   let thread;
   for (const task of [EXACT_TASK, 'follow-up']) {
-    const sent = await call({ action: 'send', target: 'claude', ...(thread && { thread }), cwd: dir, task, effort: task === EXACT_TASK ? 'low' : null });
+    const sent = await call({ action: 'send', companion: 'claude', ...(thread && { thread }), cwd: dir, task, effort: task === EXACT_TASK ? 'low' : null });
     assert.equal(sent.ok, true);
     thread = sent.thread;
     assert.equal(sent.effective_model, 'claude-haiku-5-5');
@@ -192,7 +192,7 @@ test('dispatch wires the Claude provider through fake native send and cold resum
     assert.equal(sent.effective_effort, null);
     assert.equal(sent.permission_mode, 'plan');
     const catalog = await call({ action: 'catalog' });
-    assert.equal(catalog.targets.find((target) => target.id === 'claude').permission.mode, sent.permission_mode);
+    assert.equal(catalog.companions.find((target) => target.id === 'claude').permission.mode, sent.permission_mode);
     const answer = await call({ action: 'wait', job_id: sent.job_id, max_wait_sec: 5 });
     assert.equal(answer.status, 'completed');
     assert.equal(answer.content, 'alpha');
@@ -213,7 +213,7 @@ test('dispatch wires the Claude provider through fake native send and cold resum
 test('Codex accepts effort and exposes adapter refusals through send, status and saved results', async (t) => {
   const h = codexDispatchFixture(t);
   h.env.AGENT_COMPANION_HOME = h.dir;
-  const send = effort => h.call({ action: 'send', target: 'codex', cwd: h.dir, task: 'original', effort });
+  const send = effort => h.call({ action: 'send', companion: 'codex', cwd: h.dir, task: 'original', effort });
   const accepted = await send('low');
   assert.equal(accepted.status, 'still_running');
   assert.equal(accepted.selected_effort, 'low');

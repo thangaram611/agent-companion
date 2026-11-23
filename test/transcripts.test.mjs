@@ -418,7 +418,7 @@ for (const companion of ['codex', 'claude', 'copilot']) {
       assert.equal(message.author, 'fixture-agent'); assert.equal(message.recipient, 'fixture-recipient');
       assert.ok(!JSON.stringify(result).includes('opaque-fixture-ciphertext'));
       const mcp = result.items.filter(i => i.nativeType.endsWith('/McpToolCall'));
-      assert.deepEqual(mcp.map(i => i.name), ['agent_send', 'agent_wait', 'agent_wait']);
+      assert.deepEqual(mcp.map(i => i.name), ['send', 'wait', 'wait'].map(action => 'agent_' + action));
       assert.ok(mcp.every(i => i.server === 'agent-bridge' && i.status === 'completed'));
       assert.equal(mcp[0].input.task, 'fixture'); assert.equal(mcp[1].output, 'MCP result 1\n');
       assert.equal(mcp[1].result.content[1].type, 'resource_link');

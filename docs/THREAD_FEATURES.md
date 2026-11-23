@@ -1,5 +1,7 @@
 # Features that must survive the thread redesign
 
+Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
+
 Inventory taken 2026-11-22 from the code on main, each row checked against the
 code, before any redesign work. It is the checklist for
 [THREAD_PLAN.md](THREAD_PLAN.md): every row must still hold after the plan's last

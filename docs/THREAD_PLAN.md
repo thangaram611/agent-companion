@@ -62,11 +62,11 @@ the design and stand once this plan is approved.
     and no job runs outside the lead's session. On Codex the session is the
     daemon's conversation, so each conversation's bridge is the daemon's child.
 12. **Antigravity is in scope again** (pause lifted 2026-11-22).
-13. **Six tools, one changed set.** `agent_reply` folds into `agent_send` (a send
-    to a running thread is an intervention with a `mode`), and `agent_read` is
-    new. `agent_status` with no arguments lists the caller's threads.
+13. **Six tools, one changed set.** `agent_reply` folds into `companion_send` (a send
+    to a running thread is an intervention with a `mode`), and `companion_read` is
+    new. `companion_status` with no arguments lists the caller's threads.
 14. **Sizes.** A wake notice or hook injection inlines an answer up to 4,000
-    characters. `agent_read` pages at 8,000 characters by default and 40,000 at
+    characters. `companion_read` pages at 8,000 characters by default and 40,000 at
     most. Both sit under every cap measured below.
 15. **The lead's identity comes from the host on every call,** never from the
     model: the hook's session id on Claude, turn metadata on Codex. The thread
@@ -176,7 +176,7 @@ OpenCode model or `gemini-3.8-flash-low`.
   (openai/codex#41849).
 - **A wake restarts the delay.** `/quit` at 0 s, a wake at 53 s, unload at
   113 s. A woken lead keeps its conversation loaded while it works, then for
-  the delay again. Leaving does not stop a running turn: a pending `agent_wait`
+  the delay again. Leaving does not stop a running turn: a pending `companion_wait`
   delivered into the conversation left. Resuming that conversation delivers an
   unread result at its first prompt.
 - **No presence signal** (2026-11-23). Status, read state,
@@ -251,22 +251,22 @@ do not hold a turn open.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `agent_catalog` | none | Unchanged |
-| `agent_send` | `task`; `cwd` on a new thread; optional `thread`, `target`, `model`, `effort`, `mode`, `title` | At once: `thread`, `job_id`, companion, model, effort, permission mode, and `delivery` (which wake is armed, or why none) |
-| `agent_wait` | `thread` or `job_id`, `max_wait_sec` | The next news or the terminal state |
-| `agent_read` | `thread`; optional `after`, `offset`, `limit` | The thread's posts after `after`, long text paged, with a footer naming the range and the next offset |
-| `agent_cancel` | `thread` or `job_id` | The terminal state |
-| `agent_status` | optional `thread`, `job_id`, `diagnostics` | With no arguments: the caller's threads, each with companion, state, title and unread count |
+| `companion_catalog` | none | `default_companion` with its source, and `companions` with model and effort defaults, capabilities and readiness |
+| `companion_send` | `task`; `cwd` on a new thread; optional `thread`, `companion`, `model`, `effort`, `mode`, `title` | At once: `thread`, `job_id`, companion, model, effort, permission mode, and `delivery` (which wake is armed, or why none) |
+| `companion_wait` | `thread` or `job_id`, `max_wait_sec` | The next news or the terminal state |
+| `companion_read` | `thread`; optional `after`, `offset`, `limit` | The thread's posts after `after`, long text paged, with a footer naming the range and the next offset |
+| `companion_cancel` | `thread` or `job_id` | The terminal state |
+| `companion_status` | optional `thread`, `job_id`, `diagnostics` | With no arguments: the caller's threads, each with companion, state, title and unread count |
 
 - A send with no `thread` starts a thread. A send with a `thread` whose companion
   is idle resumes it. A send to a running thread is an intervention: `mode` is
-  steer, queue or interrupt, defaulting to the execution's saved default, and an
+  steer, queue or interrupt, defaulting to the job's saved default, and an
   unavailable mode is refused as today. An identical send to a running thread
   reattaches.
 - A terminal result is a plain text block (the answer, or its first page) and a
   second block of metadata. No `structuredContent` and no output schema, so
   Codex shows the text itself.
-- Every call from a conversation that does not own the thread is refused with
+- Every call from a lead that does not own the thread is refused with
   `THREAD_NOT_YOURS`.
 
 ### Identity and store
@@ -279,7 +279,7 @@ do not hold a turn open.
   instead of the owner, with `lead` and `title` added. Its read cursor is a
   sibling record, `reads/<thread>.json`, written under the thread's lock: the
   controller rewrites the conversation record after awaits, which would drop a
-  cursor written in between. Its posts are its executions in generation order
+  cursor written in between. Its posts are its jobs in generation order
   with their results and interventions. No new event log.
 - **Removed records:** `stops/`, `attachments/` and the "owner away" display.
 
@@ -295,7 +295,7 @@ Three layers, in this order on every host:
    conversation id. Because the prompt hook fires for the wake's own message on
    both hosts, the answer arrives with the notice in one turn. The hook inlines
    up to 4,000 characters and otherwise gives the head and the reference.
-3. **Wait and read.** `agent_wait` blocks; `agent_read` pages.
+3. **Wait and read.** `companion_wait` blocks; `companion_read` pages.
 
 | Host | Wake adapter | Sent only when |
 | --- | --- | --- |
@@ -323,16 +323,16 @@ Three layers, in this order on every host:
 | --- | --- |
 | Lead ends its turn | Nothing; the job runs and the wake follows |
 | Esc, cancelled wait, stopped background wait | The wait returns; the job runs on |
-| Compaction | Same conversation id; `agent_status` lists the threads again |
+| Compaction | Same conversation id; `companion_status` lists the threads again |
 | `/clear` (Claude) | Old threads are not listed and not woken; their jobs run on; they stay on the companion page |
 | `/new`, `/quit` (Codex) | The conversation left stays loaded until idle for `thread_unload_delay_secs` (60 s by default): a job ending then wakes it unseen, and the delay starts again. Codex then shuts it down, which is bridge loss for a job still running. Resuming it delivers unread results at the first prompt; its threads stay on the companion page |
 | Host session exits | Bridge loss: owned process trees are stopped and results fenced, as today |
-| `agent_cancel`, user cancel | The job stops; the thread stays and a later send resumes |
+| `companion_cancel`, user cancel | The job stops; the thread stays and a later send resumes |
 
 ### Recursion guard
 
 Before starting a job the bridge looks up the caller's conversation ids among the
-native sessions of executions in both state homes. A match is refused with
+native sessions of jobs in both state homes. A match is refused with
 `RECURSION_REFUSED`. The Claude companion keeps its `--disallowedTools` guard.
 
 ## Features
@@ -343,10 +343,10 @@ change by design:
 
 | Today | After |
 | --- | --- |
-| The parent briefs a subagent, which asks for a missing path | The lead calls `agent_send`; a new thread without an absolute `cwd` is refused |
+| The parent briefs a subagent, which asks for a missing path | The lead calls `companion_send`; a new thread without an absolute `cwd` is refused |
 | `NATIVE_OWNER_REQUIRED` for a root caller | Root callers are leads; `THREAD_NOT_YOURS` and `RECURSION_REFUSED` guard instead |
-| Follow-up by messaging the same subagent; a new subagent for new work | `agent_send` with the thread; `agent_send` without one |
-| `agent_reply` | `agent_send` to a running thread with a `mode` |
+| Follow-up by messaging the same subagent; a new subagent for new work | `companion_send` with the thread; `companion_send` without one |
+| `agent_reply` | `companion_send` to a running thread with a `mode` |
 | A different task on a busy conversation returns `thread_busy` | It is an intervention in the default mode; an identical send still reattaches |
 | An aborted owner call or a stop marker ends the job (`owner_stop`) | Neither ends a job |
 | Status shows owner attached or detached | Removed with the attachment record |
@@ -357,7 +357,7 @@ change by design:
 | Setup and session start install the agent file | Removed with the role |
 | The Claude companion denies `Agent(agent-companion)` | It keeps denying the bridge's tools; the role no longer exists |
 | Ambiguous legacy history is refused (`thread_ambiguous`) | Legacy history is not read at all (decision 22) |
-| `agent_status` without a job lists every execution in the store | It lists the caller's threads only (decisions 10 and 13) |
+| `companion_status` without a job lists every execution in the store | It lists the caller's threads only (decisions 10 and 13) |
 | A terminal result is one JSON envelope with `content` and `meta` | Two text blocks: the answer, paged past 8,000 characters, then the metadata (step 4) |
 | A reply to a closed job returns `reply_unavailable` (reason `state`) | A `mode` with no running job is refused as invalid; text alone on an ended thread is a follow-up (step 2) |
 | Completions go to a session-tagged queue with one publication receipt per execution | A per-session news marker; the result and its delivery receipt are the record (step 4) |
@@ -500,7 +500,7 @@ Check: the guard passes; the affected suites pass unchanged.
   on Codex. `callArgs` (`server.mjs:745-770`) goes.
 - Mint the thread reference; key the conversation record by it, with `lead` and
   `title`; check ownership on every call.
-- Fold `agent_reply` into `agent_send`. `agent_status` with no arguments lists
+- Fold `agent_reply` into `companion_send`. `companion_status` with no arguments lists
   the caller's threads.
 - Send uses the one routing function, `resolveRouting`, which the live path
   skips today.
@@ -533,11 +533,11 @@ Check: the tests that pin the old behaviour are rewritten
 `hooks.test.mjs` 99-100). Live on both hosts: Esc on a pending wait leaves the
 job running and a later wait returns its result.
 
-### Step 4: Results, `agent_read` and one delivery path
+### Step 4: Results, `companion_read` and one delivery path
 
 - Terminal results as a text block plus metadata; drop `structuredContent` and
   the output schema (`server.mjs:277-287,590-610`).
-- Add `agent_read` with the read cursor and paging.
+- Add `companion_read` with the read cursor and paging.
 - Add `bridge-server/delivery.mjs`. The queue file, its move-aside rewrite, the
   heartbeat and the receipt code in `server.mjs:61-87,137-153,323-347` go.
 - Add `hooks/hook.sh` and `hooks/hook.mjs`; delete `drain-completions.sh` and
@@ -569,16 +569,16 @@ in one project each receiving only their own results.
 ### Step 6: Recursion guard
 
 Check: a scenario with the shared fake adapter. Live: a Codex companion with the
-plugin loaded calls `agent_send` and is refused.
+plugin loaded calls `companion_send` and is refused.
 
 ### Step 7: Views
 
 - `hooks/mod.ts`: record sends from the main conversation (`:417-429` ignores
   them today), key cards by thread, and list running threads above the prompt
   with title, companion, model, activity and elapsed time. The mod must keep
-  hooking `agent_send` only: a mod hook that can match a tool turns off Claude
+  hooking `companion_send` only: a mod hook that can match a tool turns off Claude
   Code's move to the background for that tool (mod API types), which
-  `agent_wait` relies on.
+  `companion_wait` relies on.
 - `bridge-server/ui/jobs.mjs`: list by the lead's conversation; title from
   `title`, else the task's first line.
 - Remove the attachment row from `ui/rows.mjs`.
