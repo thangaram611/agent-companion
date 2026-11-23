@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { companionHomeDir, refuseRealHomeUnderTest } from '../../lib/host.mjs';
+import { companionHomeDir, refuseRealHomeUnderTest } from '../../lib/hosts/index.mjs';
 
 const repo = process.env.AGENT_COMPANION_REPO || fileURLToPath(new URL('../..', import.meta.url));
 export const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -71,9 +71,11 @@ export async function startBridge(session, { env = process.env, repo: root = rep
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
   });
   const tool = async (name, args, owner) => {
-    const response = await rpc('tools/call', { name, arguments: args,
+    const response = await rpc('tools/call', { name, arguments: owner && env.AGENT_COMPANION_HOST !== 'codex' ? { ...args, lead: { session, agent: owner } } : args,
       ...(owner ? { _meta: { 'x-codex-turn-metadata': { thread_id: owner, thread_source: 'subagent', session_id: session } } } : {}) });
-    return response.structuredContent ?? JSON.parse(response.content.find((c) => c.type === 'text').text);
+    const [first, metadata] = response.content;
+    if (metadata) return { ...JSON.parse(metadata.text), content: first.text };
+    return name === 'agent_read' && !response.isError ? first.text : JSON.parse(first.text);
   };
   try {
     await rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'phase3-smoke', version: '1' } });

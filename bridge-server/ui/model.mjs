@@ -5,6 +5,7 @@
 // are the box's inbox requests, through inbox.mjs, and the defaults panel's
 // saves, through defaults.mjs; drafts stay in memory.
 import { randomUUID } from 'node:crypto';
+import { HOSTS } from '../../lib/hosts/index.mjs';
 import { jobModel } from '../../lib/model-name.mjs';
 import { JobTranscript } from './follow.mjs';
 import { defaults as readDefaults } from './defaults.mjs';
@@ -15,7 +16,6 @@ import { Pane, age, boxRows, cardHead, clean, cut, fitSegs, jobBlocks, layoutLin
 const DAY = 86_400_000;
 export const WIDE = 110;
 const LIST = 41;
-const HOSTS = { claude: 'Claude Code', codex: 'Codex' };
 const tokens = n => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
 const HELP = [['↑↓ j k', 'jobs, or transcript items when the transcript has focus'], ['⏎ ⇥ esc', 'open or focus the job; back to the list'],
   ['PgUp PgDn', 'scroll the transcript a page'], ['g G', 'transcript top; bottom and follow'], ['e E', 'expand the item; expand all'],
@@ -369,7 +369,7 @@ export class Model {
     if (!d) return [];
     const { job } = d, { execution, result } = job;
     const used = result?.usage?.total_tokens;
-    const parts = [HOSTS[job.host] + (job.caller.lead ? ` › ${one(job.caller.lead)}` : ''),
+    const parts = [HOSTS[job.host]?.displayName + (job.caller.lead ? ` › ${one(job.caller.lead)}` : ''),
       jobModel(execution, result).map(one).join(' '), used != null ? `${tokens(used)} tokens` : '', d.branch ? one(d.branch) : ''];
     const pad = ' '.repeat(margin);
     const header = [[pad + parts.filter(Boolean).join(' · '), 'dim']];

@@ -24,8 +24,8 @@ export function runFakeClaude() {
       value('--input-format') !== 'stream-json' || value('--output-format') !== 'stream-json' || value('--permission-prompts') !== 'none') fail('invalid Claude argv');
   if (!['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'].includes(value('--permission-mode'))) fail('invalid permission mode');
   if (args.includes('--effort') && !['low', 'medium', 'high', 'xhigh', 'max'].includes(value('--effort'))) fail('invalid effort');
-  const denies = args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--disallowedTools') + 4);
-  if (JSON.stringify(denies) !== JSON.stringify(['mcp__plugin_agent-companion_agent-bridge__*', 'mcp__agent-bridge__*', 'Agent(agent-companion)'])) fail('missing recursion denies');
+  const denies = args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--disallowedTools') + 3);
+  if (JSON.stringify(denies) !== JSON.stringify(['mcp__plugin_agent-companion_agent-bridge__*', 'mcp__agent-bridge__*'])) fail('missing recursion denies');
   const resumed = args.includes('--resume'), session_id = value(resumed ? '--resume' : '--session-id');
   if (!session_id || session_id.startsWith('--')) fail('missing session id');
   trace({ type: 'argv', args });

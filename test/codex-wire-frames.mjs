@@ -27,15 +27,14 @@
 //
 // It never spawns anything and never spends a token.
 
+import { CODEX_PINNED_VERSION, parseFieldTag } from '../lib/codex-app-server-contract.mjs';
 import {
-  CODEX_PINNED_VERSION,
-  parseFieldTag,
   serverFrameViolation,
   serverNotificationContract,
   structuredTypeContract,
   threadItemContract,
   threadItemViolation,
-} from '../lib/codex-app-server-contract.mjs';
+} from './codex-contract-frames.mjs';
 
 // A synthesised string says so. A test that ends up asserting on one is reading a
 // field it never set, which is worth seeing in the failure message rather than

@@ -92,7 +92,6 @@ for (const relPath of [
   'hooks',
   'lib',
   'scripts',
-  'templates',
   'LICENSE',
   'README.md',
 ]) {
@@ -116,6 +115,7 @@ if (bridge?.command !== '/bin/bash'
     || bridge?.cwd !== '.'
     || bridge?.env?.AGENT_COMPANION_HOST !== 'codex'
     || bridge?.default_tools_approval_mode !== 'approve'
+    || bridge?.required !== true
     || bridge?.startup_timeout_sec !== 120
     || bridge?.tool_timeout_sec !== 1320) {
   fail('plugin manifest must declare the Codex agent-bridge MCP launcher');

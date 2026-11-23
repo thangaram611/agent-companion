@@ -14,7 +14,8 @@ import { bounded, systemClock } from '../controller/clock.mjs';
 import { lastRuns } from '../last-runs.mjs';
 import { age, one } from './rows.mjs';
 
-const usesServer = id => id === 'codex' || id === 'opencode';
+const usesServer = id => getTargetById(id).capabilities.serverMode;
+const usesAppServer = id => getTargetById(id).runtime.adapterKind === 'app-server';
 const unavailable = reason => ({ model: null, effort: null, reason });
 const reason = err => one([err.message, err.cause?.message].filter(Boolean).join(': ')).slice(0, 300);
 
@@ -43,7 +44,7 @@ async function readNative(adapter, codex, needModels) {
 }
 
 async function probe(id, needModels, { cwd, env, createSupervisor, timeoutMs, signal }) {
-  const codex = id === 'codex';
+  const codex = usesAppServer(id);
   const adapter = codex ? new CodexAdapter({ env }) : opencodeProvider({ env }).create();
   const supervisor = createSupervisor();
   const read = async () => {
@@ -91,7 +92,7 @@ function validateSelection(id, changes, saved, native) {
   if (native.catalogError) throw new Error(id + ' model list unavailable: ' + native.catalogError);
   const selected = model ?? native.inherit.model;
   if (!selected) throw new Error(id + ' inherited model unavailable: ' + native.inherit.reason);
-  if (id === 'codex') {
+  if (usesAppServer(id)) {
     if (effort) validateCodexEffort(native.models, selected, effort);
   } else {
     const [name, variant, extra] = selected.split('#');
@@ -115,11 +116,11 @@ function companionRow(id, settings, env, native) {
     effort: field(saved.effort, readDefaultEffort(id, env, undefined, settings), 'effort'),
     inherit,
   };
-  if ((id === 'copilot' || id === 'antigravity') && (saved.model || saved.effort)) {
+  if (getTargetById(id).capabilities.acp && (saved.model || saved.effort)) {
     row.validation = 'unverified until a session runs';
   }
   const selected = saved.model ?? (saved.effort ? inherit.model : null);
-  if (id === 'codex' && selected && models && !models.some(m => m.model === selected)) {
+  if (usesAppServer(id) && selected && models && !models.some(m => m.model === selected)) {
     row.validation = "unverified: not in Codex's model list";
   }
   return row;
@@ -158,7 +159,7 @@ export async function defaults(query = {}, {
     if (!usesServer(id)) return [id, { inherit: last.get(id)?.run ?? unavailable('no reported run') }];
     try {
       const saved = settings?.companions?.[id];
-      const needModels = validating || (id === 'codex' && (editing || saved?.model || saved?.effort));
+      const needModels = validating || (usesAppServer(id) && (editing || saved?.model || saved?.effort));
       return [id, await probe(id, needModels, { env, cwd, createSupervisor, timeoutMs, signal })];
     } catch (err) {
       return [id, { inherit: unavailable(reason(err)), catalogError: reason(err) }];

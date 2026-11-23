@@ -1,7 +1,7 @@
-import { readFileSync, readSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, statSync, lstatSync, fstatSync, rmSync, constants } from 'node:fs';
+import { readFileSync, readSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, lstatSync, fstatSync, rmSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { BASE_DIR } from '../../lib/state.mjs';
-import { refuseRealHomeUnderTest } from '../../lib/host.mjs';
+import { refuseRealHomeUnderTest, stateDirs } from '../../lib/hosts/index.mjs';
 import { writePrivateFileAtomic } from '../../lib/runtime-paths.mjs';
 import { sumUsage } from '../../lib/usage.mjs';
 
@@ -30,6 +30,20 @@ export function resultText(execution, fallback = execution.terminal?.text ?? exe
 export const resultUsage = (execution, fallback = execution.terminal?.usage) =>
   (execution.turns?.length ?? 0) > 1 ? sumUsage(execution.turns.map(turn => turn.usage)) : fallback;
 
+// The one result shape, for normal close, recovery and the cleanup watcher;
+// each passes only how its job ended.
+export function buildResult(execution, { outcome, cause, detail, workSummary, stopEvidence, finishedAt }) {
+  const { owner, executionId, generation, turns, interventions, nativeTurnIds, terminal } = execution;
+  return {
+    workSummary, owner, executionId, generation, outcome, cause, detail, text: resultText(execution),
+    turns, interventions, nativeTurnIds, usage: resultUsage(execution),
+    nativeRefs: { historyId: execution.historyId, nativeTurnId: execution.nativeTurnId, nativeTurnIds, ...execution.nativeRefs, ...terminal?.nativeRefs },
+    selectedModel: execution.modelOverride, selectedEffort: execution.effortOverride,
+    effectiveModel: terminal?.effectiveModel ?? execution.effectiveModel, effectiveEffort: terminal?.effectiveEffort ?? execution.effectiveEffort,
+    stopEvidence, finishedAt,
+  };
+}
+
 export function discardInterventions(execution) {
   for (const input of execution.interventions ?? []) {
     if (input.state !== 'answered') input.state = 'not_delivered';
@@ -52,7 +66,6 @@ export class Records {
   }
   readConversation(owner) { return this.read('conversations', owner); }
   readExecution(id) { return this.read('executions', id); }
-  readAttachment(id) { return this.read('attachments', id); }
   readResult(id) { return this.read('results', id); }
   inboxPath(executionId) { return join(this.dir, 'inbox', segment(executionId)); }
   readInbox(executionId) {
@@ -116,44 +129,14 @@ export class Records {
       return { from, mode, text, at };
     });
   }
-  listExecutions() {
+  list(kind) {
     let files;
-    try { files = readdirSync(join(this.dir, 'executions')); }
+    try { files = readdirSync(join(this.dir, kind)); }
     catch (err) { if (err.code === 'ENOENT') return []; throw err; }
-    return files.filter((f) => f.endsWith('.json')).map((f) => this.readExecution(f.slice(0, -5)));
+    return files.filter(f => f.endsWith('.json')).map(f => this.read(kind, f.slice(0, -5)));
   }
-  readLegacyHistory(owner, provider) {
-    const file = (suffix) => {
-      try { return readFileSync(join(this.dir, 'threads', `${segment(owner)}.${suffix}`), 'utf8').trim(); }
-      catch (err) { if (err.code === 'ENOENT') return null; throw err; }
-    };
-    const conflict = file('ambiguous');
-    if (conflict) throw Object.assign(error('AMBIGUOUS_HISTORY'), { message: `legacy thread ${owner} has conflicting histories: ${conflict}` });
-    const sid = file('sid');
-    if (!sid) return null;
-    // A bare legacy sid has no provider identity. Adopt it only when the last
-    // ledger job for this owner proves the same target; never silently reset.
-    let files = [];
-    try { files = readdirSync(join(this.dir, 'jobs')); }
-    catch (err) { if (err.code !== 'ENOENT') throw err; }
-    const jobs = files.filter((f) => f.endsWith('.json')).map((f) => this.read('jobs', f.slice(0, -5)))
-      .filter((job) => job?.thread === owner).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
-    const latest = jobs[0];
-    if (!latest?.target || latest.target !== provider) {
-      throw Object.assign(error('thread_ambiguous'), {
-        message: `legacy thread ${owner} belongs to ${latest?.target || 'an unknown target'}; requested ${provider}`,
-      });
-    }
-    return sid;
-  }
-  readStop(owner) {
-    const value = this.read('stops', owner);
-    if (!value) return null;
-    try {
-      const stat = statSync(this.path('stops', owner));
-      return { value, mtimeMs: stat.mtimeMs, ino: stat.ino };
-    } catch (err) { if (err.code === 'ENOENT') return null; throw err; }
-  }
+  listExecutions() { return this.list('executions'); }
+  listConversations() { return this.list('conversations'); }
   _write(kind, id, data) {
     mkdirSync(join(this.dir, kind), { recursive: true, mode: 0o700 });
     writePrivateFileAtomic(this.path(kind, id), JSON.stringify(data) + '\n');
@@ -181,7 +164,7 @@ export class Records {
     }
     return true;
   }
-  begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes, historyId = null, executionId, text, hostSessionId, now }, expectedGeneration) {
+  begin({ owner, lead, title, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes, historyId = null, executionId, text, hostSessionId, now }, expectedGeneration) {
     return this._locked(owner, () => {
       const old = this.readConversation(owner);
       if ((old?.generation ?? 0) !== expectedGeneration) {
@@ -202,7 +185,8 @@ export class Records {
         interventions: [], turns: [], nativeTurnIds: [] };
       this._write('executions', executionId, execution);
       // Effort becomes a conversation override only after openHistory accepts it.
-      this._write('conversations', owner, { owner, generation, executionId, provider, cwd, modelOverride, effortOverride: old?.effortOverride, historyId });
+      this._write('conversations', owner, { owner, lead: old ? old.lead : lead, title: old ? old.title : title ?? firstLine(text),
+        generation, executionId, provider, cwd, modelOverride, effortOverride: old?.effortOverride, historyId });
       return execution;
     });
   }
@@ -216,12 +200,6 @@ export class Records {
     return this._locked(record.owner, () => {
       if (!this._fenced(record, writer)) return false;
       this._write('executions', record.executionId, record); return true;
-    });
-  }
-  writeAttachment(record) {
-    return this._locked(record.owner, () => {
-      if (!this._fenced(record)) return false;
-      this._write('attachments', record.executionId, record); return true;
     });
   }
   writeResult(record, writer = 'controller') {
@@ -241,4 +219,20 @@ export class Records {
       return true;
     });
   }
+}
+
+export function isCompanionSession(session, env) {
+  for (const { dir } of stateDirs(env)) {
+    const records = new Records({ dir });
+    let entries;
+    try { entries = readdirSync(join(dir, 'conversations'), { withFileTypes: true }); }
+    catch { continue; }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      try {
+        if (records.readConversation(entry.name.slice(0, -5))?.historyId === session) return true;
+      } catch { /* Skip unreadable records and continue checking this host. */ }
+    }
+  }
+  return false;
 }

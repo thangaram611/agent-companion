@@ -36,10 +36,9 @@ test('stale generation refused and logged; terminal results are immutable', () =
   const second = records.begin(input('e2'), 1);
   assert.equal(second.generation, 2);
   assert.equal(rival.writeExecution({ ...first, state: 'running' }), false);
-  assert.equal(rival.writeAttachment({ owner: first.owner, executionId: first.executionId, generation: 1, attached: false }), false);
   assert.equal(rival.writeConversation({ ...records.readConversation('child'), generation: 1 }), false);
   assert.equal(rival.writeResult({ ...first, outcome: 'stopped' }), false);
-  assert.equal(logs.filter((e) => e.code === 'stale_generation').length, 4);
+  assert.equal(logs.filter((e) => e.code === 'stale_generation').length, 3);
   assert.equal(records.readResult('e1').outcome, 'completed');
 });
 
@@ -51,7 +50,7 @@ test('observer reads create nothing and change no bytes or mtimes', () => {
   const before = snapshot(records.dir);
   for (let i = 0; i < 5; i++) {
     records.readConversation('child'); records.readExecution(execution.executionId);
-    records.readAttachment(execution.executionId); records.readResult(execution.executionId); records.listExecutions();
+    records.readResult(execution.executionId); records.listExecutions();
   }
   assert.deepEqual(snapshot(records.dir), before);
 });

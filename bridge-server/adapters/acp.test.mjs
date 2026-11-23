@@ -13,7 +13,7 @@ import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs'
 import { getTargetById } from '../../lib/target-registry.mjs';
 import { writeTargetChecks, isModelAllowedFor } from '../../lib/state.mjs';
 import { AcpAdapter, acpProvider } from './acp.mjs';
-import { dispatch } from '../server.mjs';
+import { callTool, testLead } from '../../test/tool-call.mjs';
 import { appendProviderError } from '../provider-error.mjs';
 
 const lines = (path) => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
@@ -54,7 +54,7 @@ for (const target of ['copilot', 'antigravity']) test(`ACP AUTH_REQUIRED control
   const descriptor = getTargetById(target);
   const h = setup(t, { descriptor, env: { ACP_FAKE_AUTH_REQUIRED: '1' } });
   h.controller.providers[target] = h.controller.providers.fake;
-  const sent = (await dispatch({ action: 'send', target, thread: 'child', cwd: h.dir, task: 'hello' }, { controller: h.controller })).structuredContent;
+  const sent = await callTool({ action: 'send', target, cwd: h.dir, task: 'hello' }, { controller: h.controller });
   const result = h.records.readResult(sent.job_id);
   const terminal = h.records.readExecution(sent.job_id).terminal;
   t.diagnostic('AUTH_REQUIRED_TERMINAL ' + JSON.stringify({ outcome: result.outcome, error: terminal.error, text: result.text }));
@@ -64,8 +64,8 @@ for (const target of ['copilot', 'antigravity']) test(`ACP AUTH_REQUIRED control
   assert.equal(sent.status, 'failed'); assert.equal(sent.meta.detail, 'AUTH_REQUIRED');
   assert.equal(result.text, ['Authentication required.', ...descriptor.auth.nextSteps].join(' '));
   assert.equal(result.text.split('Authentication required').length - 1, 1);
-  const waited = (await dispatch({ action: 'wait', job_id: sent.job_id, thread: 'child' }, { controller: h.controller })).structuredContent;
-  const status = (await dispatch({ action: 'status', job_id: sent.job_id }, { controller: h.controller })).structuredContent;
+  const waited = await callTool({ action: 'wait', job_id: sent.job_id }, { controller: h.controller });
+  const status = await callTool({ action: 'status', job_id: sent.job_id }, { controller: h.controller });
   assert.equal(sent.content, result.text); assert.equal(waited.content, result.text); assert.equal(status.partial_text, result.text);
   assert.equal(h.frames('session/new').length, 1); assert.equal(h.frames('session/prompt').length, 0);
   assert.ok(result.stopEvidence.gone);
@@ -75,13 +75,13 @@ for (const fault of ['session-new-error', 'session-new-empty-error', 'session-ne
   test(`ACP session/new relays only a string message: ${fault}`, async t => {
     const h = setup(t, { descriptor: getTargetById('copilot'), env: { ACP_FIXTURE_FAULT: fault } });
     h.controller.providers.copilot = h.controller.providers.fake;
-    const sent = (await dispatch({ action: 'send', target: 'copilot', thread: 'child', cwd: h.dir, task: 'hello' }, { controller: h.controller })).structuredContent;
+    const sent = await callTool({ action: 'send', target: 'copilot', cwd: h.dir, task: 'hello' }, { controller: h.controller });
     assert.equal(sent.status, 'failed'); assert.equal(sent.meta.detail, 'history_unavailable');
     const message = '403 "unauthorized: not authorized to use this Copilot feature\\n"';
     if (fault === 'session-new-error') assert.equal(sent.content, message);
     else assert.doesNotMatch(sent.content, /data|headers|\[object Object\]/);
-    const waited = (await dispatch({ action: 'wait', job_id: sent.job_id, thread: 'child' }, { controller: h.controller })).structuredContent;
-    const status = (await dispatch({ action: 'status', job_id: sent.job_id }, { controller: h.controller })).structuredContent;
+    const waited = await callTool({ action: 'wait', job_id: sent.job_id }, { controller: h.controller });
+    const status = await callTool({ action: 'status', job_id: sent.job_id }, { controller: h.controller });
     assert.equal(waited.content, sent.content); assert.equal(status.partial_text, sent.content);
     assert.doesNotMatch(JSON.stringify([sent, waited, status]), /SECRET_|headers|response|permission_denied/);
     assert.equal(h.frames('session/prompt').length, 0);
@@ -132,8 +132,8 @@ function setup(t, { descriptor = fakeAcpDescriptor(), env = {}, clock } = {}) {
     for (const supervisor of supervisors) await supervisor.terminate({ graceMs: 0 });
     for (const active of controller.live.values()) clearTimeout(active.timer);
   });
-  const send = (args = {}) => controller.send({ owner: 'child', provider: 'fake', cwd: dir, text: 'exact text\n  with spacing', ...args });
-  const finish = async (sent) => sent.outcome ? sent : waitForResult(controller, { owner: 'child', executionId: sent.executionId });
+  const send = (args = {}) => controller.send({ owner: 'child', lead: testLead, provider: 'fake', cwd: dir, text: 'exact text\n  with spacing', ...args });
+  const finish = async (sent) => sent.outcome ? sent : waitForResult(controller, { owner: records.readExecution(sent.executionId).owner, executionId: sent.executionId });
   const frames = (method) => lines(trace).filter((frame) => frame.method === method);
   return { dir, bin, childEnv, records, controller, adapters, supervisors, progress, logs, send, finish, frames, trace };
 }
@@ -182,8 +182,8 @@ for (const model of ['bogus-model', 'local-model']) test(`Copilot refuses an una
     ACP_FAKE_MODELS: JSON.stringify(models), ACP_FAKE_IGNORE_MODEL: '1',
   } });
   h.controller.providers.copilot = h.controller.providers.fake;
-  const sent = (await dispatch({ action: 'send', target: 'copilot', thread: 'child', cwd: h.dir, task: 'hello', model },
-    { controller: h.controller })).structuredContent;
+  const sent = await callTool({ action: 'send', target: 'copilot', cwd: h.dir, task: 'hello', model },
+    { controller: h.controller });
   assert.equal(sent.status, 'failed');
   assert.equal(sent.meta.detail, 'MODEL_NOT_ALLOWED');
   assert.ok(sent.content.includes(`model "${model}"`));
@@ -442,8 +442,8 @@ for (const fault of ['refused', 'ignored', 'missing', 'confirmed']) test(`Copilo
   const h = setup(t, { descriptor: getTargetById('copilot'), env: { ACP_FAKE_THOUGHT_LEVELS: '["low","medium","high","xhigh","max"]',
     ACP_FAKE_IGNORE_EFFORT: fault === 'ignored' ? '1' : '', ACP_FAKE_MISSING_EFFORT: fault === 'missing' ? '1' : '' } });
   h.controller.providers.copilot = h.controller.providers.fake;
-  const sent = (await dispatch({ action: 'send', target: 'copilot', thread: 'child', cwd: h.dir, task: 'hello',
-    effort: fault === 'refused' ? 'none' : 'low' }, { controller: h.controller })).structuredContent;
+  const sent = await callTool({ action: 'send', target: 'copilot', cwd: h.dir, task: 'hello',
+    effort: fault === 'refused' ? 'none' : 'low' }, { controller: h.controller });
   if (fault === 'confirmed') {
     assert.equal(sent.status, 'still_running'); assert.equal(sent.effective_effort, 'low');
     const result = await h.finish({ executionId: sent.job_id }); assert.equal(result.effectiveEffort, 'low');
@@ -453,7 +453,7 @@ for (const fault of ['refused', 'ignored', 'missing', 'confirmed']) test(`Copilo
     assert.match(sent.content, fault === 'refused' ? /Use one of: low, medium, high, xhigh, max/ : /did not confirm effort/);
     assert.equal(h.frames('session/prompt').length, 0);
     assert.equal(h.frames('session/set_config_option').length, fault === 'refused' ? 0 : 1);
-    assert.equal(h.records.readConversation('child').effortOverride, undefined);
+    assert.equal(h.records.readConversation(sent.thread).effortOverride, undefined);
   }
   t.diagnostic('COPILOT_EFFORT_ENVELOPE ' + fault + ' ' + JSON.stringify(sent));
 });
@@ -820,14 +820,14 @@ test('Antigravity default steer joins the controller turn and sums both prompt a
   const sent = await h.send({ provider: 'antigravity' });
   const supervisor = h.supervisors[0];
   t.mock.method(supervisor, 'terminate', supervisor.terminate.bind(supervisor, { graceMs: 0 }));
-  const call = async args => (await dispatch(args, { controller: h.controller })).structuredContent;
+  const call = args => callTool(args, { controller: h.controller });
   const catalog = await call({ action: 'catalog' });
   assert.deepEqual(catalog.targets.find(t => t.id === 'antigravity').capabilities.interventions,
     { default: 'steer', steer: true, queue: 'bridge', interrupt: true });
   const status = await call({ action: 'status', job_id: sent.executionId });
   assert.deepEqual(status.interventions, { default: 'steer', steer: true, queue: true, interrupt: true });
   const text = 'also do this\n  exactly';
-  const ack = await call({ action: 'reply', thread: 'child', job_id: sent.executionId, message: text });
+  const ack = await call({ action: 'send', thread: 'child', task: text });
   assert.equal(ack.accepted, true); assert.equal(ack.confirmed, true);
   assert.equal(h.records.readExecution(sent.executionId).interventions[0].state, 'joined');
   assert.deepEqual(h.frames('session/prompt')[1].params, { sessionId: 'fake-sess-1', prompt: [{ type: 'text', text }] });
@@ -839,7 +839,7 @@ test('Antigravity default steer joins the controller turn and sums both prompt a
   const result = await h.finish(sent);
   assert.equal(result.outcome, 'completed');
   assert.equal(result.text, 'First.\nSecond.');
-  assert.deepEqual(result.turns.map(t => [t.nativeTurnId, t.messages]), [[null, [sent.executionId, ack.id]]]);
+  assert.deepEqual(result.turns.map(t => [t.nativeTurnId, t.messages]), [[null, [sent.executionId, ack.intervention_id]]]);
   assert.equal(result.interventions[0].state, 'answered');
   assert.deepEqual(result.usage, { source: 'antigravity-acp', input_tokens: 18031, output_tokens: 90,
     cached_input_tokens: 6842, cache_write_input_tokens: 0, reasoning_output_tokens: 0, total_tokens: 18121 });

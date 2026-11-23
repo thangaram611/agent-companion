@@ -1,12 +1,11 @@
 // Read-only job list for the live view: every execution in both hosts' state
-// directories, with the caller's own name for the job where the host records
-// it, and one Claude session's jobs for Claude Code's Companions pane (the
-// `jobs` entry at the end). Nothing here writes a record, renews a lease or
+// directories with its thread's title and its lead session's name, and one
+// Claude session's threads for Claude Code's Companions pane (the `jobs` entry
+// at the end). Nothing here writes a record, renews a lease or
 // signals a process; the view's messages go through inbox.mjs.
 import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
-import { stateDirs } from '../../lib/host.mjs';
+import { stateDirs, HOSTS } from '../../lib/hosts/index.mjs';
 import { locateTranscript } from '../../lib/transcripts.mjs';
 import { Records } from '../controller/records.mjs';
 import { pidAlive } from '../controller/process-supervisor.mjs';
@@ -58,16 +57,16 @@ export function createJobSource({ env = process.env, dirs = stateDirs(env), aliv
         for (const name of names) {
           if (!name.endsWith('.json') || name.startsWith('.')) continue;
           const id = name.slice(0, -5);
-          let execution, result, attachment;
+          let execution, result, conversation;
           try {
             execution = read(records.path('executions', id));
             result = execution && read(records.path('results', id), true);
-            attachment = execution && !result ? read(records.path('attachments', id)) : null;
+            conversation = execution && read(records.path('conversations', execution.owner));
           } catch { continue; }
           if (!execution?.executionId) continue;
           const status = statusOf(execution, result, alive);
           // `dir` is the owning host's state dir, where the job's inbox lives.
-          jobs.push({ key: `${host}:${id}`, host, dir, execution, result, attachment, status, provider: execution.provider,
+          jobs.push({ key: `${host}:${id}`, host, dir, execution, result, conversation, status, provider: execution.provider,
             project: execution.cwd ? basename(execution.cwd) : '', startedAt: execution.startedAt,
             finishedAt: result?.finishedAt ?? null });
         }
@@ -79,78 +78,53 @@ export function createJobSource({ env = process.env, dirs = stateDirs(env), aliv
   };
 }
 
-// One Claude Code session's jobs for its Companions pane (hooks/mod.ts), which
-// has no Node and rebuilds its list from them, a resumed session included (its
-// recorded id, or a subagent its transcript spawned): the
-// newest job of each of the session's subagents in list() order, the first
-// `limit` with the lead's title for each, and the ids of the session's other jobs.
+// The session a job's lead belongs to; a job from before threads has only the
+// bridge's host session.
+const leadSession = job => job.conversation?.lead?.session ?? job.execution.hostSessionId;
+
+// One Claude Code session's threads for its Companions pane (hooks/mod.ts),
+// which has no Node and rebuilds its list from them: the newest job of each
+// thread whose lead is this session (main conversation or its subagents), in
+// list() order, the first `limit` with their titles, and the ids of the
+// session's other jobs. Another session's threads, one before a /clear
+// included, are left to the live view.
 export function sessionJobs({ dir, sessionId, limit, env = process.env, alive = pidAlive }) {
-  const source = createJobSource({ dirs: [{ host: 'claude', dir }], env, alive });
-  const spawned = sessionAgents(sessionId, env);
-  const all = source.list().filter(job => job.execution.hostSessionId === sessionId || spawned.has(job.execution.owner));
-  const owners = new Set();
-  const jobs = all.filter(job => !owners.has(job.execution.owner) && owners.add(job.execution.owner)).slice(0, limit)
-    .map(job => ({ owner: job.execution.owner, title: source.caller(job).title, status: job.status, execution: job.execution, result: job.result, attachment: job.attachment }));
+  const source = createJobSource({ dirs: [{ host: HOSTS.claude.id, dir }], env, alive });
+  const all = source.list().filter(job => leadSession(job) === sessionId);
+  const threads = new Set();
+  const jobs = all.filter(job => !threads.has(job.execution.owner) && threads.add(job.execution.owner)).slice(0, limit)
+    .map(job => ({ thread: job.execution.owner, title: source.caller(job).title, status: job.status, execution: job.execution, result: job.result }));
   const listed = new Set(jobs.map(job => job.execution.executionId));
   return { jobs, older: all.flatMap(job => listed.has(job.execution.executionId) ? [] : [job.execution.executionId]) };
 }
 
-// The subagents a Claude session spawned, from the Agent results its
-// transcript records. A resume can continue under a new session id (measured
-// 2026-11-17 on 2.1.326: two resumes in a row each got one), copying the
-// history, these results included, under it; the jobs keep the id they started under.
-function sessionAgents(sessionId, env) {
-  const path = locateTranscript({ companion: 'claude', historyId: sessionId, env })?.path;
-  if (!path) return new Set();
-  const lead = { ino: null, offset: 0, agents: new Map(), custom: null, ai: null };
-  try { scanLead(path, lead); } catch { return new Set(); }
-  return new Set(lead.agents.keys());
-}
-
 const firstLine = text => String(text ?? '').split('\n').map(line => line.trim()).find(Boolean) ?? '';
 
-// Caller identity. Claude: the lead session's transcript records the Agent
-// call's result with the subagent id (the execution's owner) and its
-// description, and the session's titles. Codex: the subagent thread's own
-// rollout names its task (`agent_path`) and parent thread; Codex's session
-// index names threads the person or Codex titled. The spawn message itself is
-// encrypted in the parent's rollout (measured on codex-cli 0.168), so no
-// longer description is readable. Otherwise the task's first line is the title.
+// A job's title is its thread's (the lead's `title` on send, else the task's
+// first line). The lead's name is its session's title: Claude's from the lead
+// transcript, a title the person set winning over the generated one; Codex's
+// from its session index, which names threads the person or Codex titled.
 export function createCallers(env = process.env) {
-  const home = env.HOME || homedir();
-  const codexHome = String(env.CODEX_HOME || '').trim() || join(home, '.codex');
-  const located = new Map(), leads = new Map(), rollouts = new Map();
+  const codexHome = HOSTS.codex.configDir(env);
+  const located = new Map(), leads = new Map();
   const index = { names: new Map(), mtimeMs: null, size: null };
   // Found paths do not move; a miss is retried after a while, not on every frame.
-  function locate(companion, id) {
-    const key = `${companion}:${id}`, hit = located.get(key);
+  function locate(id) {
+    const hit = located.get(id);
     if (hit?.path || (hit && Date.now() - hit.at < RETRY_MS)) return hit.path;
-    const path = locateTranscript({ companion, historyId: id, env })?.path ?? null;
-    located.set(key, { path, at: Date.now() });
+    const path = locateTranscript({ companion: HOSTS.claude.id, historyId: id, env })?.path ?? null;
+    located.set(id, { path, at: Date.now() });
     return path;
   }
-  function claude(job) {
-    const path = job.execution.hostSessionId && locate('claude', job.execution.hostSessionId);
-    if (!path) return {};
+  function claudeName(session) {
+    const path = locate(session);
+    if (!path) return null;
     let lead = leads.get(path);
-    if (!lead) leads.set(path, lead = { ino: null, offset: 0, agents: new Map(), custom: null, ai: null });
+    if (!lead) leads.set(path, lead = { ino: null, offset: 0, custom: null, ai: null });
     scanLead(path, lead);
-    // A title the person set wins over Claude's generated one.
-    return { title: lead.agents.get(job.execution.owner), lead: lead.custom ?? lead.ai };
+    return lead.custom ?? lead.ai;
   }
-  function codex(job) {
-    let meta = rollouts.get(job.execution.owner);
-    if (!meta) {
-      const path = locate('codex', job.execution.owner);
-      const payload = path ? parseLine(readFirstLine(path))?.payload : null;
-      if (!payload) return {};
-      const spawn = payload.source?.subagent?.thread_spawn ?? {};
-      const task = (payload.agent_path ?? spawn.agent_path ?? '').split('/').pop();
-      rollouts.set(job.execution.owner, meta = { task: task ? task.replaceAll('_', ' ') : null, parent: payload.parent_thread_id ?? spawn.parent_thread_id ?? null });
-    }
-    return { title: meta.task, lead: threadName(meta.parent ?? job.execution.hostSessionId) };
-  }
-  function threadName(id) {
+  function codexName(id) {
     const path = join(codexHome, 'session_index.jsonl');
     try {
       const stat = statSync(path);
@@ -165,10 +139,12 @@ export function createCallers(env = process.env) {
     } catch { return null; }
     return index.names.get(id) ?? null;
   }
+  const names = { [HOSTS.claude.id]: claudeName, [HOSTS.codex.id]: codexName };
   return function caller(job) {
-    let found = {};
-    try { found = job.host === 'codex' ? codex(job) : claude(job); } catch { /* unreadable host files: fall back */ }
-    return { title: found.title || firstLine(job.execution.text), fromCaller: Boolean(found.title), lead: found.lead ?? null };
+    const session = leadSession(job);
+    let lead = null;
+    try { lead = session ? names[job.host]?.(session) ?? null : null; } catch { /* unreadable host files: no name */ }
+    return { title: job.conversation?.title || firstLine(job.execution.text), lead };
   };
 }
 
@@ -176,31 +152,14 @@ function parseLine(line) {
   try { return line ? JSON.parse(line) : null; } catch { return null; }
 }
 
-// session_meta carries the base instructions, so the first line can be large.
-function readFirstLine(path, limit = 8 * 1024 * 1024) {
-  const fd = openSync(path, 'r');
-  try {
-    let bytes = Buffer.alloc(0);
-    for (let size = 64 * 1024; bytes.length < limit; size *= 2) {
-      const chunk = Buffer.alloc(size);
-      const n = readSync(fd, chunk, 0, size, bytes.length);
-      bytes = Buffer.concat([bytes, chunk.subarray(0, n)]);
-      const end = bytes.indexOf(10);
-      if (end >= 0) return bytes.subarray(0, end).toString('utf8');
-      if (n < size) return bytes.toString('utf8');
-    }
-    return null;
-  } finally { closeSync(fd); }
-}
-
 // Lead transcripts reach 140 MB (measured). Read each appended byte once, in
-// chunks, and parse only the lines that carry an agent id or a session title.
-const MARKERS = ['"agentId":"', '"type":"custom-title"', '"type":"ai-title"'].map(text => Buffer.from(text));
+// chunks, and parse only the lines that carry a session title.
+const MARKERS = ['"type":"custom-title"', '"type":"ai-title"'].map(text => Buffer.from(text));
 function scanLead(path, lead, chunkSize = 4 * 1024 * 1024) {
   const fd = openSync(path, 'r');
   try {
     const { size, ino } = fstatSync(fd);
-    if (lead.ino !== ino || size < lead.offset) Object.assign(lead, { ino, offset: 0, agents: new Map(), custom: null, ai: null });
+    if (lead.ino !== ino || size < lead.offset) Object.assign(lead, { ino, offset: 0, custom: null, ai: null });
     while (lead.offset < size) {
       const chunk = Buffer.alloc(Math.min(chunkSize, size - lead.offset));
       const n = readSync(fd, chunk, 0, chunk.length, lead.offset);
@@ -218,9 +177,7 @@ function scanLead(path, lead, chunkSize = 4 * 1024 * 1024) {
       }
       for (const start of [...lines].sort((a, b) => a - b)) {
         const record = parseLine(chunk.subarray(start, chunk.indexOf(10, start)).toString('utf8'));
-        const result = record?.toolUseResult;
-        if (result?.agentId && typeof result.description === 'string') lead.agents.set(result.agentId, result.description);
-        else if (record?.type === 'custom-title' && record.customTitle) lead.custom = record.customTitle;
+        if (record?.type === 'custom-title' && record.customTitle) lead.custom = record.customTitle;
         else if (record?.type === 'ai-title' && record.aiTitle) lead.ai = record.aiTitle;
       }
       lead.offset += end;
@@ -245,9 +202,9 @@ export function branchOf(cwd) {
 
 const USAGE = `usage: agent-companion jobs <state dir> <session id> <limit>
 
-Prints one Claude Code session's companion jobs as one JSON line: the newest
-job of each of its subagents, running first, at most <limit>, and the ids of
-its older jobs. Claude Code's Companions pane runs it; it reads only.
+Prints one Claude Code session's companion threads as one JSON line: the
+newest job of each thread its lead started, running first, at most <limit>,
+and the ids of its older jobs. Claude Code's Companions pane runs it; it reads only.
 `;
 if (import.meta.main) {
   const [dir, sessionId, limit, ...rest] = process.argv.slice(2);

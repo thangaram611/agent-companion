@@ -48,7 +48,7 @@ for (const script of ['install-deps.sh', 'launch-agent-bridge.sh']) {
       mkdirSync(join(root, 'bridge-server/node_modules/@modelcontextprotocol/sdk'), { recursive: true });
       writeFileSync(join(root, 'bridge-server/package.json'), '{"name":"fixture","version":"1.0.0"}');
       writeFileSync(join(root, 'bridge-server/node_modules/@modelcontextprotocol/sdk/package.json'), '{}');
-      copyFileSync(join(HERE, script), join(hooks, script));
+      for (const file of [script, 'host-paths.sh']) copyFileSync(join(HERE, file), join(hooks, file));
       // Existing launcher fixture seam: preserve real helpers, substitute only
       // exhausted resolution, so machine-wide Homebrew cannot satisfy it.
       writeFileSync(join(hooks, 'node-tools.sh'), readFileSync(join(HERE, 'node-tools.sh'), 'utf8') + '\nresolve_node() { return 1; }\n');

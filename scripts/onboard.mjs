@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // onboard.mjs — first-class companion onboarding for agent-companion.
 //
-// "Attach your companion." Supported now: opencode, copilot, codex, claude, and antigravity. This is the
+// "Attach your companion." This is the
 // one place that selects today's target id, explains how to get it ready, and
 // (with --set-default) persists the choice and optional per-companion model. It never prompts for or stores
 // provider secrets — auth is delegated to the vendor tools (`opencode` /connect,
 // `copilot login`, `agy acp --login`).
 //
 // Usage:
-//   node scripts/onboard.mjs --host claude|codex|both --target opencode|copilot|codex|claude|antigravity|auto|none [--model <id|inherit>] [--set-default] [--yes] [--json]
+//   node scripts/onboard.mjs --host <host|both> --target <id|auto|none> [--model <id|inherit>] [--set-default] [--yes] [--json]
 //   node scripts/onboard.mjs --list-targets [--json]
 //   node scripts/onboard.mjs --doctor [--json]
 //   node scripts/onboard.mjs --target opencode --smoke
@@ -25,7 +25,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import readline from 'node:readline/promises';
 
-import { TARGET_IDS, getTargetById } from '../lib/target-registry.mjs';
+import { TARGET_IDS, getTargetById, modelHint } from '../lib/target-registry.mjs';
 import {
   inspectTargets,
   targetReadinessSummary,
@@ -35,12 +35,10 @@ import {
 import { migrateDefaults, previewDefaults, writeDefaultTarget, readDefaultTarget, writeTargetChecks,
   readDefaultModel, writeDefaultModel, clearDefaultModel, isModelAllowedFor } from '../lib/state.mjs';
 import { Controller } from '../bridge-server/controller/controller.mjs';
-import { codexProvider } from '../bridge-server/adapters/codex.mjs';
-import { claudeProvider } from '../bridge-server/adapters/claude.mjs';
-import { opencodeProvider } from '../bridge-server/adapters/opencode.mjs';
-import { acpProvider } from '../bridge-server/adapters/acp.mjs';
+import { createProviders } from '../bridge-server/providers.mjs';
+import { HOSTS } from '../lib/hosts/index.mjs';
 import { Records } from '../bridge-server/controller/records.mjs';
-const VALID_HOSTS = new Set(['claude', 'codex', 'both']);
+const VALID_HOSTS = new Set([...Object.keys(HOSTS), 'both']);
 const VALID_TARGET_OPTS = new Set([...TARGET_IDS, 'auto', 'none']);
 
 export function parseArgs(argv) {
@@ -95,7 +93,7 @@ export function planOnboard({ options, targets, configuration }) {
     }
     if (options.model !== 'inherit' && !isModelAllowedFor(t, options.model)) {
       // Mirror resolveRouting's hints without importing the MCP server during setup.
-      const hint = t === 'opencode' ? 'Use a provider/model id.' : 'Model ids must contain no whitespace.';
+      const hint = modelHint(t);
       return { kind: 'error', code: 'MODEL_NOT_ALLOWED', message: `model "${options.model}" is not valid for ${t}. ${hint}` };
     }
   }
@@ -170,8 +168,7 @@ function modelIntent(model) {
 export async function runSmoke(id, env, controllerOptions = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'agent-onboard-smoke-')));
   const controller = new Controller({ env, records: new Records({ dir: join(dir, 'state') }),
-    providers: { codex: codexProvider({ env }), claude: claudeProvider({ env }), opencode: opencodeProvider({ env }),
-      copilot: acpProvider('copilot', { env }), antigravity: acpProvider('antigravity', { env }) },
+    providers: createProviders(env),
     ...controllerOptions });
   const abort = new AbortController();
   const timer = controller.clock.setTimeout(() => abort.abort(), 120_000);
@@ -195,12 +192,12 @@ export async function runSmoke(id, env, controllerOptions = {}) {
 }
 const HELP = `agent-companion onboarding
 
-  node scripts/onboard.mjs --target opencode|copilot|codex|claude|antigravity|auto|none [--host claude|codex|both]
+  node scripts/onboard.mjs --target ${[...VALID_TARGET_OPTS].join('|')} [--host ${[...VALID_HOSTS].join('|')}]
                            [--model <id|inherit>] [--set-default] [--yes] [--json] [--plan] [--smoke] [--no-target-check]
   node scripts/onboard.mjs --list-targets [--json]
   node scripts/onboard.mjs --doctor [--json]
 
-Attach your companion. Supported now: opencode, copilot, codex, claude, and antigravity. Onboarding never
+Attach your companion. Supported now: ${new Intl.ListFormat('en').format([...TARGET_IDS])}. Onboarding never
 asks for or stores provider secrets — authenticate with the vendor tools.
 With no --target, existing configuration is preserved. --target none also preserves it.
 --plan previews selection and readiness without writes or smoke tasks.
@@ -215,7 +212,7 @@ async function main() {
 
   if (options.help) { console.log(HELP); process.exit(0); }
   if (options.unknown) { console.error(`[FAIL] unknown argument: ${options.unknown}`); process.exit(2); }
-  if (!VALID_HOSTS.has(options.host)) { console.error(`[FAIL] --host must be claude|codex|both (got ${options.host})`); process.exit(2); }
+  if (!VALID_HOSTS.has(options.host)) { console.error(`[FAIL] --host must be ${[...VALID_HOSTS].join('|')} (got ${options.host})`); process.exit(2); }
   if (options.plan && options.smoke) {
     console.error('[FAIL] --plan cannot be combined with --smoke.'); process.exit(2);
   }
@@ -269,7 +266,7 @@ async function main() {
   // Interactive target selection when required and a tty is available.
   if (plan.kind === 'ask') {
     if (!process.stdin.isTTY) {
-      console.error('[FAIL] no --target given and not a tty; pass --target opencode|copilot|codex|claude|antigravity|none.');
+      console.error(`[FAIL] no --target given and not a tty; pass --target ${[...TARGET_IDS].join('|')}|none.`);
       process.exit(2);
     }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

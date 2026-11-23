@@ -42,6 +42,7 @@ test('builds a Codex marketplace root with a nested plugin package', () => {
         AGENT_COMPANION_HOST: 'codex',
       },
       default_tools_approval_mode: 'approve',
+      required: true,
       startup_timeout_sec: 120,
       tool_timeout_sec: 1320,
     });

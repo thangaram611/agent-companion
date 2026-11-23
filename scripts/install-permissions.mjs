@@ -26,30 +26,22 @@ import {
   mkdirSync,
   renameSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { tools } from '../bridge-server/tools.mjs';
+import { HOSTS, settingsFile } from '../lib/hosts/index.mjs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
 // Claude registers the bridge at plugin scope, so the tool names carry the
 // plugin namespace. The bare session-scope names belong to the retired
 // registration and are removed when found.
-const PERMISSIONS = [
-  'mcp__plugin_agent-companion_agent-bridge__agent_catalog',
-  'mcp__plugin_agent-companion_agent-bridge__agent_send',
-  'mcp__plugin_agent-companion_agent-bridge__agent_wait',
-  'mcp__plugin_agent-companion_agent-bridge__agent_status',
-  'mcp__plugin_agent-companion_agent-bridge__agent_reply',
-  'mcp__plugin_agent-companion_agent-bridge__agent_cancel',
-];
 const STALE = /^mcp__agent-bridge__agent_/;
-const SETTINGS = path.join(homedir(), '.claude', 'settings.json');
 const args = process.argv.slice(2);
 const yes = args.includes('--yes') || args.includes('-y');
 
 const hostIdx = args.indexOf('--host');
-const host = hostIdx >= 0 ? args[hostIdx + 1] : 'claude';
-if (host !== 'claude' && host !== 'codex') {
-  console.error(`[FAIL] --host must be 'claude' or 'codex' (got: ${host})`);
+const host = hostIdx >= 0 ? args[hostIdx + 1] : HOSTS.claude.id;
+if (!Object.hasOwn(HOSTS, host)) {
+  console.error(`[FAIL] --host must be ${Object.keys(HOSTS).map(id => `'${id}'`).join(' or ')} (got: ${host})`);
   process.exit(2);
 }
 
@@ -62,11 +54,14 @@ const fail = (m, code = 1) => {
 // Codex permission model is not addressed by this plan — emit a clear
 // no-op marker so setup.sh's exit-code check stays happy and a future
 // Codex-permission implementation has an obvious place to plug in.
-if (host === 'codex') {
+if (host === HOSTS.codex.id) {
   ok('permission injection skipped: Codex permission model not handled by this plan');
   process.exit(0);
 }
 
+const SETTINGS = settingsFile(host);
+const PERMISSIONS = tools.map(({ name }) => HOSTS[host].toolPrefix + name);
+const isStale = p => STALE.test(p) || p === 'Agent(agent-companion)' || p === HOSTS[host].toolPrefix + 'agent_reply';
 mkdirSync(path.dirname(SETTINGS), { recursive: true });
 
 let cfg = {};
@@ -98,8 +93,8 @@ const allow = Array.isArray(cfg.permissions.allow)
   ? cfg.permissions.allow.slice()
   : [];
 
-const stale = allow.filter((permission) => STALE.test(permission));
-const kept = allow.filter((permission) => !STALE.test(permission));
+const stale = allow.filter(isStale);
+const kept = allow.filter((permission) => !isStale(permission));
 const missing = PERMISSIONS.filter((permission) => !kept.includes(permission));
 if (missing.length === 0 && stale.length === 0) {
   ok(`agent-companion permissions already in ${SETTINGS}`);

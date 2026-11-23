@@ -32,18 +32,14 @@
 
 import { chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-
-const CONTRACT_MODULE_URL = pathToFileURL(
-  join(fileURLToPath(new URL('../lib/', import.meta.url)), 'codex-app-server-contract.mjs'),
-).href;
 
 export const FAKE_APP_SERVER = `
 import { appendFileSync, cpSync } from 'node:fs';
 import * as historyFs from 'node:fs';
+import { CODEX_PINNED_VERSION } from ${JSON.stringify(new URL('../lib/codex-app-server-contract.mjs', import.meta.url).href)};
 import {
-  CODEX_PINNED_VERSION, JSONRPC_INVALID_REQUEST, contractViolation, serverFrameViolation, unhandledMethodError,
-} from ${JSON.stringify(CONTRACT_MODULE_URL)};
+  JSONRPC_INVALID_REQUEST, contractViolation, serverFrameViolation, unhandledMethodError,
+} from ${JSON.stringify(new URL('./codex-contract-frames.mjs', import.meta.url).href)};
 
 const TRACE = process.env.CODEX_FAKE_TRACE || '';
 // The pinned version supplies fixture provenance; schema comparison is separate.

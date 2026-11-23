@@ -65,9 +65,7 @@ function waitForFollowOn(clock, hasOpenWork) {
   return { ...done, check, promise: done.promise.finally(() => clock.clearTimeout(timer)) };
 }
 
-// Reuse ACP framing, v1 initialization, session new/load, update parsing and
-// permission answers. The controller owns deadlines and process lifetime:
-// the inherited lifecycle methods are historical and unused here.
+// The adapter handles ACP messages. The controller owns deadlines and process lifetime.
 class ProtocolConnection extends AcpConnection {
   constructor(descriptor, env, log, activity) {
     super({ ...descriptor, acp: { ...descriptor.acp, permission: () => descriptor.acp.permission(env) } });

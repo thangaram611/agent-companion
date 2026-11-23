@@ -70,12 +70,3 @@ test("an unrecognized transcript's notice is clean: the reader's detail can quot
   assert.deepEqual(notice.lines()[0].segs, [['transcript not recognized: evil: bad', 'warn']]);
 });
 
-test('the live line shows how long the owner has been away after a minute, never while attached', () => {
-  const now = 1_800_000_000_000, execution = { state: 'running', progress: { activeCommand: ['npm', 'test'] } };
-  const line = attachment => liveLines({ execution, attachment }, { now }).at(-1).segs.map(([t]) => t).join('');
-  assert.equal(line({ attached: false, detachedAt: now - 12 * 60_000 }), '● running $ npm test · owner away 12m');
-  assert.equal(line({ attached: false, detachedAt: now - 30_000 }), '● running $ npm test');
-  assert.equal(line({ attached: true, detachedAt: null }), '● running $ npm test');
-  assert.equal(line({ attached: false, detachedAt: now + 60_000 }), '● running $ npm test', 'a clock correction shows nothing');
-  assert.equal(line(undefined), '● running $ npm test');
-});

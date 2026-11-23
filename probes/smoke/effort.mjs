@@ -80,7 +80,7 @@ export async function runEffortProbe({ bridge, target, model, cwd, owner, record
       assert.ok(execution?.historyId && execution.processes?.pid > 0, 'native history and process identity required');
       assert.equal(result.meta.stop_evidence?.gone, true, 'runtime must exit before cold follow-up');
       checkWire(offset, effort);
-      return { result, execution };
+      return { result, execution, thread: sent.thread };
     };
     step = `b: ${backendEffort ? 'selected' : 'lowest offered'} effort (${effort}) reaches the provider`;
     const first = await send({ ...selection, effort, task: 'Reply with exactly: OK' });
@@ -90,7 +90,7 @@ export async function runEffortProbe({ bridge, target, model, cwd, owner, record
       report(`SKIP ${step}; Copilot cold follow-up is unsupported and out of scope`);
       return;
     }
-    const second = await send({ target, cwd, task: 'Reply with exactly: OK' });
+    const second = await send({ thread: first.thread, task: 'Reply with exactly: OK' });
     assert.equal(second.execution.historyId, first.execution.historyId);
     assert.notEqual(second.execution.processes.pid, first.execution.processes.pid);
     assert.deepEqual(second.result.meta.effective_model, first.result.meta.effective_model);

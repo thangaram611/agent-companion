@@ -7,12 +7,12 @@ import { mkdtempSync, readFileSync, mkdirSync, writeFileSync, existsSync } from 
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SANDBOX_HOME } from '../sandbox-home.mjs';
+import { snapshotWorktree } from '../../lib/worktree-snapshot.mjs';
 import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
-import { Controller } from '../../bridge-server/controller/controller.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
 import { cleanupExecution, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';
 import { fixtureSupervisor } from './fixture-table.mjs';
-import { ManualClock, until } from './helpers.mjs';
+import { ManualClock, setupController, until } from './helpers.mjs';
 
 const treePath = fileURLToPath(new URL('./process-tree.mjs', import.meta.url));
 const watcherPath = fileURLToPath(new URL('./watcher-child.mjs', import.meta.url));
@@ -20,17 +20,12 @@ const input = (executionId, owner = 'child') => ({ owner, executionId, provider:
 const makeRecords = () => new Records({ dir: mkdtempSync(join(SANDBOX_HOME, 'watcher-')), log: () => {} });
 
 test('bridge loss: detached watcher kills grouped grandchild and SIGTERM-ignoring child; fresh records read verified result', async (t) => {
-  const records = makeRecords(); const clock = new ManualClock(); const supervisors = [];
   let watcher, watcherMessage;
-  const provider = { enabled: true, ready: true, create: () => ({
-    capabilities: { followUp: true, loadsHistory: true, modelSelection: false },
-    async start({ supervisor }) { return { runtime: await supervisor.spawn([process.execPath, treePath, 'root', 'ignore'], { stdio: ['pipe', 'ignore', 'ignore', 'ipc'] }) }; },
-    async openHistory() { return { historyId: 'saved-history' }; },
-    async deliver() { return { nativeTurnId: 'native-turn' }; },
-    observe() { return new Promise(() => {}); }, async interrupt() { throw new Error('watcher must not use protocol'); }, async close() {},
-  }) };
-  const controller = new Controller({ records, clock, providers: { fake: provider }, env: {},
-    createSupervisor: (options) => { const supervisor = fixtureSupervisor(options); supervisors.push(supervisor); return supervisor; },
+  const { controller, records, supervisors, send } = setupController({
+    capabilities: { modelSelection: false }, history: { historyId: 'saved-history' }, ack: { nativeTurnId: 'native-turn' },
+    start: async ({ supervisor }) => ({ runtime: await supervisor.spawn([process.execPath, treePath, 'root', 'ignore'], { stdio: ['pipe', 'ignore', 'ignore', 'ipc'] }) }),
+    interrupt() { throw new Error('watcher must not use protocol'); },
+    createSupervisor: fixtureSupervisor, snapshot: snapshotWorktree,
     launchWatcher: async ({ stateDir, executionId }) => {
       watcher = fork(watcherPath, [stateDir, executionId], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
       watcherMessage = once(watcher, 'message');
@@ -43,7 +38,7 @@ test('bridge loss: detached watcher kills grouped grandchild and SIGTERM-ignorin
     }
     watcher?.kill();
   });
-  const sent = await controller.send({ owner: 'child', provider: 'fake', cwd: records.dir, text: 'original text' });
+  const sent = await send({ text: 'original text' });
   const record = supervisors[0].serialize();
   const grandchild = supervisors[0].fixture.grandchild;
   const handoffs = await controller.bridgeLost();

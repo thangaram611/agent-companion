@@ -1,30 +1,26 @@
 import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
-import { Pane, cardHead, clean, clock, fitSegs, jobBlocks, layoutLine, liveLines, outcomeLabel, pendingInputs, pendingLine, segsWidth, cut, width,
+import { Pane, cardHead, clean, clock, fitSegs, jobBlocks, layoutLine, liveLines, outcomeLabel, pendingInputs, pendingLine, cut, width,
   type Block, type Seg, COMPANION_NAMES, MODE_HINTS, supportedModes } from '../bridge-server/ui/rows.mjs'
 import { jobModel } from '../lib/model-name.mjs'
 
-// Claude Code's mod for agent-companion (Codex ignores hooks modules). Each
-// agent-companion subagent's row in the agent list carries its job's
-// progress, read from the bridge's records; other subagents' rows are left to
-// the engine. One Companions pane follows the view: this session's jobs as
-// cards, rebuilt from the records by a Node child (`launch-ui.sh jobs`) at
-// the session's start and each open, or the job of the companion subagent in
-// view, or of a card Claude Code could not view, its transcript streamed by a
-// Node child (`launch-ui.sh follow`) while it is shown. It opens on
-// /companion, or unasked on entering the view of a companion subagent with a
-// job; the return to the main conversation closes a pane that view opened,
-// unless the person took it since. Native text reaches the screen only
-// through rows.mjs's clean.
+// Claude Code's mod for agent-companion (Codex ignores hooks modules). The
+// session's running threads are listed above the prompt with their progress,
+// read from the bridge's records. One Companions pane, opened by /companion,
+// shows this session's threads as cards, rebuilt from the records by a Node
+// child (`launch-ui.sh jobs`) at the session's start and each open; a card
+// opens its thread's newest job in the pane, its transcript streamed by a
+// Node child (`launch-ui.sh follow`) while it is shown. Native text reaches
+// the screen only through rows.mjs's clean.
 
-type Agent = {
+// One thread, by its id: its newest job and that job's records.
+type Card = {
   title: string
-  endedAt?: number
   jobId?: string
   execution?: any
   result?: any
-  attachment?: any
   texts?: string
+  // The thread's record was read for its title.
   looked?: boolean
   // A list rebuild found no result and no process: its record is not read again.
   gone?: boolean
@@ -40,7 +36,7 @@ type Follow = {
   stopped?: boolean
   ended?: boolean
   failure?: string
-  job?: { status: string; execution: any; result: any; attachment?: any; branch: string | null }
+  job?: { status: string; execution: any; result: any; branch: string | null }
   turn?: Turn
   items: Map<string, any>
   list: any[]
@@ -52,11 +48,7 @@ type Follow = {
 const SEND = /^mcp__(plugin_agent-companion_)?agent-bridge__agent_send$/
 // Record ids as records.mjs accepts them; anything else names no record.
 const isId = (id: unknown): id is string => typeof id === 'string' && /^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(id)
-const ENDED = new Set(['completed', 'failed', 'killed'])
 const TICK_MS = 1000
-// The terminal's own palette, so its theme carries the colour; 39 ends the
-// colour alone, leaving the engine's dim or bold for the row.
-const SGR: Record<string, string> = { ok: '32', warn: '33', bad: '31' }
 const PANE = 'companions'
 // The list's cards, each pressed by its digit; the session's other jobs are counted.
 const CARDS = 9
@@ -83,20 +75,14 @@ const STYLE: Record<string, { color?: string; weight?: 'bold' }> = {
   ok: { color: 'success' }, bad: { color: 'error' }, warn: { color: 'warning' }, edit: { color: 'suggestion' },
 }
 
-const agents = new Map<string, Agent>()
+const threads = new Map<string, Card>()
 let timer: { cancel: () => void } | undefined
 let dir: string | undefined
 let follow: Follow | undefined
-// The agent whose job the pane shows itself, Claude Code having refused its view.
+// The thread whose job the pane shows.
 let picked: string | undefined
 // The last rebuild: how many of the session's jobs it left off the list, and why it failed.
 let older = 0, rebuilds = 0, failure: string | undefined
-// The agent in view when a site last drew, so each switch of the view is seen once.
-let shownAgent: string | undefined
-// The pane is open because a companion subagent's view opened it, so the
-// return to the main conversation closes it. Cleared once the person takes it
-// (its keys, a press in it, /companion) and by any close.
-let viewOpened = false
 
 // A running job's message box, per job: the draft, the mode it sends in (the
 // companion's own default first), the cancel question, and the last send's
@@ -131,7 +117,7 @@ async function sendRequest($: EngineInterface, jobId: string, box: MessageBox, m
   $.ui.invalidate('ui.render')
 }
 
-// lib/host.mjs's claude state dir: AGENT_COMPANION_HOME, else ~/.claude/agent-companion.
+// lib/hosts/'s claude state dir: AGENT_COMPANION_HOME, else ~/.claude/agent-companion.
 async function stateDir($: EngineInterface) {
   return dir ??= (await $.env.get('AGENT_COMPANION_HOME')) || `${await $.env.get('HOME')}/.claude/agent-companion`
 }
@@ -143,17 +129,11 @@ function parse(text: string | undefined) {
   try { return text ? JSON.parse(text) : null } catch { return null }
 }
 
-// What the clock still reads for an agent: the conversation naming its job
-// (while it runs, or once after it ended), then the job's records until the
-// result. A subagent that ended with no stop signal leaves its job to finish
-// its turn, so silence never stops the reading; a rebuild that found the job gone does.
-function due(a: Agent) {
-  if (a.result) return null
-  if (!a.jobId) return a.endedAt == null || !a.looked ? 'conversation' : null
-  return a.gone ? null : 'job'
-}
+// The clock reads a thread's job until its result; silence never stops the
+// reading, a rebuild that found the job gone does.
+const due = (a: Card) => Boolean(a.jobId && !a.result && !a.gone)
 // A card's status: the result's outcome, else running until a rebuild found it gone.
-const statusOf = (a: Agent) => a.result?.outcome ?? (due(a) ? 'running' : 'unknown')
+const statusOf = (a: Card) => a.result?.outcome ?? (due(a) ? 'running' : 'unknown')
 
 function startClock($: EngineInterface) {
   timer ??= $.clock.every(TICK_MS, () => void tick($))
@@ -164,21 +144,17 @@ function startClock($: EngineInterface) {
 async function tick($: EngineInterface) {
   const now = await $.clock.now(), base = await stateDir($)
   let pending = false, redraw = false
-  for (const [id, a] of agents) {
-    const need = due(a)
-    if (!need) continue
+  for (const [id, a] of threads) {
+    if (!due(a)) continue
     pending = true
-    if (need === 'conversation') {
+    if (!a.looked) {
       a.looked = true
-      const jobId = parse(await readText($, `${base}/conversations/${id}.json`))?.executionId
-      if (!isId(jobId)) continue
-      Object.assign(a, { jobId, listed: true })
+      a.title ||= clean(parse(await readText($, `${base}/conversations/${id}.json`))?.title ?? '')
     }
     const execution = await readText($, `${base}/executions/${a.jobId}.json`)
     const result = await readText($, `${base}/results/${a.jobId}.json`)
-    const attachment = result ? '' : await readText($, `${base}/attachments/${a.jobId}.json`)
-    if (execution + result + attachment !== a.texts) {
-      Object.assign(a, { texts: execution + result + attachment, execution: parse(execution) ?? a.execution, result: parse(result), attachment: parse(attachment) })
+    if (execution + result !== a.texts) {
+      Object.assign(a, { texts: execution + result, execution: parse(execution) ?? a.execution, result: parse(result) })
       redraw = true
     }
     if (a.execution && !a.result) redraw = true
@@ -193,12 +169,12 @@ function queued(execution: any) {
   return (execution.interventions ?? []).filter((m: any) => m.from === 'user' && m.mode === 'queue'
     && (m.state === 'accepted' || (m.state === 'delivered' && execution.interventionModes?.queue === 'native'))).length
 }
-// What a running job is doing, as the agent row and the card say it: the
+// What a running job is doing, as the band and the card say it: the
 // person's queued messages, or the live view's in-flight line less its bullet.
-function doing(execution: any, attachment: any, now: number): Seg[] {
+function doing(execution: any, now: number): Seg[] {
   const waiting = queued(execution)
   if (waiting) return [[`◌ your ${waiting === 1 ? 'message' : `${waiting} messages`} queued`, 'warn']]
-  const [[head, style], ...rest] = liveLines({ execution, attachment }, { now }).at(-1)!.segs as [Seg, ...Seg[]]
+  const [[head, style], ...rest] = liveLines({ execution }, { now }).at(-1)!.segs as [Seg, ...Seg[]]
   return [[head.slice(2), style], ...rest]
 }
 // The model, less its provider prefix when that repeats the companion (opencode/flint-40b-free).
@@ -207,53 +183,20 @@ function modelText(execution: any, result?: any) {
   return jobModel(execution, result).map(clean).map(m => m.startsWith(`${provider}/`) ? m.slice(provider.length + 1) : m).join(' ')
 }
 
-// The row's body: title, companion · model, the live line and elapsed time,
-// or the outcome and duration once the job ended; cut to `columns`.
-function body(a: Agent, now: number, columns: number | undefined, titleWidth: number) {
-  const { execution, result } = a
-  const title = cut(a.title, titleWidth)
-  const segs: Seg[] = [[title + ' '.repeat(titleWidth - width(title) + 2)], [clean(execution.provider)]]
-  if (result) {
-    const [text, style] = outcomeLabel({ execution, result })
-    segs.push([' · '], [text, result.outcome === 'completed' ? undefined : style])
-  } else {
-    const model = modelText(execution)
-    if (model) segs.push([` · ${model}`])
-    segs.push([' · '], ...doing(execution, a.attachment, now), [` · ${clock(now - execution.startedAt)}`])
-  }
-  return fitSegs(segs, columns ?? segsWidth(segs))
-    .map(([text, style]) => style && SGR[style] ? `\x1b[${SGR[style]}m${text}\x1b[39m` : text).join('').trimEnd()
+// A running thread's row above the prompt: title, companion · model, the
+// live line and elapsed time, cut to `columns`.
+function bandRow(a: Card, now: number, columns: number, titleWidth: number): Seg[] {
+  const { execution } = a, title = cut(titleOf(a), titleWidth), model = modelText(execution)
+  return fitSegs([[title + ' '.repeat(titleWidth - width(title) + 2), 'title'], [clean(execution.provider), 'dim'],
+    ...(model ? [[` · ${model}`, 'dim'] as Seg] : []), [' · ', 'dim'], ...doing(execution, now), [` · ${clock(now - execution.startedAt)}`, 'dim']], columns)
 }
 
 // Claude Code 2.1.326 dropped /companion from the typeahead after the person
-// viewed a subagent and came back (cause unknown). Each open and each return
-// to the main conversation registers it again: the engine lists a forgotten
-// one again and ignores an unchanged repeat. The name stays a literal here,
-// where claude plugin validate reads it.
+// viewed a subagent and came back (cause unknown). Each open registers it
+// again: the engine lists a forgotten one again and ignores an unchanged
+// repeat. The name stays a literal here, where claude plugin validate reads it.
 function registerCommand($: EngineInterface) {
-  return $.command.register({ name: 'companion', description: "Show this session's companion jobs, or the job of the companion subagent in view" })
-}
-// Each switch of the view, seen once by whichever site draws first: a
-// companion subagent's view opens the pane unless it is up; the return to the
-// main conversation closes the one that view opened.
-function sawView($: EngineInterface, agentId: string | undefined, paneUp = false) {
-  if (agentId === shownAgent) return
-  const left = shownAgent
-  shownAgent = agentId
-  if (agentId) { if (!paneUp) void openForView($, agentId).catch(() => {}) }
-  else if (left) {
-    void registerCommand($).catch(() => {})
-    if (viewOpened) { viewOpened = false; void $.ui.close({ id: PANE }).catch(() => {}) }
-  }
-}
-// Unasked, so placed only on a wide terminal and leaving the keys with the
-// prompt; the view may have moved on while the engine listed the panes.
-async function openForView($: EngineInterface, agentId: string) {
-  if (!agents.get(agentId)?.jobId) return
-  const up = (await $.ui.panes()).some(pane => pane.id === PANE)
-  if (up || viewOpened || shownAgent !== agentId) return
-  viewOpened = true
-  await openPane($)
+  return $.command.register({ name: 'companion', description: "Show this session's companion threads and their jobs" })
 }
 
 // Each open lists the session's jobs again; the person's own takes the keys.
@@ -273,9 +216,9 @@ function ring($: EngineInterface, key: string) {
     .catch(() => {})
 }
 
-// This session's jobs from the records, the ones whose start the mod did not
-// see included: a resumed session has no rows for its earlier subagents. The
-// newest rebuild wins; a job the mod saw start since stays on the list.
+// This session's threads from the records, the ones whose start the mod did
+// not see included (a reload, an earlier run of the session). The newest
+// rebuild wins; a job the mod saw start since stays on the list.
 async function rebuild($: EngineInterface) {
   const n = ++rebuilds
   let out: any, why: string | undefined
@@ -287,21 +230,22 @@ async function rebuild($: EngineInterface) {
   if (n !== rebuilds) return
   failure = why && clean(why)
   if (!why) {
-    const owners = new Set<string>(), old = new Set(out.older)
+    const listed = new Set<string>(), old = new Set(out.older)
     for (const job of out.jobs) {
       const jobId = job.execution?.executionId
-      if (!isId(jobId) || typeof job.owner !== 'string') continue
-      owners.add(job.owner)
-      const a = agents.get(job.owner) ?? { title: '' }
-      agents.set(job.owner, a)
+      if (!isId(jobId) || !isId(job.thread)) continue
+      listed.add(job.thread)
+      const a = threads.get(job.thread) ?? { title: '' }
+      threads.set(job.thread, a)
       a.title ||= clean(job.title)
+      a.looked = true
       // A newer job the mod saw start stands.
       if (a.jobId && a.jobId !== jobId && !(a.execution?.startedAt < job.execution.startedAt)) continue
       // No result and no process: the job is gone, so its record is not read again.
-      Object.assign(a, { jobId, execution: job.execution, result: job.result, attachment: job.attachment, texts: undefined,
+      Object.assign(a, { jobId, execution: job.execution, result: job.result, texts: undefined,
         gone: job.status !== 'running' && !job.result })
     }
-    for (const [id, a] of agents) a.listed = owners.has(id) || (a.listed && !old.has(a.jobId))
+    for (const [id, a] of threads) a.listed = listed.has(id) || (a.listed && !old.has(a.jobId))
     older = old.size
     startClock($)
   }
@@ -359,16 +303,16 @@ function take(f: Follow, message: any) {
 
 // This session's jobs, running first, then the rest by when they ended.
 function cards() {
-  const at = (c: { status: string; a: Agent }) => c.status === 'running' ? Infinity : c.a.result?.finishedAt ?? c.a.execution.startedAt
-  return [...agents].flatMap(([id, a]) => a.listed && a.jobId && a.execution ? [{ id, a, status: statusOf(a) }] : [])
+  const at = (c: { status: string; a: Card }) => c.status === 'running' ? Infinity : c.a.result?.finishedAt ?? c.a.execution.startedAt
+  return [...threads].flatMap(([id, a]) => a.listed && a.jobId && a.execution ? [{ id, a, status: statusOf(a) }] : [])
     .sort((x, y) => at(y) - at(x) || y.a.execution.startedAt - x.a.execution.startedAt)
 }
-const titleOf = (a: Agent) => a.title || (clean(a.execution?.text ?? '').split('\n')[0] ?? '')
+const titleOf = (a: Card) => a.title || (clean(a.execution?.text ?? '').split('\n')[0] ?? '')
 // A card's second row, under its title: the status glyph, the companion,
 // then what it is doing or how it ended, the glyph not repeated.
-function cardLine({ a, status }: { a: Agent; status: string }, glyph: Seg, now: number): Seg[] {
+function cardLine({ a, status }: { a: Card; status: string }, glyph: Seg, now: number): Seg[] {
   const line: Seg[] = [[' '.repeat(HOTKEY)], glyph, [` ${clean(a.execution.provider)} · `, 'dim']]
-  if (status === 'running') return [...line, ...doing(a.execution, a.attachment, now).map(([text, style]): Seg => [text, style === 'ok' ? 'dim' : style])]
+  if (status === 'running') return [...line, ...doing(a.execution, now).map(([text, style]): Seg => [text, style === 'ok' ? 'dim' : style])]
   if (status === 'unknown') return [...line, ['no result', 'warn']]
   const [text, style] = outcomeLabel({ execution: a.execution, result: a.result })
   return [...line, [text.slice(2), status === 'completed' ? 'dim' : style]]
@@ -376,8 +320,8 @@ function cardLine({ a, status }: { a: Agent; status: string }, glyph: Seg, now: 
 
 // The viewed job's rows, exactly what fits in `rows`: a running job follows
 // its live line, an ended one opens on its outcome.
-function jobRows(a: Agent, f: Follow, now: number, w: number, rows: number): Seg[][] {
-  const job = f.job ?? (a.execution && { status: statusOf(a), execution: a.execution, result: a.result ?? null, attachment: a.attachment, branch: null })
+function jobRows(a: Card, f: Follow, now: number, w: number, rows: number): Seg[][] {
+  const job = f.job ?? (a.execution && { status: statusOf(a), execution: a.execution, result: a.result ?? null, branch: null })
   const about = job ? [clean(job.execution.provider), modelText(job.execution, job.result), clean(job.branch ?? '')].filter(Boolean).join(' · ') : ''
   const head = layoutLine({ segs: [[titleOf(a), 'title'], ...(about ? [[`  ${about}`, 'dim'] as Seg] : [])], wrap: false }, w)
   if (!job) return [...head, [], [['waiting for the job\'s record', 'dim']]]
@@ -405,58 +349,42 @@ export const register: Register = on => {
   })
   // The person's own open: placed at any width, with the keys.
   on('command.run', { command: 'companion' }, async $ => {
-    viewOpened = false
     await openPane($, true)
     return {}
   })
 
-  // The bridge answers agent_send with the job it started for this subagent;
-  // the row's clock may have found it already (the bridge writes its
-  // conversation record before agent_send answers). A start opens nothing,
-  // save for a person already in that subagent's view, as entering it does.
+  // The bridge answers agent_send with the thread and the job it started,
+  // for the main conversation and its subagents alike; a terminal answer
+  // carries them in its metadata block, the last line. A start opens nothing.
   on('tool.call', { tool: SEND }, async ($, e, next) => {
     const ran = await next(e)
-    const jobId = parse(ran.text)?.job_id
-    if (e.agentId && isId(jobId)) {
-      const a = agents.get(e.agentId) ?? { title: '' }
-      agents.set(e.agentId, a)
-      // Its subagent sent it, so that subagent runs.
-      if (a.jobId !== jobId) Object.assign(a, { jobId, execution: undefined, result: undefined, attachment: undefined, texts: undefined, endedAt: undefined, gone: false, listed: true })
-      if (e.agentId === shownAgent) void openForView($, e.agentId).catch(() => {})
+    const sent = parse(ran.text) ?? parse(ran.text?.trimEnd().split('\n').at(-1))
+    const thread = sent?.thread ?? sent?.meta?.thread, jobId = sent?.job_id ?? sent?.meta?.job_id
+    if (isId(thread) && isId(jobId)) {
+      const a = threads.get(thread) ?? { title: '' }
+      threads.set(thread, a)
+      if (a.jobId !== jobId) Object.assign(a, { jobId, execution: undefined, result: undefined, texts: undefined, gone: false, listed: true })
       startClock($)
     }
     return ran
   })
 
-  on('ui.render', { component: 'AgentRow', props: { type: 'agent-companion' } }, async ($, e, next) => {
-    const { id, description, status, rowIds, columns } = e.props
-    const now = await $.clock.now()
-    const a = agents.get(id) ?? { title: '' }
-    agents.set(id, a)
-    a.title = clean(description)
-    // A resumed subagent runs again under the same id.
-    a.endedAt = ENDED.has(status) ? a.endedAt ?? now : undefined
-    if (due(a)) startClock($)
-    if (!a.execution || (!a.result && !due(a))) return next(e)
-    // Titles line up across this list's companion rows, within a third of the row.
-    const titles = rowIds.flatMap(row => agents.get(row)?.execution ? [width(agents.get(row)!.title)] : [])
-    const titleWidth = Math.min(Math.max(width(a.title), ...titles), columns ? Math.floor(columns / 3) : Infinity)
-    return next({ ...e, props: { ...e.props, body: body(a, now, columns, titleWidth) } })
-  })
-
-  // The band above the prompt is drawn again at every switch of the view,
-  // the pane open or not; the mod draws nothing there.
-  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
-    sawView($, e.props.view?.agentId)
-    return next(e)
+  // The band above the prompt: one row per running thread, titles lined up
+  // within a third of the row. It yields to a survey and draws nothing with
+  // no thread running.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const running = cards().filter(c => c.status === 'running')
+    if (e.props.hasSurvey || !running.length) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const now = await $.clock.now(), w = Math.max(16, e.props.bodyColumns)
+    const titleWidth = Math.min(Math.max(...running.map(c => width(titleOf(c.a)))), Math.floor(w / 3))
+    return h(Box, { flexDirection: 'column' }, ...running.map(c => h(Text, { key: c.id, wrap: 'truncate-end' },
+      ...bandRow(c.a, now, w, titleWidth).map(([text, style]) => h(Text, STYLE[style ?? ''] ?? null, text))))) as RenderElement
   })
 
   // Draws only from what the clock and the children already brought in.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Input } = $.ui.resolve(e)
-    sawView($, e.props.view?.agentId, true)
-    // The person took the pane: the return to the main conversation keeps it.
-    if (e.props.isFocused) viewOpened = false
     // A module loaded under an open pane (a reload) has not listed the session's jobs yet.
     if (!rebuilds) void rebuild($)
     const now = await $.clock.now(), w = Math.max(16, e.props.bodyColumns), focused = e.props.isFocused
@@ -464,15 +392,12 @@ export const register: Register = on => {
     const row = (segs: Seg[]) => h(Text, { wrap: 'truncate-end' }, ...(segs.length ? spans(segs) : [' ']))
     // h() answers any node; a column Box is the element a pane takes.
     const column = (...children: unknown[]) => h(Box, { flexDirection: 'column' }, ...children) as RenderElement
-    const viewed = e.props.view?.agentId, inView = viewed ? agents.get(viewed) : undefined
-    // The person's view of a companion subagent wins over the pane's own pick.
-    if (inView?.jobId) picked = undefined
-    const id = inView?.jobId ? viewed : picked, a = id ? agents.get(id) : undefined
+    const id = picked, a = id ? threads.get(id) : undefined
     if (id && a?.jobId) {
       followJob($, a.jobId)
-      const back = async () => {
-        if (inView?.jobId) await $.ui.view({})
-        else { picked = undefined; $.ui.invalidate('ui.render') }
+      const back = () => {
+        picked = undefined
+        $.ui.invalidate('ui.render')
         const first = cards()[0]
         if (first) ring($, first.id)
       }
@@ -518,17 +443,12 @@ export const register: Register = on => {
         row([[focused ? 'esc returns to the chat' : 'ctrl+x tab for keys', 'faint']]))
     }
     stopFollow()
-    // A card switches Claude Code to its subagent's view; one Claude Code
-    // cannot show (a resumed session lists no earlier subagent) opens here.
-    const open = async (agentId: string) => {
-      const shown = await $.ui.view({ agentId }).catch((error: unknown) => ({ deny: String(error) }))
-      if (shown.deny) {
-        $.ui.log(`agent-companion: no view of subagent ${agentId} (${shown.deny}); the Companions pane shows its job`, { to: 'debug' })
-        picked = agentId
-        $.ui.invalidate('ui.render')
-      }
-      // A running job that takes messages opens with the keys in its box.
-      const opened = agents.get(agentId)
+    // A card opens its thread's newest job here; a running job that takes
+    // messages opens with the keys in its box.
+    const open = (thread: string) => {
+      picked = thread
+      $.ui.invalidate('ui.render')
+      const opened = threads.get(thread)
       ring($, opened?.execution && statusOf(opened) === 'running' && supportedModes(opened.execution).length ? 'message' : 'jobs')
     }
     const list = cards(), shown = list.slice(0, CARDS), more = older + list.length - shown.length
@@ -552,17 +472,10 @@ export const register: Register = on => {
       row([[focused ? ` ${keys} or ⏎ open a job · esc returns` : ` ctrl+x tab for keys · ${keys} or ⏎ open a job`, 'faint']]))
   })
 
-  // A press in the pane, by click as well as by key, is the person taking it.
-  on('ui.press', { component: 'Pane', requestId: PANE }, ($, e, next) => {
-    viewOpened = false
-    return next(e)
-  })
-
   // The next open starts on the list.
   on('ui.close', { id: PANE }, ($, e, next) => {
     stopFollow()
     picked = undefined
-    viewOpened = false
     return next(e)
   })
 }

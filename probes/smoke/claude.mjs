@@ -56,7 +56,7 @@ try {
     assert.match(first.meta.effective_model, /^claude-/);
     console.log('PASS: Claude fresh send, native identity, usage, cost and verified exit');
 
-    const followup = await bridge.tool('agent_send', { target: 'claude', model: 'haiku', cwd: work,
+    const followup = await bridge.tool('agent_send', { thread: sent.thread,
       task: 'What magic word did you just report? Reply from memory; do not read any file.' }, owner);
     assert.equal(followup.ok, true, JSON.stringify(followup));
     const secondExecution = record('executions', followup.job_id);
@@ -75,8 +75,8 @@ try {
       task: 'Write a 1500-word essay about the history of mathematics. Do not use any tools.' }, cancelOwner);
     assert.equal(long.ok, true, JSON.stringify(long));
     assert.equal(long.status, 'still_running');
-    assert.equal((await bridge.tool('agent_status', { job_id: long.job_id })).status, 'running');
-    const reply = await bridge.tool('agent_reply', { job_id: long.job_id, message: 'Reply PIVOT instead.' }, cancelOwner);
+    assert.equal((await bridge.tool('agent_status', { job_id: long.job_id }, cancelOwner)).status, 'running');
+    const reply = await bridge.tool('agent_send', { thread: long.thread, task: 'Reply PIVOT instead.' }, cancelOwner);
     assert.equal(reply.ok, false);
     assert.equal(reply.status, 'reply_unavailable');
     assert.equal(reply.reason, 'capability');

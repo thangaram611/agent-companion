@@ -9,7 +9,7 @@ test('Claude argv preserves literal denies, uses one history flag and omits inhe
   assert.deepEqual(args, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--replay-user-messages', '--include-partial-messages', '--permission-mode', 'bypassPermissions',
     '--permission-prompts', 'none', '--disallowedTools', 'mcp__plugin_agent-companion_agent-bridge__*',
-    'mcp__agent-bridge__*', 'Agent(agent-companion)', '--session-id', 'fresh']);
+    'mcp__agent-bridge__*', '--session-id', 'fresh']);
   const resume = claudeArgs({ historyId: 'saved', resume: true, model: 'haiku', env: { AGENT_COMPANION_CLAUDE_PERMISSION: 'ACCEPTEDITS' } });
   assert.deepEqual(resume.slice(-4), ['--resume', 'saved', '--model', 'haiku']);
   assert.equal(resume.includes('--session-id'), false);

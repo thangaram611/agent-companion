@@ -1,0 +1,4 @@
+This is an isolated measurement against a fake job tool. Follow the steps exactly.
+1. Call mcp__modprobe__job_start with seconds=SECONDS and kb=KB. Call it exactly once.
+2. Reply "SENT" and end your turn. Do not call any other tool, do not wait, do not poll.
+3. If a later message tells you the job finished, reply "WOKEN", then say exactly how that message was framed (who it says it is from, any tags around it), quote its first 150 characters and its last 150 characters exactly, and say what the number of the last "Line NNNNN" you can see is. Do not call any tool unless you were told the text was saved to a file; then say so, give the path and stop.

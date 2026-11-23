@@ -1,32 +1,6 @@
 #!/usr/bin/env node
-// install-codex-hooks.mjs — idempotently install the agent-companion
-// hook entries into $CODEX_HOME/hooks.json (default ~/.codex/hooks.json).
-// Current setup uses this script only to remove managed entries left by older
-// source installs; the installed Codex plugin owns the live hook registration.
-//
-// Why a script instead of just shipping hooks/hooks-codex.json: the user
-// almost certainly has other hooks already in place (their own
-// PreToolUse/PostToolUse scripts, other plugins' entries). Overwriting
-// would destroy unrelated work. Also, user-scope hook commands cannot
-// reference ${CLAUDE_PLUGIN_ROOT}. We substitute the absolute plugin path at
-// install time, which only this script knows.
-//
-// Usage:
-//   node scripts/install-codex-hooks.mjs --plugin-root /abs/path [--yes]
-//   node scripts/install-codex-hooks.mjs --plugin-root /abs/path --uninstall
-//
-// Behavior:
-//   - Backs up ~/.codex/hooks.json to ~/.codex/hooks.json.bak.<ts> when
-//     it exists and would be modified.
-//   - Each managed entry carries `_managed_by: "agent-companion"` so
-//     uninstall and re-install can locate just our entries without
-//     touching unrelated work.
-//   - Aborts cleanly if the existing file is not valid JSON (rather than
-//     overwriting and losing the user's data).
-//
-// Exit codes: 0 success / no-op, 1 user-aborted or non-tty without --yes,
-// 2 malformed hooks.json or other fatal fs/parse error.
-
+// Remove user-scope hook entries left by older source installs.
+// Usage: node scripts/install-codex-hooks.mjs --plugin-root /abs/path --uninstall
 import {
   existsSync,
   readFileSync,
@@ -34,12 +8,9 @@ import {
   copyFileSync,
   mkdirSync,
   renameSync,
-  accessSync,
-  constants,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import readline from 'node:readline/promises';
 
 const configuredCodexHome = String(process.env.CODEX_HOME || '').trim();
 const CODEX_HOME = configuredCodexHome
@@ -48,18 +19,7 @@ const CODEX_HOME = configuredCodexHome
 const HOOKS_FILE = path.join(CODEX_HOME, 'hooks.json');
 const SENTINEL_KEY = '_managed_by';
 const SENTINEL_VALUE = 'agent-companion';
-const STABLE_HOOK_PATH_DIRS = [
-  '/opt/homebrew/bin',
-  '/usr/local/bin',
-  '/usr/bin',
-  '/bin',
-  '/usr/sbin',
-  '/sbin',
-];
-
 const args = process.argv.slice(2);
-const yes = args.includes('--yes') || args.includes('-y');
-const uninstall = args.includes('--uninstall');
 const rootIdx = args.indexOf('--plugin-root');
 const pluginRoot = rootIdx >= 0 ? args[rootIdx + 1] : null;
 
@@ -69,10 +29,6 @@ const fail = (m, code = 1) => {
   process.exit(code);
 };
 
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
-}
-
 if (!pluginRoot) {
   fail('--plugin-root <abs path> required; pass the directory containing .codex-plugin/plugin.json', 2);
 }
@@ -80,93 +36,7 @@ if (!path.isAbsolute(pluginRoot)) {
   fail(`--plugin-root must be absolute (got: ${pluginRoot})`, 2);
 }
 
-// Hook definitions to install. Each command resolves to an absolute path
-// at install time — Codex does NOT expand ${CLAUDE_PLUGIN_ROOT} for
-// user-scope hooks (only for plugin-scope hooks discovered through
-// append_plugin_hook_sources). We export the var explicitly in the
-// command line so the underlying scripts (which still reference
-// $CLAUDE_PLUGIN_ROOT internally) can resolve their own paths.
-function scriptPath(scriptRel) {
-  return path.join(pluginRoot, scriptRel);
-}
-
-function buildHookPath(nodeDir) {
-  const seen = new Set();
-  const entries = [
-    nodeDir,
-    ...STABLE_HOOK_PATH_DIRS,
-  ].filter(Boolean);
-  const out = [];
-  for (const entry of entries) {
-    if (seen.has(entry)) continue;
-    seen.add(entry);
-    out.push(entry);
-  }
-  return out.join(path.delimiter);
-}
-
-function findExecutable(name, searchDirs) {
-  const candidates = searchDirs
-    .filter(Boolean)
-    .map((dir) => path.join(dir, name));
-  for (const candidate of candidates) {
-    try {
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Try the next candidate.
-    }
-  }
-  return null;
-}
-
-function bashEntry(scriptRel, timeout) {
-  const abs = scriptPath(scriptRel);
-  const nodeDir = path.dirname(process.execPath);
-  const hookPath = buildHookPath(nodeDir);
-  const npmBin = findExecutable('npm', [nodeDir, ...STABLE_HOOK_PATH_DIRS]);
-  const jqBin = findExecutable('jq', STABLE_HOOK_PATH_DIRS);
-  const env = [
-    `CLAUDE_PLUGIN_ROOT=${shellQuote(pluginRoot)}`,
-    'AGENT_COMPANION_HOST=codex',
-    `AGENT_COMPANION_NODE=${shellQuote(process.execPath)}`,
-  ];
-  if (npmBin) env.push(`AGENT_COMPANION_NPM=${shellQuote(npmBin)}`);
-  if (jqBin) env.push(`AGENT_COMPANION_JQ=${shellQuote(jqBin)}`);
-  env.push(`PATH=${shellQuote(hookPath)}`);
-  return {
-    type: 'command',
-    command: `${env.join(' ')} /bin/bash ${shellQuote(abs)}`,
-    timeout,
-    [SENTINEL_KEY]: SENTINEL_VALUE,
-  };
-}
-
-const MANAGED_ENTRIES = {
-  SessionStart: [
-    {
-      hooks: [
-        bashEntry('hooks/install-agent-codex.sh', 5),
-        bashEntry('hooks/install-deps.sh', 55),
-        bashEntry('hooks/drain-completions.sh', 5),
-      ],
-      [SENTINEL_KEY]: SENTINEL_VALUE,
-    },
-  ],
-  UserPromptSubmit: [
-    {
-      hooks: [bashEntry('hooks/drain-completions.sh', 5)],
-      [SENTINEL_KEY]: SENTINEL_VALUE,
-    },
-  ],
-  PostToolUse: [
-    {
-      matcher: '.*',
-      hooks: [bashEntry('hooks/drain-completions.sh', 5)],
-      [SENTINEL_KEY]: SENTINEL_VALUE,
-    },
-  ],
-};
+if (!args.includes('--uninstall')) fail('--uninstall required', 2);
 
 mkdirSync(path.dirname(HOOKS_FILE), { recursive: true });
 
@@ -216,55 +86,17 @@ function dropManaged(eventName) {
 
 const ALL_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PreToolUse', 'Stop'];
 
-if (uninstall) {
-  let removed = false;
-  for (const ev of ALL_EVENTS) {
-    if (dropManaged(ev)) removed = true;
-  }
-  if (!removed) {
-    ok(`no agent-companion hooks present in ${HOOKS_FILE}`);
-    process.exit(0);
-  }
-  if (Object.keys(cfg.hooks).length === 0) delete cfg.hooks;
-  writeAtomic(cfg);
-  ok(`removed agent-companion hooks from ${HOOKS_FILE}`);
+let removed = false;
+for (const ev of ALL_EVENTS) {
+  if (dropManaged(ev)) removed = true;
+}
+if (!removed) {
+  ok(`no agent-companion hooks present in ${HOOKS_FILE}`);
   process.exit(0);
 }
-
-// Confirm with the user before mutating an existing file (skipped with --yes).
-if (existsSync(HOOKS_FILE) && !yes) {
-  if (!process.stdin.isTTY) {
-    fail('interactive confirmation required but stdin is not a tty; pass --yes', 1);
-  }
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  const ans = (await rl.question(`Merge agent-companion hooks into ${HOOKS_FILE}? [y/N] `))
-    .trim()
-    .toLowerCase();
-  rl.close();
-  if (ans !== 'y' && ans !== 'yes') {
-    console.log('aborted');
-    process.exit(1);
-  }
-}
-
-// Replace any prior managed entries (idempotent re-install) before
-// merging the fresh ones.
-for (const ev of ALL_EVENTS) dropManaged(ev);
-
-// Merge: append managed entries to each event's existing array. We
-// deliberately keep ours as separate sibling entries (rather than
-// folding into the user's existing matcher entries) so uninstall is a
-// clean filter operation.
-for (const [ev, entries] of Object.entries(MANAGED_ENTRIES)) {
-  if (!Array.isArray(cfg.hooks[ev])) cfg.hooks[ev] = [];
-  cfg.hooks[ev].push(...entries);
-}
-
+if (Object.keys(cfg.hooks).length === 0) delete cfg.hooks;
 writeAtomic(cfg);
-ok(`installed agent-companion hooks into ${HOOKS_FILE}`);
+ok(`removed agent-companion hooks from ${HOOKS_FILE}`);
 
 function writeAtomic(data) {
   const ts = new Date()

@@ -1,0 +1,4 @@
+This is an isolated measurement against a fake job server. Follow the steps exactly.
+1. Call mcp__fixture__job_send with task "probe". Call it exactly once.
+2. Reply "SENT" and end your turn. Do not call any other tool, do not wait, do not poll.
+3. If a later message or reminder tells you the job finished, reply "WOKEN", then say exactly where that text appeared (what kind of message or tag it was in), quote its first 150 characters and its last 150 characters exactly, and say how many "Line NNNNN" lines you can see in it. Do not call any tool.

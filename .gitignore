@@ -6,3 +6,4 @@ default-model
 *.log
 .DS_Store
 .drafts/
+probes/direct-lead/runs/

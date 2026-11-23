@@ -13,13 +13,14 @@ PLUGIN_PACKAGE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)" || exit 1
 # id so this launcher and the SessionStart installer converge on one install.
 export PLUGIN_ROOT="$PLUGIN_PACKAGE_ROOT"
 export AGENT_COMPANION_HOST="${AGENT_COMPANION_HOST:-codex}"
-if [ "$AGENT_COMPANION_HOST" = "codex" ]; then
-  CODEX_DATA_ROOT="${CODEX_HOME:-$HOME/.codex}"
-  export PLUGIN_DATA="${PLUGIN_DATA:-$CODEX_DATA_ROOT/plugins/data/agent-companion-agent-companion}"
-  SDK_PACKAGE="$PLUGIN_DATA/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
-else
-  SDK_PACKAGE="$PLUGIN_PACKAGE_ROOT/bridge-server/node_modules/@modelcontextprotocol/sdk/package.json"
+. "$SCRIPT_DIR/host-paths.sh" || exit 1
+host_paths "$AGENT_COMPANION_HOST" "$PLUGIN_PACKAGE_ROOT"
+NODE_ARGS=()
+if [ -n "$HOST_BRIDGE_IMPORT" ]; then
+  export PLUGIN_DATA="$HOST_PLUGIN_DATA"
+  NODE_ARGS=(--import "$HOST_BRIDGE_IMPORT")
 fi
+SDK_PACKAGE="${HOST_DEPS_LINK:-$HOST_PLUGIN_DATA/bridge-server/node_modules}/@modelcontextprotocol/sdk/package.json"
 
 # stdout belongs exclusively to MCP framing. Dependency notices and failures
 # must go to stderr or they corrupt the protocol before initialize.
@@ -65,8 +66,4 @@ NODE_BIN="$(resolve_node 2>/dev/null || true)"
   exit 1
 }
 
-if [ "$AGENT_COMPANION_HOST" = "codex" ]; then
-  exec "$NODE_BIN" --import "$PLUGIN_PACKAGE_ROOT/hooks/launch-agent-bridge.mjs" \
-    "$PLUGIN_PACKAGE_ROOT/bridge-server/server.mjs"
-fi
-exec "$NODE_BIN" "$PLUGIN_PACKAGE_ROOT/bridge-server/server.mjs"
+exec "$NODE_BIN" "${NODE_ARGS[@]}" "$PLUGIN_PACKAGE_ROOT/bridge-server/server.mjs"

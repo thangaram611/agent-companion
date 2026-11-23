@@ -32,9 +32,10 @@ UI="$ROOT/bridge-server/ui/app.mjs"
 if [ -r "$ROOT/bridge-server/node_modules/ink/package.json" ]; then
   exec "$NODE_BIN" "$UI" "$@"
 fi
-DATA="${PLUGIN_DATA:-${CODEX_HOME:-$HOME/.codex}/plugins/data/agent-companion-agent-companion}"
-if [ -r "$DATA/bridge-server/node_modules/ink/package.json" ]; then
-  PLUGIN_DATA="$DATA" exec "$NODE_BIN" --import "$ROOT/hooks/launch-agent-bridge.mjs" "$UI" "$@"
+. "$SCRIPT_DIR/host-paths.sh" || exit 1
+host_paths codex "$ROOT"
+if [ -r "$HOST_PLUGIN_DATA/bridge-server/node_modules/ink/package.json" ]; then
+  PLUGIN_DATA="$HOST_PLUGIN_DATA" exec "$NODE_BIN" --import "$HOST_BRIDGE_IMPORT" "$UI" "$@"
 fi
 echo "agent-companion: the UI's dependencies (ink, react) are not installed for $ROOT. Start a Claude Code or Codex session so its SessionStart hook installs them, or rerun setup.sh." >&2
 exit 1

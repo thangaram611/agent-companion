@@ -32,7 +32,7 @@ function makeRoot({ npmBody }) {
   mkdirSync(join(root, 'bridge-server'), { recursive: true });
   mkdirSync(join(root, 'hooks'), { recursive: true });
   writeFileSync(join(root, 'bridge-server', 'package.json'), JSON.stringify({ name: 'fake', version: '1.0.0' }));
-  writeFileSync(join(root, 'hooks', 'node-tools.sh'), readFileSync(join(__dirname, 'node-tools.sh')));
+  for (const file of ['node-tools.sh', 'host-paths.sh']) writeFileSync(join(root, 'hooks', file), readFileSync(join(__dirname, file)));
   const npm = join(dir, 'fake-npm');
   writeFileSync(npm, npmBody);
   chmodSync(npm, 0o755);

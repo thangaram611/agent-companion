@@ -1,7 +1,7 @@
 {
   "name": "agent-companion",
   "version": "0.3.0",
-  "description": "Delegate in plain language from Codex CLI to an OpenCode, GitHub Copilot, Codex CLI, or Google Antigravity companion. Give the subagent a task, an absolute repo or worktree path, and any companion or model preference. Continue the same subagent for follow-ups.",
+  "description": "Delegate from Codex CLI to OpenCode, GitHub Copilot CLI, Codex CLI, Google Antigravity or Claude Code. Codex starts a thread with your task and an absolute repo or worktree path, follows up in that thread, and brings the result back to your conversation.",
   "author": {
     "name": "thangaram611",
     "email": "thangaram611@gmail.com",
@@ -16,7 +16,6 @@
     "antigravity",
     "delegation",
     "mcp",
-    "subagent",
     "acp",
     "codex"
   ],
@@ -31,6 +30,7 @@
         "AGENT_COMPANION_HOST": "codex"
       },
       "default_tools_approval_mode": "approve",
+      "required": true,
       "startup_timeout_sec": 120,
       "tool_timeout_sec": 1320
     }
@@ -38,8 +38,8 @@
   "hooks": "./hooks/hooks-codex.json",
   "interface": {
     "displayName": "Agent Companion",
-    "shortDescription": "Delegate to a companion coding agent in plain language.",
-    "longDescription": "Adds a subagent that hands work to OpenCode, GitHub Copilot CLI, Codex CLI, or Google Antigravity and brings the answer back. Give it a task, an absolute repo or worktree path, and optionally a companion or model. Ask for available choices through the read-only catalog. Send follow-ups to the same subagent to continue the conversation; spawn a new one for independent work. Run long work in the background. Codex registers the internal bridge at plugin scope so the subagent can inherit it.",
+    "shortDescription": "Start companion threads and receive answers in Codex.",
+    "longDescription": "The Codex lead sends your task directly to OpenCode, GitHub Copilot CLI, Codex CLI, Google Antigravity or Claude Code. A new thread takes an absolute repo or worktree path and returns its id at once. Follow up in that thread, send input while it runs, or keep working until the result arrives. The lead can also wait, read long answers in pages and cancel a job.",
     "developerName": "thangaram611",
     "category": "Engineering",
     "capabilities": [
@@ -49,9 +49,9 @@
     ],
     "websiteURL": "https://github.com/thangaram611/agent-companion",
     "defaultPrompt": [
-      "Ask the agent companion to review this repository",
-      "Delegate this implementation to the agent companion",
-      "Check agent job status"
+      "Ask Claude Code to review the changes in this worktree and flag bugs with file references.",
+      "Follow up in the same companion thread and ask which check would confirm the finding.",
+      "List my companion threads and read the latest answer."
     ],
     "brandColor": "#0969DA",
     "screenshots": []

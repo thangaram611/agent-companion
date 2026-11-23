@@ -1,5 +1,5 @@
 import '../sandbox-home.mjs';
-import { mkdtempSync, writeFileSync, appendFileSync, readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { SANDBOX_HOME } from '../sandbox-home.mjs';
 import { fakeCodexBin } from '../fake-codex-app-server.mjs';
@@ -9,8 +9,8 @@ import { fixtureSupervisor } from './fixture-table.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
 import { systemClock } from '../../bridge-server/controller/clock.mjs';
 import { writeTargetChecks } from '../../lib/state.mjs';
-import { queuePath } from '../../lib/runtime-paths.mjs';
-import { createBridgeController, dispatch } from '../../bridge-server/server.mjs';
+import { createBridgeController } from '../../bridge-server/tools.mjs';
+import { callTool } from '../tool-call.mjs';
 
 // Real local processes and production codexProvider. Only the OS census is
 // replaced: sandboxed ps is unavailable, so the fake reports its identity over
@@ -49,8 +49,8 @@ if (process.argv[2] === 'app-server') {
     return adapter;
   };
   const call = async (args, request = {}, controller = active) =>
-    (await dispatch(args, { controller, ...request })).structuredContent;
-  const send = (task = 'original', thread = 'child') => call({ action: 'send', target: 'codex', cwd: dir, task, thread });
+    await callTool(args, { controller, ...request });
+  const send = (task = 'original', thread) => call({ action: 'send', target: 'codex', cwd: dir, task, ...(thread && { thread }) });
   const adapter = (id) => active.live.get(id).adapter;
   const emit = (id, frames) => adapter(id)._call('fake/emit', { frames });
   const complete = async (id, text = 'native answer') => {
@@ -64,14 +64,4 @@ if (process.argv[2] === 'app-server') {
     for (const a of [...active.live.values()]) await active.cancel({ owner: a.record.owner, executionId: a.record.executionId });
   });
   return { dir, bin, env, records, clock, active, call, send, adapter, emit, complete, frames, spawns };
-}
-
-export function diskSnapshot(dir = SANDBOX_HOME) {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir, { recursive: true }).sort().filter((f) => statSync(join(dir, f)).isFile())
-    .map((f) => [f, statSync(join(dir, f)).mtimeMs, readFileSync(join(dir, f), 'base64')]);
-}
-export function terminalRows(id) {
-  return existsSync(queuePath()) ? readFileSync(queuePath(), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
-    .filter((row) => row.kind === 'terminal' && row.jobId === id) : [];
 }

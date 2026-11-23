@@ -3,24 +3,24 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { runSmoke } from './onboard.mjs';
-import { ManualClock, deferred, until } from '../test/controller/helpers.mjs';
+import { ManualClock, fakeAdapter, deferred, until } from '../test/controller/helpers.mjs';
 
 function smokeFixture(id, terminal) {
   const clock = new ManualClock();
-  const calls = [];
-  let cwd;
-  const provider = { enabled: true, ready: true, create: () => ({
-    capabilities: { loadsHistory: true, followUp: true },
-    async start(args) { cwd = args.cwd; calls.push(['start', args.model]); },
-    async openHistory(args) { calls.push(['history', args.historyId]); return { historyId: 'smoke-history' }; },
-    async deliver(args) { calls.push(['deliver', args.text]); return { nativeTurnId: 'smoke-turn' }; },
-    observe() { calls.push(['observe']); return terminal; },
-    async interrupt() { calls.push(['interrupt']); },
-    async close() { calls.push(['close']); },
-  }) };
+  const adapter = fakeAdapter({ history: { historyId: 'smoke-history' }, ack: { nativeTurnId: 'smoke-turn' } });
+  adapter.terminal.resolve(terminal);
+  const provider = { enabled: true, ready: true, create: () => adapter };
   const pending = runSmoke(id, {}, { clock, providers: { [id]: provider },
-    createSupervisor: () => ({ async terminate() { calls.push(['terminate']); return { gone: true, survivors: [], signals: [] }; } }) });
-  return { clock, calls, pending, cwd: () => cwd };
+    createSupervisor: () => ({ spawn() {}, async terminate() { adapter.calls.push(['terminate']); return { gone: true, survivors: [], signals: [] }; } }) });
+  return { clock, pending, cwd: () => adapter.calls.find(([name]) => name === 'start')[1].cwd,
+    get calls() {
+      return adapter.calls.map(([name, args]) => {
+        if (name === 'start') return [name, args.model];
+        if (name === 'openHistory') return ['history', args.historyId];
+        if (name === 'deliver') return [name, args.text];
+        return [name];
+      });
+    } };
 }
 
 for (const id of ['codex', 'opencode', 'copilot', 'antigravity', 'claude']) {

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { SANDBOX_HOME } from '../../test/sandbox-home.mjs';
 import { fakeCodexBin } from '../../test/fake-codex-app-server.mjs';
 import { ProcessSupervisor, pidAlive } from '../controller/process-supervisor.mjs';
-import { companionHomeDir } from '../../lib/host.mjs';
+import { companionHomeDir } from '../../lib/hosts/index.mjs';
 import { settingsPath } from '../../lib/state.mjs';
 import { defaults, formatDefaults } from './defaults.mjs';
 

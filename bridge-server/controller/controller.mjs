@@ -1,7 +1,7 @@
 import { realpathSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Records, resultText, resultUsage, discardInterventions } from './records.mjs';
+import { Records, buildResult, discardInterventions } from './records.mjs';
 import { getTargetById } from '../../lib/target-registry.mjs';
 import { probePermission } from '../../lib/target-diagnostics.mjs';
 import { ProcessSupervisor } from './process-supervisor.mjs';
@@ -24,9 +24,7 @@ const deferred = () => {
 };
 
 // providers[id] = { enabled, ready, modelAllowed(model), create() }.
-// create() returns exactly the protocol-only adapter in PHASE3-SPEC.md.
-// The host supplies trusted owner/request identities; this module does no
-// metadata attribution. send/wait/reply/cancel hold attachment until they return.
+// create() supplies the adapter for one execution.
 export class Controller {
   constructor({ providers, records = new Records(), clock = systemClock, env = process.env, createSupervisor = (opts) => new ProcessSupervisor(opts), launchWatcher = spawnCleanupWatcher, snapshot = snapshotWorktree, onProgress = () => {}, onResult = () => {} } = {}) {
     this.providers = providers;
@@ -39,7 +37,6 @@ export class Controller {
     this.onProgress = onProgress;
     this.onResult = onResult;
     this.live = new Map();
-    this.requests = new Map();
   }
   _owner(owner) { if (!owner) throw error('NATIVE_OWNER_REQUIRED'); }
   _persist(a) {
@@ -49,48 +46,7 @@ export class Controller {
     try { this._persist(a); return true; }
     catch (err) { void Promise.resolve().then(() => this._abandon(a, err)); }
   }
-  // Attachment is shown, never enforced: a detached owner may be thinking or
-  // retrying offline for hours, which silence cannot tell from a stopped one.
-  // The record is for display, so a failed write (RECORD_BUSY) must never
-  // block a request or its cancel.
-  _attachment(a) {
-    if (a.handedOff || a.closed) return;
-    try {
-      this.records.writeAttachment({ owner: a.record.owner, executionId: a.record.executionId, generation: a.record.generation,
-        attached: a.requests.size > 0, requestIds: [...a.requests], detachedAt: a.requests.size ? null : a.detachedAt ?? null });
-    } catch {}
-  }
-  // Also usable around a host's owner-bound operation. Only these four kinds
-  // constitute attachment; catalog/status never call this method.
-  beginRequest({ owner, executionId, requestId = randomUUID(), kind, signal }) {
-    this._owner(owner);
-    const a = this.live.get(executionId);
-    if (!a || a.record.owner !== owner || a.closed || a.handedOff) throw error('execution_unknown');
-    if (!['send', 'wait', 'reply', 'cancel'].includes(kind)) throw error('invalid_owner_request');
-    if (this.requests.has(requestId)) throw error('request_id_busy');
-    const abort = () => { void this.cancelRequest(requestId); };
-    this.requests.set(requestId, { a, signal, abort });
-    a.requests.add(requestId);
-    this._attachment(a);
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
-    return requestId;
-  }
-  endRequest(requestId) {
-    const request = this.requests.get(requestId);
-    if (!request) return;
-    const { a, signal, abort } = request;
-    signal?.removeEventListener('abort', abort);
-    this.requests.delete(requestId); a.requests.delete(requestId);
-    if (!a.requests.size) a.detachedAt = this.clock.now();
-    this._attachment(a);
-  }
-  async cancelRequest(requestId) {
-    const request = this.requests.get(requestId);
-    if (!request) return null;
-    return this._close(request.a, 'owner_stop');
-  }
-  async send({ owner, provider, cwd, text, model, effort, savedEffortHint, requestId, signal, hostSessionId }) {
+  async send({ owner, lead, title, provider, cwd, text, model, effort, savedEffortHint, hostSessionId }) {
     this._owner(owner);
     if (this.lost) throw error('bridge_loss');
     if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw error('INVALID_CWD');
@@ -106,34 +62,28 @@ export class Controller {
       ? (existing && !existing.closed ? existing.record.effortOverride : conversation?.effortOverride) : effort;
     if (existing && !existing.closed) {
       if (existing.record.text !== text || existing.record.modelOverride !== modelOverride || existing.record.effortOverride !== effortOverride) throw error('thread_busy');
-      return this._sendAttached(existing, { owner, requestId, signal });
+      return existing.ready.promise;
     }
     const selected = this.providers?.[provider];
     if (!selected?.enabled) throw error('TARGET_UNSUPPORTED');
     if (!selected.ready) throw error('CAPABILITY_UNAVAILABLE');
     if (modelOverride !== undefined && (typeof modelOverride !== 'string' || !selected.modelAllowed?.(modelOverride))) throw error('MODEL_NOT_ALLOWED');
-    const historyId = conversation ? conversation.historyId : this.records.readLegacyHistory(owner, provider);
+    const historyId = conversation?.historyId ?? null;
     const adapter = selected.create();
     if (historyId && (!adapter.capabilities.loadsHistory || !adapter.capabilities.followUp)) throw error('FOLLOWUP_UNSUPPORTED');
     const executionId = randomUUID();
     const permissionMode = probePermission(getTargetById(provider), this.env)?.mode ?? null;
-    const record = this.records.begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes: adapter.capabilities.interventions,
+    const record = this.records.begin({ owner, lead, title, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes: adapter.capabilities.interventions,
       historyId, executionId, text, hostSessionId, now: this.clock.now() }, conversation?.generation ?? 0);
-    const a = { record, adapter, savedEffortHint, held: [], requests: new Set(), waiters: new Set(), inboxRequests: new Set(), ready: deferred(), done: deferred() };
+    const a = { record, adapter, savedEffortHint, held: [], waiters: new Set(), inboxRequests: new Set(), ready: deferred(), done: deferred() };
     a.supervisor = this.createSupervisor({ clock: this.clock, onRecord: (processes) => { a.record.processes = processes; this._eventWrite(a); } });
-    // Snapshot the marker at dispatch. An old SubagentStop must not cancel a
-    // later same-child follow-up; a changed marker is a new stop observation.
-    a.stopMarker = JSON.stringify(this.records.readStop(owner));
+    a.done.promise.then(result => {
+      for (const finish of a.waiters) finish(result);
+    });
     this.live.set(executionId, a);
-    const response = this._sendAttached(a, { owner, requestId, signal });
     this._schedule(a);
     void this._run(a).catch((err) => this._abandon(a, err));
-    return response;
-  }
-  async _sendAttached(a, args) {
-    const id = this.beginRequest({ ...args, executionId: a.record.executionId, kind: 'send' });
-    try { return await a.ready.promise; }
-    finally { this.endRequest(id); }
+    return a.ready.promise;
   }
   async _run(a) {
     const selection = {
@@ -294,11 +244,6 @@ export class Controller {
   }
   _tick(a) {
     if (a.stopping || a.closed || a.handedOff) return;
-    const marker = this.records.readStop(a.record.owner);
-    if (marker && JSON.stringify(marker) !== a.stopMarker) { void this._close(a, 'owner_stop'); return; }
-    this._inbox(a);
-  }
-  _inbox(a) {
     const executionId = a.record.executionId;
     for (const { requestId, request, reason } of this.records.readInbox(executionId)) {
       if (a.inboxRequests.has(requestId)) continue;
@@ -350,7 +295,6 @@ export class Controller {
     const cleanup = await a.supervisor.terminate();
     a.closed = true;
     this.records.removeInbox(a.record.executionId);
-    for (const id of [...a.requests]) this.endRequest(id);
     this.live.delete(a.record.executionId);
     const response = { executionId: a.record.executionId, state: 'unknown', error: err.code || err.message, stopEvidence: cleanup };
     a.ready.resolve(response); a.done.resolve(response);
@@ -401,52 +345,45 @@ export class Controller {
         text: appendProviderError(terminal.text, nativeError.message) };
       this._recordTurn(a, terminal);
     }
-    const result = {
+    const result = buildResult(a.record, {
       workSummary,
-      owner: a.record.owner, executionId: a.record.executionId, generation: a.record.generation,
       outcome: terminal?.outcome || (cleanup.gone ? 'stopped' : 'failed'), cause: terminal?.cause || cause,
-      detail: cleanup.gone ? terminal?.detail : 'cleanup_unverified', text: resultText(a.record),
-      turns: a.record.turns, interventions: a.record.interventions, nativeTurnIds: a.record.nativeTurnIds,
-      usage: resultUsage(a.record, terminal?.usage), nativeRefs: { historyId: a.record.historyId, nativeTurnId: a.record.nativeTurnId, nativeTurnIds: a.record.nativeTurnIds, ...a.record.nativeRefs, ...terminal?.nativeRefs },
-      selectedModel: a.record.modelOverride, selectedEffort: a.record.effortOverride, effectiveModel: terminal?.effectiveModel ?? a.record.effectiveModel,
-      effectiveEffort: terminal?.effectiveEffort ?? a.record.effectiveEffort,
+      detail: cleanup.gone ? terminal?.detail : 'cleanup_unverified',
       stopEvidence: a.record.cleanup, finishedAt: this.clock.now(),
-    };
+    });
     if (!this.records.writeResult(result)) throw error('writer_fenced');
     a.record.state = cleanup.gone ? 'closed' : 'unknown'; this._persist(a);
     a.closed = true;
-    for (const id of [...a.requests]) this.endRequest(id);
     const saved = this.records.readResult(a.record.executionId);
     this.onResult(a.record, saved);
     this.live.delete(a.record.executionId);
     a.ready.resolve(saved); a.done.resolve(saved);
     return saved;
   }
-  async wait({ owner, executionId, requestId, signal, timeoutMs = 30_000 }) {
+  async wait({ owner, executionId, signal, timeoutMs = 30_000 }) {
     this._owner(owner);
     const execution = this.records.readExecution(executionId);
     if (!execution || execution.owner !== owner) throw error('execution_unknown');
+    if (signal?.aborted) return this.status({ executionId });
     const result = this.records.readResult(executionId);
     if (result) return this._userNotice(owner, executionId) ?? result;
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 1_200_000) throw error('invalid_wait');
     const a = this.live.get(executionId);
     if (!a || a.handedOff) return this._userNotice(owner, executionId) ?? this.status({ executionId });
-    const id = this.beginRequest({ owner, executionId, requestId, signal, kind: 'wait' });
-    try {
-      const notice = !signal?.aborted && this._userNotice(owner, executionId);
-      if (notice) return notice;
-      return await new Promise(resolve => {
-        const finish = value => {
-          if (!a.waiters.delete(finish)) return;
-          this.clock.clearTimeout(timer);
-          resolve(value);
-        };
-        const timer = this.clock.setTimeout(() => finish(this.status({ executionId })), timeoutMs);
-        a.waiters.add(finish);
-        a.done.promise.then(finish);
-      });
-    }
-    finally { this.endRequest(id); }
+    const notice = this._userNotice(owner, executionId);
+    if (notice) return notice;
+    return new Promise(resolve => {
+      const finish = value => {
+        a.waiters.delete(finish);
+        this.clock.clearTimeout(timer);
+        signal?.removeEventListener('abort', returnStatus);
+        resolve(value);
+      };
+      const returnStatus = () => finish(this.status({ executionId }));
+      const timer = this.clock.setTimeout(returnStatus, timeoutMs);
+      a.waiters.add(finish);
+      signal?.addEventListener('abort', returnStatus, { once: true });
+    });
   }
   _userNotice(owner, executionId) {
     const intervention = this.records.takeUserIntervention(executionId, owner);
@@ -459,7 +396,7 @@ export class Controller {
       finish(notice);
     }
   }
-  async intervene({ executionId, from, owner, mode, text, requestId, signal }) {
+  async intervene({ executionId, from, owner, mode, text, signal }) {
     if (!['caller', 'user'].includes(from)) throw error('INVALID_SENDER');
     if (from === 'caller') {
       this._owner(owner);
@@ -472,54 +409,47 @@ export class Controller {
     const unavailable = reason => ({ ok: false, status: 'intervention_unavailable', reason });
     const reason = interventionUnavailable(a, mode);
     if (reason || !['steer', 'queue', 'interrupt'].includes(mode)) return unavailable(reason || 'capability');
-    const request = from === 'caller' ? this.beginRequest({ owner, executionId, requestId, signal, kind: 'reply' }) : null;
-    try {
-      if (a.stopping || signal?.aborted) return unavailable('state');
-      const input = { id: randomUUID(), from, mode, text, at: this.clock.now(), state: 'accepted' };
-      a.record.interventions.push(input); this._persist(a);
-      if (from === 'user') this._notifyUser(a);
-      const operation = (a.inputTail ?? Promise.resolve()).then(async () => {
-        if (a.stopping || a.handedOff || a.closed) return unavailable('state');
-        const nativeQueue = a.adapter.capabilities.interventions.queue === 'native';
-        try {
-          let ack;
-          if (mode === 'queue' && !nativeQueue) a.held.push(input);
-          else if (mode === 'interrupt' && !nativeQueue) {
-            a.held.push(input);
-            await bounded(this.clock, () => a.adapter.interrupt({ drain: true }), PROTOCOL_MS, 'interrupt_timeout');
-          } else {
-            ack = mode === 'steer' ? await a.adapter.steer({ text, id: input.id })
-              : await bounded(this.clock, () => a.adapter.intervene(input), PROTOCOL_MS, 'DeliveryUnknown');
-            if (!a.stopping && !a.handedOff && !a.closed) {
-              if (mode === 'steer') { a.turn?.messages.push(input.id); input.state = 'joined'; }
-              else if (input.state === 'accepted') input.state = 'delivered';
-            }
+    if (signal?.aborted) return unavailable('state');
+    const input = { id: randomUUID(), from, mode, text, at: this.clock.now(), state: 'accepted' };
+    a.record.interventions.push(input); this._persist(a);
+    if (from === 'user') this._notifyUser(a);
+    const operation = (a.inputTail ?? Promise.resolve()).then(async () => {
+      if (a.stopping || a.handedOff || a.closed) return unavailable('state');
+      const nativeQueue = a.adapter.capabilities.interventions.queue === 'native';
+      try {
+        let ack;
+        if (mode === 'queue' && !nativeQueue) a.held.push(input);
+        else if (mode === 'interrupt' && !nativeQueue) {
+          a.held.push(input);
+          await bounded(this.clock, () => a.adapter.interrupt({ drain: true }), PROTOCOL_MS, 'interrupt_timeout');
+        } else {
+          ack = mode === 'steer' ? await a.adapter.steer({ text, id: input.id })
+            : await bounded(this.clock, () => a.adapter.intervene(input), PROTOCOL_MS, 'DeliveryUnknown');
+          if (!a.stopping && !a.handedOff && !a.closed) {
+            if (mode === 'steer') { a.turn?.messages.push(input.id); input.state = 'joined'; }
+            else if (input.state === 'accepted') input.state = 'delivered';
           }
-          if (!a.closed && !a.handedOff) this._persist(a);
-          return { ok: true, ...ack, id: input.id };
-        } catch (err) {
-          input.state = 'not_delivered'; a.held = a.held.filter(held => held !== input);
-          if (!a.closed && !a.handedOff) this._persist(a);
-          throw err;
         }
-      });
-      a.inputTail = operation.catch(() => {});
-      return await operation;
-    } finally { if (request) this.endRequest(request); }
+        if (!a.closed && !a.handedOff) this._persist(a);
+        return { ok: true, ...ack, id: input.id };
+      } catch (err) {
+        input.state = 'not_delivered'; a.held = a.held.filter(held => held !== input);
+        if (!a.closed && !a.handedOff) this._persist(a);
+        throw err;
+      }
+    });
+    a.inputTail = operation.catch(() => {});
+    return operation;
   }
-  async steer(args) {
-    const result = await this.intervene({ ...args, from: 'caller', mode: 'steer' });
-    return result.status === 'intervention_unavailable' ? { ...result, status: 'reply_unavailable' } : result;
-  }
-  async cancel({ owner, executionId, requestId, signal }) {
+  async cancel({ owner, executionId }) {
     this._owner(owner);
     const execution = this.records.readExecution(executionId);
     if (!execution || execution.owner !== owner) throw error('execution_unknown');
     const result = this.records.readResult(executionId);
     if (result) return result;
-    const id = this.beginRequest({ owner, executionId, requestId, signal, kind: 'cancel' });
-    try { return await this._close(this.live.get(executionId), 'owner_stop'); }
-    finally { this.endRequest(id); }
+    const a = this.live.get(executionId);
+    if (!a || a.handedOff || a.closed) throw error('execution_unknown');
+    return this._close(a, 'owner_stop');
   }
   status({ executionId, owner } = {}) {
     if (!executionId && owner) executionId = this.records.readConversation(owner)?.executionId;
@@ -528,14 +458,9 @@ export class Controller {
     if (!execution) return null;
     const result = this.records.readResult(executionId);
     const live = this.live.get(executionId);
-    // A result or a watcher handoff ends attachment even when the saved record
-    // predates it (handoff stops attachment writes) or never existed.
-    const saved = this.records.readAttachment(executionId);
-    const attachment = result || execution.writer === 'watcher'
-      ? { ...saved, attached: false, requestIds: [], detachedAt: null } : saved;
     const interventions = { default: execution.interventionModes?.default ?? null,
       ...Object.fromEntries(['steer', 'queue', 'interrupt'].map(mode => [mode, !result && interventionUnavailable(live, mode) === null])) };
-    return { execution, result, attachment, interventions,
+    return { execution, result, interventions,
       state: result?.stopEvidence?.gone || execution.cleanup?.gone ? 'closed' : live ? execution.state : 'unknown' };
   }
   // Explicit startup reconciliation, never invoked by an observer. It never
@@ -553,13 +478,10 @@ export class Controller {
     if (!stopEvidence.gone) return this.status({ owner });
     const terminal = execution.terminal;
     discardInterventions(execution);
-    if (!saved) this.records.writeResult({ owner, executionId: execution.executionId, generation: execution.generation,
+    if (!saved) this.records.writeResult(buildResult(execution, {
       outcome: terminal?.outcome || 'stopped', cause: 'bridge_loss', detail: terminal?.detail,
-      selectedModel: execution.modelOverride, selectedEffort: execution.effortOverride, effectiveModel: terminal?.effectiveModel ?? execution.effectiveModel,
-      effectiveEffort: terminal?.effectiveEffort ?? execution.effectiveEffort, text: resultText(execution),
-      turns: execution.turns, interventions: execution.interventions, nativeTurnIds: execution.nativeTurnIds,
-      usage: resultUsage(execution, terminal?.usage), nativeRefs: { historyId: execution.historyId, nativeTurnId: execution.nativeTurnId, nativeTurnIds: execution.nativeTurnIds, ...terminal?.nativeRefs },
-      stopEvidence, finishedAt: this.clock.now() }, execution.writer);
+      stopEvidence, finishedAt: this.clock.now(),
+    }), execution.writer);
     this.records.writeExecution({ ...execution, state: 'closed', cleanup: stopEvidence }, execution.writer);
     return this.status({ owner });
   }
@@ -585,7 +507,6 @@ export class Controller {
         catch { watcher = { result: await cleanupExecution({ records: this.records, execution: a.record, clock: this.clock, createSupervisor: this.createSupervisor }) }; }
         a.supervisor.detach();
         const response = { executionId: a.record.executionId, state: 'cleanup_pending', watcher };
-        for (const id of [...a.requests]) this.endRequest(id);
         a.ready.resolve(response); a.done.resolve(response); handoffs.push(response);
       } catch (err) { handoffs.push(await this._abandon(a, err)); }
     }

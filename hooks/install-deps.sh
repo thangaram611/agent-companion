@@ -38,16 +38,15 @@ fi
 # CLAUDE_PLUGIN_DATA/PLUGIN_DATA is only populated for marketplace-installed plugins.
 # For --plugin-dir local-dev runs, fall back to a sibling dir under the
 # plugin root (not pretty, but keeps local-dev functional).
-DATA="${CLAUDE_PLUGIN_DATA:-${PLUGIN_DATA:-$ROOT/.plugin-data}}"
-if [ "${AGENT_COMPANION_HOST:-claude}" = "codex" ]; then
-  DATA="${PLUGIN_DATA:-${CODEX_HOME:-$HOME/.codex}/plugins/data/agent-companion-agent-companion}"
-fi
+. "$ROOT/hooks/host-paths.sh" || exit 1
+host_paths "${AGENT_COMPANION_HOST:-claude}" "$ROOT"
+DATA="$HOST_PLUGIN_DATA"
 
 BUNDLED_PKG="$ROOT/bridge-server/package.json"
 BUNDLED_LOCK="$ROOT/bridge-server/package-lock.json"
 PERSIST_DIR="$DATA/bridge-server"
 MANIFEST_HASH="$PERSIST_DIR/.manifest.sha256"
-SYMLINK="$ROOT/bridge-server/node_modules"
+SYMLINK="$HOST_DEPS_LINK"
 LOG="$PERSIST_DIR/install.log"
 
 [ -f "$BUNDLED_PKG" ] || exit 0
@@ -221,7 +220,7 @@ fi
 
 # Fast path: deps current, and on Claude the link genuinely resolves to them.
 # Codex imports directly from plugin data. No npm or bundle writes.
-if [ "$DEPS_OK" = 1 ] && { [ "${AGENT_COMPANION_HOST:-claude}" = "codex" ] || link_ok; }; then
+if [ "$DEPS_OK" = 1 ] && { [ -z "$SYMLINK" ] || link_ok; }; then
   exit 0
 fi
 
@@ -294,7 +293,7 @@ fi
 # Codex fingerprints the entire plugin before running each hook. Keep all
 # generated dependencies in PLUGIN_DATA; even a node_modules symlink in ROOT
 # makes every hook fail before its command starts (codex-cli 0.164.0).
-if [ "${AGENT_COMPANION_HOST:-claude}" = "codex" ]; then
+if [ -z "$SYMLINK" ]; then
   [ "$DEPS_OK" = 0 ] && echo "agent-companion: deps ready"
   exit 0
 fi

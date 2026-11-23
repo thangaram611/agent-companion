@@ -1,6 +1,6 @@
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { stateDirs } from '../lib/host.mjs';
+import { stateDirs } from '../lib/hosts/index.mjs';
 import { modelName } from '../lib/model-name.mjs';
 import { TARGET_IDS } from '../lib/target-registry.mjs';
 import { Records } from './controller/records.mjs';

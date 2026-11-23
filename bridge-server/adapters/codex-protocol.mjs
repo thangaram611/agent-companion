@@ -32,12 +32,6 @@ const APP_SERVER_SANDBOX_BY_EXEC_MODE = {
   bypass: 'danger-full-access',
 };
 
-// Historical exec comparisons below describe the transport retired in Phase 3;
-// the resolver and measured app-server policy remain in use.
-// Where the network decision actually lives on this transport — measured
-// 2026-08-11 against codex-cli 0.147.0's own schema, after shipping with it
-// unmeasured and `network_applied: false`.
-//
 // `thread/start`/`thread/resume` carry `sandbox`, which is the bare `SandboxMode`
 // enum (`read-only | workspace-write | danger-full-access`) and has NO network
 // option at all; the start response echoes `networkAccess: false` whatever the
@@ -48,39 +42,10 @@ const APP_SERVER_SANDBOX_BY_EXEC_MODE = {
 //   {type:'dangerFullAccess'}
 //   {type:'externalSandbox', networkAccess:'restricted'|'enabled'}
 //
-// EVERY VARIANT'S `networkAccess` DEFAULTS TO ITS RESTRICTIVE VALUE — `false` for
-// the two booleans, `'restricted'` for `externalSandbox`'s enum (the schema
-// declares both defaults). So silence here is the RESTRICTIVE direction, the
-// exact opposite of the exec transport, where omitting
-// `-c sandbox_workspace_write.network_access=` defers to the user's config.toml
-// and fails OPEN. Both adapters must therefore be explicit, for opposite
-// reasons, and this builds an explicit variant for every mode:
-//
-//   workspace-write     → `networkAccess` = the exec resolver's answer, i.e. ON
-//                         by default (so a delegated job can `npm install`) and
-//                         OFF only on AGENT_COMPANION_CODEX_NETWORK=off. Silence
-//                         would fall OFF and quietly diverge from exec.
-//   read-only           → `networkAccess: false`. The exec resolver reports
-//                         `network: null` here — its toggle is the
-//                         workspace-write-scoped config key, so the bridge has
-//                         no opinion in this mode — and false is both the
-//                         union's own default and what `--sandbox read-only`
-//                         gives on exec. Stated rather than left to silence, so
-//                         the two transports agree by construction.
-//   danger-full-access  → no `networkAccess` field exists on the variant: the
-//                         sandbox is gone, so nothing is restricted. Falls open,
-//                         which is what the mode asks for on both transports.
-//   bypass              → collapses onto `dangerFullAccess`, exactly as the mode
-//                         mapping above already does. NOT `externalSandbox`,
-//                         even though "the bridge is already sandboxed" is
-//                         literally what bypass means here: that variant's
-//                         network vocabulary is a different one
-//                         (`restricted|enabled`, not a boolean), its semantics
-//                         were never measured, and the exec flag it translates
-//                         (`--dangerously-bypass-approvals-and-sandbox`) has one
-//                         sandbox effect — removing it. A second, unmeasured
-//                         spelling of the same intent could only disagree with
-//                         the mode already sent on `thread/start`.
+// The schema defaults network access to false on the two boolean variants.
+// Set it explicitly from the workspace-write setting. Read-only disables it,
+// and both unrestricted modes use dangerFullAccess, which has no network field.
+// Bypass is not externalSandbox: that variant's network semantics were never measured.
 //
 // THE TAGS ARE camelCase WHILE `thread/start`'s MODE ENUM IS kebab-case, and the
 // same job sends both on the same transport — so mis-spelling one as the other is
@@ -97,7 +62,7 @@ const APP_SERVER_SANDBOX_BY_EXEC_MODE = {
 //   {type:'workspaceWrite', networkAccess:'enabled'} → invalid type: string
 //   {networkAccess:true}                             → missing field `type`
 // The fakes cannot catch that first refusal — the pinned contract validates
-// top-level field PRESENCE only, by design (lib/codex-app-server-contract.mjs) —
+// top-level field PRESENCE only, by design (test/codex-contract-frames.mjs) —
 // so the adapter's own test asserts the tag against that measured vocabulary.
 //
 // ⚠️ A sandboxPolicy REPLACES the policy, it does not patch it, and

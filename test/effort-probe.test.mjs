@@ -16,7 +16,7 @@ function fixture(target, { acceptInvalid = false, effectiveEffort, effectiveMode
       selectedModel = args.model ?? selectedModel;
       const job_id = `job-${++turns}`;
       executions.set(job_id, { historyId: 'history', processes: { pid: turns } });
-      return { ok: true, status: 'still_running', job_id, selected_effort: 'low' };
+      return { ok: true, status: 'still_running', job_id, thread: 'th-fixture', selected_effort: 'low' };
     },
     async wait(job_id) {
       return { ok: true, status: 'completed', job_id, content: 'OK', meta: { selected_effort: 'low',
@@ -39,7 +39,7 @@ for (const target of ['claude', 'codex', 'opencode', 'antigravity', 'copilot']) 
   } else {
     assert.equal(sends.length, 3); assert.equal(Object.hasOwn(sends[2].args, 'effort'), false);
     assert.equal(Object.hasOwn(sends[2].args, 'model'), false);
-    assert.equal(sends[1].owner, sends[2].owner); assert.match(h.reports[2], /^PASS/);
+    assert.equal(sends[2].args.thread, 'th-fixture'); assert.equal(sends[1].owner, sends[2].owner); assert.match(h.reports[2], /^PASS/);
   }
   assert.ok(h.reports.slice(0, 2).every(line => line.startsWith('PASS')));
 });

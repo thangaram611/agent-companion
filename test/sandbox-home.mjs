@@ -12,7 +12,7 @@
 // that `await import()` after setting their own env keep working: `??=` leaves
 // a value that is already set alone.
 //
-// Why a sandbox is mandatory: under `node --test`, lib/host.mjs's
+// Why a sandbox is mandatory: under `node --test`, lib/hosts/index.mjs's
 // refuseRealHomeUnderTest throws on any path under the operator's real
 // account home (see test/runtime-sandbox-guard.test.mjs), because a suite
 // that read or wrote live state kept the retired shared codex broker alive for 30 min

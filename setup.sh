@@ -13,6 +13,24 @@ ok()   { printf "${GREEN}[OK]${NC}   %s\n" "$1"; }
 warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
 fail() { printf "${RED}[FAIL]${NC} %s\n" "$1"; }
 
+. "$SCRIPT_DIR/hooks/host-paths.sh"
+. "$SCRIPT_DIR/hooks/node-tools.sh"
+
+read_registry_ids() {
+  if ! command -v node >/dev/null 2>&1; then
+    node_requirement_error ''
+    exit 1
+  fi
+  NODE_VERSION=$(node --version)
+  NODE_VER="${NODE_VERSION#v}"
+  if [ "${NODE_VER%%.*}" -lt 26 ] 2>/dev/null; then
+    node_requirement_error "$NODE_VERSION"
+    exit 1
+  fi
+  TARGET_IDS=$(node -p '[...require(process.argv[1]).TARGET_IDS].join(" ")' "$SCRIPT_DIR/lib/target-registry.mjs")
+  HOST_IDS=$(node -p 'Object.keys(require(process.argv[1]).HOSTS).join(" ")' "$SCRIPT_DIR/lib/hosts/index.mjs")
+}
+
 # --- Argument parsing -------------------------------------------------------
 #
 # An omitted host is detected; an omitted target preserves existing configuration.
@@ -23,6 +41,7 @@ NO_TARGET_CHECK=0
 SKIP_TESTS=0
 YES=0
 DRY_RUN=0
+UNLOAD_DELAY=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host)   [ "$#" -ge 2 ] && [ -n "$2" ] || { fail "--host requires a value"; exit 2; }; HOST="$2"; shift 2 ;;
@@ -31,21 +50,29 @@ while [ "$#" -gt 0 ]; do
     --target=*) TARGET="${1#--target=}"; [ -n "$TARGET" ] || { fail "--target requires a value"; exit 2; }; shift ;;
     --model) [ "$#" -ge 2 ] && [ -n "$2" ] && [[ "$2" != -* ]] || { fail "--model requires a value"; exit 2; }; MODEL="$2"; shift 2 ;;
     --model=*) MODEL="${1#--model=}"; [ -n "$MODEL" ] || { fail "--model requires a value"; exit 2; }; shift ;;
+    --codex-unload-delay) [[ "${2:-}" =~ ^([0-9]+|default)$ ]] || { fail "--codex-unload-delay takes seconds or default"; exit 2; }; UNLOAD_DELAY="$2"; shift 2 ;;
+    --codex-unload-delay=*) UNLOAD_DELAY="${1#--codex-unload-delay=}"; [[ "$UNLOAD_DELAY" =~ ^([0-9]+|default)$ ]] || { fail "--codex-unload-delay takes seconds or default"; exit 2; }; shift ;;
     --no-target-check) NO_TARGET_CHECK=1; shift ;;
     --skip-tests)      SKIP_TESTS=1; shift ;;
     --yes|-y) YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
+      read_registry_ids
       cat <<EOF
-Usage: $(basename "$0") [--host claude|codex|both] [--target opencode|copilot|codex|claude|antigravity|auto|none]
-                        [--model <id|inherit>] [--no-target-check] [--skip-tests] [--yes] [--dry-run]
+Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both] [--target ${TARGET_IDS// /|}|auto|none]
+                        [--model <id|inherit>] [--codex-unload-delay <seconds|default>]
+                        [--no-target-check] [--skip-tests] [--yes] [--dry-run]
 
-  --host claude|codex|both   install that harness surface (default: detect installed CLIs)
-  --target opencode|copilot|codex|claude|antigravity|auto|none
+  --host ${HOST_IDS// /|}|both   install that harness surface (default: detect installed CLIs)
+  --target ${TARGET_IDS// /|}|auto|none
                              choose a default companion (default: preserve existing config,
                              otherwise select the only ready target). none preserves
                              config; auto explicitly selects the only ready target.
   --model <id|inherit>       save a model for an explicit companion; inherit clears it
+  --codex-unload-delay <seconds|default>
+                             how long Codex keeps a conversation you left loaded
+                             (thread_unload_delay_secs, Codex default 60). Lower ends
+                             its wakes and its running jobs sooner; default removes it.
   --no-target-check          select the target without failing on not-ready
   --skip-tests               skip the unit-test step
   --yes                      apply without interactive confirmation
@@ -60,15 +87,20 @@ EOF
   esac
 done
 
-case "$HOST" in
-  ""|claude|codex|both) ;;
-  *) fail "--host must be one of: claude, codex, both (got: $HOST)"; exit 2 ;;
-esac
+read_registry_ids
+has_id() {
+  local wanted="$1" id
+  shift
+  for id in "$@"; do [ "$wanted" != "$id" ] || return 0; done
+  return 1
+}
 
-case "$TARGET" in
-  ""|opencode|copilot|codex|claude|antigravity|auto|none) ;;
-  *) fail "--target must be one of: opencode, copilot, codex, claude, antigravity, auto, none (got: $TARGET)"; exit 2 ;;
-esac
+if ! has_id "$HOST" "" $HOST_IDS both; then
+  fail "--host must be one of: ${HOST_IDS// /, }, both (got: $HOST)"; exit 2
+fi
+if ! has_id "$TARGET" "" $TARGET_IDS auto none; then
+  fail "--target must be one of: ${TARGET_IDS// /, }, auto, none (got: $TARGET)"; exit 2
+fi
 
 if [ -n "$MODEL" ]; then
   case "$TARGET" in
@@ -79,17 +111,16 @@ fi
 # Host selection never assumes that both CLIs are installed.
 if [ -z "$HOST" ]; then
   DETECTED=()
-  command -v claude >/dev/null 2>&1 && DETECTED+=(claude)
-  command -v codex >/dev/null 2>&1 && DETECTED+=(codex)
+  for h in $HOST_IDS; do command -v "$h" >/dev/null 2>&1 && DETECTED+=("$h"); done
   case "${#DETECTED[@]}" in
-    0) fail "No supported harness found. Install Claude Code or Codex CLI, then rerun with --host claude|codex."; exit 1 ;;
+    0) fail "No supported harness found. Install Claude Code or Codex CLI, then rerun with --host ${HOST_IDS// /|}."; exit 1 ;;
     1) HOST="${DETECTED[0]}"; ok "detected harness: $HOST" ;;
     *)
       if [ -t 0 ] && [ "$YES" = 0 ]; then
-        read -r -p "Installed harnesses: claude, codex. Install for [claude/codex/both]: " HOST
-        case "$HOST" in claude|codex|both) ;; *) fail "Select claude, codex or both."; exit 2 ;; esac
+        read -r -p "Installed harnesses: ${HOST_IDS// /, }. Install for [${HOST_IDS// /\/}/both]: " HOST
+        has_id "$HOST" $HOST_IDS both || { fail "Select ${HOST_IDS// /, } or both."; exit 2; }
       else
-        fail "Both harnesses are installed. Select --host claude|codex|both."; exit 2
+        fail "Both harnesses are installed. Select --host ${HOST_IDS// /|}|both."; exit 2
       fi
       ;;
   esac
@@ -100,8 +131,11 @@ HOSTS=()
 case "$HOST" in
   claude) DO_CLAUDE=1; HOSTS=(claude) ;;
   codex) DO_CODEX=1; HOSTS=(codex) ;;
-  both) DO_CLAUDE=1; DO_CODEX=1; HOSTS=(claude codex) ;;
+  both) DO_CLAUDE=1; DO_CODEX=1; HOSTS=($HOST_IDS) ;;
 esac
+if [ -n "$UNLOAD_DELAY" ] && [ "$DO_CODEX" = 0 ]; then
+  fail "--codex-unload-delay needs a Codex host (--host codex or both)"; exit 2
+fi
 
 DEPS_STATUS="not installed this run"
 UI_STATUS="not installed this run"
@@ -151,18 +185,6 @@ echo "=== agent-companion setup: preflight (host=$HOST) ==="
 
 printf "Checking prerequisites...\n"
 
-# shellcheck source=hooks/node-tools.sh
-. "$SCRIPT_DIR/hooks/node-tools.sh"
-if ! command -v node >/dev/null 2>&1; then
-  node_requirement_error ''
-  exit 1
-fi
-NODE_VERSION=$(node --version)
-NODE_VER="${NODE_VERSION#v}"
-if [ "${NODE_VER%%.*}" -lt 26 ] 2>/dev/null; then
-  node_requirement_error "$NODE_VERSION"
-  exit 1
-fi
 ok "node v$(node --version | tr -d 'v')"
 
 if ! command -v npm >/dev/null 2>&1; then
@@ -214,23 +236,20 @@ echo ""
 printf "Checking plugin surface...\n"
 
 SURFACE_PATHS=(
-  "$SCRIPT_DIR/hooks/drain-completions.sh"
+  "$SCRIPT_DIR/hooks/hook.sh"
+  "$SCRIPT_DIR/hooks/hook.mjs"
   "$SCRIPT_DIR/hooks/install-deps.sh"
 )
 if [ "$DO_CLAUDE" = 1 ]; then
   SURFACE_PATHS+=(
     "$SCRIPT_DIR/.claude-plugin/plugin.json"
-    "$SCRIPT_DIR/templates/agent-companion.md"
     "$SCRIPT_DIR/hooks/hooks.json"
-    "$SCRIPT_DIR/hooks/install-agent.sh"
   )
 fi
 if [ "$DO_CODEX" = 1 ]; then
   SURFACE_PATHS+=(
     "$SCRIPT_DIR/.codex-plugin/plugin.json"
-    "$SCRIPT_DIR/templates/agent-companion.toml"
     "$SCRIPT_DIR/hooks/launch-agent-bridge.sh"
-    "$SCRIPT_DIR/hooks/install-agent-codex.sh"
     "$SCRIPT_DIR/scripts/build-codex-marketplace.mjs"
     "$SCRIPT_DIR/scripts/install-codex-hooks.mjs"
   )
@@ -269,7 +288,7 @@ for h in "${HOSTS[@]}"; do
   jq -r '.targets[] | "  \(.displayName): " + (if .ready then "ready" else "not ready" end), (.blockers[], .warnings[] | "    " + .message), (.nextSteps[] | "    Next: " + .)' "$PLAN_DIR/$h.json"
   if [ "$PLAN_CODE" != 0 ] && [ -t 0 ] && [ "$YES" = 0 ] \
       && jq -e '.plan.code == "ambiguous_target" or .plan.code == "no_ready_target"' "$PLAN_DIR/$h.json" >/dev/null; then
-    read -r -p "Shared default companion [opencode/copilot/codex/claude/antigravity/none]: " CHOICE
+    read -r -p "Shared default companion [${TARGET_IDS// /\/}/none]: " CHOICE
     if jq -e --arg id "$CHOICE" '.targets[$id].capabilities.modelSelection == true' "$PLAN_DIR/$h.json" >/dev/null; then
       read -r -p "Default model for $CHOICE [inherit]: " MODEL_CHOICE
       [ "$MODEL_CHOICE" != inherit ] || MODEL_CHOICE=""
@@ -297,22 +316,29 @@ for h in "${HOSTS[@]}"; do
     fi
     jq -r 'if .plan.ready then empty else "  Readiness deferred by --no-target-check; companion is not ready." end' "$PLAN_DIR/$h.json"
   fi
-  if [ "$h" = codex ]; then
-    AGENT_FILE="${CODEX_HOME:-$HOME/.codex}/agents/agent-companion.toml"
-  else
-    AGENT_FILE="$HOME/.claude/agents/agent-companion.md"
+  host_paths "$h" "$SCRIPT_DIR"
+  if [ -f "$HOST_AGENT_FILE" ]; then
+    if grep -q '^# AUTO-INSTALLED by agent-companion plugin' "$HOST_AGENT_FILE"; then
+      echo "  Remove the retired plugin role at $HOST_AGENT_FILE."
+    else
+      echo "  User-owned agent preserved: $HOST_AGENT_FILE"
+    fi
   fi
-  if [ -f "$AGENT_FILE" ] && ! grep -qF '# AUTO-INSTALLED by agent-companion plugin' "$AGENT_FILE"; then
-    fail "User-owned agent preserved: $AGENT_FILE. Move or reconcile it manually before rerunning."; exit 1
-  fi
-  [ ! -e "$AGENT_FILE" ] || echo "Existing $h agent found; setup will refresh and verify it."
 done
 
 echo "Intended installation changes:"
 echo "  Install bridge-server dependencies in $SCRIPT_DIR/bridge-server."
 echo "  Install or refresh the live-view launcher ~/.local/bin/agent-companion (runs this checkout's hooks/launch-ui.sh)."
-[ "$DO_CLAUDE" = 0 ] || echo "  Materialize the Claude agent; merge companion permissions into ~/.claude/settings.json."
-[ "$DO_CODEX" = 0 ] || echo "  Create ${CODEX_HOME:-$HOME/.codex} if needed; refresh the Codex plugin, verify MCP and agent, and remove legacy managed hooks."
+[ "$DO_CLAUDE" = 0 ] || echo "  Merge companion permissions into ~/.claude/settings.json."
+if [ "$DO_CODEX" = 1 ]; then
+  host_paths codex "$SCRIPT_DIR"
+  echo "  Create $HOST_CONFIG_DIR if needed; refresh the Codex plugin, verify MCP, and remove legacy managed hooks."
+  case "$UNLOAD_DELAY" in
+    '') ;;
+    default) echo "  Remove thread_unload_delay_secs from $HOST_CONFIG_DIR/config.toml (applies when Codex's daemon restarts)." ;;
+    *) echo "  Set thread_unload_delay_secs to $UNLOAD_DELAY in $HOST_CONFIG_DIR/config.toml (applies when Codex's daemon restarts)." ;;
+  esac
+fi
 echo "  Write diagnostic install markers after each harness finishes."
 if [ "$MODEL" = inherit ]; then
   echo "  Clear the shared default model for ${SELECTED_TARGETS[0]}."
@@ -391,22 +417,17 @@ if [ "$TARGET" = "copilot" ] || command -v copilot >/dev/null 2>&1; then
   echo ""
 fi
 
-# --- Claude-host install (subagent + permissions) -------------------
+remove_retired_role() {
+  if [ -f "$HOST_AGENT_FILE" ] && grep -q '^# AUTO-INSTALLED by agent-companion plugin' "$HOST_AGENT_FILE"; then
+    rm -- "$HOST_AGENT_FILE"
+  fi
+}
 
 if [ "$DO_CLAUDE" = 1 ]; then
-  STEP="Claude agent and permissions"
+  STEP="Claude permissions"
   printf "=== Claude Code host install ===\n"
-
-  # 5a. Eagerly materialize the Markdown subagent. Idempotent.
-  printf "Materializing subagent at ~/.claude/agents/agent-companion.md...\n"
-  CLAUDE_PLUGIN_ROOT="$SCRIPT_DIR" bash "$SCRIPT_DIR/hooks/install-agent.sh"
-  if [ -f "$HOME/.claude/agents/agent-companion.md" ]; then
-    CLAUDE_STATUS="agent installed; permissions pending"
-    ok "subagent installed at ~/.claude/agents/agent-companion.md"
-  else
-    fail "subagent install hook ran but file not found — check $SCRIPT_DIR/hooks/install-agent.sh"
-    exit 1
-  fi
+  host_paths claude "$SCRIPT_DIR"
+  remove_retired_role
 
   # 5b. Permission allow-list — without an explicit allow rule, the first
   # invocation of a agent-bridge MCP tool can surface a permission
@@ -421,28 +442,21 @@ if [ "$DO_CLAUDE" = 1 ]; then
   fi
 
   # 5c. Diagnostic marker.
-  mkdir -p "$HOME/.claude/agent-companion"
-  printf "claude\n" > "$HOME/.claude/agent-companion/.host"
-  CLAUDE_STATUS="agent and permissions installed"
+  mkdir -p "$HOST_STATE_DIR"
+  printf "claude\n" > "$HOST_STATE_DIR/.host"
+  CLAUDE_STATUS="permissions installed"
   ok "diagnostic marker: ~/.claude/agent-companion/.host"
 
   echo ""
 fi
 
-# --- Codex-host install (local marketplace plugin + subagent TOML) ---
-#
-# Current Codex deliberately ignores mcp_servers added by an agent role: a
-# child may inherit its parent's MCP authority but may not expand it. Installing
-# the Codex-only plugin manifest is therefore required even for source-checkout
-# development. Re-adding the same local plugin atomically refreshes its cached
-# package, so this path remains idempotent during iteration.
-
+# --- Codex marketplace installation ---
 if [ "$DO_CODEX" = 1 ]; then
   STEP="Codex plugin installation"
   printf "=== Codex CLI host install ===\n"
-  CODEX_DATA_ROOT="${CODEX_HOME:-$HOME/.codex}"
+  host_paths codex "$SCRIPT_DIR"
   # Codex requires an explicit CODEX_HOME to exist before plugin commands.
-  mkdir -p "$CODEX_DATA_ROOT"
+  mkdir -p "$HOST_CONFIG_DIR"
 
   # 6a. Build and install/refresh the local Codex plugin. The manifest owns the
   # MCP registration and plugin-scoped hooks; no root .mcp.json is installed,
@@ -467,7 +481,7 @@ if [ "$DO_CODEX" = 1 ]; then
 
   PLUGIN_RESULT=""
   if PLUGIN_RESULT="$(codex plugin add agent-companion@agent-companion --json)"; then
-    CODEX_STATUS="plugin installed; MCP, agent and hooks pending verification"
+    CODEX_STATUS="plugin installed; MCP and hooks pending verification"
     ok "Codex plugin installed/refreshed"
   else
     fail "Codex plugin install failed"
@@ -506,30 +520,10 @@ if [ "$DO_CODEX" = 1 ]; then
     fail "Codex installed the plugin but did not register its agent-bridge MCP transport"
     exit 1
   fi
-  STEP="Codex agent and hooks"
+  STEP="Codex hooks"
   ok "Codex agent-bridge MCP registration verified"
 
-  # 6b. Eagerly materialize the TOML subagent from the installed package.
-  # SessionStart repeats this after upgrades, but doing it now makes the next
-  # fresh Codex session usable even before any hook has run.
-  printf "Materializing subagent at %s/agents/agent-companion.toml...\n" "$CODEX_DATA_ROOT"
-  CLAUDE_PLUGIN_ROOT="$INSTALLED_PLUGIN_ROOT" \
-    /bin/bash "$INSTALLED_PLUGIN_ROOT/hooks/install-agent-codex.sh"
-  AGENT_DEST="$CODEX_DATA_ROOT/agents/agent-companion.toml"
-  AGENT_SENTINEL="# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent-codex.sh) — edits will be overwritten on next session"
-  AGENT_EXPECTED="$(mktemp)"
-  {
-    printf '%s\n' "$AGENT_SENTINEL"
-    /bin/cat "$INSTALLED_PLUGIN_ROOT/templates/agent-companion.toml"
-  } > "$AGENT_EXPECTED"
-  if [ -f "$AGENT_DEST" ] && cmp -s "$AGENT_DEST" "$AGENT_EXPECTED"; then
-    ok "subagent installed at $AGENT_DEST"
-    rm -f "$AGENT_EXPECTED"
-  else
-    rm -f "$AGENT_EXPECTED"
-    fail "cannot verify $AGENT_DEST; a user-owned file at that path is preserved and must be moved or reconciled manually"
-    exit 1
-  fi
+  remove_retired_role
 
   # 6c. Remove only this project's pre-plugin managed global hook entries.
   # Current installs use hooks/hooks-codex.json from plugin scope; leaving the
@@ -554,11 +548,20 @@ if [ "$DO_CODEX" = 1 ]; then
     exit 1
   fi
 
-  # 6e. Diagnostic marker.
-  mkdir -p "$CODEX_DATA_ROOT/agent-companion"
-  printf "codex\n" > "$CODEX_DATA_ROOT/agent-companion/.host"
-  CODEX_STATUS="plugin, MCP, agent and hooks installed/verified"
-  ok "diagnostic marker: $CODEX_DATA_ROOT/agent-companion/.host"
+  # 6e. Opt-in: how long Codex keeps a conversation you left loaded, and so its bridge, its jobs and its wakes.
+  if [ -n "$UNLOAD_DELAY" ]; then
+    if node "$SCRIPT_DIR/scripts/install-codex-unload-delay.mjs" "$UNLOAD_DELAY"; then
+      warn "Codex reads thread_unload_delay_secs when its app-server daemon starts: run 'codex app-server daemon restart' (it stops running Codex work) or restart Codex."
+    else
+      fail "writing Codex's thread_unload_delay_secs failed — see error above"; exit 1
+    fi
+  fi
+
+  # 6f. Diagnostic marker.
+  mkdir -p "$HOST_STATE_DIR"
+  printf "codex\n" > "$HOST_STATE_DIR/.host"
+  CODEX_STATUS="plugin, MCP and hooks installed/verified"
+  ok "diagnostic marker: $HOST_STATE_DIR/.host"
 
   echo ""
 fi

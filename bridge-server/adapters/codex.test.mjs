@@ -1,7 +1,7 @@
 import '../../test/sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
@@ -311,13 +311,15 @@ test('start failure becomes failed runtime_unavailable with cleanup', async (t) 
 
 test('unknown history fails HistoryUnavailable without starting a replacement', async (t) => {
   const h = setup(t);
-  mkdirSync(join(h.records.dir, 'threads'), { recursive: true });
-  writeFileSync(join(h.records.dir, 'threads', 'child.sid'), 'missing-thread');
-  h.records._write('jobs', 'legacy', { thread: 'child', target: 'codex', startedAt: 1 });
+  const first = await h.send();
+  await h.emit(terminal());
+  await h.wait(first.executionId);
+  rmSync(h.env.CODEX_TEST_HISTORY);
+  const offset = h.trace().length;
   const result = await h.send();
   assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'history_unavailable');
   assert.equal(h.records.readExecution(result.executionId).terminal.error, 'HistoryUnavailable');
-  assert.deepEqual(h.trace().filter((m) => m.method.startsWith('thread/')).map((m) => [m.method, m.params.threadId]), [['thread/resume', 'missing-thread']]);
+  assert.deepEqual(h.trace().slice(offset).filter((m) => m.method.startsWith('thread/')).map((m) => [m.method, m.params.threadId]), [['thread/resume', 'T1']]);
 });
 
 test('transport death before terminal rejects ProviderLost and preserves partial text', async (t) => {
@@ -566,7 +568,7 @@ for (const mode of ['queue', 'interrupt']) test(`${mode} continues with a distin
 
 test('controller steer belongs to the active native turn and cannot create a second answer', async t => {
   const h = setup(t), { executionId } = await h.send();
-  const reply = h.controller.steer({ owner: 'child', executionId, text: 'STEER-B' });
+  const reply = h.controller.intervene({ owner: 'child', executionId, text: 'STEER-B', from: 'caller', mode: 'steer' });
   await until(() => h.trace().some(f => f.method === 'turn/steer'));
   // Completion may arrive before the steer confirmation promise is settled.
   await h.emit(note('item/completed', { threadId: 'T1', turnId: 'TURN1',
