@@ -56,20 +56,18 @@ Each companion's `capabilities.interventions` contains `{ default, steer, queue,
 The lead calls its session's bridge directly. Each job runs its own companion
 process. [Current architecture](docs/ARCHITECTURE.md#flow)
 
+![The lead reaches a companion through agent-bridge; results come back by hook, companion_wait or a wake](assets/readme/architecture.png)
+
 <details>
-<summary>Earlier subagent design (recording and diagram)</summary>
+<summary>Earlier subagent design (recording)</summary>
 
 ![Claude Code receiving a Codex answer through the earlier subagent](assets/readme/demo.gif)
-
-![Retired subagent architecture](assets/readme/architecture.png)
 
 </details>
 
 ## Supported Companions
 
-![Companion capabilities](assets/readme/target-matrix.png)
-
-The image shows an earlier release. The table lists the current capabilities.
+![Companion capabilities](assets/readme/companion-matrix.png)
 
 | Companion | Per-job runtime | Follow-up by cold resume | In-flight messages (default first) | Model selection | History |
 | --- | --- | --- | --- | --- | --- |

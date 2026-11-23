@@ -1,7 +1,7 @@
 # README image specifications
 
-The three PNGs in this directory are generated bitmaps, produced on 2026-11-06
-with Codex's `imagegen` skill (built-in `image_gen` tool). There is no vector
+The PNGs in this directory are generated bitmaps, produced on 2026-11-23 with
+Codex's built-in image tool for the 1.0.0 thread design. There is no vector
 source. To regenerate, give an image model the shared style and one
 specification below, then check every label against the text here before
 committing; CI only checks that the files exist.
@@ -9,63 +9,66 @@ committing; CI only checks that the files exist.
 ## Shared style
 
 Flat vector-style illustration on a solid dark navy background (#0f172a).
-Electric teal as the only accent, plus white and soft gray. Clean geometric
-shapes, generous whitespace. No photorealism, gradients, gloss, logos,
+Electric teal (#2dd4bf) as the only accent, plus white and soft gray. Clean
+geometric shapes, generous whitespace. No photorealism, gradients, gloss, logos,
 trademarks, watermark or text beyond the labels specified. Readable sans-serif
-labels. Landscape, 16:9 or 2:1.
+labels, spelled exactly as given. Landscape, 16:9 or 2:1.
 
 ## hero.png
 
-Concept: "Come with any harness and attach any companion of your choice."
-One terminal window on the left labelled `harness` (the only text inside it), a
-rounded node in the middle labelled `agent-companion`, four identical companion
-nodes fanned out on the right labelled `Codex`, `OpenCode`, `Copilot`,
-`Antigravity`. One line from harness to agent-companion, four lines from there
-to the companions. Title `Agent Companion` top-left. Nothing else.
-Kept variant: solid navy terminal with a gray frame, teal-filled centre node,
+Concept: "Your own conversation talks to any companion."
+One terminal window on the left labelled `Claude Code · Codex CLI` (the only
+text inside it), a rounded node in the middle labelled `agent-bridge`, five
+identical companion nodes fanned out on the right labelled `Codex`,
+`OpenCode`, `Copilot`, `Antigravity`, `Claude Code`. One line from the
+terminal to agent-bridge, five lines from there to the companions. Title
+`Agent Companion` top-left. Nothing else.
+Style: solid navy terminal with a gray frame, teal-filled centre node,
 outlined companion nodes.
 
 ## architecture.png
 
-Left-to-right diagram of the shipped design, boxes in this order:
+Left-to-right diagram of the shipped design, four boxes in this order:
 
-1. `Harness (Claude Code / Codex CLI)`
-2. `agent-companion subagent`
-3. `agent-bridge (MCP, session scope)`
-4. `Controller: one per answer`, containing `process group`, `owner attachment`,
+1. `Lead` with the subtitle `your Claude Code or Codex CLI conversation`
+2. `agent-bridge` with the subtitle `MCP, one per session`, containing
+   `companion_* tools` and `threads th-…`
+3. `Controller: one per job`, containing `process group` and
    `immutable result`
-5. `Cold companion runtime`, containing `Codex app-server`, `OpenCode server`,
-   `ACP: Antigravity, Copilot`
+4. `Cold companion runtime`, containing `Codex app-server`, `OpenCode server`,
+   `ACP: Antigravity, Copilot`, `Claude Code stream-json`
 
-Above the controller: `stop hooks -> stop markers` with an arrow into the
-controller. Below: `bridge loss -> cleanup watcher` with an arrow to the
-runtime. Footer: `Native history survives; a follow-up resumes it cold.`
-Kept variant: crisp rectangular boxes, gray outlines, teal connectors.
+Arrows left to right between the boxes. One return arrow along the top from
+the controller back to the lead, labelled
+`result: hook · companion_wait · wake`. Below the controller:
+`bridge loss -> cleanup watcher` with an arrow to the runtime. Footer:
+`Native history survives; a follow-up on the thread resumes it cold.`
+Style: crisp rectangular boxes, gray outlines, teal connectors.
 
-## target-matrix.png
+## companion-matrix.png
 
-Title `Companion capabilities`. Columns `Companion`, `Transport`, `Follow-up`,
-`In-flight reply`, `Cancel`. Rows:
+Title `Companion capabilities`. Columns `Companion`, `Runtime`, `Follow-up`,
+`Steer`, `Queue`, `Interrupt`, `Cancel`. Rows:
 
-| Companion | Transport | Follow-up | In-flight reply | Cancel |
-| --- | --- | --- | --- | --- |
-| Codex CLI | app-server | yes | yes | yes |
-| OpenCode 2.x | HTTP server | yes | yes | yes |
-| Google Antigravity | ACP | yes | yes | yes |
-| GitHub Copilot CLI | ACP | not yet | no | yes |
+| Companion | Runtime | Follow-up | Steer | Queue | Interrupt | Cancel |
+| --- | --- | --- | --- | --- | --- | --- |
+| Codex CLI | app-server | yes | yes | yes | yes | yes |
+| OpenCode 2.x | HTTP server | yes | yes | yes | yes | yes |
+| Google Antigravity | ACP | yes | yes | yes | yes | yes |
+| Claude Code | stream-json | yes | no | yes | yes | yes |
+| GitHub Copilot CLI | ACP | not yet | no | no | no | yes |
 
 Keep this table in step with the capability table in README.md.
-Kept variant: full gray grid, teal header row, teal `yes`, gray `no`.
+Style: full gray grid, teal header row, teal `yes`, gray `no` and `not yet`.
 
 ## ../../.claude-plugin/icon.png
 
-Square 1024x1024 listing icon for the Claude plugin directory, generated the
-same day with the same tool. Solid #0f172a background, flat vector style, teal
-(#2dd4bf) and white only. One teal-filled rounded-square node in the centre, a
-single white line entering from the left, four white lines fanning out to four
-small outlined rounded-square nodes stacked on the right. Smooth curved
-connectors, bold strokes, rounded caps, generous padding, no frame, no text,
-no logos, no gradients, no shadows.
+Square 1024x1024 listing icon for the Claude plugin directory. Solid #0f172a
+background, flat vector style, teal (#2dd4bf) and white only. One teal-filled
+rounded-square node in the centre, a single white line entering from the left,
+five white lines fanning out to five small outlined rounded-square nodes
+stacked on the right. Smooth curved connectors, bold strokes, rounded caps,
+generous padding, no frame, no text, no logos, no gradients, no shadows.
 
 ## demo.gif
 

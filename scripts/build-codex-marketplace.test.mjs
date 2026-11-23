@@ -25,7 +25,7 @@ test('builds a Codex marketplace root with a nested plugin package', () => {
     const manifestPath = path.join(pluginRoot, '.codex-plugin', 'plugin.json');
     const heroPath = path.join(pluginRoot, 'assets', 'readme', 'hero.png');
     const architecturePath = path.join(pluginRoot, 'assets', 'readme', 'architecture.png');
-    const targetMatrixPath = path.join(pluginRoot, 'assets', 'readme', 'target-matrix.png');
+    const companionMatrixPath = path.join(pluginRoot, 'assets', 'readme', 'companion-matrix.png');
     const hookPath = path.join(pluginRoot, 'hooks', 'hooks-codex.json');
     const bridgeLauncherPath = path.join(pluginRoot, 'hooks', 'launch-agent-bridge.sh');
     const marketplacePath = path.join(out, '.agents', 'plugins', 'marketplace.json');
@@ -49,7 +49,7 @@ test('builds a Codex marketplace root with a nested plugin package', () => {
     assert.equal(manifest.interface.displayName, 'Agent Companion');
     assert.ok(existsSync(heroPath));
     assert.ok(existsSync(architecturePath));
-    assert.ok(existsSync(targetMatrixPath));
+    assert.ok(existsSync(companionMatrixPath));
     assert.ok(existsSync(hookPath));
     assert.ok(existsSync(bridgeLauncherPath));
     assert.equal(existsSync(path.join(pluginRoot, '.mcp.json')), false,

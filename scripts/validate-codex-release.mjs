@@ -134,7 +134,7 @@ function validateMarketplaceTree(marketplaceRoot) {
 
   assertExists(path.join(pluginRoot, 'assets', 'readme', 'hero.png'), 'README assets');
   assertExists(path.join(pluginRoot, 'assets', 'readme', 'architecture.png'), 'README architecture asset');
-  assertExists(path.join(pluginRoot, 'assets', 'readme', 'target-matrix.png'), 'README target matrix asset');
+  assertExists(path.join(pluginRoot, 'assets', 'readme', 'companion-matrix.png'), 'README companion matrix asset');
   assertMissing(path.join(pluginRoot, 'scripts', 'build-codex-marketplace.test.mjs'), 'test file in release package');
   assertMissing(path.join(pluginRoot, 'scripts', 'validate-codex-release.test.mjs'), 'validator test file in release package');
   assertMissing(path.join(pluginRoot, '.plugin-data'), 'plugin data directory in release package');
@@ -161,7 +161,7 @@ function validateInstalledTree(codexHome, installedPath) {
   assertExists(path.join(resolvedInstalledPath, 'bridge-server', 'server.mjs'), 'installed bridge server');
   assertExists(path.join(resolvedInstalledPath, 'assets', 'readme', 'hero.png'), 'installed README assets');
   assertExists(path.join(resolvedInstalledPath, 'assets', 'readme', 'architecture.png'), 'installed README architecture asset');
-  assertExists(path.join(resolvedInstalledPath, 'assets', 'readme', 'target-matrix.png'), 'installed README target matrix asset');
+  assertExists(path.join(resolvedInstalledPath, 'assets', 'readme', 'companion-matrix.png'), 'installed README companion matrix asset');
   assertMissing(path.join(resolvedInstalledPath, 'scripts', 'validate-codex-release.test.mjs'), 'test file in installed package');
 }
 
