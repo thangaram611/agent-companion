@@ -356,8 +356,10 @@ Companion/model refusals include `COMPANION_UNCONFIGURED`, `COMPANION_UNSUPPORTE
 ACP authentication refusals use `AUTH_REQUIRED`: relay them as setup problems
 with the sign-in steps; do not retry or switch companion.
 See historical substitution failure [F5](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
-Missing history fails as `history_unavailable`; unsupported cold follow-up fails
-as `FOLLOWUP_UNSUPPORTED`.
+A follow-up whose saved history cannot be opened fails as `history_unavailable`;
+a new thread whose companion session cannot be created fails as
+`history_create_failed` (Copilot's 403 on an unentitled account, a refused model);
+unsupported cold follow-up fails as `FOLLOWUP_UNSUPPORTED`.
 A missing delivery acknowledgement produces `delivery_unknown`, terminates the
 runtime and is never automatically resent.
 

@@ -97,11 +97,12 @@ export class Controller {
       a.started = true;
       await bounded(this.clock, () => a.adapter.start({ cwd: a.record.cwd, env: this.env, ...selection, supervisor: a.supervisor, historyId: this.records.readThread(a.record.thread).historyId }), PROTOCOL_MS, 'runtime_unavailable');
       if (a.stopping) return;
-      phase = 'history_unavailable';
       const threadRecord = this.records.readThread(a.record.thread);
-      const history = await bounded(this.clock, () => a.adapter.openHistory({ historyId: threadRecord.historyId, ...selection }), PROTOCOL_MS, 'history_unavailable');
+      // A follow-up opens saved history; a new thread creates it. The lead needs to know which one failed.
+      phase = threadRecord.historyId ? 'history_unavailable' : 'history_create_failed';
+      const history = await bounded(this.clock, () => a.adapter.openHistory({ historyId: threadRecord.historyId, ...selection }), PROTOCOL_MS, phase);
       if (a.stopping) return;
-      if (!history?.historyId || (threadRecord.historyId && history.historyId !== threadRecord.historyId)) throw error('history_unavailable');
+      if (!history?.historyId || (threadRecord.historyId && history.historyId !== threadRecord.historyId)) throw error(phase);
       a.record.historyId = history.historyId;
       a.record.effectiveModel = history.effectiveModel;
       a.record.effectiveEffort = history.effectiveEffort;

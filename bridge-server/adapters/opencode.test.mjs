@@ -162,7 +162,7 @@ for (const mode of ['model-rejected', 'model-ignored', 'bad-model-ack']) test(`$
   const h = setup(t, { FAKE_OPENCODE_MODE: mode });
   const result = await h.settle(h.send({ model: 'fixture/chosen' }));
   assert.equal(result.outcome, 'failed');
-  assert.equal(result.detail, 'history_unavailable');
+  assert.equal(result.detail, 'history_create_failed');
   assert.equal(h.requests().filter(r => r.path?.endsWith('/prompt')).length, 0);
   assert.equal(result.stopEvidence.gone, true);
 });
@@ -326,7 +326,7 @@ test('OpenCode effort selects a variant on its configured model', async t => {
 
 for (const [mode, code] of [
   ['bad-model-ack', 'CAPABILITY_UNAVAILABLE'],
-  ...['model-rejected', 'model-write-lost', 'model-read-lost', 'session-lost-after-model'].map(mode => [mode, 'history_unavailable']),
+  ...['model-rejected', 'model-write-lost', 'model-read-lost', 'session-lost-after-model'].map(mode => [mode, 'history_create_failed']),
 ]) test(`OpenCode ${mode} effort selection is ${code} before prompting`, async t => {
   const h = setup(t, { FAKE_OPENCODE_MODE: mode });
   const refused = await h.send({ effort: 'low' });

@@ -76,7 +76,7 @@ for (const fault of ['session-new-error', 'session-new-empty-error', 'session-ne
     const h = setup(t, { descriptor: getCompanionById('copilot'), env: { ACP_FIXTURE_FAULT: fault } });
     h.controller.providers.copilot = h.controller.providers.fake;
     const sent = await callTool({ action: 'send', companion: 'copilot', cwd: h.dir, task: 'hello' }, { controller: h.controller });
-    assert.equal(sent.status, 'failed'); assert.equal(sent.meta.detail, 'history_unavailable');
+    assert.equal(sent.status, 'failed'); assert.equal(sent.meta.detail, 'history_create_failed');
     const message = '403 "unauthorized: not authorized to use this Copilot feature\\n"';
     if (fault === 'session-new-error') assert.equal(sent.content, message);
     else assert.doesNotMatch(sent.content, /data|headers|\[object Object\]/);
@@ -472,7 +472,7 @@ for (const effort of [undefined, 'low']) test(`Antigravity config connection los
   const h = setup(t, { descriptor: getCompanionById('antigravity') });
   h.childEnv.ACP_FAKE_MODEL_DISCONNECT = '1';
   const failed = await h.send({ model: 'gemini-3.8-flash', effort });
-  assert.equal(failed.detail, 'history_unavailable');
+  assert.equal(failed.detail, 'history_create_failed');
   assert.equal(h.records.readJob(failed.jobId).terminal.error, 'HistoryUnavailable');
   assert.equal(h.frames('session/set_config_option').length, 1);
   assert.equal(h.frames('session/prompt').length, 0);

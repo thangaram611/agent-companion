@@ -35,7 +35,7 @@ for (const failed of [false, true]) test(`Antigravity end_turn with ${failed ? '
   if (failed) assert.equal(result.detail, 'INVALID_ARGUMENT');
 });
 
-for (const [method, detail] of [['start', 'runtime_unavailable'], ['openHistory', 'history_unavailable'], ['deliver', 'delivery_unknown']]) {
+for (const [method, detail] of [['start', 'runtime_unavailable'], ['openHistory', 'history_create_failed'], ['deliver', 'delivery_unknown']]) {
   test(`wrapped ${method} failure relays the innermost message only, on one bounded line`, async () => {
     const h = setup(), create = h.controller.providers.fake.create;
     const message = '  provider refused\n\t' + 'x'.repeat(600);
@@ -211,7 +211,7 @@ test('unqualified follow-up and history failure never create replacement convers
   assert.equal(h.supervisors.length, 1);
   const broken = setup({ historyCrash: true });
   const result = await broken.send();
-  assert.equal(result.detail, 'history_unavailable');
+  assert.equal(result.detail, 'history_create_failed');
   assert.equal(calls(broken.adapters[0], 'deliver').length, 0);
 });
 
