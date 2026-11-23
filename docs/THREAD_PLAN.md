@@ -1,8 +1,8 @@
 # Threads: the lead talks to the companion without a subagent: plan
 
-Status: building on `feat/threads` (2026-11-23). Steps 0 to 2 are done;
-steps 3 to 7 are next, in three tracks. Every fact under Evidence was measured on
-2026-11-22 unless it says otherwise.
+Status: building on `feat/threads` (2026-11-23). Steps 0 to 7 are done and
+checked live on both hosts; step 8 is next. Every fact under Evidence was measured
+on 2026-11-22 unless it says otherwise.
 
 ## Goal
 
@@ -51,8 +51,13 @@ the design and stand once this plan is approved.
 10. **A thread belongs to the conversation that started it.** The listing shows
     only that conversation's threads. After `/clear` or in a new session the old
     threads are not listed and not woken; they stay on the companion page.
+    Codex keeps a conversation the user left loaded for about a minute: a job
+    ending then wakes it unseen, and one still running ends in bridge loss
+    (2026-11-23: nothing tells the bridge which conversation a Codex window
+    shows, so no gate is possible without asking Codex's daemon).
 11. **No shared bridge server.** The bridge stays the host session's own child,
-    and no job runs outside the lead's session.
+    and no job runs outside the lead's session. On Codex the session is the
+    daemon's conversation, so each conversation's bridge is the daemon's child.
 12. **Antigravity is in scope again** (pause lifted 2026-11-22).
 13. **Six tools, one changed set.** `agent_reply` folds into `agent_send` (a send
     to a running thread is an intervention with a `mode`), and `agent_read` is
@@ -145,9 +150,22 @@ OpenCode model or `gemini-3.8-flash-low`.
   turn on an idle root at once, with default settings. To a busy root it started
   a new turn right after the running one. Two in a row gave two turns. The text
   arrives as a user message and `UserPromptSubmit` fires for it.
-- **`/new`.** The new conversation has a new thread id and Codex starts a second
-  MCP server process for it; the first keeps running. A queue to the thread the
-  user left is accepted and starts no turn.
+- **The daemon** (2026-11-23). By default the TUI runs its conversations in a
+  managed app-server daemon per Codex home; `--dangerously-bypass-hook-trust` or
+  `--no-daemon` keeps them in the TUI. The bridge and every hook are the
+  daemon's children, shared by every window on that home.
+- **`/new` and `/quit`** (2026-11-23, both modes). `/new` starts the new
+  conversation and its own MCP server at once and leaves the old one loaded.
+  SessionStart for the new one fires only at its first prompt; nothing ends the
+  old one. A queue to the old one starts a turn that no screen draws, and its
+  prompt hook runs. Codex shuts a conversation down once it is idle about a
+  minute with no client ("has no subscribers and is idle"), closing its MCP
+  server: a job still running ended in bridge loss 62 s after `/new`. After
+  `/quit` the same happens with no window open. The research note that a queue
+  to a left thread starts no turn had no run behind it.
+- **Subagents** (2026-11-23). A native subagent gets its own MCP server and fires
+  no SessionStart; its hooks carry the root's `session_id` and its own thread id
+  as `agent_id`.
 - **Output cut.** A 71.8k-character tool result reached an unknown model as about
   12k: head, `…N tokens truncated…`, tail, no file. With
   `[mcp_servers.<server>.tools.<tool>] output_token_limit = 40000` the whole
@@ -275,7 +293,8 @@ Three layers, in this order on every host:
 | Lead ends its turn | Nothing; the job runs and the wake follows |
 | Esc, cancelled wait, stopped background wait | The wait returns; the job runs on |
 | Compaction | Same conversation id; `agent_status` lists the threads again |
-| `/clear` (Claude), `/new` (Codex) | Old threads are not listed and not woken; they stay on the companion page |
+| `/clear` (Claude) | Old threads are not listed and not woken; their jobs run on; they stay on the companion page |
+| `/new`, `/quit` (Codex) | The conversation left stays loaded until idle about a minute: a job ending then wakes it unseen. Codex then shuts it down, which is bridge loss for a job still running. Its threads stay on the companion page |
 | Host session exits | Bridge loss: owned process trees are stopped and results fenced, as today |
 | `agent_cancel`, user cancel | The job stops; the thread stays and a later send resumes |
 
@@ -504,10 +523,12 @@ the scripted model, compared byte for byte with the stored result.
 - Tag unread news with the lead's conversation id, not the bridge's inherited
   session id.
 
-Check: scenarios against a fake socket and a fake `codex`. Live on each host:
-idle wake, busy wake, two results at once, `/clear` or `/new` (no wake, thread
-still on the companion page), an idle hour, and two leads in one project each
-receiving only their own results.
+Check: scenarios against a fake socket and a fake `codex`. Live on each host,
+Codex through its daemon as installed: idle wake, busy wake, two results at
+once, `/clear` (no wake, thread still on the companion page) or `/new` (a job
+ending within the minute wakes only the conversation left; one still running
+ends in bridge loss; both threads stay on record), an idle hour, and two leads
+in one project each receiving only their own results.
 
 ### Step 6: Recursion guard
 
@@ -571,6 +592,9 @@ The tracker's terms note still applies to Antigravity: the bridge must not wrap
   silently and the result still arrives through the hooks at the next prompt or
   through wait. The probe detects the change.
 - **`codex queue` is experimental.** Same fallback.
+- **A Codex conversation the user left can get an unseen turn.** For about a
+  minute after `/new` or `/quit` a finished job wakes it; the lead runs that
+  turn in its own permission mode. A gate needs the daemon's client list.
 - **A Claude setting can stop the wake.** If the user sets messages from other
   sessions to hold or refuse, the bridge's own post is held or dropped too
   (docs). Same fallback.
