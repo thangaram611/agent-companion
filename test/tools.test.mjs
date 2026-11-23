@@ -47,7 +47,7 @@ const scenarios = {
     assert.match(sent.thread, /^th-[a-f0-9]{10}$/);
     assert.deepEqual(sent, { ok: true, status: 'still_running', thread: sent.thread, job_id: sent.job_id,
       target: 'claude', selected_model: null, selected_effort: null, effective_model: 'effective-model',
-      effective_effort: null, permission_mode: 'bypassPermissions' });
+      effective_effort: null, permission_mode: 'bypassPermissions', delivery: { wake: null, reason: 'missing_socket', fallback: 'agent_wait' } });
     assert.deepEqual(h.adapters[0].calls.filter(([name]) => name === 'deliver').map(([, input]) => input.text), [task]);
   },
   async 'host identity gates every protected call before work'() {

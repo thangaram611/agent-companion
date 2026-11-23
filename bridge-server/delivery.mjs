@@ -29,6 +29,7 @@ export function publish(records, execution, result) {
     // A tool may have claimed and cleared news between the check and mark.
     if (existsSync(path)) unread(records, lead);
   }
+  return lead;
 }
 
 // Install the complete receipt exclusively. A racing tool can identify the
@@ -70,6 +71,10 @@ export function unread(records, lead) {
 
 const reference = (thread, offset) =>
   `agent_read({ thread: ${JSON.stringify(thread)}${offset ? ', offset: ' + offset : ''} })`;
+
+export function wakeNotice(execution, result) {
+  return `agent-companion: ${execution.provider} finished thread ${result.owner} (${executionStatus(result)}), job ${result.executionId}. ${reference(result.owner)} reads it.`;
+}
 
 function excerpt(result, limit) {
   const answer = result.text ?? '';

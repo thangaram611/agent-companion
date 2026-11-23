@@ -1,6 +1,7 @@
-import { readFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { Records } from '../bridge-server/controller/records.mjs';
+import { writePrivateFileAtomic } from '../lib/runtime-paths.mjs';
 import { hookAnswer } from '../bridge-server/delivery.mjs';
 import { detectHost, HOSTS, refuseRealHomeUnderTest } from '../lib/hosts/index.mjs';
 
@@ -15,6 +16,12 @@ if (event === 'pre-tool') {
   output({ hookEventName: 'PreToolUse', updatedInput: { ...input, lead } });
 } else {
   if (event === 'session-start') {
+    const socket = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+    const current = host.sessionFile?.(process.env);
+    if (current && typeof session === 'string' && session) {
+      mkdirSync(dirname(current), { recursive: true, mode: 0o700 });
+      writePrivateFileAtomic(current, JSON.stringify({ socket, session, at: Date.now() }) + '\n');
+    }
     const file = join(host.configDir(), 'agents', host.id === HOSTS.codex.id ? 'agent-companion.toml' : 'agent-companion.md');
     refuseRealHomeUnderTest(file, 'agent file');
     try {

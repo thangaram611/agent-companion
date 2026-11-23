@@ -6,7 +6,7 @@ import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs
 import { defaultTargetInfo, getTarget, TARGETS, modelHint, listTargets, listTargetIds } from '../lib/target-registry.mjs';
 import { lastRuns } from './last-runs.mjs';
 import { getCodexContractStatus } from './adapters/codex.mjs';
-import { executionStatus, publish, toolAnswer } from './delivery.mjs';
+import { executionStatus, publish, toolAnswer, wakeNotice } from './delivery.mjs';
 import { Controller } from './controller/controller.mjs';
 import { Records, firstLine } from './controller/records.mjs';
 import { systemClock } from './controller/clock.mjs';
@@ -82,8 +82,19 @@ function runningEnvelope(view, action, now) {
     hint: 'call agent_wait({ job_id, max_wait_sec }) again to continue blocking.' };
 }
 
+// Observe only MCP waits on this bridge. Controller requests also include
+// sends, cancels and interventions, and are detached before onResult fires.
+const pendingWaits = new WeakMap();
 async function handleWait(args, active, request) {
-  const response = await active.wait({ owner: args.thread, executionId: args.job_id, timeoutMs: clampWaitSec(args.max_wait_sec) * 1000, ...request });
+  const waits = pendingWaits.get(active) ?? new Set();
+  pendingWaits.set(active, waits);
+  const waiter = { id: args.job_id, signal: request.signal };
+  waits.add(waiter);
+  let response;
+  try {
+    response = await active.wait({ owner: args.thread, executionId: args.job_id,
+      timeoutMs: clampWaitSec(args.max_wait_sec) * 1000, ...request });
+  } finally { waits.delete(waiter); }
   if (response?.status === 'user_intervened') return asJson({ ok: true, action: 'wait', status: response.status,
     thread: args.thread, job_id: args.job_id, intervention: response.intervention });
   const view = active.status({ executionId: args.job_id });
@@ -245,6 +256,10 @@ function refuse(action, code, fields = {}) {
   return asJson({ ok: false, action, status: code, code, ...fields });
 }
 
+function sendDelivery(lead, env) {
+  return { ...HOSTS[lead.host].wakeStatus(lead, env), fallback: 'agent_wait' };
+}
+
 async function handleSend(args, active, request, conversation) {
   const { task, mode, lead } = args;
   const cwd = args.cwd ?? conversation?.cwd;
@@ -265,7 +280,8 @@ async function handleSend(args, active, request, conversation) {
         const { id, ...ack } = await active.intervene({ from: 'caller', owner: thread, executionId: e.executionId,
           mode: selected, text: task, ...request });
         if (!ack.ok) return asJson({ action: 'send', ...ack });
-        return asJson({ ...ack, action: 'send', status: 'intervened', thread, job_id: e.executionId, mode: selected, intervention_id: id });
+        return asJson({ ...ack, action: 'send', status: 'intervened', thread, job_id: e.executionId, mode: selected, intervention_id: id,
+          delivery: sendDelivery(lead, active.env) });
       }
     }
   }
@@ -282,7 +298,7 @@ async function handleSend(args, active, request, conversation) {
     return refuse('send', sent.error ?? 'bridge_loss', { thread, job_id: sent.executionId, status: sent.state });
   }
   if (sent.outcome) return ownerTerminalResponse(active.records, active.records.readExecution(sent.executionId), sent, 'send', request);
-  return asJson({ ok: true, status: 'still_running', thread, job_id: sent.executionId, target: companion,
+  return asJson({ ok: true, status: 'still_running', thread, job_id: sent.executionId, target: companion, delivery: sendDelivery(lead, active.env),
     selected_model: sent.selectedModel ?? null, selected_effort: sent.selectedEffort ?? null,
     effective_model: sent.effectiveModel ?? null, effective_effort: sent.effectiveEffort ?? null, permission_mode: sent.permissionMode ?? null });
 }
@@ -463,11 +479,18 @@ function ownerTerminalResponse(records, execution, result, action, { signal }) {
 }
 
 export function createBridgeController({ env = process.env, records = new Records(), ...options } = {}) {
-  const safely = (fn) => (...args) => { try { fn(...args); } catch (err) { log('WARN', 'execution publication failed:', err.message); } };
-  return new Controller({ env, records, clock: systemClock,
-    providers: createProviders(env),
-    ...options, onResult: safely((execution, result) => publish(records, execution, result)),
+  const controller = new Controller({ env, records, clock: systemClock, providers: createProviders(env), ...options,
+    onResult(execution, result) {
+      try {
+        const lead = publish(records, execution, result);
+        const waits = pendingWaits.get(controller) ?? [];
+        const waiting = [...waits].some(w => w.id === execution.executionId && !w.signal?.aborted);
+        if (lead && !waiting) HOSTS[lead.host].wake(lead, wakeNotice(execution, result), env)
+          .catch(err => log('WARN', 'completion wake failed:', err.message));
+      } catch (err) { log('WARN', 'execution publication failed:', err.message); }
+    },
   });
+  return controller;
 }
 export async function recoverController(active) {
   for (const execution of active.records.listExecutions()) {
@@ -475,6 +498,8 @@ export async function recoverController(active) {
     if (conversation?.executionId === execution.executionId && execution.state !== 'closed') {
       await active.recover({ owner: execution.owner });
     }
+    // A startup scan can observe another bridge's live completion. Restore
+    // news here; only the bridge finishing the job attempts its wake.
     const result = active.records.readResult(execution.executionId);
     if (result) publish(active.records, execution, result);
   }
