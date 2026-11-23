@@ -15,7 +15,7 @@ resume, verified cleanup and host-identified leads are the acceptance contract. 
 [Claude report](../probes/host-qualification/claude/REPORT-2026-11-05.md) (2.1.318)
 and [Codex report](../probes/host-qualification/codex/REPORT-2026-11-05.md) (0.166.0)
 are measured host inputs, not installed-form cleanup qualification. Codex desktop,
-operator-only TUI rows, Copilot cold load and Claude companion smoke on both
+operator-only TUI rows and Claude companion smoke on both
 hosts remain open release gates. Those older reports establish Claude as a host,
 not Claude as a companion.
 
@@ -74,12 +74,13 @@ OpenCode companion:
 
 GitHub Copilot CLI companion:
 
-- `lib/target-registry.mjs` prefers native ACP prompt usage and falls back to
+- The ACP adapter prefers native prompt usage and falls back to
   OTEL. Its `usage_update` event is context occupancy, not per-turn tokens.
   Qualify usage on the installed CLI rather than assuming the wire shape from
   its version number.
-- Cold follow-up is refused until account access and cross-process session
-  loading are qualified. No critic footer or answer classification is added.
+- Copilot CLI 1.0.114 replayed saved history on local Ollama (2026-11-23).
+  The bridge requires replay on cold load and reapplies the model override.
+  GitHub-hosted models still get 403 on `session/new` on this account. No critic footer or answer classification is added.
   Supported model ids belong in `lib/state.mjs`.
 
 Codex CLI companion:
@@ -193,8 +194,8 @@ Manual smoke gates before a public tag (real delegations spend model tokens):
    reuse in a new process, default steer, cancel, a background command's file
    and final reply, model selection and bridge-loss cleanup. The probe logs
    whether the model waited in the prompt or the bridge kept the turn open.
-   Also qualify a real Copilot first send and usage, then
-   explicitly test `FOLLOWUP_UNSUPPORTED`; enable cold load only after its own gate.
+   For Copilot, qualify first-send usage on the installed CLI and verify cold
+   follow-up by recalling a value from the first job.
 10. OpenCode 2.x: verify new pid plus same native history on follow-up, canonical
     cwd/worktree and symlink cases, model changes and inherited/resolved model,
     transcript boundaries, cancellation and no surviving descendants. Two
@@ -237,5 +238,6 @@ and verify fresh CI on that exact commit before publication.
   delivery 0.6 s after the job ended, and `/quit` with
   `thread_unload_delay_secs = 0` ending a running job in bridge loss after
   3.5 s.
-- Open, as before: Codex desktop, Copilot cold load and older Claude Code
-  versions; gates 3, 4 and 7 to 11 were not rerun for this release.
+- Live bridge check, 2026-11-23 (isolated homes, local Ollama `gpt-oss:20b`, 32k context): Copilot CLI 1.0.114 recalled the code word on the same thread and refused steer with `intervention_unavailable` (reason `capability`). Claude Code 2.1.330 steer joined two messages in one turn. On both companions, queue ran a second turn. Interrupt ended the first turn as `interrupted` and answered in the second.
+- Codex desktop and older Claude Code versions remain open. Gates 3, 4 and
+  7 to 11 were not rerun in full for this release.

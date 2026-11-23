@@ -30,7 +30,8 @@ test('the Copilot spawn argv carries its permission flags and model selection us
     COPILOT_OTEL_FILE_EXPORTER_PATH: '/x/traces.jsonl',
   });
   assert.deepEqual(COPILOT.acp.rotate, ['otelTraces']);
-  assert.equal(COPILOT.acp.loadSession, false, 'Copilot sessions are process-local (github/copilot-cli#1767)');
+  assert.equal(COPILOT.acp.loadSession, true, 'Copilot 1.0.114 loads a saved session in a fresh process');
+  assert.equal(COPILOT.acp.loadRequiresReplay, true, 'a load that replays nothing is refused');
   assert.equal(COPILOT.acp.permission({}), 'all');
 
   assert.deepEqual(FAKE.acp.args({ model: null, env: {} }), ['--acp']);

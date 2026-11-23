@@ -486,7 +486,7 @@ test('cancel asks once, sends no text, and no takes it back', async ($, on) => {
   await ui.unmount()
 })
 
-test('Copilot takes cancel only: no box and no mode, cancel kept', async ($, on) => {
+test('a job recorded with no message modes (a Copilot job from an earlier release) takes cancel only: no box and no mode, cancel kept', async ($, on) => {
   const copilot = await boxed($, on, { companion: 'copilot', interventionModes: { default: null, steer: false, queue: false, interrupt: false } })
   expect(await copilot.ui.find({ key: 'message' })).toBeUndefined()
   expect(await copilot.ui.find({ key: 'mode' })).toBeUndefined()

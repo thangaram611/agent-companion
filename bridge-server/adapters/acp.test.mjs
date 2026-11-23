@@ -161,7 +161,7 @@ test('new session then cold follow-up loads the same history in a new process an
   assert.equal(second.nativeRefs.promptRequestId, h.frames('session/prompt')[1].id);
 });
 
-test('Copilot sets the session model before prompting and refuses cold follow-up', async (t) => {
+test('Copilot sets the session model before prompting and reapplies it after a cold load', async (t) => {
   const h = setup(t, { descriptor: getCompanionById('copilot'), env: { ACP_FIXTURE_USAGE: 'copilot', ACP_FAKE_MODELS: '["auto","local-model"]' } });
   const first = await h.finish(await h.send({ model: 'local-model' }));
   assert.equal(first.outcome, 'completed'); assert.equal(first.usage.input_tokens, 1234);
@@ -171,9 +171,11 @@ test('Copilot sets the session model before prompting and refuses cold follow-up
     ['initialize', 'session/new', 'session/set_config_option', 'session/prompt']);
   assert.deepEqual(h.frames('session/set_config_option')[0].params,
     { sessionId: first.nativeRefs.sessionId, configId: 'model', value: 'local-model' });
-  await assert.rejects(h.send({ text: 'follow-up' }), { code: 'FOLLOWUP_UNSUPPORTED' });
-  assert.equal(h.supervisors.length, 1); assert.equal(h.frames('session/new').length, 1);
-  assert.equal(h.frames('session/load').length, 0);
+  const next = await h.finish(await h.send({ text: 'follow-up' }));
+  assert.equal(next.outcome, 'completed'); assert.equal(next.effectiveModel, 'local-model');
+  assert.equal(h.supervisors.length, 2); assert.equal(h.frames('session/new').length, 1);
+  assert.deepEqual(h.frames('session/load').map(f => f.params.sessionId), [first.nativeRefs.sessionId]);
+  assert.deepEqual(h.frames('session/set_config_option').map(f => f.params.value), ['local-model', 'local-model']);
 });
 
 for (const model of ['bogus-model', 'local-model']) test(`Copilot refuses an unavailable or unconfirmed model before delivery: ${model}`, async t => {
@@ -348,12 +350,12 @@ test('inherited model is reported only when the native session reports one', asy
 
 test('provider factories use cached readiness without spawning and expose qualified capabilities', () => {
   writeCompanionChecks({ antigravity: { ready: true }, copilot: { ready: false } });
-  for (const [id, loadsHistory] of [['antigravity', true], ['copilot', false]]) {
+  for (const [id, ready] of [['antigravity', true], ['copilot', false]]) {
     const provider = acpProvider(id, { env: { PATH: '', COPILOT_BIN: '/missing', ANTIGRAVITY_BIN: '/missing' } });
-    assert.equal(provider.enabled, true); assert.equal(provider.ready, loadsHistory);
+    assert.equal(provider.enabled, true); assert.equal(provider.ready, ready);
     assert.equal(provider.modelAllowed('test-model'), isModelAllowedFor(id, 'test-model'));
     const { capabilities } = provider.create();
-    assert.deepEqual(capabilities, { followUp: loadsHistory, modelSelection: true, loadsHistory,
+    assert.deepEqual(capabilities, { followUp: true, modelSelection: true, loadsHistory: true,
       interventions: getCompanionById(id).capabilities.interventions });
     assert.equal(capabilities.interventions, getCompanionById(id).capabilities.interventions);
   }
@@ -388,10 +390,10 @@ for (const effort of ['ultra', 'low']) test(`Antigravity effort refusal for ${ef
   assert.equal(h.records.readThread('child').effortOverride, undefined);
 });
 
-for (const replay of ['empty', 'other-session']) test(`Antigravity refuses cold load with ${replay} replay before config or prompt`, async t => {
-  const h = setup(t, { descriptor: getCompanionById('antigravity'), env: { ACP_FAKE_LOAD_REPLAY: replay } });
+for (const [companion, selection] of [['antigravity', { model: 'gemini-3.8-flash', effort: 'low' }], ['copilot', { model: 'local-model' }]]) for (const replay of ['empty', 'other-session']) test(`${companion} refuses cold load with ${replay} replay before config or prompt`, async t => {
+  const h = setup(t, { descriptor: getCompanionById(companion), env: { ACP_FAKE_LOAD_REPLAY: replay, ACP_FAKE_MODELS: '["auto","local-model"]' } });
   const first = await h.finish(await h.send());
-  const next = await h.finish(await h.send({ model: 'gemini-3.8-flash', effort: 'low', text: 'follow-up' }));
+  const next = await h.finish(await h.send({ ...selection, text: 'follow-up' }));
   assert.equal(h.records.readJob(next.jobId).terminal.error, 'HistoryUnavailable');
   assert.equal(h.records.readThread('child').historyId, first.nativeRefs.historyId);
   assert.equal(h.frames('session/new').length, 1);
@@ -544,18 +546,21 @@ test('Antigravity waits for the cancelled prompt response, then sends only new t
   assert.equal(h.frames('initialize').length, 1); assert.equal(h.supervisors.length, 1);
 });
 
-test('Copilot refuses every intervention mode without writes, while cancel still works', async t => {
+// Copilot 1.0.114 cancels a running prompt when a second one arrives, so steer stays unavailable.
+test('Copilot refuses steer without writes; interrupt cancels, then it and the queued message run as later prompts', async t => {
   const h = setup(t, { descriptor: getCompanionById('copilot') });
   const sent = await h.send({ text: 'sleep:60000' });
-  for (const mode of ['steer', 'queue', 'interrupt']) {
-    assert.deepEqual(await input(h, sent, mode, 'not supported'), { ok: false, status: 'intervention_unavailable', reason: 'capability' });
-  }
+  assert.deepEqual(await input(h, sent, 'steer', 'not supported'), { ok: false, status: 'intervention_unavailable', reason: 'capability' });
   await assert.rejects(h.adapters[0].steer({ text: 'unsupported' }), { code: 'DeliveryUnknown' });
   assert.deepEqual(h.records.readJob(sent.jobId).interventions, []);
+  assert.equal((await input(h, sent, 'queue', 'QUEUED')).ok, true);
   assert.equal(h.frames('session/cancel').length, 0); assert.equal(h.frames('session/prompt').length, 1);
-  const result = await h.controller.cancel({ thread: 'child', jobId: sent.jobId });
-  assert.equal(result.outcome, 'interrupted'); assert.equal(h.frames('session/cancel').length, 1);
-  await assert.rejects(h.adapters[0].deliver({ text: 'unqualified follow-up' }), { code: 'DeliveryUnknown' });
+  assert.equal((await input(h, sent, 'interrupt', 'NOW')).ok, true);
+  const result = await waitForResult(h.controller, { thread: 'child', jobId: sent.jobId });
+  assert.equal(h.frames('session/cancel').length, 1);
+  assert.deepEqual(h.frames('session/prompt').map(f => f.params.prompt[0].text), ['sleep:60000', 'NOW', 'QUEUED']);
+  assert.deepEqual(result.turns.map(turn => turn.outcome), ['interrupted', 'completed', 'completed']);
+  assert.deepEqual(result.interventions.map(i => [i.mode, i.state]), [['queue', 'answered'], ['interrupt', 'answered']]);
 });
 
 test('ACP resets the usage window and collectors for each descriptor-enabled bridge turn', async t => {

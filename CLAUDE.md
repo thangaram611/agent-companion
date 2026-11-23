@@ -58,11 +58,12 @@ Companion/model/effort refusals are `COMPANION_UNCONFIGURED`, `COMPANION_UNSUPPO
 authentication refusals are `AUTH_REQUIRED`, with the descriptor's sign-in steps;
 they are setup problems, not reasons to retry or switch companion. Lead, history
 and job refusals are separate: `LEAD_REQUIRED`, `THREAD_NOT_YOURS`,
-`RECURSION_REFUSED` and `FOLLOWUP_UNSUPPORTED`. Omitted companion uses the
+`RECURSION_REFUSED` and `FOLLOWUP_UNSUPPORTED`. The latter is reserved for companions
+without saved history. No shipped companion returns it. Omitted companion uses the
 configured default; omitted model inherits configuration unless the thread
 already has an override. Effort is a thread override too, supported by all five
 companions. Claude has static levels `low`, `medium`, `high`, `xhigh`, `max`.
-Copilot sets a requested model after `session/new` through
+Copilot sets a requested model after `session/new` or `session/load` through
 `session/set_config_option` and confirms `currentValue`. A model refusal lists
 the session's advertised ids. Copilot and Antigravity validate and confirm the
 selected model's ACP `thought_level` and report inherited effort. Codex catalog
@@ -86,10 +87,13 @@ without retaining thinking content. The bridge delivers task text verbatim.
 
 **Capabilities are provider facts.** Codex uses app-server, OpenCode uses its
 2.x HTTP server, and Copilot/Antigravity use ACP. Claude Code uses its own `-p`
-stream-json protocol; cold follow-up via the saved session. Codex, OpenCode and
-Antigravity default to steer and support queue and interrupt. Claude defaults to
-queue and supports interrupt. Copilot supports cancel only. There are no
-transport-selection knobs. Copilot cold follow-up is refused until qualified.
+stream-json protocol and resumes its saved session. Codex, OpenCode, Antigravity
+and Claude default to steer and support queue and interrupt. Measured 2026-11-23,
+Claude Code 2.1.330 steered with `priority: "next"` and queued with `"later"`.
+Copilot CLI 1.0.114 replayed saved history in a fresh process on local Ollama.
+The bridge requires replay, queues by default and supports interrupt. Steer is
+unavailable because a second prompt cancels the running turn. Each companion
+uses a fixed transport.
 Routing applies model defaults only on a new thread. Both hosts share
 `settings.json` and its one-shot migration in `lib/state.mjs`.
 

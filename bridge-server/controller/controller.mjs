@@ -416,20 +416,20 @@ export class Controller {
     if (from === 'user') this._notifyUser(a);
     const operation = (a.inputTail ?? Promise.resolve()).then(async () => {
       if (a.stopping || a.handedOff || a.closed) return unavailable('state');
-      const nativeQueue = a.adapter.capabilities.interventions.queue === 'native';
+      // A native-queue companion takes every mode itself and reports when a message joins a turn.
+      const native = a.adapter.capabilities.interventions.queue === 'native';
+      const live = () => !a.stopping && !a.handedOff && !a.closed;
       try {
         let ack;
-        if (mode === 'queue' && !nativeQueue) a.held.push(input);
-        else if (mode === 'interrupt' && !nativeQueue) {
-          a.held.push(input);
-          await bounded(this.clock, () => a.adapter.interrupt({ drain: true }), PROTOCOL_MS, 'interrupt_timeout');
+        if (native) {
+          ack = await bounded(this.clock, () => a.adapter.intervene(input), PROTOCOL_MS, 'DeliveryUnknown');
+          if (live() && input.state === 'accepted') input.state = 'delivered';
+        } else if (mode === 'steer') {
+          ack = await a.adapter.steer({ text, id: input.id });
+          if (live()) { a.turn?.messages.push(input.id); input.state = 'joined'; }
         } else {
-          ack = mode === 'steer' ? await a.adapter.steer({ text, id: input.id })
-            : await bounded(this.clock, () => a.adapter.intervene(input), PROTOCOL_MS, 'DeliveryUnknown');
-          if (!a.stopping && !a.handedOff && !a.closed) {
-            if (mode === 'steer') { a.turn?.messages.push(input.id); input.state = 'joined'; }
-            else if (input.state === 'accepted') input.state = 'delivered';
-          }
+          a.held.push(input);
+          if (mode === 'interrupt') await bounded(this.clock, () => a.adapter.interrupt({ drain: true }), PROTOCOL_MS, 'interrupt_timeout');
         }
         if (!a.closed && !a.handedOff) this._persist(a);
         return { ok: true, ...ack, id: input.id };

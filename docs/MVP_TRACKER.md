@@ -80,12 +80,12 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
   wire-effort assertions; implementation validation is hermetic, with live execution
   left to the reviewer.
 
-- Copilot cold follow-up is unsupported (`FOLLOWUP_UNSUPPORTED`) pending account
-  resolution and qualification of cross-process history loading. It must not
-  silently open a new conversation. Copilot accepts no interventions. Codex,
-  OpenCode and Antigravity default to steer and support queue and interrupt.
-  Claude Code defaults to queue and supports interrupt. Unsupported modes
-  return `intervention_unavailable`.
+- Copilot loads saved history on follow-up and fails with `history_unavailable`
+  if the session replays nothing. Its bridge queue is the default. It supports
+  interrupt and refuses steer because a second prompt cancels the running turn.
+  Claude Code, Codex, OpenCode and Antigravity default to steer and support queue
+  and interrupt.
+- Live bridge check, 2026-11-23 (isolated homes, local Ollama `gpt-oss:20b`, 32k context): Copilot CLI 1.0.114 recalled the code word on the same thread and refused steer with `intervention_unavailable` (reason `capability`). Claude Code 2.1.330 steer joined two messages in one turn. On both companions, queue ran a second turn. Interrupt ended the first turn as `interrupted` and answered in the second.
 - OpenCode 1.x is dropped; only the authenticated 2.x HTTP contract is shipped.
 - Codex desktop remains unqualified. TUI-only rows require operator actions:
   compaction, UI stop/restart, native close, suspend/wake and clock observation.
@@ -284,8 +284,8 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
 - Refresh the README artwork and demo for direct threads and the five current
   companions. The architecture diagram and recording still show the former role.
 - Qualify Codex desktop and finish operator-only TUI rows.
-- Resolve Copilot account access, then qualify cold history loading before
-  enabling follow-up; a capability advertisement is insufficient.
+- Qualify GitHub-hosted Copilot models once this account can open a session.
+  It still gets 403 on `session/new`.
 - Phase 5: include a workspace-diff summary on failure, with explicit observation
   limits; partial assistant text does not establish what changed on disk.
 - Permission mirroring remains a separate decision: align companion access
@@ -313,7 +313,7 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
   adapter, as t3code does ([providers-acp.md](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-acp.md)).
   Each companion has its own quirks (see Negative Results: approval flags,
   advertised `loadSession`, usage shapes), so an unqualified companion would get
-  conservative defaults: no cold follow-up, cancel only, no usage. Needs decision
+  conservative defaults: no cold follow-up, cancellation without in-flight messages, no usage. Needs decision
   9's adoption check and a named companion the user would actually use.
 
 ## Validation Commands

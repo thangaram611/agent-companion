@@ -55,11 +55,11 @@ Title `Companion capabilities`. Columns `Companion`, `Runtime`, `Follow-up`,
 | Codex CLI | app-server | yes | yes | yes | yes | yes |
 | OpenCode 2.x | HTTP server | yes | yes | yes | yes | yes |
 | Google Antigravity | ACP | yes | yes | yes | yes | yes |
-| Claude Code | stream-json | yes | no | yes | yes | yes |
-| GitHub Copilot CLI | ACP | not yet | no | no | no | yes |
+| Claude Code | stream-json | yes | yes | yes | yes | yes |
+| GitHub Copilot CLI | ACP | yes | no | yes | yes | yes |
 
 Keep this table in step with the capability table in README.md.
-Style: full gray grid, teal header row, teal `yes`, gray `no` and `not yet`.
+Style: full gray grid, teal header row, teal `yes`, gray `no`.
 
 ## ../../.claude-plugin/icon.png
 

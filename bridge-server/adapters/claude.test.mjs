@@ -303,21 +303,23 @@ function measuredAdapter() {
   return { adapter, writes, states };
 }
 
-test('m1 tool-time queue joins the answer; lifecycle completion before result is retained', async () => {
+// The m1 frames were recorded with no priority, which joins at the next tool boundary exactly as `next` does (2.1.330).
+test('m1 tool-time steer joins the answer; lifecycle completion before result is retained', async () => {
   const { adapter, writes, states } = measuredAdapter();
-  await adapter.intervene({ id: 'message', mode: 'queue', text: 'B verbatim\nnext line' });
+  await adapter.intervene({ id: 'message', mode: 'steer', text: 'B verbatim\nnext line' });
   for (const frame of measured.tool) adapter._message(frame);
   const result = await adapter.observe();
   assert.equal(result.outcome, 'completed'); assert.deepEqual(result.messages, ['task', 'message']);
   assert.equal(await adapter.hasPendingInput(), false);
   assert.deepEqual(writes, [{ type: 'user', uuid: 'message', session_id: 'session',
-    message: { role: 'user', content: 'B verbatim\nnext line' }, parent_tool_use_id: null }]);
+    message: { role: 'user', content: 'B verbatim\nnext line' }, parent_tool_use_id: null, priority: 'next' }]);
   assert.ok(states.some(s => s.id === 'message' && s.state === 'joined'));
 });
 
 for (const buffered of [false, true]) test(`m1 final-text queue becomes the next turn, buffered=${buffered}`, async () => {
-  const { adapter } = measuredAdapter();
+  const { adapter, writes } = measuredAdapter();
   await adapter.intervene({ id: 'message', mode: 'queue', text: 'B' });
+  assert.equal(writes[0].priority, 'later');
   const boundary = measured.stream.findIndex(frame => frame.type === 'result');
   for (const frame of measured.stream.slice(0, boundary + 1)) adapter._message(frame);
   assert.equal(await adapter.hasPendingInput(), true);
@@ -341,7 +343,7 @@ for (const buffered of [false, true]) test(`m1 final-text queue becomes the next
 for (const scenario of ['now', 'now-tool']) test(`m1 ${scenario}: message precedes send_now and gets its own answer`, async () => {
   const { adapter, writes } = measuredAdapter();
   await adapter.intervene({ id: 'message', mode: 'interrupt', text: 'ONLY-NEW' });
-  assert.equal(writes[0].type, 'user'); assert.equal(writes[0].message.content, 'ONLY-NEW');
+  assert.equal(writes[0].type, 'user'); assert.equal(writes[0].message.content, 'ONLY-NEW'); assert.equal(writes[0].priority, undefined);
   assert.deepEqual(writes[1].request, { subtype: 'interrupt', send_now: true, message_uuid: 'message' });
   for (const frame of measured[scenario]) adapter._message(frame);
   const first = await adapter.observe();
@@ -373,7 +375,7 @@ for (const scenario of ['tool', 'stream', 'now', 'now-tool']) test(`controller w
     createSupervisor: () => ({ terminate: async () => ({ gone: true }) }) });
   t.after(() => { for (const a of controller.live.values()) clearTimeout(a.timer); });
   const { jobId } = await controller.send({ thread: 'child', companion: 'claude', cwd: dir, text: 'task' });
-  await controller.intervene({ jobId, from: 'user', mode: scenario.startsWith('now') ? 'interrupt' : 'queue', text: 'B' });
+  await controller.intervene({ jobId, from: 'user', mode: scenario.startsWith('now') ? 'interrupt' : scenario === 'tool' ? 'steer' : 'queue', text: 'B' });
   const [input] = records.readJob(jobId).interventions;
   const id = uuid => uuid === 'task' ? jobId : uuid === 'message' ? input.id : uuid;
   // Both results can be in the same stdout chunk, before the loop resumes.

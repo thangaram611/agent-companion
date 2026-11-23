@@ -103,9 +103,12 @@ export class ClaudeAdapter {
 
   async intervene({ id, text, mode }) {
     this.inputs.set(id, { state: 'accepted', answered: false });
+    // Measured on 2.1.330: `next` (or no priority) joins the running turn at its next tool boundary;
+    // `later` waits for the turn to end. Interrupt's send_now delivers the message itself.
+    const priority = { steer: 'next', queue: 'later' }[mode];
     try {
       await this._write({ type: 'user', uuid: id, session_id: this.historyId,
-        message: { role: 'user', content: text }, parent_tool_use_id: null });
+        message: { role: 'user', content: text }, parent_tool_use_id: null, ...(priority ? { priority } : {}) });
       if (mode === 'interrupt') await this.interrupt({ messageId: id });
       return { accepted: true };
     } catch (err) {

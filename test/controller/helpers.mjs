@@ -105,7 +105,8 @@ export function fakeAdapter(options = {}) {
     async intervene({ mode, id, text }) {
       options.beforeSend?.(id);
       this.calls.push([mode, { id, text }]);
-      pending = true;
+      // A native steer joins the running turn, as Claude's does; the other modes wait for a next turn.
+      if (mode !== 'steer') pending = true;
       return { accepted: true };
     },
     finishTurn(result, next) {

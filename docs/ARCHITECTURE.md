@@ -185,7 +185,7 @@ The separate `models.availableModels` list still had suffixed Gemini ids.
 The adapter uses the session options. Gemini 3.8 Flash offered `low`, `medium`
 and `high` as thought levels. A reload reset effort to the default, so the
 adapter reapplies both overrides after each load.
-Copilot receives no spawn effort flag. Its cold follow-up remains unsupported.
+Copilot receives no spawn effort flag. The bridge reapplies its model override after a cold load.
 Claude rejects off-enum effort before spawn. Its CLI selection persistence
 was not measured here.
 
@@ -255,9 +255,8 @@ the job's input chain. The tool checks the caller's lead identity. The live view
 states are refused before recording input.
 
 After each native result, the controller settles accepted writes and continues
-while the adapter has pending input or the bridge holds messages. Native queued
-input stays with Claude, which decides whether it joins the current turn or
-starts another. Bridge-held queues start the next turn on the same session.
+while the adapter has pending input or the bridge holds messages. Claude handles queue natively
+and starts the queued message after the running turn ends. Bridge-held queues start the next turn on the same session.
 Interrupt ends the active turn natively, then sends only the new text, ahead
 of held queues. Failure ends the job; outstanding messages become `not_delivered`.
 The result lists each turn's answer once, labelled with the message(s) it answers,
@@ -304,9 +303,9 @@ Each job owns a new process, including the HTTP and ACP providers.
 | --- | --- | --- | --- | --- | --- |
 | Codex CLI | `codex app-server` over stdio | `thread/resume` | Steer, queue, interrupt; steer accepted and confirmed are separate | Explicit override, otherwise inherited; effective model/effort recorded | Saved thread id and vendor rollouts |
 | OpenCode 2.x only | Private `opencode serve` on loopback | Saved session id | Steer, queue, interrupt | `provider/model`, optional variant; resolved model verified | Vendor-persisted session |
-| GitHub Copilot CLI | `copilot --acp` | `FOLLOWUP_UNSUPPORTED` until cold load is qualified | Unsupported | Inherit or select an advertised session model | Session id retained; cross-process load unqualified |
+| GitHub Copilot CLI | `copilot --acp` | `session/load` with history replay | Queue, interrupt | Inherit or select an advertised session model | Native session under `$COPILOT_HOME` |
 | Google Antigravity | `agy acp` over stdio | `session/load` with history replay | Steer (default), queue, interrupt | `model` and `thought_level` after new and load | SQLite under `~/.gemini/antigravity-cli/conversations/` |
-| Claude Code | `claude -p` stream-json over stdio | `--resume` saved session id | Queue, interrupt (`send_now`) | Explicit override, otherwise inherited | Native session id and transcripts |
+| Claude Code | `claude -p` stream-json over stdio | `--resume` saved session id | Steer, queue, interrupt | Explicit override, otherwise inherited | Native session id and transcripts |
 
 OpenCode validates the 2.x authenticated `/api` contract and runtime pid. Its
 bootstrap password stays only in adapter memory. The OS cwd and `PWD` both match
@@ -326,8 +325,22 @@ bridge; catalog's Codex entry and status expose `contractStatus` as
 `match|drift|unverified`. A version-only change is not schema drift.
 
 ACP pins protocol v1. The descriptor supplies argv, permissions, usage and model
-rules. The adapter handles `session/request_permission` itself. Copilot cold
-follow-up remains refused pending account resolution and qualification.
+rules. The adapter handles `session/request_permission` itself. Measured 2026-11-23 on local Ollama in an isolated
+home, Copilot CLI 1.0.114 advertised `loadSession: true` and the `close` and
+`list` session capabilities at initialization. A fresh `copilot --acp` process
+replayed `session/update` notifications, including `user_message_chunk`, before
+answering `session/load`. The next model request included that history and the
+model recalled a code word from the first job. Copilot stores sessions in
+`$COPILOT_HOME/session-state` and `$COPILOT_HOME/session-store.db` (default
+home `~/.copilot`). The bridge requires replay for the saved session. Empty
+replay fails the job with `history_unavailable`. GitHub-hosted models still
+returned 403 on `session/new` for this account.
+
+A second Copilot `session/prompt` cancelled the running prompt
+(`stopReason: cancelled`) and answered the new one. The bridge therefore
+refuses steer. By default it holds the message until the turn ends, then
+sends the next prompt on the same connection. Interrupt sends `session/cancel`
+first.
 
 Antigravity steers with a second `session/prompt` on the running session. The CLI
 answers the first prompt with `end_turn` at once and continues the work under the
@@ -345,8 +358,13 @@ user message is not the acknowledgement. Results are filtered by session id;
 not necessarily the process; the controller owns close and termination.
 Interruption sends a stdin `control_request` with subtype `interrupt`; after an
 adapter-requested interrupt, `aborted_streaming` and `aborted_tools` map to
-`interrupted`. There is no steer support. Queued input is written immediately;
-native UUID lifecycle events identify joined messages and pending turns.
+`interrupted`. Measured 2026-11-23 with the bridge's own `claude -p` stream-json
+arguments, Claude Code 2.1.330 joined a user message with `priority: "next"`
+at the next tool boundary. Omitting priority did the same, so the bridge's
+former queue steered. The bridge now sends `next` for steer (the default) and
+`later` for queue. Claude waits for the turn to end before starting queued input.
+Interrupt still uses the `send_now` control request. Native UUID lifecycle
+events identify joined messages and pending turns.
 
 The Claude companion denies
 `mcp__plugin_agent-companion_agent-bridge__*` and `mcp__agent-bridge__*` through
@@ -384,7 +402,8 @@ See historical substitution failure [F5](RELIABILITY_REMEDIATION.md#1-incident-a
 A follow-up whose saved history cannot be opened fails as `history_unavailable`;
 a new thread whose companion session cannot be created fails as
 `history_create_failed` (Copilot's 403 on an unentitled account, a refused model);
-unsupported cold follow-up fails as `FOLLOWUP_UNSUPPORTED`.
+`FOLLOWUP_UNSUPPORTED` is reserved for companions without saved history.
+No shipped companion returns it.
 A missing delivery acknowledgement produces `delivery_unknown`, terminates the
 runtime and is never automatically resent.
 
@@ -404,7 +423,7 @@ processes. The provider factories create an adapter with this interface:
 | `close()` | Close protocol channels; process termination belongs to the supervisor. |
 | `capabilities` | `{ followUp, modelSelection, loadsHistory, interventions }`; `interventions` references the companion registry's `{ default, steer, queue, interrupt }`, with queue `false`, `bridge` or `native`. Unsupported history load refuses follow-up. |
 | `steer({ text, id })` | Supported by Codex, OpenCode and Antigravity. Codex reports acceptance separately from observed confirmation. |
-| `intervene(input)`, `hasPendingInput()` | Native queue/interrupt delivery and pending-turn observation, used for Claude. Other supported queues are held by the controller. |
+| `intervene(input)`, `hasPendingInput()` | Native steer, queue and interrupt delivery and pending-turn observation, used for Claude. Other supported queues are held by the controller. |
 
 The one startup exception is Claude: `start` receives the saved `historyId` so it
 can choose `--session-id` versus `--resume` at spawn. Other adapters ignore that
@@ -1058,14 +1077,16 @@ These passive fixtures establish host signals, not the shipped cleanup implement
   Work continuing after `end_turn` has no further prompt
   counters, so the bridge marks usage partial. The corrupt-image turn had no usage.
 - **A companion advertising `loadSession: true` does not mean its sessions survive its
-  process.** Copilot CLI 1.0.83 advertises it (measured) and its sessions are
-  process-local (github/copilot-cli#1767). Which is why `session/load` is a
-  descriptor decision (`acp.loadSession`) ANDed with the companion's advertisement, not
-  the advertisement alone: Copilot false; the fake companion's descriptor true; Antigravity
-  true, and measured to mean it — a fresh `agy_acp_server.par` process loads the id,
-  replays twelve updates of history and answers the follow-up from memory.
+  process.** Copilot CLI 1.0.83 advertised it (measured) and its sessions were
+  process-local (github/copilot-cli#1767). The bridge disabled cold load for that version.
+  It requires both the descriptor's `acp.loadSession` and the CLI's advertisement.
+  A fresh Antigravity `agy_acp_server.par` process loaded the id, replayed twelve
+  history updates and answered the follow-up from memory.
   **Superseded 2026-11-22:** `agy acp` replays its own saved histories. A load
   with no replay is refused, including a follow-up to an old `.par` conversation.
+  **Copilot 1.0.114, measured 2026-11-23:** A fresh process on local Ollama
+  replayed the saved session and recalled its code word. The bridge now enables
+  cold load for Copilot and requires replay for the requested session.
 - **A v2 `initialize` request is answered with `protocolVersion: 1`.** By both agents
   measured (Copilot 1.0.83, Gemini 0.59.0; the spec says an agent answers with the
   latest version it supports), so a client cannot probe for v2 support by asking — and

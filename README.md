@@ -48,8 +48,7 @@ The lead reuses the thread id. A follow-up after completion starts a new job wit
 where supported. It keeps the model and effort unless you change them. A refused effort preserves the old choice.
 
 **Change running work.** Send new text (up to 8,000 characters) on the thread.
-Steer joins the current turn. Queue holds the message for the next turn, except that
-Claude can join it to the current one. Interrupt stops the turn and sends the new text.
+Steer joins the current turn. Queue holds the message for the next turn. Interrupt stops the turn and sends the new text.
 Omit the mode to use the companion's default. Status shows which modes work now.
 An unavailable mode returns `intervention_unavailable`. Changing model or effort
 mid-job returns `thread_busy`. Repeating the original send returns the existing job.
@@ -100,10 +99,10 @@ If you asked for tests, check the commands and exit codes. Ask the lead to cance
 | Companion | Per-job runtime | Follow-up by cold resume | In-flight messages (default first) | Model selection | History |
 | --- | --- | --- | --- | --- | --- |
 | OpenCode 2.x | Private authenticated `opencode serve` | Saved session | Steer, queue, interrupt | `provider/model`, optional variant | Vendor-persisted session |
-| GitHub Copilot CLI | `copilot --acp` | Unsupported until qualified | Unsupported | Inherit or select a model advertised by the session | Session id retained, cold load unqualified |
+| GitHub Copilot CLI | `copilot --acp` | `session/load` with history replay | Queue, interrupt | Inherit or select an advertised session model | Native session under `$COPILOT_HOME` |
 | Codex CLI | `codex app-server` | `thread/resume` | Steer, queue, interrupt | Inherit or explicit override | Native thread and rollouts |
 | Google Antigravity | `agy acp` over stdio | `session/load` with history replay | Steer, queue, interrupt | Session model and thought level after new/load | Native SQLite history |
-| Claude Code | `claude -p` | `--resume` saved session | Queue, interrupt | Inherit or explicit override | Native transcripts |
+| Claude Code | `claude -p` | `--resume` saved session | Steer, queue, interrupt | Inherit or explicit override | Native transcripts |
 
 **OpenCode.** Run `opencode` and use `/connect` to choose a provider. OpenCode 2.x
 supplies its own server permissions. Inherit its model or request a `provider/model`
@@ -112,9 +111,11 @@ precedence over the variant in the model string.
 
 **GitHub Copilot CLI.** Run `copilot login` with an account that can use Copilot CLI.
 Inherit the session model or pick one it offers. Effort must match that model's
-thought levels. The bundled reviewer inherits the session model. You can cancel a
-running job. Follow-ups return `FOLLOWUP_UNSUPPORTED`, so start a new thread and
-include the context it needs.
+thought levels. The bundled reviewer inherits the session model. Measured on 1.0.114 with local Ollama on
+2026-11-23, a fresh process replayed the saved session and recalled a code word.
+The bridge reapplies the model override after load. Empty replay fails the job
+with `history_unavailable`. Queue is the default. Steer is unavailable because a
+second prompt cancels the running turn. Interrupt cancels, then sends the new text.
 
 **Codex CLI.** Use `codex login` or configure API-key login. Inherit the configured
 model or request one explicitly. Codex checks effort for listed models. For an
@@ -131,6 +132,8 @@ or `ANTHROPIC_API_KEY`. Billing follows your plan or API setup. Inherit your mod
 or name an id or alias. Effort accepts `low`, `medium`, `high`, `xhigh` or `max`.
 Even from a Claude host, the child denies the bridge's tools to itself and disables
 background tasks. Your settings, hooks, plugins and CLAUDE.md still load. Installed runs used 2.1.319.
+Measured on 2.1.330 on 2026-11-23, steer (the default) joined the turn at its
+next tool boundary. Queue waited for the next turn.
 Older versions are unverified. The `--permission-prompts` flag needs 2.1.259 or later. [Compatibility and release gates](docs/RELEASE_READINESS.md)
 
 ## Hosts

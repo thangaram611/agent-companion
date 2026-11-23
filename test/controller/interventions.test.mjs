@@ -43,6 +43,15 @@ for (const steer of [false, true]) for (const queue of [false, 'native', 'bridge
   });
 }
 
+test('a native-queue companion takes steer through intervene and reports the join itself', async t => {
+  const h = setup(t, { default: 'steer', steer: true, queue: 'native', interrupt: true }), { jobId } = await h.send();
+  assert.equal((await h.input(jobId, 'steer')).ok, true);
+  const [input] = h.records.readJob(jobId).interventions;
+  assert.equal(input.state, 'delivered', 'the companion, not the controller, reports the join');
+  assert.equal(h.controller.live.get(jobId).turn?.messages.includes(input.id) ?? false, false);
+  await h.controller.cancel({ thread: 'child', jobId });
+});
+
 for (const mode of ['steer', 'queue', 'interrupt']) test(`${mode} refuses unavailable states without recording input`, async t => {
   const h = setup(t), { jobId } = await h.send(), a = h.controller.live.get(jobId);
   for (const fields of [{ record: { state: 'starting' } }, { record: { state: 'delivering' } }, { record: { terminal: {} } },
