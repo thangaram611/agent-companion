@@ -404,3 +404,39 @@ test('tool and hook excerpts preserve raw text, include read references and boun
     assert.ok(text.endsWith(n === 4000 ? answer : [...answer].slice(0, 4000).join('') + `\n[… 1 more characters. agent_read({ thread: "${thread}", offset: 4000 }) reads on.]`));
   }
 });
+
+test('status reports the available intervention modes before and after close', async () => {
+  const h = fixture({ capabilities: { interventions: { default: 'queue', steer: false, queue: 'bridge', interrupt: true } } });
+  const { job_id } = await h.send();
+  const modes = async () => (await h.call('status', { job_id })).interventions;
+  assert.deepEqual(await modes(), { default: 'queue', steer: false, queue: true, interrupt: true });
+  await h.finish(job_id);
+  assert.deepEqual(await modes(), { default: 'queue', steer: false, queue: false, interrupt: false });
+});
+
+test('terminal metadata gives each undelivered message its mode, sender and short first line', async () => {
+  const h = fixture();
+  const { thread, job_id } = await h.send();
+  await h.call('send', { thread, task: 'one\nsecond line', mode: 'steer' });
+  await h.controller.intervene({ executionId: job_id, from: 'user', mode: 'queue', text: 'x'.repeat(81) });
+  const result = await h.call('cancel', { job_id });
+  assert.deepEqual(result.meta.interventions, [
+    { from: 'caller', mode: 'steer', state: 'not_delivered', first_line: 'one' },
+    { from: 'user', mode: 'queue', state: 'not_delivered', first_line: 'x'.repeat(79) + '…' },
+  ]);
+});
+
+test('startup republishes a saved result only while it is unclaimed', async () => {
+  const h = fixture();
+  const lead = { session: 'recovery', agent: null };
+  const { job_id } = await h.send({}, lead);
+  await h.finish(job_id);
+  const news = join(process.env.AGENT_RUNTIME_DIR, 'news', lead.session);
+  assert.equal(existsSync(news), false);
+  const fresh = createBridgeController({ records: h.records, env: h.controller.env });
+  await recoverController(fresh);
+  assert.equal(existsSync(news), true);
+  assert.equal((await h.call('wait', { job_id }, lead, { controller: fresh })).content, 'answer');
+  await recoverController(fresh);
+  assert.equal(existsSync(news), false);
+});

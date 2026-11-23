@@ -22,7 +22,7 @@ if (event === 'pre-tool') {
       mkdirSync(dirname(current), { recursive: true, mode: 0o700 });
       writePrivateFileAtomic(current, JSON.stringify({ socket, session, at: Date.now() }) + '\n');
     }
-    const file = join(host.configDir(), 'agents', host.id === HOSTS.codex.id ? 'agent-companion.toml' : 'agent-companion.md');
+    const file = join(host.configDir(), 'agents', host.oldAgentFile);
     refuseRealHomeUnderTest(file, 'agent file');
     try {
       if (/^# AUTO-INSTALLED by agent-companion plugin\b/m.test(readFileSync(file, 'utf8'))) unlinkSync(file);

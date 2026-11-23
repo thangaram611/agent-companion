@@ -41,6 +41,7 @@ NO_TARGET_CHECK=0
 SKIP_TESTS=0
 YES=0
 DRY_RUN=0
+UNLOAD_DELAY=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host)   [ "$#" -ge 2 ] && [ -n "$2" ] || { fail "--host requires a value"; exit 2; }; HOST="$2"; shift 2 ;;
@@ -49,6 +50,8 @@ while [ "$#" -gt 0 ]; do
     --target=*) TARGET="${1#--target=}"; [ -n "$TARGET" ] || { fail "--target requires a value"; exit 2; }; shift ;;
     --model) [ "$#" -ge 2 ] && [ -n "$2" ] && [[ "$2" != -* ]] || { fail "--model requires a value"; exit 2; }; MODEL="$2"; shift 2 ;;
     --model=*) MODEL="${1#--model=}"; [ -n "$MODEL" ] || { fail "--model requires a value"; exit 2; }; shift ;;
+    --codex-unload-delay) [[ "${2:-}" =~ ^([0-9]+|default)$ ]] || { fail "--codex-unload-delay takes seconds or default"; exit 2; }; UNLOAD_DELAY="$2"; shift 2 ;;
+    --codex-unload-delay=*) UNLOAD_DELAY="${1#--codex-unload-delay=}"; [[ "$UNLOAD_DELAY" =~ ^([0-9]+|default)$ ]] || { fail "--codex-unload-delay takes seconds or default"; exit 2; }; shift ;;
     --no-target-check) NO_TARGET_CHECK=1; shift ;;
     --skip-tests)      SKIP_TESTS=1; shift ;;
     --yes|-y) YES=1; shift ;;
@@ -57,7 +60,8 @@ while [ "$#" -gt 0 ]; do
       read_registry_ids
       cat <<EOF
 Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both] [--target ${TARGET_IDS// /|}|auto|none]
-                        [--model <id|inherit>] [--no-target-check] [--skip-tests] [--yes] [--dry-run]
+                        [--model <id|inherit>] [--codex-unload-delay <seconds|default>]
+                        [--no-target-check] [--skip-tests] [--yes] [--dry-run]
 
   --host ${HOST_IDS// /|}|both   install that harness surface (default: detect installed CLIs)
   --target ${TARGET_IDS// /|}|auto|none
@@ -65,6 +69,10 @@ Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both] [--target ${TARGET_IDS// 
                              otherwise select the only ready target). none preserves
                              config; auto explicitly selects the only ready target.
   --model <id|inherit>       save a model for an explicit companion; inherit clears it
+  --codex-unload-delay <seconds|default>
+                             how long Codex keeps a conversation you left loaded
+                             (thread_unload_delay_secs, Codex default 60). Lower ends
+                             its wakes and its running jobs sooner; default removes it.
   --no-target-check          select the target without failing on not-ready
   --skip-tests               skip the unit-test step
   --yes                      apply without interactive confirmation
@@ -125,6 +133,9 @@ case "$HOST" in
   codex) DO_CODEX=1; HOSTS=(codex) ;;
   both) DO_CLAUDE=1; DO_CODEX=1; HOSTS=($HOST_IDS) ;;
 esac
+if [ -n "$UNLOAD_DELAY" ] && [ "$DO_CODEX" = 0 ]; then
+  fail "--codex-unload-delay needs a Codex host (--host codex or both)"; exit 2
+fi
 
 DEPS_STATUS="not installed this run"
 UI_STATUS="not installed this run"
@@ -322,6 +333,11 @@ echo "  Install or refresh the live-view launcher ~/.local/bin/agent-companion (
 if [ "$DO_CODEX" = 1 ]; then
   host_paths codex "$SCRIPT_DIR"
   echo "  Create $HOST_CONFIG_DIR if needed; refresh the Codex plugin, verify MCP, and remove legacy managed hooks."
+  case "$UNLOAD_DELAY" in
+    '') ;;
+    default) echo "  Remove thread_unload_delay_secs from $HOST_CONFIG_DIR/config.toml (applies when Codex's daemon restarts)." ;;
+    *) echo "  Set thread_unload_delay_secs to $UNLOAD_DELAY in $HOST_CONFIG_DIR/config.toml (applies when Codex's daemon restarts)." ;;
+  esac
 fi
 echo "  Write diagnostic install markers after each harness finishes."
 if [ "$MODEL" = inherit ]; then
@@ -532,7 +548,16 @@ if [ "$DO_CODEX" = 1 ]; then
     exit 1
   fi
 
-  # 6e. Diagnostic marker.
+  # 6e. Opt-in: how long Codex keeps a conversation you left loaded, and so its bridge, its jobs and its wakes.
+  if [ -n "$UNLOAD_DELAY" ]; then
+    if node "$SCRIPT_DIR/scripts/install-codex-unload-delay.mjs" "$UNLOAD_DELAY"; then
+      warn "Codex reads thread_unload_delay_secs when its app-server daemon starts: run 'codex app-server daemon restart' (it stops running Codex work) or restart Codex."
+    else
+      fail "writing Codex's thread_unload_delay_secs failed — see error above"; exit 1
+    fi
+  fi
+
+  # 6f. Diagnostic marker.
   mkdir -p "$HOST_STATE_DIR"
   printf "codex\n" > "$HOST_STATE_DIR/.host"
   CODEX_STATUS="plugin, MCP and hooks installed/verified"

@@ -365,7 +365,7 @@ function attributedInput(tool, params, host, active) {
   if (tool.action === 'send' && !args.thread && args.cwd === undefined) assertCwd(args.cwd);
   if (args.thread && args.job_id) invalid('pass either thread or job_id');
   if (tool.inputSchema.oneOf && !args.thread && !args.job_id) invalid('thread or job_id is required');
-  if (tool.action !== 'catalog' && host === HOSTS.codex.id) adoptHostSessionId(active, lead.session);
+  if (tool.action !== 'catalog' && HOSTS[host].bridgePerSession) adoptHostSessionId(active, lead.session);
   return { ...args, lead };
 }
 

@@ -1,19 +1,20 @@
 # MVP Tracker
 
-Last updated: 2026-11-22
+Last updated: 2026-11-23
 
-Current direction: active development of the approved conversational redesign.
-The shipped controller owns one cold provider runtime per execution. Qualification
-remains separate from implementation; see the release gates below.
+The bridge runs one cold companion process per job. Release qualification is
+tracked in [Release Readiness](RELEASE_READINESS.md).
 
 ## Current State
 
-- The parent delegates in plain language: task, absolute repo/worktree path and
-  optional companion/model preference. The child asks for a missing path.
-- The ownerless catalog reports enabled companions, the default, model
-  configuration, each companion's saved model and effort and its last run's
-  reported values, capabilities, readiness and the last checked version. An open
-  choice uses a ready companion; model omission preserves its configuration.
+- **Done (2026-11-23).** The Claude Code and Codex CLI leads call the six bridge
+  tools directly. A send with a task and absolute cwd starts a thread. The lead
+  uses its id for follow-ups and in-flight interventions.
+- A session hook, a host wake or a bounded wait brings the result back.
+  `agent_read` pages long answers. Status lists the lead's threads.
+  Claude's band and `/companion` pane show the running work. [Thread plan](THREAD_PLAN.md)
+- The catalog reports companions, defaults, saved and last-reported model and
+  effort, capabilities, cached readiness and the last checked version.
 - Defaults (2026-11-18, docs/DEFAULTS_PLAN.md): one `settings.json` for both hosts
   holds the default companion and each companion's model and effort.
   - A new conversation uses the host's explicit choice, then the model env knob,
@@ -24,24 +25,13 @@ remains separate from implementation; see the release gates below.
   - Onboarding and setup still save the target and model with
     `--target <companion> --model <id|inherit>`.
   - Copilot's model is selected through the session's model option.
-- The bridge passes the child's message verbatim. The child relays the answer
-  and questions, with its own focused checks kept separate. Refusals and failures
-  do not authorize self-completion or a silent companion/model substitution.
+- The bridge sends the lead's task verbatim. Refusals preserve the requested route.
 - Claude Code and Codex CLI support OpenCode, Copilot, Codex, Google
   Antigravity and Claude Code. The
   [companion matrix](ARCHITECTURE.md#companion-matrix) records transport capabilities.
-- One `agent-companion` is one companion conversation. The host names its
-  thread; an MCP send without one is refused. Continue the same agent for a
-  follow-up, or start another for independent work. See
-  [conversation ownership](../README.md#one-agent-companion-one-companion-conversation).
-- Within the same route and cwd, a retry of the in-flight request reattaches;
-  a different request returns `thread_busy`. Wait, cancel, or use `agent_reply`
-  when the job's `interventions` reports the requested mode available.
-
-- One controller owns each answer's process group, owner attachment and immutable
-  result. Silence never ends a job: stop hooks and attributed cancellation close
-  owned work; bridge loss hands its
-  tree to the cleanup watcher. Native history survives for a cold follow-up.
+- One controller owns the job's process group and immutable result. Bridge
+  loss hands its tree to the cleanup watcher. Native history survives for a
+  supported cold follow-up.
 - CLI host measurements are recorded in the
   [Claude 2.1.318 report](../probes/host-qualification/claude/REPORT-2026-11-05.md)
   and [Codex 0.166.0 report](../probes/host-qualification/codex/REPORT-2026-11-05.md).
@@ -49,19 +39,29 @@ remains separate from implementation; see the release gates below.
 
 - Step 6 (2026-11-09) closes the first-use feedback on invoker effort selection
   for Claude, launch transparency, silent-thinking activity and companion/cwd
-  mismatch remedies. Both host roles pass named effort and relay launch/activity
-  fields. Selected effort survives cold follow-up and bridge-loss results;
+  mismatch remedies. The send and status tools expose these fields. Selected effort survives cold follow-up and bridge-loss results;
   provider-reported effective effort remains separate. No new state files.
 
 - Done — Live-view Step 1 (2026-11-15): native transcript readers for all five
   companions, work summary on terminal results, and on-demand `agent-digest://`
-  rendering without a second transcript copy. Both roles relay the summary and
-  transcript pointer. Copilot in-turn native failures override an apparent ACP
+  rendering without a second transcript copy. Terminal metadata carries the summary and transcript pointer. Copilot in-turn native failures override an apparent ACP
   success; ACP acknowledgements no longer mistake protocol request ids for native
   turn ids.
   Fixture and local suite checks are separate from installed-host qualification.
 
 ## MVP Limitations
+
+- Codex `/new` and `/quit` leave the old conversation loaded until idle for
+  `thread_unload_delay_secs` (60 s by default). A job that finishes then can
+  wake it unseen. A job still running when Codex closes the bridge ends in
+  bridge loss. The threads stay on the companion page, and resuming the
+  conversation delivers unread results. `setup.sh --codex-unload-delay`
+  changes the delay (opt-in); Codex offers no way to tell whether a window
+  still shows a conversation (openai/codex#58423).
+- A native subagent acting as lead gets no wake. Use `agent_wait`.
+- Claude's inbox wake needs Claude Code 2.1.228 or later and the current
+  session's socket and token. A relocated `CODEX_HOME` gets no Codex wake:
+  the bridge does not inherit that setting. Use `agent_wait` there.
 
 - All five companions accept conversation-level effort, and a saved effort
   default applies to a new conversation when the host names none. Codex catalog models, OpenCode and Antigravity validate
@@ -82,12 +82,12 @@ remains separate from implementation; see the release gates below.
   silently open a new conversation. Copilot accepts no interventions. Codex,
   OpenCode and Antigravity default to steer and support queue and interrupt.
   Claude Code defaults to queue and supports interrupt. Unsupported modes
-  return `reply_unavailable`.
+  return `intervention_unavailable`.
 - OpenCode 1.x is dropped; only the authenticated 2.x HTTP contract is shipped.
 - Codex desktop remains unqualified. TUI-only rows require operator actions:
   compaction, UI stop/restart, native close, suspend/wake and clock observation.
-  Claude `/clear` was measured preserving the bridge; unattended `/compact`
-  was not evidenced. Neither result qualifies the rest of the TUI matrix.
+  Claude `/clear` preserves the bridge and changes the session id. Compaction
+  preserves the id.
 - In-flight survival across bridge replacement is deliberately given up.
   SIGINT/SIGTERM/EOF trigger watcher handoff; uncatchable bridge SIGKILL cannot
   execute that handoff. Startup never adopts a live/unverified tree.
@@ -95,12 +95,9 @@ remains separate from implementation; see the release gates below.
   enumerate are reported as such; reading the catalog starts no session.
 - Usage is present only when reported by the provider. Antigravity reports
   prompt counters. Usage is partial if the turn continues after `end_turn`.
-  New execution/result records have no one-hour expiry; delivery-queue TTLs
-  and rotating logs do not make a complete adoption/cost history.
-- Silence never ends a job (decision 12). A job whose subagent ended with no stop
-  signal (Esc between waits) finishes its current turn; if that turn hangs, it runs
-  until you cancel it or the host session ends. The views show `owner away`. Count
-  occurrences before adding any cap; a cap would be an explicit setting, off by default.
+  Execution and result records have no one-hour expiry.
+- Esc, including stopping a background wait, leaves the job running. A hung
+  turn continues until cancellation or bridge loss.
 - Claude reports cost only for fresh history; resumed native cost includes the
   conversation total. Tokens are per turn. User hooks and plugins load in the
   child; slow hooks can push startup past the 10 s protocol delivery bound.
@@ -201,7 +198,7 @@ remains separate from implementation; see the release gates below.
    `--permission-prompts` needs at least 2.1.259; that flag minimum does not
    qualify older versions of the complete integration.
 
-10. Both plugin manifests and the private bridge package declare `0.2.0`.
+10. Both plugin manifests and the private bridge package declare `0.3.0`.
     Build release artifacts from the reviewed commit; version metadata alone
     does not establish that the release gates pass.
 
@@ -217,36 +214,36 @@ remains separate from implementation; see the release gates below.
     Antigravity work on 2026-11-22 (decision 8). The next milestone is walk-away
     reliability.
 
-12. **Silence never ends a job (2026-11-19).** The 120 s owner grace killed healthy
-    owners waiting out an outage under Claude's retry watchdog. Codex and Fable
-    differentials both chose stop-on-evidence only; the user agreed. A stop with
-    no signal (Esc between waits) lets the job finish its turn; status shows
-    `owner_detached_at` and the user can cancel. Evidence: ARCHITECTURE Negative
-    Results, owner silence.
+12. **Silence never ends a job (2026-11-19).** A caller waiting out a network
+    outage can leave long gaps between calls. The thread redesign keeps this
+    rule. Only a terminal outcome, explicit cancel or bridge loss ends work.
 
 ## Next Backlog
 
-- Walk-away reliability (decision 11), in order:
+- **Future hosts.** Build one host per milestone under decision 9's adoption
+  check. All three use the same tools. [Hosts built later](THREAD_PLAN.md#hosts-built-later)
+  1. OpenCode registers MCP in `opencode.json`, takes the session id from call
+     metadata and wakes it with `opencode run -s`. Check idle wake and that a
+     job stops when OpenCode's server exits.
+  2. Copilot CLI needs an experimental extension to join the session and send
+     the wake. Check idle delivery and isolation across `/clear`.
+  3. Antigravity needs a plugin MCP entry and an allowed command the lead runs
+     to start a waiter. Check idle wake with the waiter and delivery through
+     wait without it. Decision 8 still applies.
+- Walk-away reliability (decision 11):
   1. Outage through the bridge, 8 and 50 min, Codex companion first (`codex exec`
      waited for the network; app-server through the adapter is unmeasured).
   2. Suspend/wake mid-`agent_wait`, including a cancel right after wake.
   3. Confirm the Claude companion child inherits `CLAUDE_CODE_RETRY_WATCHDOG`.
-  4. Measure Esc on a subagent between waits: does `$.agent.list()` report
-     `killed` or SubagentStop fire? If so, write a stop marker from it.
-  5. Vigil must count a running delegated job as work so a closed Mac stays awake
+  4. Vigil must count a running delegated job as work so a closed Mac stays awake
      for it; measured 2026-11-19 as only sometimes. Tracked in vigil's ROADMAP Open.
-  6. Check the Claude adapter's wait for a queued input's final lifecycle event
+  5. Check the Claude adapter's wait for a queued input's final lifecycle event
      (`bridge-server/adapters/claude.mjs` ~116) for an unbounded wait.
 - Code Mode and browser parameters for companions (`code_mode`, `browser` on
   `agent_send`): researched and decided 2026-11-20, then parked to see whether
   Claude Code ships a browser for Code Mode. Decisions, measurements, open
   decisions and steps are in the [Code Mode plan](CODE_MODE_PLAN.md); run its
   re-verify list before building.
-- A completion drain with no process per tool call: under a Code Mode host the
-  bash drain is spawned for every call inside a script (15 ms alone, about
-  28 ms inside Claude Code, measured 2026-11-20). An `mcp_tool` hook into the
-  running bridge would avoid the spawn on Claude; unmeasured, and Codex has no
-  such hook type.
 - Study codex-plugin-cc's design (app-server wrapper, rescue subagent, resume)
   for improvements; the user runs it as a trial later, not now.
 - Vercel Board (read 2026-11-21: `@vercel/board` 0.50, experimental, launched
@@ -255,8 +252,7 @@ remains separate from implementation; see the release gates below.
   renewable time limit and wait on one ordered event log by cursor. It starts
   and supervises no agent. Parked; nothing here is committed work. The user is
   interested in two of its ideas as possible later improvements:
-  1. Agents talking many-to-many. Today every exchange is lead → subagent →
-     companion. The candidate is Board as a third host, not a store of our own:
+  1. Agents talking many-to-many. Today each thread connects one lead with one companion. The candidate is Board as a host, not a store of our own:
      a foreground worker claims a task, runs it through the controller, renews
      the claim from the controller process (a process, not a model, so decision
      12 holds), posts the result and work summary to the thread, and turns
@@ -265,14 +261,13 @@ remains separate from implementation; see the release gates below.
      machine), isolated homes, a free OpenCode model, one task end to end.
      Re-read the API first; its 0.x releases break often.
   2. The thread as the job record. One append-only event log per execution,
-     read by cursor, might replace `intervention-notices/`, the completion
-     queue's consumed flags and inbox outcomes; that is unverified against the
-     code. `results/<id>.json.delivery` is a claim between two deliverers, not a
+     read by cursor, might replace `intervention-notices/` and inbox outcomes.
+     That remains unverified. `results/<id>.json.delivery` is a claim between two deliverers, not a
      cursor, and would stay. No defect drives this. Size it against
      `records.mjs`, `controller.mjs` and `server.mjs` before touching them.
 
   Not adopted, each for a measured reason: a claim the model must keep renewing
-  (Board's lease; our removed 120 s owner grace, decision 12); identity the agent
+  (Board's lease, decision 12); identity the agent
   names itself with `--as` (ours comes from the host, see Negative Results: the
   host session id does not identify the caller); a `blocked` state (0 of 344
   completed answers ended in a question by a last-line check, and the Codex
@@ -282,13 +277,10 @@ remains separate from implementation; see the release gates below.
   loss; 109 ran alongside another job of the same lead session (10 of 38
   sessions, 5 with four or more); 63 of 237 conversations had follow-ups.
   Whether a lead loses its plan when its session ends or compacts is unmeasured;
-  count that before building job groups. Adopted: both roles now tell the parent
-  to write the brief for a reader who has none of its conversation.
-- Regenerate `assets/readme/target-matrix.png`: the image still shows Antigravity
-  without in-flight replies; its prompt in `assets/readme/PROMPTS.md` is current.
-- Regenerate `assets/readme/architecture.png`: the image still says `lease`; its
-  prompt in `assets/readme/PROMPTS.md` now says `owner attachment`.
-- Qualify Codex desktop as the third host and finish operator-only TUI rows.
+  count that before building job groups. The MCP instructions tell the lead to include the context the companion needs.
+- Refresh the README artwork and demo for direct threads and the five current
+  companions. The architecture diagram and recording still show the former role.
+- Qualify Codex desktop and finish operator-only TUI rows.
 - Resolve Copilot account access, then qualify cold history loading before
   enabling follow-up; a capability advertisement is insufficient.
 - Phase 5: include a workspace-diff summary on failure, with explicit observation

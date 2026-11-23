@@ -2,15 +2,10 @@
 
 ## What this is
 
-A delegation plugin: a **harness** (Claude Code or Codex CLI) spawns an isolated
-`agent-companion` subagent, which uses `agent-bridge` to run work on a **companion** runtime
-(OpenCode, GitHub Copilot CLI, Codex CLI, Google Antigravity, or Claude Code).
-The parent talks to the subagent in plain language (what to do, the absolute repo path, optionally which companion or
-model); the subagent sends that text verbatim through the private `agent_*` tools and brings the
-companion's answer back. Both hosts register the bridge at plugin/session scope;
-execution calls require a native child owner. Claude attributes it through a hook;
-Codex supplies subagent metadata. The install matrix is two CLI hosts × five
-companions. Codex desktop remains unqualified.
+The **lead** in Claude Code or Codex CLI calls `agent-bridge` directly. It sends
+a task and absolute cwd to OpenCode, GitHub Copilot CLI, Codex CLI, Google
+Antigravity or Claude Code. The bridge returns a thread id, runs the job and
+delivers the result to that lead. Codex desktop remains unqualified.
 
 Read `README.md` for the user-facing contract and `docs/ARCHITECTURE.md` before any non-trivial
 change. `docs/ARCHITECTURE.md` carries a **Negative Results** section: things that look wrong
@@ -21,7 +16,7 @@ before "fixing" something surprising.
 
 Use [README.md — Development](README.md#development) for checks, packaging and
 README asset regeneration. Discover tests from the repo root: directory allowlists
-can omit the three cross-cutting guards in `test/`. CI's command is in
+can omit cross-cutting guards in `test/`. CI's command is in
 `.github/workflows/ci.yml`.
 
 Regenerate the pinned codex wire contract (the only sanctioned way that fixture changes; the
@@ -46,55 +41,48 @@ write live runtime state. They are outside `node --test`; see `probes/README.md`
 
 **One controller owns each execution.** Each job starts a cold provider runtime
 in its own process group and loops over native turns while accepted input remains.
-The controller owns the process tree, native history
-reference, owner attachment and terminal result. Pending send/wait/reply/cancel
-calls attach the owner; silence never ends a job. Stop markers supply explicit
-owner-stop evidence. On SIGINT, SIGTERM or stdin EOF, the bridge hands the recorded tree to
-`scripts/cleanup-watcher.mjs`, which terminates it and saves a fenced result.
-In-flight survival across bridge replacement is deliberately given up. Native
-history remains; a later message to the same native child resumes it cold.
-Provider processes and protocol connections are never shared across children.
-Uncatchable bridge SIGKILL cannot run the handoff; recovery refuses to adopt a
-live or unverified tree.
+The controller owns the process tree, history reference and terminal result.
+SIGINT, SIGTERM or stdin EOF hands the recorded tree to the cleanup watcher for
+termination and a fenced result. SIGKILL cannot run the handoff. Recovery
+refuses to adopt a live or unverified tree. A later job resumes supported
+native history in a fresh process.
 
-**No silent fallback.** Target/model/effort refusals are `TARGET_UNCONFIGURED`,
-`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`.
-ACP authentication refusals are `AUTH_REQUIRED`, with the descriptor's sign-in steps;
-relay them as setup problems without retrying or switching companion. Ownership,
-history and execution refusals are separate, including `NATIVE_OWNER_REQUIRED`
-and `FOLLOWUP_UNSUPPORTED`. Both role templates relay failures without changing
-the parent's choice. Omitted target uses the configured default; omitted model
-inherits configuration unless the conversation already has an override. Effort is
-a conversation override too, supported by all five companions. Claude has static
-levels `low`, `medium`, `high`, `xhigh`, `max`. Copilot sets a requested model
-after `session/new` through `session/set_config_option` and confirms `currentValue`.
-A model refusal lists the session's advertised ids. Copilot and Antigravity
-validate and confirm the selected model's ACP `thought_level` and report inherited effort.
-Codex catalog models and OpenCode also validate model-specific levels before delivery.
-Codex levels are unverified for models outside Codex's catalog: it confirms the
-reported effort and lets the backend validate vocabulary during the turn. Before writing any
-selection on existing history, Codex reads its model. OpenCode queries variants
-only for an effort override, which takes precedence over a variant in the model
-string. Inherited OpenCode effort stays null. Refused effort is not saved on the
-conversation or written to native selection state. On a new conversation, omitted
-effort uses the companion's saved default, then native configuration. Copilot's spawn effort flag is removed;
-the option is validated before a config write.
-Local Ollama BYOK makes Copilot testable; GitHub-hosted model qualification still
-hits this account's `session/new` 403. The isolated free-backend harness is in
-`probes/free-backends/`; never use the operator's live homes for it.
-Send acknowledgements expose target,
-selected/effective model and effort, and
-resolved permission mode; effective effort is null unless the provider reports it.
-Status adds activity (thinking, responding, running a command or retrying for Claude)
+**The host identifies the lead.** Claude's PreToolUse hook writes `lead` from
+`session_id` and optional `agent_id`. Codex uses turn metadata. The bridge
+issues a thread id. A caller using another lead's thread gets `THREAD_NOT_YOURS`.
+Starting work from a recorded companion session gets `RECURSION_REFUSED`.
+
+**No silent fallback.** A thread keeps its companion and canonical cwd.
+Target/model/effort refusals are `TARGET_UNCONFIGURED`, `TARGET_UNSUPPORTED`,
+`CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`. ACP
+authentication refusals are `AUTH_REQUIRED`, with the descriptor's sign-in steps;
+they are setup problems, not reasons to retry or switch companion. Lead, history
+and execution refusals are separate: `LEAD_REQUIRED`, `THREAD_NOT_YOURS`,
+`RECURSION_REFUSED` and `FOLLOWUP_UNSUPPORTED`. Omitted target uses the
+configured default; omitted model inherits configuration unless the thread
+already has an override. Effort is a thread override too, supported by all five
+companions. Claude has static levels `low`, `medium`, `high`, `xhigh`, `max`.
+Copilot sets a requested model after `session/new` through
+`session/set_config_option` and confirms `currentValue`. A model refusal lists
+the session's advertised ids. Copilot and Antigravity validate and confirm the
+selected model's ACP `thought_level` and report inherited effort. Codex catalog
+models and OpenCode also validate model-specific levels before delivery. Codex
+levels are unverified for models outside Codex's catalog: it confirms the
+reported effort and lets the backend validate vocabulary during the turn. Before
+writing any selection on existing history, Codex reads its model. OpenCode
+queries variants only for an effort override, which takes precedence over a
+variant in the model string. Inherited OpenCode effort stays null. Refused effort
+is not saved on the thread or written to native selection state. On a new
+thread, omitted effort uses the companion's saved default, then native
+configuration. Copilot's spawn effort flag is removed; the option is validated
+before a config write. Local Ollama BYOK makes Copilot testable; GitHub-hosted
+model qualification still hits this account's `session/new` 403. The isolated
+free-backend harness is in `probes/free-backends/`; never use the operator's live
+homes for it. Send acknowledgements expose the job, thread, target,
+selected/effective model and effort, resolved permission mode and which wake is
+armed; effective effort is null unless the provider reports it. Status adds
+activity (thinking, responding, running a command or retrying for Claude)
 without retaining thinking content. The bridge delivers task text verbatim.
-
-**Conversation identity comes from the host.** Claude's `hooks/name-thread.sh`
-unconditionally overwrites `thread` with the child's `agent_id` or clears it.
-Codex requires `_meta["x-codex-turn-metadata"].thread_source: subagent` and uses
-its `thread_id`. A fresh spawn starts independent work. An identical busy send
-reattaches; different text, model or effort returns `thread_busy`, and provider/cwd
-mismatches fail explicitly. Catalog and status are ownerless observers: they
-neither start work nor attach the owner nor write execution state.
 
 **Capabilities are provider facts.** Codex uses app-server, OpenCode uses its
 2.x HTTP server, and Copilot/Antigravity use ACP. Claude Code uses its own `-p`
@@ -105,80 +93,84 @@ transport-selection knobs. Copilot cold follow-up is refused until qualified.
 Routing applies model defaults only on a new conversation. Both hosts share
 `settings.json` and its one-shot migration in `lib/state.mjs`.
 
-**Interventions share one controller path.** `agent_reply` accepts an optional
-`mode`; omission uses the execution's saved `interventionModes.default`.
-Status reports per-mode `interventions` availability. The user's atomic, private
-`inbox/<executionId>/<requestId>.json` requests are read on the tick after the owner
-stop check, without attaching the owner. Outcomes are private atomic
-files; close removes that execution's inbox. An accepted user message wakes
-`agent_wait` with `user_intervened`, never an answer; durable notice receipts
-prevent repeats, including after a wait gap. Both roles relay it and keep waiting.
-User cancel produces a terminal result with cause `user_cancel`.
-Terminal `meta.interventions` exposes each message's sender, mode, state and first
-line, including `not_delivered` messages.
+**Interventions share one controller path.** New text sent to a running thread
+is an intervention with an optional `mode`; omission uses the execution's saved
+`interventionModes.default`, and repeating the original send returns the
+existing job. Status reports per-mode `interventions` availability. The views'
+atomic, private `inbox/<executionId>/<requestId>.json` requests are read on the
+controller's tick. Outcomes are private atomic files; close removes that
+execution's inbox. An accepted user message wakes `agent_wait` with
+`user_intervened`, never an answer; durable notice receipts prevent repeats,
+including after a wait gap. User cancel produces a terminal result with cause
+`user_cancel`. The terminal metadata's `interventions` lists each message's
+sender, mode, state and first line, including `not_delivered` messages.
 
 ## Single-source-of-truth modules
 
 | Module | Owns |
 | --- | --- |
-| `bridge-server/server.mjs` | MCP attribution, envelopes, resource routing, completion publication and bridge-loss handoff. |
-| `bridge-server/controller/controller.mjs` | Native turn loop, interventions, inbox consumption, caller notices, owner requests and attachment, stop observations and result decisions. |
-| `bridge-server/controller/records.mjs` | Atomic conversation/execution/attachment/result records, inbox I/O and cleanup, notice receipts, generation and writer fencing, immutable results. |
+| `bridge-server/server.mjs` | MCP wiring, startup and bridge-loss handoff. |
+| `bridge-server/tools.mjs` | Six tool schemas and handlers, lead checks, routing, paged reads and digest resources. |
+| `bridge-server/delivery.mjs` | Result notices, session news markers, exclusive delivery receipts and answer excerpts. |
+| `bridge-server/controller/controller.mjs` | Native turn loop, interventions, user inbox and job lifecycle. |
+| `bridge-server/controller/records.mjs` | Atomic records, inbox I/O, notice receipts, generation and writer fences, shared terminal result builder. |
 | `bridge-server/controller/process-supervisor.mjs` | Owned process groups, descendant census, termination and PID/birth-identity verification. |
 | `bridge-server/adapters/{codex,opencode,acp,claude}.mjs` | Provider protocols, history loading, delivery acknowledgement, native progress, usage and model selection. |
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
-| `lib/state.mjs` | Shared target, model and effort settings, atomic model/effort edits and one-shot migration of legacy defaults and history. |
-| `lib/host.mjs` | Host conventions and sandbox guard; `AGENT_COMPANION_HOST` is authoritative, `.host` is diagnostic. |
+| `lib/state.mjs` | Shared target, model and effort settings, atomic model/effort edits and one-shot migration of legacy defaults. |
+| `lib/hosts/` | Host registry, paths, lead identity, wake adapters and sandbox guard. |
+| `hooks/hook.sh` and `hooks/hook.mjs` | Hook entry for Claude identity, session registration and delivery on session start, prompt submit and post-tool events. |
 | `lib/transcripts.mjs` and `lib/transcripts/` | Read-only native transcript location, format fingerprints, normalized in-memory items and live follow (`followTranscript`). |
 | `lib/work-summary.mjs` | Native turn selection and bounded commands, edits, errors and worktree summary projection. |
 | `lib/worktree-snapshot.mjs` | Bounded snapshots through a throwaway index and the diff-stat including any writer. |
 | `lib/digest.mjs` | Read-only, on-demand execution digest from native transcript and result records. |
 | `lib/target-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
-| `bridge-server/ui/jobs.mjs` | The live view's job list from both hosts' state and caller titles from host transcripts (Claude lead session, Codex rollout and session index), and the `jobs` entry that lists one Claude session's jobs for the pane. |
+| `bridge-server/ui/jobs.mjs` | Both hosts' job lists, thread titles and lead session names. The pane lists the latest job per thread in its session. |
 | `bridge-server/ui/defaults.mjs` | The package-free `defaults` command and the live view's defaults panel (`d`): saved choices, native inheritance, validation, saves and legacy conflict resolution. |
 | `bridge-server/ui/rows.mjs` | Sanitizing native text, cell widths, item folding and wrapping, a job's transcript blocks, card head and pending lines for both views, and the cached row index. |
 | `bridge-server/ui/follow.mjs` | One job's transcript follow and turn selection for both views, and the `follow` entry that streams them to the Claude pane as JSON lines. |
 | `bridge-server/ui/model.mjs` | Live-view state, keys, message boxes and frame composition; `app.mjs` is only the Ink layer and the `ui` entry point. |
 | `bridge-server/ui/inbox.mjs` | The views' job writes: atomic 0600 inbox request files, deleting each outcome read, and `send` (`launch-ui.sh send`) for the Claude pane's message box. |
-| `hooks/mod.ts` | Claude Code's mod (Codex ignores it): each agent-companion subagent's agent-list row from the bridge's records, read on a clock only while a job runs, and the Companions pane that follows the view, its list rebuilt by a `jobs` child, one `follow` child per shown job. |
+| `hooks/mod.ts` | Claude's running-thread band above the prompt and the `/companion` pane. A card opens its thread's latest job. |
 | `hooks/launch-ui.sh`, `scripts/install-ui-launcher.mjs` | The `~/.local/bin/agent-companion` launcher, the live view and its package-free `defaults`, `jobs`, `follow` and `send` commands. |
 
 ## Things that will bite you
 
-- **`templates/` is the source; the installed copy is generated.** `hooks/install-agent.sh`
-  re-materializes `~/.claude/agents/agent-companion.md` on *every* session start, unconditionally.
-  Edits to the installed copy are silently discarded. (A destination lacking the AUTO-INSTALLED
-  sentinel is treated as hand-authored and left alone forever.)
-- **Host parity is a test.** Both plugin manifests register the session transport.
-  Claude uses sibling `timeout` in milliseconds; Codex uses `tool_timeout_sec`
-  in seconds. `templates/host-parity.test.mjs` pins their effective settings.
-- **The MCP timeout is a per-call wall.** Both hosts cancelled at 1320 s, with
-  or without progress. Waits cap at 1200 s (default 480); parent messages become
-  visible between waits. `env: { MCP_TOOL_TIMEOUT }` does not configure the host.
-  See the dated host reports below and Architecture's host budgets.
-- **Silence never ends a job.** A quiet owner may be thinking or retrying offline
-  for hours (Claude's retry watchdog), which no gap can tell from a stopped one.
-  A job ends on a stop marker, an attributed cancel, bridge loss, a user cancel
-  or its native turn's end; status shows `owner_detached_at`. The 120 s owner
-  grace, its env knob and the 40-minute cutoffs are gone.
-- **Stop markers are advisory evidence.** Claude's TaskStop hook uses
-  `onFailure: "continue"` so a failed or timed-out marker write lets the stop proceed.
-  `hooks/stop-owner.sh` writes
-  `stops/<owner>.json` for Claude TaskStop and both hosts' SubagentStop. A changed
-  marker closes that owner's execution on the next controller tick; an old
-  marker cannot cancel a later follow-up. A stop with no signal (Esc between
-  waits) lets the job finish its current turn.
-- **A result is delivered once.** A terminal send, wait or cancel and the drain
-  hook race to create `results/<id>.json.delivery`; the first one delivers the
-  text. After a hook delivery an owner call returns the status with a one-line
-  note and `meta.result_path` in place of the text; after an owner delivery the
-  owner's repeated calls return the text again. Status never claims.
-- **Claude plugin tools are namespaced.** The installer qualifies the source
-  reference to `plugin:agent-companion:agent-bridge` and tools to
-  `mcp__plugin_agent-companion_agent-bridge__*`; the identity hook matches these
-  as well as bare session tool names. Its PreToolUse handler uses
-  `onFailure: "block"` so a failed or timed-out identity rewrite denies the call.
+- **Silence never ends a job.** A quiet companion may be thinking or retrying
+  offline for hours (Claude's retry watchdog), which no gap can tell from a
+  stopped one. A job ends on its native turn's end, `agent_cancel`, a user
+  cancel or bridge loss. Esc and a cancelled or stopped wait never end it.
+- **Claude identity must fail closed.** PreToolUse replaces any supplied lead
+  before send, wait, read, status or cancel. Keep `onFailure: "block"` for a
+  failed or timed-out hook.
+- **Claude plugin tools are namespaced.** Claude names them
+  `mcp__plugin_agent-companion_agent-bridge__*`; the identity hook and the mod
+  match these as well as bare session tool names.
+- **Host parity is a test.** Both plugin manifests register the bridge. Claude
+  uses sibling `timeout` in milliseconds; Codex uses `tool_timeout_sec` in
+  seconds. `test/hosts.test.mjs` pins their effective settings.
+- **The empty hook path starts no process.** On ordinary prompt and post-tool
+  events the stub reads stdin with Bash builtins and checks the session news
+  marker. Keep Node off that path.
+- **One delivery module arbitrates the hook/tool race.** Use `delivery.mjs`
+  for both. A result is claimed once: after a hook delivery a tool call returns
+  a note and `delivered_by: "hook"` in place of the text; after a tool delivery
+  repeated calls return the text again. A wake attempt, `agent_status` and
+  `agent_read` never claim. The read cursor lives in a separate record so a
+  controller rewrite cannot roll it back.
+- **Claude needs two JSON lines on the inbox socket.** Send the auth object,
+  then `{"type":"user","message":{"role":"user","content":"…"}}`. Plain text
+  starts no turn. Recheck the session id because `/clear` reuses the socket.
+- **Codex can wake an unseen lead.** After `/new` or `/quit`, the daemon keeps
+  the old conversation loaded until idle for `thread_unload_delay_secs` (60 s
+  by default), and a wake restarts that delay. Its shutdown is bridge loss for
+  a job still running. Nothing tells a watched conversation from a left one, so
+  do not add a presence gate; `setup.sh --codex-unload-delay` is the one knob,
+  read when Codex's daemon starts.
+- **The MCP wall is per call.** Both hosts cancelled at 1,320 s even with
+  progress. Waits default to 480 s and cap at 1,200. Claude's mod must match
+  only `agent_send` so a long main-conversation wait can move to the background.
 - **The live view lives in `bridge-server/ui/` for its imports.** ESM finds `ink`
   and `react` by walking up to `bridge-server/node_modules` (Claude's link); on
   Codex, `hooks/resolve-codex-deps.mjs` relocates bare package imports only from
@@ -217,7 +209,7 @@ line, including `not_delivered` messages.
   with `is_error: true` is a failure (measured when not logged in). `--bare`
   skips OAuth/keychain, so the adapter never uses it. `total_cost_usd` is
   cumulative on resume, so cost is reported only for fresh history. The child
-  denies `Agent(agent-companion)` and both bridge namespaces to prevent recursive
+  denies the bridge tool namespaces to prevent recursive
   delegation; user settings, hooks and plugins still load. These are protocol
   measurements on 2.1.319, not installed-host qualification.
 - **Antigravity runs one `agy acp` per job.** Cold `session/load` must replay
@@ -230,6 +222,7 @@ line, including `not_delivered` messages.
 
 | File | Use |
 | --- | --- |
+| `docs/THREAD_PLAN.md` | Thread contract, measured host behavior and future host adapters. |
 | `docs/ARCHITECTURE.md` | Layer boundaries, routing contract, state layout, **Negative Results**. |
 | `docs/RELIABILITY_REMEDIATION.md` | Historical incident and protocol measurements; retired survival design explicitly labelled. |
 | `docs/MVP_TRACKER.md` | What is done, what the current limitations are, what is next. |

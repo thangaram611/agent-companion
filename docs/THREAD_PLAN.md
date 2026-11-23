@@ -1,7 +1,8 @@
 # Threads: the lead talks to the companion without a subagent: plan
 
-Status: building on `feat/threads` (2026-11-23). Steps 0 to 7 are done and
-checked live on both hosts; step 8 is next. Every fact under Evidence was measured
+Status: built on `feat/threads` (2026-11-23). Steps 0 to 8 are done and
+checked live on both hosts; the installed-form run on the user's hosts and the
+merge are next. Every fact under Evidence was measured
 on 2026-11-22 unless it says otherwise.
 
 ## Goal
@@ -51,10 +52,13 @@ the design and stand once this plan is approved.
 10. **A thread belongs to the conversation that started it.** The listing shows
     only that conversation's threads. After `/clear` or in a new session the old
     threads are not listed and not woken; they stay on the companion page.
-    Codex keeps a conversation the user left loaded for about a minute: a job
-    ending then wakes it unseen, and one still running ends in bridge loss
-    (2026-11-23: nothing tells the bridge which conversation a Codex window
-    shows, so no gate is possible without asking Codex's daemon).
+    Codex keeps a conversation the user left loaded until it has been idle for
+    `thread_unload_delay_secs` (60 s by default): a job ending then wakes it
+    unseen, and one still running ends in bridge loss. The wake stays as it is,
+    since Codex tells no one which conversation a window shows (2026-11-23).
+    `setup.sh --codex-unload-delay <seconds>` sets that delay, opt-in: shorter
+    means fewer unseen wakes and running jobs stopping sooner after the user
+    leaves, longer the reverse.
 11. **No shared bridge server.** The bridge stays the host session's own child,
     and no job runs outside the lead's session. On Codex the session is the
     daemon's conversation, so each conversation's bridge is the daemon's child.
@@ -163,6 +167,28 @@ OpenCode model or `gemini-3.8-flash-low`.
   server: a job still running ended in bridge loss 62 s after `/new`. After
   `/quit` the same happens with no window open. The research note that a queue
   to a left thread starts no turn had no run behind it.
+- **The unload delay** (2026-11-23). The minute is `thread_unload_delay_secs`,
+  a top-level `config.toml` key (default 60 since openai/codex#57242, 1800
+  before). The daemon reads it when it starts and fixes it per conversation; an
+  override on `thread/resume` of a loaded conversation was ignored (unloaded at
+  61.2 s). At 0, the conversation left unloaded 1.3 s after `/new` and its
+  running job ended in bridge loss at 1.8 s. Codex unloads to free each
+  conversation's MCP servers (openai/codex#11324) and its writer lock
+  (openai/codex#41849).
+- **A wake restarts the delay.** `/quit` at 0 s, a wake at 53 s, unload at
+  113 s. A woken lead keeps its conversation loaded while it works, then for
+  the delay again. Leaving does not stop a running turn: a pending `agent_wait`
+  delivered into the conversation left. Resuming that conversation delivers an
+  unread result at its first prompt.
+- **No presence signal** (2026-11-23). Status, read state,
+  `canAcceptDirectInput`, the loaded list, files, locks and the log are the
+  same for a watched conversation and a left one; neither `inject_items` nor a
+  blocked prompt changes them. Codex has no subscriber API
+  (openai/codex#58423 asks for one).
+- **A prompt hook can block** with `{"decision":"block","reason":…}`: no model
+  call, and a watching window shows the reason. A second hook that blocked did
+  not stop ours from claiming the result, so a block would have to live in
+  `hooks/hook.mjs` and claim nothing. Not used.
 - **Subagents** (2026-11-23). A native subagent gets its own MCP server and fires
   no SessionStart; its hooks carry the root's `session_id` and its own thread id
   as `agent_id`.
@@ -294,7 +320,7 @@ Three layers, in this order on every host:
 | Esc, cancelled wait, stopped background wait | The wait returns; the job runs on |
 | Compaction | Same conversation id; `agent_status` lists the threads again |
 | `/clear` (Claude) | Old threads are not listed and not woken; their jobs run on; they stay on the companion page |
-| `/new`, `/quit` (Codex) | The conversation left stays loaded until idle about a minute: a job ending then wakes it unseen. Codex then shuts it down, which is bridge loss for a job still running. Its threads stay on the companion page |
+| `/new`, `/quit` (Codex) | The conversation left stays loaded until idle for `thread_unload_delay_secs` (60 s by default): a job ending then wakes it unseen, and the delay starts again. Codex then shuts it down, which is bridge loss for a job still running. Resuming it delivers unread results at the first prompt; its threads stay on the companion page |
 | Host session exits | Bridge loss: owned process trees are stopped and results fenced, as today |
 | `agent_cancel`, user cancel | The job stops; the thread stays and a later send resumes |
 
@@ -327,6 +353,11 @@ change by design:
 | The Claude companion denies `Agent(agent-companion)` | It keeps denying the bridge's tools; the role no longer exists |
 | Ambiguous legacy history is refused (`thread_ambiguous`) | Legacy history is not read at all (decision 22) |
 | `agent_status` without a job lists every execution in the store | It lists the caller's threads only (decisions 10 and 13) |
+| A terminal result is one JSON envelope with `content` and `meta` | Two text blocks: the answer, paged past 8,000 characters, then the metadata (step 4) |
+| A reply to a closed job returns `reply_unavailable` (reason `state`) | A `mode` with no running job is refused as invalid; text alone on an ended thread is a follow-up (step 2) |
+| Completions go to a session-tagged queue with one publication receipt per execution | A per-session news marker; the result and its delivery receipt are the record (step 4) |
+| One bridge binds to one host session id (`BRIDGE_SID_CONFLICT`) | Codex still binds, one bridge per conversation; Claude's bridge serves the new conversation after `/clear` (decision 10) |
+| Logs: `agent-bridge.log` and a `daemon.log` JSONL stream whose one event is `bridge.startup` | `bridge.startup` is a line in `agent-bridge.log`; `daemon.log` is gone (step 0) |
 
 ## Structure
 
@@ -559,6 +590,8 @@ subagent.
   `CLAUDE.md` and `docs/MVP_TRACKER.md`. Version 0.3.0.
 - Walk THREAD_FEATURES.md: each row holds or is in the table under Features, and
   names its pinning test.
+- `setup.sh --codex-unload-delay <seconds|default>` (decision 10), written
+  through Codex's own config writer.
 - Count the totals against step 0 and the files a sample change of each kind
   touches against the Structure targets.
 
@@ -592,9 +625,11 @@ The tracker's terms note still applies to Antigravity: the bridge must not wrap
   silently and the result still arrives through the hooks at the next prompt or
   through wait. The probe detects the change.
 - **`codex queue` is experimental.** Same fallback.
-- **A Codex conversation the user left can get an unseen turn.** For about a
-  minute after `/new` or `/quit` a finished job wakes it; the lead runs that
-  turn in its own permission mode. A gate needs the daemon's client list.
+- **A Codex conversation the user left can get an unseen turn.** Until it has
+  been idle for `thread_unload_delay_secs` after `/new` or `/quit`, a finished
+  job wakes it; the lead runs that turn in its own permission mode. A gate needs
+  a subscriber API Codex lacks. `--codex-unload-delay` shortens the window at
+  the cost of stopping running jobs sooner.
 - **A Claude setting can stop the wake.** If the user sets messages from other
   sessions to hold or refuse, the bridge's own post is held or dropped too
   (docs). Same fallback.

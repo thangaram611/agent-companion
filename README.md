@@ -15,25 +15,18 @@ Supported now: **OpenCode**, **GitHub Copilot CLI**, **Codex CLI**, **Google
 Antigravity** and **Claude Code**. Both Codex CLI and Claude Code can be a harness
 or a companion; the two roles are independent.
 
-Talk to the `agent-companion` subagent in plain language. Give it the task, the
-absolute repo or worktree path, and any companion or model preference. Follow-ups
-to the same subagent cold-resume saved history where supported; a new subagent starts
-independent work. Run long work in the background.
+Ask the model in your harness (the **lead**) to give a companion a task in an
+absolute repo or worktree path. Name a companion, model or effort if you have a
+preference. The lead sends the task directly and gets a thread id back. Use the
+same thread for follow-ups or start a new one for independent work.
 
-The product posture is deliberately companion-neutral:
-
-- **Bring your harness.** Install the Claude Code surface, the Codex CLI surface,
-  or both.
-- **Attach your companion.** Name OpenCode, Copilot, Codex, Antigravity or
-  Claude Code, or let the subagent choose a ready companion from the catalog. Set a default if useful.
-- **Keep the parent workflow clean.** Delegated work runs through the isolated
-  subagent. Both hosts register the internal bridge at plugin/session scope;
-  execution calls require the native child owner.
-- **Discover available choices.** Ask what companions and models are available.
-  The read-only catalog reports configuration, capabilities and readiness.
-- **Keep failures explicit.** The subagent relays refusals and terminal failures.
-  The delegated work stays with the companion; failure does not authorize the
-  subagent to finish it or silently choose another companion or model.
+- **Bring your harness.** Install the Claude Code surface, the Codex CLI surface, or both.
+- **Choose a companion.** Ask which companions and models are available. The
+  catalog reports capabilities, configuration and last-checked readiness.
+- **Keep working.** The lead can end its turn. The bridge keeps the job running
+  and attempts to wake that conversation when the job ends.
+- **Keep failures explicit.** A refused companion, model or effort comes back
+  with the reason.
 
 Implementation note: today the CLI and MCP schema still use `host` for harness
 selection and `target` for companion selection. Those names are stable public
@@ -48,26 +41,18 @@ unqualified; local tests do not replace installed-host acceptance.
 
 ## What It Does
 
-![One plain-language delegation to the Codex companion from Claude Code](assets/readme/demo.gif)
-
-1. The parent spawns `agent-companion` with a plain-language request and an
-   absolute repo or worktree path. The subagent asks if the path is missing.
-2. The subagent honours a named companion and model. When the choice is open,
-   it reads the catalog once, chooses a ready companion and leaves the model
-   to that companion's configuration.
-3. It sends a clear message with the task, context, constraints and desired
-   answer. The bridge passes that message to the companion verbatim.
-4. The controller starts a provider process in its own process group, loads
-   saved history when continuing, and sends the message once. It records progress
-   and the result, terminates the owned tree and publishes completion.
-5. The subagent waits with a bounded budget, then returns the companion's answer
-   as given. It relays questions to the parent and keeps any checks of its own
-   under a separate heading.
-
-For example: "Ask Codex to review the changes in /absolute/path/to/repo. Keep it
-read-only and explain any bugs with file references." Send the next message to
-that same subagent to continue the review. The parent chooses what a good answer
-looks like; the bridge adds no instructions or required answer format.
+1. Ask, for example, “Have Codex review the changes in /absolute/path/to/repo.
+   Keep it read-only and explain any bugs with file references.”
+2. The lead calls `agent_send` with the task and absolute `cwd`. The companion
+   sees the task verbatim, so the lead includes the context and constraints it needs.
+3. The send returns a thread id, a job id and how the result will arrive. The
+   lead can carry on, end its turn or call `agent_wait`.
+4. When the job ends, the bridge can wake Claude Code through the session's inbox
+   socket or Codex through `codex queue`. The hook delivers the result on session
+   start, the next prompt (including the wake), or after a tool call. For a long
+   answer the lead follows the reference with `agent_read`.
+5. To continue the review or answer a question, the lead sends to the same
+   thread. New text sent while the job runs is an intervention.
 
 The catalog lists enabled companions, the default companion, capabilities, readiness and
 the installed version seen at the last check. Each companion's `model.saved` and
@@ -81,17 +66,23 @@ Each target's `capabilities.interventions` contains `{ default, steer, queue, in
 `false`, `bridge` or `native`. These registry capabilities describe support;
 `agent_status.interventions` reports which modes are usable on a job now.
 
-![Agent Companion architecture](assets/readme/architecture.png)
+The lead calls its session's bridge directly. Each job runs its own companion
+process. [Current architecture](docs/ARCHITECTURE.md#flow)
 
-The shipped flow: harness, subagent, session-scoped bridge, one controller per
-answer, one cold companion runtime per answer. Details are in
-[Architecture](docs/ARCHITECTURE.md#flow).
+<details>
+<summary>Earlier subagent design (recording and diagram)</summary>
+
+![Claude Code receiving a Codex answer through the earlier subagent](assets/readme/demo.gif)
+
+![Retired subagent architecture](assets/readme/architecture.png)
+
+</details>
 
 ## Supported Companions
 
 ![Companion capabilities](assets/readme/target-matrix.png)
 
-The table below is the current capability contract.
+The image shows an earlier release. The table lists the current capabilities.
 
 | Companion | Per-job runtime | Follow-up by cold resume | In-flight messages (default first) | Model selection | History |
 | --- | --- | --- | --- | --- | --- |
@@ -105,19 +96,16 @@ All support send, wait, status and cancel. Every job starts in a new process;
 accepted messages can continue it through several turns on the same live session.
 There is no shared provider runtime or adapter-selection setting. Copilot
 follow-ups return `FOLLOWUP_UNSUPPORTED` until cold loading is qualified.
-`agent_reply` returns `reply_unavailable` with reason `state` or `capability`
+An intervention through `agent_send` returns `intervention_unavailable` with reason `state` or `capability`
 when the requested mode is unavailable; it never substitutes a mode.
 Bridge loss stops the owned tree through the cleanup watcher and keeps native
 history; in-flight work does not survive bridge replacement. The next message
-to the same native child resumes cold. An unavailable history fails explicitly.
+to the same thread resumes saved history where supported. An unavailable history fails explicitly.
 
 Configuration:
 
-- Silence never ends a job: a subagent may be thinking or waiting out a network
-  outage for hours with no call open. A job ends on a stop marker (written by
-  the stop hooks), a cancel, bridge loss or its native turn's end. Status shows
-  `owner_attached` and `owner_detached_at`. Total execution has no cutoff; each
-  wait is still bounded by the host's per-call timeout.
+- Each wait is bounded. Ending the lead's turn or cancelling a wait leaves the
+  job running. It ends on completion, failure, explicit cancel or bridge loss.
 - Both hosts share target, model and effort defaults in
   `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`.
   With `AGENT_COMPANION_HOME` set, the file is `$AGENT_COMPANION_HOME/settings.json`.
@@ -229,7 +217,7 @@ See the [release gates](docs/RELEASE_READINESS.md#release-gates).
 
 - Node.js `>= 26`.
 - `npm`.
-- `jq` for hook delivery.
+- `jq` for source-checkout setup.
 - At least one companion runtime:
   - OpenCode on `PATH`, or `OPENCODE_BIN=/absolute/path/to/opencode`.
   - GitHub Copilot CLI on `PATH`, or `COPILOT_BIN=/absolute/path/to/copilot`.
@@ -316,14 +304,13 @@ If installation stops partway, setup lists completed stages and keeps the
 previous companion configuration. Fix the reported error and rerun the same
 command; completed installation steps are safe to repeat. A failure while
 configuring the second harness can leave the first harness configured, and the
-status shows each separately. User-owned agent files are preserved and require
-manual reconciliation. The final status distinguishes installation from live
+status shows each separately. The final status distinguishes installation from live
 delegation verification and names the required fresh session/hook approval.
 
 ## Onboarding Commands
 
 Inspect companions with `node scripts/onboard.mjs --list-targets`;
-see [Diagnostics](#diagnostics) for readiness checks. The subagent's catalog
+see [Diagnostics](#diagnostics) for readiness checks. The bridge catalog
 also reports model configuration and capability limits.
 
 For the full flag reference, run `node scripts/onboard.mjs --help`. `--plan --json` previews
@@ -359,17 +346,8 @@ For fastest source iteration:
 claude --plugin-dir /path/to/agent-companion
 ```
 
-Claude plugin-bundled subagents ignore `mcpServers`, `hooks`, and
-`permissionMode` frontmatter for security. Agent Companion handles that by
-materializing `templates/agent-companion.md` to:
-
-```text
-~/.claude/agents/agent-companion.md
-```
-
-The materialized agent references the session-scoped plugin server by name.
-The installer qualifies it to `plugin:agent-companion:agent-bridge` and tool
-names to `mcp__plugin_agent-companion_agent-bridge__*`.
+The plugin registers `agent-bridge` for the session. Start a fresh Claude Code
+session after upgrading to load the new tools.
 
 For MCP timeout configuration and the host idle watchdog, see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), "Host budgets".
@@ -377,8 +355,8 @@ For MCP timeout configuration and the host idle watchdog, see
 ### Claude Permissions
 
 These are host permissions for bridge tools, separate from the Claude companion
-permission modes described above. The subagent needs permission to call the
-split MCP tools. Source checkout setup does this idempotently:
+permission modes described above. The lead needs permission to call the
+bridge tools. Source checkout setup does this idempotently:
 
 ```bash
 node scripts/install-permissions.mjs --host claude --yes
@@ -390,21 +368,17 @@ again". The permission installer owns the allow-list.
 Use `.claude/settings.local.json` if you want these permissions scoped to one
 repository.
 
-### One agent-companion, one companion conversation
+### Thread lifecycle
 
-Each spawned `agent-companion` is one conversation with the companion. To
-continue it — a follow-up, or the answer to a question the companion asked —
-main sends the same agent-companion a message (`SendMessage` on Claude Code,
-`followup_task` on Codex); to start fresh, it spawns a new one. Neither main nor
-the subagent carries a thread: the host names it after the calling agent.
-Claude Code shows a subagent's `agent_id` only to hooks, so the plugin's
-`PreToolUse` hook (`hooks/name-thread.sh`) overwrites `thread` on
-send/wait/reply/cancel; Codex sends the caller's own thread id in MCP `_meta`, which the
-bridge reads. A send that reaches the bridge with neither is refused. Measured
-on [Claude Code 2.1.318](probes/host-qualification/claude/REPORT-2026-11-05.md)
-and [codex-cli 0.166.0](probes/host-qualification/codex/REPORT-2026-11-05.md):
-separate children have separate owners and same-child resume preserves identity.
-The earlier Claude 2.1.310 measurement required no experimental SendMessage flag.
+| Event | What happens |
+| --- | --- |
+| The lead ends its turn | The job continues. The bridge can wake the lead when it finishes. |
+| Esc, a cancelled wait, or a stopped background wait | The wait ends. The job keeps running. |
+| Compaction | The conversation keeps its id. `agent_status` lists its threads again. |
+| Claude Code `/clear` | Old jobs keep running and stay on the companion page. The new conversation does not list their threads or receive their wakes. |
+| Codex `/new` or `/quit` | Codex keeps the conversation you left loaded until it has been idle for `thread_unload_delay_secs` (60 s by default). A job finishing then can wake it unseen, and the delay starts again. When Codex closes that conversation, a job still running ends in bridge loss. Resuming it delivers unread results at your first prompt. Its threads stay on the companion page. |
+| Host session exits | Bridge loss stops the owned process trees and fences their results. |
+| You or the lead cancel a job | The job stops. The thread stays available for a supported follow-up. |
 
 ## Install For Codex CLI
 
@@ -415,9 +389,16 @@ bash setup.sh --host codex
 ```
 
 It builds the local marketplace, registers it, atomically refreshes the
-installed plugin even at the same version, verifies the effective MCP registry,
-and eagerly materializes the custom agent before reporting success. Start a
-fresh Codex session after it finishes.
+installed plugin even at the same version and verifies the effective MCP registry.
+Start a fresh Codex session and re-trust the updated hooks.
+
+To change how long Codex keeps a conversation you left loaded, and with it the
+bridge and its jobs, add `--codex-unload-delay <seconds>`; `default` removes the
+setting. Codex's own config writer edits `~/.codex/config.toml`, keeping its
+comments. A shorter delay means fewer wakes into a conversation nobody watches,
+and a running job stops sooner after you leave; a longer one the reverse. Codex
+reads it when its app-server daemon starts: run `codex app-server daemon restart`
+(it stops running Codex work) or restart Codex.
 
 For package/release debugging, the underlying marketplace commands are:
 
@@ -426,11 +407,6 @@ node scripts/build-codex-marketplace.mjs --out dist/codex-marketplace
 codex plugin marketplace add ./dist/codex-marketplace
 codex plugin add agent-companion@agent-companion --json
 ```
-
-On a completely clean manual install, the first new session loads the plugin
-and its SessionStart hook materializes the custom agent after role discovery;
-open one further session before delegating. `setup.sh` avoids that two-session
-bootstrap by materializing the role eagerly.
 
 Validate the package end to end in an isolated `CODEX_HOME`:
 
@@ -444,26 +420,13 @@ dependencies without relying on the GUI process's `PATH`. It has no root
 `.mcp.json`, so the Codex registration is not discovered by Claude.
 
 Codex normalizes the raw server id for its model-visible tool namespace:
-`agent-bridge` becomes `mcp__agent_bridge__agent_*`. The Codex role uses that
-underscore form through Codex's `functions.exec` deferred-tool wrapper; Claude
-uses installed `mcp__plugin_agent-companion_agent-bridge__agent_*` names.
+`agent-bridge` becomes `mcp__agent_bridge__agent_*`. The Codex lead sees that
+namespace through deferred tools. Claude uses installed `mcp__plugin_agent-companion_agent-bridge__agent_*` names.
 The plugin declares its internal bridge tools pre-approved so they remain
 usable in headless `codex exec` sessions whose approval policy is `never`.
 A user or managed plugin policy can still tighten that approval mode.
 
-Current Codex intentionally prevents an agent role from adding MCP authority.
-The custom TOML role therefore contains behavior only; it inherits the bridge
-registered by `.codex-plugin/plugin.json`. That registration is technically
-visible to main Codex as well as the child. Delegated work goes through the
-`agent-companion` subagent. The ownerless catalog can be read for discovery.
-
-The materialized role lives at:
-
-```text
-~/.codex/agents/agent-companion.toml
-```
-
-It uses plugin-scoped hooks. If an older source install left managed entries in
+If an older source install left managed entries in
 `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), setup removes only
 entries carrying `_managed_by: "agent-companion"` so events are not delivered
 twice. The cleanup can also be run directly with:
@@ -472,32 +435,24 @@ twice. The cleanup can also be run directly with:
 node scripts/install-codex-hooks.mjs --plugin-root "$(pwd)" --uninstall --yes
 ```
 
-Codex V1 `multi_agent` surfaces the terminal subagent message on the next parent
-turn. If a job has finished and main Codex has not resumed, send a short prompt
-such as `any updates?`.
-
 ## Internal MCP Surface
 
-The parent talks to the subagent in plain language. These tools are its private
-transport; the parent needs no dispatch schema. The catalog is ownerless and
-read-only. Execution and continuation belong to the subagent.
+Both hosts give the lead the same six tools. The host identifies the caller.
+The bridge checks that a thread belongs to that lead before acting on it.
 
 | Tool | Arguments | Purpose |
 | --- | --- | --- |
-| `agent_catalog` | none | Enabled companions, default target, saved and last reported model/effort, effort levels, resolved permission (mode, source, risk), capabilities, readiness and last checked version. |
-| `agent_send` | `task`, `cwd`; optional `target`, `model`, `effort`, `max_wait_sec` | Send the child's exact message to one companion. |
-| `agent_wait` | `job_id`, `max_wait_sec` | Wait for a terminal result, user intervention notice, or the budget to elapse. |
-| `agent_status` | optional `job_id`, `verbose`, `diagnostics` | Observe records and per-mode `interventions` availability; diagnostics includes cached target checks. |
-| `agent_reply` | `job_id`, `message`; optional `mode` (`steer`, `queue`, `interrupt`) | Send in the requested mode, or the execution's default when omitted. Message limit: 8000 characters. |
-| `agent_cancel` | `job_id` | Cancel the named job. |
+| `agent_catalog` | none | List companions, defaults, capabilities and cached readiness. |
+| `agent_send` | `task`, absolute `cwd` for a new thread or `thread` to continue. Optional `title`, `target`, `model`, `effort`, `mode`. | Start a job, resume saved history, or send new text to a running job. |
+| `agent_wait` | `thread` or `job_id`, optional `max_wait_sec` | Wait for a result, a user intervention or the budget to elapse. |
+| `agent_read` | `thread`, optional `after`, `offset`, `limit` | Read posts in order. Follow the next call in the footer to page a long answer. |
+| `agent_status` | Optional `thread` or `job_id`, optional `diagnostics` | With no arguments, list this lead's threads, titles, states and unread counts. A reference selects one job. |
+| `agent_cancel` | `thread` or `job_id` | Stop the job. |
 
-Every send requires an absolute existing repo/worktree `cwd`. The host supplies
-conversation identity as described in
-[One agent-companion, one companion conversation](#one-agent-companion-one-companion-conversation).
-A new conversation uses the configured defaults when the request omits them.
-A follow-up keeps the conversation’s target and model unless it names a new model. Refusals are `TARGET_UNCONFIGURED`,
-`TARGET_UNSUPPORTED`, `CAPABILITY_UNAVAILABLE`, `MODEL_NOT_ALLOWED` and `EFFORT_NOT_ALLOWED`; the
-subagent relays them and stops instead of changing the request to get around them.
+A new thread needs an absolute existing directory. A follow-up inherits that
+directory and companion. Omit `thread` to work in a different repo or with
+another companion. A new thread uses the configured defaults for choices the
+lead omits. If there is no target, the bridge returns `TARGET_UNCONFIGURED`.
 
 Name effort naturally, for example "use Claude with low effort". All five
 companions accept `effort`. Claude accepts `low`, `medium`, `high`, `xhigh`, `max`;
@@ -525,8 +480,10 @@ is stored for the conversation: omitted follow-ups keep the override where cold
 follow-up is supported, and explicit effort can change after completion. Refused
 effort leaves the previous effort override or inheritance intact.
 
-`agent_send` returns `still_running` with a `job_id` after delivery acknowledgement.
-It includes `target`, `selected_model`, `selected_effort`, `effective_model`,
+`agent_send` returns `still_running` with `thread` and `job_id` as soon as
+the provider acknowledges delivery. The `delivery` field names the wake adapter
+or the reason none is armed, and lists `agent_wait` as the fallback.
+The acknowledgement includes `target`, `selected_model`, `selected_effort`, `effective_model`,
 `effective_effort` and `permission_mode`. Selected fields are overrides; effective
 fields reflect provider reports and are null when unknown. Claude reports its
 model at init but does not report effective effort. Copilot and Antigravity
@@ -537,51 +494,45 @@ Catalog permissions use the same resolver as launch and onboarding diagnostics.
 Per-job status also includes `selected_effort`, `permission_mode` and `activity`.
 Claude can report `thinking`,
 `responding`, `running <command>` or `retrying`; other companions fall back to
-command/text activity. Thinking content is never included, and terminal activity is null. An identical
-retry on the same in-flight job reattaches to its delivery acknowledgement.
-The controller compares text/model/effort after checking provider and canonical cwd. A different task,
-model or effort on a busy conversation returns `thread_busy`; target and cwd conflicts
-have their own mismatch errors. `provider_mismatch` names the bound companion
-and cwd and tells the parent to spawn a new agent-companion for the requested
-companion. `cwd_mismatch` names the bound path and offers that path or a new
-agent-companion for the other repo. Wait, cancel, or use `agent_reply` in an
-available mode. `agent_status.interventions` contains `default` (the job's preferred
-mode, or null), and `steer`, `queue`, `interrupt` booleans describing availability
-now. After close all three are false. Refusals preserve `state` or `capability`;
-an unsupported mode is never replaced with another one.
-`agent_wait` defaults to 480 seconds and is
-capped at 1200 seconds per call. The subagent reuses the chosen budget; new
-parent messages are visible between waits.
+command/text activity. Thinking content is never included, and terminal activity is null.
 
-An accepted user message returns the owner's pending wait immediately with
-`status: user_intervened` and `intervention: { from: 'user', mode, text, at }`.
-`at` is the controller's acceptance time in epoch milliseconds. It carries no
-answer (`content`) or terminal metadata. Each notice is reported once, with a
-durable receipt; messages accepted between waits are returned by the next wait
-before any terminal answer. Both roles relay the notice in one line and keep
-waiting. User cancel is a normal terminal result with cause `user_cancel`.
+An identical retry on a running thread returns the existing job.
+New text (up to 8,000 characters) uses the job's default intervention mode or
+the requested `steer`, `queue` or `interrupt`. Status reports which modes the
+job accepts. Changing model or effort while it runs returns `thread_busy`.
+
+A wake carries a short notice and a reference. The hook can include up to
+4,000 characters of the answer or just its reference when several finish together. A terminal tool response includes up to 8,000
+characters plus a second text block with metadata. `agent_read` defaults to
+8,000 characters per page and accepts up to 40,000. Use the footer's exact
+`after` and `offset` to continue. A native subagent that acts as a lead uses
+`agent_wait`. Claude inbox wakes require Claude Code 2.1.228 or later. A relocated
+`CODEX_HOME` gets no wake because the Codex bridge does not inherit that setting.
+
+`agent_wait` defaults to 480 seconds and caps each call at 1,200. A message
+you send from the companion page returns `user_intervened` on a pending or
+subsequent wait. The lead can wait again for the answer. Cancelling
+from the page produces a terminal result with cause `user_cancel`.
 
 User requests use the owning host's state inbox:
 `inbox/<executionId>/<requestId>.json`, written atomically with mode 0600, holding
 `{ requestId, executionId, mode, text, at }`. Cancel uses mode `cancel` and no text.
-The controller reads live executions' inboxes on its tick, after the owner stop
-check. Only regular files are read, at most 64 KiB of JSON and 8000 text
+The controller reads live executions' inboxes on its tick. Only regular files are read, at most 64 KiB of JSON and 8000 text
 characters. It writes `<requestId>.outcome.json` atomically with mode 0600:
 `{ requestId, ok, status, reason?, interventionId? }`, then removes the request.
 The view removes outcomes after reading; execution close removes the whole inbox,
 including requests left behind. Rejected input reports its reason; input for an
-execution not live in that bridge reports `state`. User input never attaches
-the owner. The saved execution's `interventionModes` snapshots its adapter's
+execution not live in that bridge reports `state`. The saved execution's `interventionModes` snapshots its adapter's
 capabilities for the view.
 
 Terminal envelope statuses are `completed`, `failed` and `cancelled`; durable
 results distinguish `completed`, `failed`, `interrupted`, `stopped` and
 `delivery_unknown`. Metadata includes cause, native references and stop evidence.
 When messages exist, `meta.interventions` adds `{ from, mode, state, first_line }`
-for each, with the first line capped at 80 characters. The subagent reports
-`not_delivered` messages. A job lists each native turn's answer once; a failed
+for each, with the first line capped at 80 characters. Undelivered messages are marked
+`not_delivered`. A job lists each native turn's answer once; a failed
 turn ends the job and leaves remaining input undelivered.
-Failures carry the provider's explanation in `content` (status: `partial_text`),
+Failures carry the provider's explanation in the answer text (in `partial_text` on status),
 after any partial answer and a blank line. The explanation is one line, capped at
 500 characters; error data, headers and response bodies are excluded. Failure
 codes in `detail` are unchanged, including failures before delivery acknowledgement.
@@ -617,17 +568,15 @@ Per-host state lives under:
 ~/.codex/agent-companion/
 ```
 
-`AGENT_COMPANION_HOME` overrides the state home; `CODEX_HOME` relocates Codex.
-`conversations/`, `executions/`, `attachments/` and immutable `results/` hold ownership,
-history references, progress and verified cleanup evidence. `stops/` carries
-advisory owner-stop markers; `completions/` holds per-execution publication
-receipts. `inbox/` holds user requests and outcomes; `intervention-notices/` holds
-the caller's durable notice receipts. The hook queue is `runtime/completions.jsonl`. Legacy history/configuration
-is migrated once, preserving native ids and refusing ambiguous mappings.
+`conversations/` holds each thread's lead, title, directory and native history
+reference. `executions/` and immutable `results/` hold progress and outcomes.
+A receipt beside each result records delivery by a tool or hook. `reads/` holds
+paging cursors. The hook checks `runtime/news/` for pending results. Claude
+checks `runtime/sessions/` before waking a lead. User requests
+and outcomes live in `inbox/`, and wait notices in `intervention-notices/`.
+See [State](docs/ARCHITECTURE.md#state) for path overrides.
 
-Logs live under `runtime/`; the structured event log retains the
-historical filename `daemon.log` at the state root. It does not imply a running
-service. See [State](docs/ARCHITECTURE.md#state) for record and recovery rules.
+Logs live under `runtime/` in `agent-bridge.log`. See [State](docs/ARCHITECTURE.md#state) for record and recovery rules.
 
 The bridge renders `agent-digest://<executionId>` on demand from the execution
 and result records plus the companion's own native transcript. It includes the
@@ -636,15 +585,14 @@ and that turn's transcript items in order. Preamble is collapsed to a count;
 each item's output is capped at about 2 KB, with the native transcript path for
 the rest. Running reads include the in-flight progress line. Missing or
 unrecognized transcripts are explicitly labelled. Resources are listed from
-execution records. Reads write nothing and never attach the owner.
+execution records. Digest reads write nothing.
 Existing files under `runtime/digests/` are left alone and are no longer written.
 
 Results carry `workSummary`, exposed as `meta.work_summary` on terminal envelopes.
-Both host roles relay its non-empty parts after the answer: failed commands with
+It includes failed commands with
 exit codes and the total command count, transcript-reported edits, native errors,
 transcript gaps, and the worktree diff-stat labelled as including any writer
-between turn start and end. Omitted counts stay explicit. The `meta.digest_uri`
-and result resource link remain the pointer to the full transcript view.
+between turn start and end. Omitted counts stay explicit. `meta.digest_uri` points to the full transcript view.
 
 ## Live View
 
@@ -656,10 +604,9 @@ this checkout's `hooks/launch-ui.sh` with the Node 26 the hooks resolve. When
 `~/.local/bin/agent-companion ui`, or `bash hooks/launch-ui.sh ui` from the
 checkout. Its dependencies (Ink, React) install with the bridge's.
 
-Each job card shows the caller's own title for the job (on Claude, the
-description the lead gave its agent-companion subagent; on Codex, the
-subagent's task name), otherwise the task's first line, then the companion and
-project. The selected job's header adds only the host and lead session, model
+Each job card shows the thread's title (the lead's `title` on send or the
+first line of the task), the companion and the project. The selected job's
+header adds the host and lead session, model
 and effort, tokens (finished jobs) and branch. Below it is that job's turn from
 the companion's own native transcript, followed as it grows, with the
 in-flight activity from the execution record as the last line. A finished job
@@ -676,13 +623,12 @@ the modes that job's companion supports are offered; Copilot offers cancel
 only. A sent message waits between the live line and the box with its state
 (waiting for the bridge, queued, joined) until the companion's transcript shows
 it. A refusal shows once in red with its reason, and the text returns to an
-empty box. The lead learns of each message or cancel at once. Ended jobs have
+empty box. A wait reports accepted user messages. Cancelling produces a terminal result. Ended jobs have
 no box; a running job started by an older bridge shows a one-line hint instead.
 
 The view's job writes are those messages and cancels: one 0600 request file
 per send in the owning host's state directory, under
-`inbox/<executionId>/`, and the deletion of each outcome file it has read. It
-attaches no owner and starts no work. Drafts stay in memory.
+`inbox/<executionId>/`, and the deletion of each outcome file it has read. Drafts stay in memory.
 
 `d` opens the defaults panel: the default companion and each companion's model
 and effort, saved or what inherit resolves to, as `agent-companion defaults`
@@ -718,42 +664,17 @@ In a running job's message box:
 | `Esc` | Back to the list; the draft is kept |
 | `Ctrl+C` | Clear the draft; on an empty box, quit |
 
-### In Claude Code's agent list
+### In Claude Code
 
-The plugin also carries a Claude Code mod, `hooks/mod.ts` (Codex ignores it).
-Each agent-companion subagent's row in the agent list under the prompt shows
-its job: the lead's title for it, the companion and model, what the companion
-is doing (the running command, responding, your queued message, retrying),
-`owner away 12m` once its subagent has made no bridge call for a minute, and
-the elapsed time; once the job ends, its outcome and duration. The live view and
-the Companions pane show the same line; a job whose subagent ended with no stop
-signal stays listed as running until it finishes its turn or you cancel it. The rows refresh
-every second while a job runs, from the same execution records, and the mod
-writes nothing. Other subagents' rows stay as Claude Code draws them.
+A band above the prompt lists running threads with their title, companion,
+model, current activity and elapsed time. It disappears when no thread is
+running.
 
-The mod also draws a **Companions** pane. `/companion` opens it at any width
-and gives it the keys. Switching to an agent-companion subagent's view opens it
-too, on terminals from 144 columns and with the keys left at the prompt; going
-back to the main conversation closes that pane again, unless you used it in
-between (gave it the keys, pressed in it, or ran `/companion`). A job starting
-opens nothing. With the main conversation in view it lists this session's jobs as
-cards, running first, then the nine newest, the older ones counted; the list
-is read again from the execution records at the session's start and at each
-open, a resumed session included: its jobs are the ones its transcript's
-subagents own, whatever session id the resume gave it. Pick a card to switch to its subagent's
-view; where Claude Code cannot show that subagent (a resumed session has none
-of its earlier ones), the pane shows the job itself. With a companion subagent
-in view the pane shows that job as the live view's job pane does: its turn
-from the companion's own transcript, pending messages and the live line, or
-the outcome once it ended. A running job that takes messages has the live
-view's message box under its live line, with the keys in it: Enter sends in
-the mode shown (the companion's own default first; `mode ▸` cycles through
-the modes it takes), `cancel job` asks once, and a refusal says why and keeps
-the text. Copilot takes cancel only. `← jobs` goes back. The list, the
-transcript and each message go through small Node children (`launch-ui.sh
-jobs`, `launch-ui.sh follow` per shown job, ended when the view or the job
-changes, and `launch-ui.sh send`, which writes the inbox request and waits for
-the bridge's outcome).
+Open `/companion` to see this session's threads as cards, running first. Pick
+a card to open its latest job in the pane. You can follow the native transcript,
+see the outcome or message a running companion in a supported mode. Enter sends
+the message, `mode ▸` changes mode, and `cancel job` asks for confirmation.
+Copilot accepts cancel only. Use `← jobs` to return to the cards.
 
 From the keyboard, `ctrl+x tab` gives the pane the keys, with the first card
 (or a running job's message box, else `← jobs`) under the focus ring, where
@@ -781,7 +702,7 @@ Catalog's Codex entry and `agent_status` expose the advisory contract status as
 `contractStatus: match|drift|unverified` (the shipped field name). The adapter
 checks the schema once per bridge when Codex starts; catalog/status do not run
 that probe. Diagnostics on status reads cached target checks. Execution status
-includes owner attachment, last native activity, active command, retry state, partial text,
+includes last native activity, active command, retry state, partial text,
 selected/effective model, native refs and stop evidence.
 
 Install markers:
@@ -791,11 +712,11 @@ cat ~/.claude/agent-companion/.host
 cat ~/.codex/agent-companion/.host
 ```
 
-Bridge startup events are JSONL:
+Bridge startups are lines in the bridge log:
 
 ```bash
-grep '"event":"bridge.startup"' ~/.claude/agent-companion/daemon.log
-grep '"event":"bridge.startup"' ~/.codex/agent-companion/daemon.log
+grep bridge.startup ~/.claude/agent-companion/runtime/agent-bridge.log
+grep bridge.startup ~/.codex/agent-companion/runtime/agent-bridge.log
 ```
 
 ## Development
@@ -827,38 +748,30 @@ Its headless snapshots are `bridge-server/ui/ui.test.mjs.snapshot`; after an
 intended change, regenerate them with `node --test --test-update-snapshots
 bridge-server/ui/ui.test.mjs` and review the diff.
 
-README images are generated bitmaps. Their specifications live in
-[assets/readme/PROMPTS.md](assets/readme/PROMPTS.md); regenerate from those
-prompts (Codex's `imagegen` skill produced the current set) and check every
-label before committing. CI checks only that the files exist.
+The README illustrations are generated bitmaps. Before regenerating them,
+update the prompts for the current thread flow and companion matrix. CI checks
+only that the files exist. [Image specifications](assets/readme/PROMPTS.md)
 
 Validate Claude packaging with `claude plugin validate .` and run the mod's
 tests with `claude plugin test .`; Codex packaging and
 isolated validation commands are in [Install For Codex CLI](#install-for-codex-cli).
 
-Current live probes are listed in [probes/README.md](probes/README.md):
-`smoke.mjs`, `orphan.mjs`, `acp-antigravity.mjs`, and the two host-qualification
-harnesses. Live probes spend quota and are separate from the root test suite.
+The [probe index](probes/README.md) lists the live harnesses. Recheck lead
+identity, delivery and wake behavior after a host upgrade with the
+[direct-lead probes](probes/direct-lead/README.md). Live probes can spend quota.
 
 ## Design Invariants
 
-- The parent delegates in plain language to a native `agent-companion` child.
-  The companion does the work; the child relays answers and actual failures.
-- Both hosts register the bridge at plugin/session scope. Execution calls require
-  the host-supplied native child owner; catalog and status are ownerless reads.
-- One controller owns each execution and one cold provider process group per
-  answer. Provider processes and protocol connections are never shared by children.
-- Pending owner calls attach the owner; silence never ends a job. Stop markers
-  and attributed cancellation close the owner. Observers cannot attach it.
-- Bridge loss hands recorded trees to the cleanup watcher. It terminates and
-  verifies them, keeps native history and writes a fenced immutable result.
-  A replacement never adopts live work; subsequent answers cold-resume history.
-- Delivery is acknowledged once and is never automatically resent after an
-  ambiguous failure. Busy matching sends reattach; different work is refused.
-- Results are immutable and generation-fenced. Completion publication is keyed
-  by execution id, and hooks drain the session-tagged queue. Every wait is bounded.
-- Companion/model choices are honoured and text is delivered verbatim. Missing
-  history and unsupported follow-up fail explicitly, with no silent substitute.
+- The host identifies the lead. The bridge mints the thread id and checks it on
+  follow-ups. Companions receive the lead's task verbatim.
+- Each job owns a cold provider process group. Bridge loss hands the tree to
+  the cleanup watcher for termination, verification and a fenced result.
+- A job can outlast its lead's turn or a cancelled wait. Only an explicit
+  cancel, a terminal outcome or bridge loss ends the job.
+- An ambiguous delivery is never resent automatically. An identical busy send
+  returns the original job. New text on a busy thread uses an intervention mode.
+- A hook and a terminal tool call compete for one delivery receipt. The result
+  stays available through `agent_read`.
 - Node dependencies persist under plugin data. Claude reaches them through a
   `bridge-server/node_modules` link; Codex's launcher resolves them from plugin
   data because its plugin bundles cannot contain symlinks.
