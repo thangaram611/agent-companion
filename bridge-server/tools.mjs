@@ -328,7 +328,7 @@ function tool(action, description, fields, conditions, handler, annotations) {
 export const tools = [
   tool('catalog', 'List companions, model defaults and last-checked readiness.', {}, {}, handleCatalog,
     { readOnlyHint: true, destructiveHint: false, idempotentHint: true }),
-  tool('send', 'Send the task verbatim. Pass the returned thread for a follow-up. New text on a running thread intervenes in its default or requested mode.', {
+  tool('send', 'Delegate background work or request an independent review. The companion sees only your verbatim task and working directory. Start a new thread with task and absolute cwd. Omit thread and mode on the first send. Omit model and effort to inherit defaults. Send returns a thread immediately. Read it on the completion notice, or call companion_wait when delivery.wake is null. Pass the returned thread for a follow-up. New text on a running thread intervenes in its default or requested mode.', {
     task: field('string', string), cwd: field('string', assertCwd, { description: 'Absolute working directory. Required for a new thread.' }),
     thread, companion: field('string', (v, k) => optionalString(v, k)?.toLowerCase(), { enum: listCompanionIds() }),
     model: field('string', optionalString), effort: field('string', optionalString),
@@ -352,13 +352,13 @@ export const tools = [
 const hostSessions = new WeakMap();
 function adoptHostSessionId(active, session) {
   const bound = hostSessions.get(active);
-  if (bound && bound !== session) throw Object.assign(new Error('This bridge belongs to another Codex session.'), { code: 'BRIDGE_SID_CONFLICT' });
+  if (bound && bound !== session) throw Object.assign(new Error('This bridge belongs to another host session.'), { code: 'BRIDGE_SID_CONFLICT' });
   hostSessions.set(active, session);
 }
 
 function attributedInput(tool, params, host, active) {
   const raw = params.arguments ?? {};
-  const lead = HOSTS[host].leadFromCall({ args: raw, meta: params._meta });
+  const lead = HOSTS[host].leadFromCall({ args: raw, meta: params._meta, env: active.env });
   if (tool.action !== 'catalog' && !lead) throw Object.assign(new Error('Host lead identity is required.'), { code: 'LEAD_REQUIRED' });
   const { lead: injected, ...publicArgs } = raw;
   const args = validateFields(publicArgs, tool);

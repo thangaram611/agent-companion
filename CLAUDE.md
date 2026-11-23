@@ -2,7 +2,7 @@
 
 ## What this is
 
-The **lead** in Claude Code or Codex CLI calls `agent-bridge` directly. It sends
+The **lead** in Claude Code, Codex CLI, OpenCode or GitHub Copilot CLI calls `agent-bridge` directly. It sends
 a task and absolute cwd to OpenCode, GitHub Copilot CLI, Codex CLI, Google
 Antigravity or Claude Code. The bridge returns a thread id, runs the job and
 delivers the result to that lead. Codex desktop remains unqualified.
@@ -48,7 +48,7 @@ refuses to adopt a live or unverified tree. A later job resumes supported
 native history in a fresh process.
 
 **The host identifies the lead.** Claude's PreToolUse hook writes `lead` from
-`session_id` and optional `agent_id`. Codex uses turn metadata. The bridge
+`session_id` and optional `agent_id`. Codex uses turn metadata. OpenCode supplies the session in MCP metadata. Copilot stamps the native hook identity and binds it to the bridge root and tool call. The bridge
 issues a thread id. A caller using another lead's thread gets `THREAD_NOT_YOURS`.
 Starting work from a recorded companion session gets `RECURSION_REFUSED`.
 

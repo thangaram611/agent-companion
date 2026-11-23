@@ -13,7 +13,7 @@ that started it. The lead can work on something else or end its turn.
 
 | Product term | Current implementation term | Meaning |
 | --- | --- | --- |
-| Host | `host` | The app the user talks to, currently Claude Code or Codex CLI. |
+| Host | `host` | The app the user talks to, Claude Code, Codex CLI, OpenCode or GitHub Copilot CLI. |
 | Lead | `lead` | Calling host conversation, identified by the host on each call. |
 | Thread | `thread` | Bridge-issued id for a linear conversation with one companion in one directory. |
 | Companion | `companion` | The runtime that does the work, currently OpenCode, GitHub Copilot CLI, Codex CLI, Google Antigravity, or Claude Code. |
@@ -21,7 +21,7 @@ that started it. The lead can work on something else or end its turn.
 | Model preference | optional `companion_send` `model` | An explicit choice for this thread; a new thread uses configured defaults when omitted. |
 | Catalog | `companion_catalog` | Read-only companion/model configuration, capabilities and readiness. |
 
-`setup.sh --host claude|codex|both` selects the host, and
+`setup.sh --host claude|codex|opencode|copilot|both|all` selects the host, and
 `companion_send({ companion })` names a companion runtime directly (see Private MCP Surface).
 
 ## Flow
@@ -50,7 +50,15 @@ where supported. Each job has its own process group and protocol connection.
 
 ### MCP registration boundary
 
-Both plugin manifests register `agent-bridge` at session scope. Their launcher
+The Copilot marketplace loads the checkout in place. A bridge belongs to its
+`COPILOT_AGENT_SESSION_ID`. The native pre-tool hook signs the event's session
+and agent with its tool-call ID. Thread operations verify that stamp. A joined
+extension owns a private Unix socket registered under that root's runtime
+directory. Completion sends one bounded request and the extension acknowledges
+after `session.send`. Reads and delivery receipts follow the shared rules. The
+companion's ACP argv disables only the bundled server. [Copilot host plan](COPILOT_HOST_PLAN.md)
+
+The Claude and Codex plugin manifests register `agent-bridge` at session scope. Their launcher
 selects the host and resolves Node and the bridge dependencies. Claude sets
 `timeout: 1320000` in milliseconds. Codex sets `tool_timeout_sec: 1320` and
 pre-approves the tools for headless sessions, subject to user and managed policy.

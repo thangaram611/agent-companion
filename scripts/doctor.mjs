@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Environment diagnostics for agent-companion.
 
-import { buildDoctorReport, renderDoctorReport } from '../lib/doctor.mjs';
+import { inspectDoctor, renderDoctorReport } from '../lib/doctor.mjs';
 
 const asJson = process.argv.includes('--json');
-const report = buildDoctorReport();
+const report = await inspectDoctor();
 
 if (asJson) {
   console.log(JSON.stringify(report, null, 2));

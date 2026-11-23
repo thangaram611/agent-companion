@@ -239,8 +239,8 @@ async function main() {
 
   // --doctor: full environment report.
   if (options.doctor) {
-    const { buildDoctorReport, renderDoctorReport } = await import('../lib/doctor.mjs');
-    const report = buildDoctorReport({ env });
+    const { inspectDoctor, renderDoctorReport } = await import('../lib/doctor.mjs');
+    const report = await inspectDoctor({ env });
     console.log(options.json ? JSON.stringify(report, null, 2) : renderDoctorReport(report));
     process.exit(report.ok ? 0 : 1);
   }

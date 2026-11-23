@@ -150,8 +150,9 @@ esac
 DO_CLAUDE=0
 DO_CODEX=0
 DO_OPENCODE=0
+DO_COPILOT=0
 for h in "${HOSTS[@]}"; do
-  case "$h" in claude) DO_CLAUDE=1 ;; codex) DO_CODEX=1 ;; opencode) DO_OPENCODE=1 ;; esac
+  case "$h" in claude) DO_CLAUDE=1 ;; codex) DO_CODEX=1 ;; opencode) DO_OPENCODE=1 ;; copilot) DO_COPILOT=1 ;; esac
 done
 if [ -n "$UNLOAD_DELAY" ] && [ "$DO_CODEX" = 0 ]; then
   fail "--codex-unload-delay needs a Codex host (--host codex, both or all)"; exit 2
@@ -264,6 +265,10 @@ if [ "$DO_OPENCODE" = 1 ] && ! opencode plugin add --help >/dev/null 2>&1; then
   fail "OpenCode with plugin add support is required."; exit 1
 fi
 
+if [ "$DO_COPILOT" = 1 ] && ! copilot plugin marketplace list --help >/dev/null 2>&1; then
+  fail "Copilot CLI with local marketplace support is required."; exit 1
+fi
+
 printf "Checking plugin surface...\n"
 
 SURFACE_PATHS=(
@@ -288,6 +293,11 @@ fi
 
 if [ "$DO_OPENCODE" = 1 ]; then
   SURFACE_PATHS+=("$SCRIPT_DIR/opencode-plugin/package.json" "$SCRIPT_DIR/opencode-plugin/server.js" "$SCRIPT_DIR/hooks/launch-agent-bridge.sh")
+fi
+if [ "$DO_COPILOT" = 1 ]; then
+  SURFACE_PATHS+=("$SCRIPT_DIR/.github/plugin/plugin.json" "$SCRIPT_DIR/.claude-plugin/marketplace.json"
+    "$SCRIPT_DIR/hooks/hooks-copilot.json" "$SCRIPT_DIR/hooks/copilot.mjs"
+    "$SCRIPT_DIR/hooks/launch-agent-bridge.sh" "$SCRIPT_DIR/extensions/notice/extension.mjs")
 fi
 for path in "${SURFACE_PATHS[@]}"; do
   if [ -f "$path" ]; then
@@ -383,6 +393,10 @@ if [ "$DO_OPENCODE" = 1 ]; then
   esac
   [ -z "$OPENCODE_IDLE" ] || echo "  Apply the timeout to open directories with opencode reload or the plugin service restart."
 fi
+if [ "$DO_COPILOT" = 1 ]; then
+  echo "  Register this checkout as a local Copilot marketplace and enable agent-companion."
+  echo "  Enable experimental mode for the whole Copilot profile (copilot config experimental true)."
+fi
 echo "  Write diagnostic install markers after each host finishes."
 if [ "$MODEL" = inherit ]; then
   echo "  Clear the shared default model for ${SELECTED_COMPANIONS[0]}."
@@ -445,7 +459,7 @@ echo ""
 
 if [ "$COMPANION" = "copilot" ] || command -v copilot >/dev/null 2>&1; then
   printf "Setting up Copilot reviewer agent...\n"
-  COPILOT_AGENTS="$HOME/.copilot/agents"
+  COPILOT_AGENTS="${COPILOT_HOME:-$HOME/.copilot}/agents"
   REVIEWER_AGENT="$COPILOT_AGENTS/reviewer.agent.md"
   mkdir -p "$COPILOT_AGENTS"
   if [ ! -f "$REVIEWER_AGENT" ]; then
@@ -641,6 +655,23 @@ if [ "$DO_OPENCODE" = 1 ]; then
   OPENCODE_INSTALLED=1
 fi
 
+if [ "$DO_COPILOT" = 1 ]; then
+  STEP="Copilot plugin installation"
+  host_paths copilot "$SCRIPT_DIR"
+  market=$(copilot plugin marketplace list --json | jq -r '.[] | select(.name == "agent-companion") | .source')
+  case "$market" in
+    "") copilot plugin marketplace add "$SCRIPT_DIR" ;;
+    "Local: $SCRIPT_DIR") ;;
+    *) fail "The agent-companion marketplace is already registered from another source: $market"; exit 1 ;;
+  esac
+  AGENT_COMPANION_HOST=copilot CLAUDE_PLUGIN_ROOT="$SCRIPT_DIR" AGENT_COMPANION_REQUIRE_DEPS=1 /bin/bash "$SCRIPT_DIR/hooks/install-deps.sh"
+  copilot config experimental true
+  copilot plugin install agent-companion@agent-companion
+  mkdir -p "$HOST_STATE_DIR"
+  printf 'copilot\n' > "$HOST_STATE_DIR/.host"
+  ok "Copilot plugin installed. Start a fresh session and approve agent-bridge when prompted."
+fi
+
 # --- Syntax-check all .mjs files ------------------------------------
 
 STEP="syntax checks"
@@ -684,7 +715,7 @@ while IFS= read -r -d '' f; do EXISTING+=("$f"); done < <(
 )
 
 if [ "${#EXISTING[@]}" -gt 0 ]; then
-  if node --test "${EXISTING[@]}" 2>/dev/null; then
+  if node --test --test-timeout=300000 "${EXISTING[@]}" 2>/dev/null; then
     TEST_STATUS="passed"
     ok "unit tests passed"
   else

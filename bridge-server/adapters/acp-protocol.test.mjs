@@ -10,6 +10,7 @@ const ANTIGRAVITY = getCompanionById('antigravity');
 test('the Copilot spawn argv carries its permission flags and model selection uses the session', () => {
   assert.deepEqual(COPILOT.acp.args({ model: 'claude-sonnet-4.6', env: {} }), [
     '--acp',
+    '--disable-mcp-server', 'agent-bridge',
     '--no-ask-user',
     '--allow-all-tools',
     '--allow-all-paths',

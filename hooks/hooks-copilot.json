@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "AGENT_COMPANION_HOST=copilot node \"${PLUGIN_ROOT}/hooks/copilot.mjs\" sessionStart"
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "AGENT_COMPANION_HOST=copilot node \"${PLUGIN_ROOT}/hooks/copilot.mjs\" userPromptSubmitted"
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "AGENT_COMPANION_HOST=copilot node \"${PLUGIN_ROOT}/hooks/copilot.mjs\" preToolUse"
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "AGENT_COMPANION_HOST=copilot node \"${PLUGIN_ROOT}/hooks/copilot.mjs\" postToolUse"
+      }
+    ]
+  }
+}

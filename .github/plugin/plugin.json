@@ -1,0 +1,17 @@
+{
+  "name": "agent-companion",
+  "version": "1.0.0",
+  "description": "Delegate work to a companion in a thread owned by this Copilot conversation.",
+  "extensions": ["./extensions"],
+  "hooks": "./hooks/hooks-copilot.json",
+  "mcpServers": {
+    "agent-bridge": {
+      "type": "local",
+      "command": "/bin/bash",
+      "args": ["${PLUGIN_ROOT}/hooks/launch-agent-bridge.sh"],
+      "env": { "AGENT_COMPANION_HOST": "copilot" },
+      "tools": ["*"],
+      "timeout": 1320000
+    }
+  }
+}

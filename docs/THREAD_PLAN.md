@@ -216,7 +216,7 @@ OpenCode model or `gemini-3.8-flash-low`.
 - **Copilot CLI 1.0.114.** The MCP server's environment has
   `COPILOT_AGENT_SESSION_ID`. `--resume=<id> -p` from another process is refused
   while the session is open. An extension that calls `joinSession()` and then
-  `session.send(text)` woke the idle lead; extensions need `--experimental`.
+  `session.send(text)` woke the idle lead; setup enables the experimental profile setting. Root and native subagent threads share the root bridge and keep distinct owners. [Implementation and qualification](COPILOT_HOST_PLAN.md)
 - **Antigravity 1.5.13.** MCP servers come from `agy mcp add` (measured) or a
   plugin's `mcp_config.json` (its own plugin guide). Each call's `_meta` has `antigravity.google/conversation_id`
   and `root_conversation_id`. Only commands the session itself runs get
@@ -302,7 +302,7 @@ Three layers, in this order on every host:
 | Claude Code | Bridge writes the two lines to its own session's inbox socket | The lead is the main conversation and its session id is still current for this process |
 | Codex CLI | Bridge runs `codex queue --thread <lead thread>` | The lead is a root thread |
 | OpenCode (later) | Bridge runs `opencode run -s <lead session>`, detached | The session id is known |
-| Copilot CLI (later) | The plugin's extension calls `session.send` | The extension has registered for the lead's session |
+| Copilot CLI | The plugin's extension calls `session.send` | The extension has registered for the lead's session |
 | Antigravity (later) | A waiter the lead starts with one command runs `agentapi send-message` | The lead ran the command |
 
 - **Current session on Claude.** A SessionStart hook records

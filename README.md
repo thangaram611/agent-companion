@@ -6,7 +6,7 @@ Ask a companion to work in a repo or worktree from your own conversation.
 The companion gets your task word for word and returns its answer to you.
 You can keep working, then follow up on the same thread.
 
-- **Host** — Claude Code or Codex CLI, the app you use.
+- **Host** — Claude Code, Codex CLI, OpenCode or GitHub Copilot CLI.
 - **Lead** — your conversation in the host.
 - **Companion** — OpenCode, GitHub Copilot CLI, Codex CLI, Google Antigravity or Claude Code.
 - **Thread** — one ongoing conversation with one companion in one directory, owned by one lead. Its id looks like `th-0123456789`.
@@ -32,7 +32,7 @@ bash setup.sh --host codex
 
 Open a fresh Codex session and approve the plugin hooks.
 
-In either host, try “Ask Codex to review the staged changes in /abs/path.”
+From your lead, try “Ask Codex to review the staged changes in /abs/path.”
 Use the absolute path to your repo. The send returns a thread id and job id as soon as the companion accepts.
 The answer comes later by hook or `companion_wait`. A wake can bring the lead back for it.
 
@@ -169,10 +169,9 @@ language servers loaded until the service stops. Use `default` to remove the
 global override. For a timeout change alone, run `opencode reload` after
 running jobs finish. It rebuilds open directories and restarts their MCP servers.
 
-Two more hosts are planned. [Hosts built later](docs/THREAD_PLAN.md#hosts-built-later-1)
+**GitHub Copilot CLI.** Run `setup.sh --host copilot` from the checkout. Setup enables experimental mode for the whole Copilot profile so the notice extension can join your session. Approve the bridge when prompted or launch with `--allow-tool=agent-bridge`. A root gets a completion message in its own session. Subagents and sessions without a live extension use `companion_wait`. Doctor reports the profile setting and live registrations.
 
-- **GitHub Copilot CLI** will use a session extension for wakes in experimental mode.
-- **Google Antigravity** will use a permitted wake command, with wait as the fallback.
+**Google Antigravity** hosting is planned with a permitted wake command and wait as the fallback. [Host plan](docs/THREAD_PLAN.md#hosts-built-later-1)
 
 ## Live view
 
@@ -208,7 +207,7 @@ selects, `1`–`9` open cards, `b` returns to the cards and Esc returns to the c
 
 ## Configuration
 
-Both hosts share `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`.
+All hosts share `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`.
 `agent-companion defaults` shows saved choices, their sources and what each companion
 inherits. Codex and OpenCode read native defaults for the current directory. The others
 show the last reported value and its age. Conflicting older defaults show both files
@@ -231,11 +230,11 @@ to the bridge. Use saved defaults or name the model in your request.
 
 | Setup flag | Effect |
 | --- | --- |
-| `--host` | Install for `claude`, `codex`, `opencode` or `all`. `both` selects Claude Code and Codex. Setup detects a sole host. With multiple hosts present, choose at the prompt or pass the flag for unattended setup. |
+| `--host` | Install for `claude`, `codex`, `opencode`, `copilot` or `all`. `both` selects Claude Code and Codex. Setup detects a sole host. With multiple hosts present, choose at the prompt or pass the flag for unattended setup. |
 | `--companion` | Choose `opencode`, `copilot`, `codex`, `antigravity` or `claude`. Omit to preserve existing defaults. On a clean install, setup selects the only ready companion or asks you to choose. `auto` selects the only ready one. `none` installs the host and preserves defaults. |
 | `--model` | Save a model for an explicitly named companion. Use `inherit` to clear it. |
 | `--codex-unload-delay` | For `codex`, `both` or `all`, set idle seconds (zero allowed). `default` removes the setting. |
-| `--opencode-idle-timeout` | For `opencode` or `all`, set a global idle duration such as `"90 minutes"`. `false` disables idle unloading. `default` removes the setting. Omit to keep the current value. |
+| `--opencode-idle-timeout` | For `opencode`, `copilot` or `all`, set a global idle duration such as `"90 minutes"`. `false` disables idle unloading. `default` removes the setting. Omit to keep the current value. |
 | `--no-companion-check` | Allow an explicit selection despite a readiness failure. |
 | `--skip-tests` | Skip setup's unit tests. |
 | `--yes`, `-y` | Apply without the interactive confirmation. |
@@ -267,7 +266,7 @@ finish with “ready” for the check to pass. A failed check blocks the save. R
 | `OPENCODE_DB`, `XDG_DATA_HOME` | Set the OpenCode transcript database or its data root. |
 | `AGENT_RUNTIME_DIR`, `AGENT_BRIDGE_LOG_FILE`, `AGENT_PROMPT_JSONL_DIR` | Override the runtime directory, log file or prompt directory reported by doctor. |
 | `AGENT_COMPANION_NODE`, `AGENT_COMPANION_NPM` | Select Node and npm executables for the hooks. |
-| `AGENT_COMPANION_HOST`, `CLAUDE_PLUGIN_DATA`, `PLUGIN_DATA` | The host registration selects `claude` or `codex`. The data variables locate installed dependencies. |
+| `AGENT_COMPANION_HOST`, `CLAUDE_PLUGIN_DATA`, `PLUGIN_DATA` | The registration selects the host descriptor. The data variables locate installed dependencies. |
 | `CLAUDE_PLUGIN_ROOT`, `PLUGIN_ROOT` | Locate the plugin for the dependency installer. The host or bridge launcher supplies the path. |
 | `AGENT_COMPANION_LOCK_WAIT_SEC`, `AGENT_COMPANION_REQUIRE_DEPS` | Dependency installation waits 45 seconds for the lock by default (override 1–54). The bridge launcher sets the second to `1` to retry on contention. |
 
@@ -280,6 +279,7 @@ companion's own error text. Catalog and status report the last Codex schema chec
 
 - Claude Code keeps records in `~/.claude/agent-companion/`.
 - Codex CLI uses `$CODEX_HOME/agent-companion/` (default `~/.codex/agent-companion/`).
+- Copilot CLI uses `$COPILOT_HOME/agent-companion/` (default `~/.copilot/agent-companion/`).
 - In each home, `.host` marks a source install. Look for `bridge.startup` in `runtime/agent-bridge.log`. [State paths, overrides and recovery](docs/ARCHITECTURE.md#state)
 
 | Refusal | What to do |

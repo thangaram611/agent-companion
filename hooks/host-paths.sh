@@ -30,6 +30,13 @@ codex_config_dir() {
 host_paths() {
   local host="$1" root="$2"
   case "$host" in
+    copilot)
+      HOST_CONFIG_DIR="${COPILOT_HOME:-$HOME/.copilot}"
+      HOST_PLUGIN_DATA="${HOST_CONFIG_DIR%/}/agent-companion/deps"
+      HOST_DEPS_LINK=""
+      HOST_BRIDGE_IMPORT="$root/hooks/launch-agent-bridge.mjs"
+      HOST_AGENT_FILE=""
+      ;;
     opencode)
       HOST_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
       HOST_PLUGIN_DATA="$root"

@@ -241,3 +241,35 @@ and verify fresh CI on that exact commit before publication.
 - Live bridge check, 2026-11-23 (isolated homes, local Ollama `gpt-oss:20b`, 32k context): Copilot CLI 1.0.114 recalled the code word on the same thread and refused steer with `intervention_unavailable` (reason `capability`). Claude Code 2.1.330 steer joined two messages in one turn. On both companions, queue ran a second turn. Interrupt ended the first turn as `interrupted` and answered in the second.
 - Codex desktop and older Claude Code versions remain open. Gates 3, 4 and
   7 to 11 were not rerun in full for this release.
+
+### Copilot CLI host
+
+On 1.0.114 in a disposable profile, two setup runs produced one enabled local
+marketplace plugin and one bridge. A plain TUI joined its notice extension.
+The installed launcher advertised six tools and refused both direct status
+calls (missing and forged lead) with `LEAD_REQUIRED`. Two open roots had
+separate registrations. A forged read of the other root's actual thread
+returned `THREAD_NOT_YOURS`; the owner listed it. Clearing one replaced its
+registration while the other root survived. A marked ACP session started the
+unrelated control MCP with no additional bridge startup or notice registration. The independent
+post-tool hook's canary accompanied a successful native status result. Doctor
+pinged three live registrations; with extension loading disabled in a fresh
+TUI, doctor reported zero. Disable, enable, update and uninstall were exercised
+in a separate isolated profile.
+
+The installed bridge delivered a failed job's completion to the idle owning
+root. The shared jobs view displayed that failed job. The process census
+returned EPERM in this sandbox. In a separate model-driven send the local
+model supplied an invalid `mode: "sync"` and invented a thread ID; the bridge
+refused the call. The send description now specifies the first-send fields
+and exposes the supported modes in its schema. A controlled wake
+was acknowledged 759 ms into a separate 12 s native tool call that then
+completed successfully. Acknowledgement measures acceptance by the session.
+GPU qualification remains open for successful supervised send, wait/read,
+follow-up and cancellation across reachable companions; model receipt after a
+queued busy/background wake; concurrent completions and wait races; sibling
+and nested subagent ownership and wait; disabled or late extension fallback;
+one-hour idle retention, the full 1,200 s wait, cancelled wait and job survival;
+clear, crash and exit during work; and recursion on a real start and resume.
+Private Ollama stopped after this run. Port 11435 refused connections.
+[Installed-product checks](../probes/copilot-host/README.md#installed-product)

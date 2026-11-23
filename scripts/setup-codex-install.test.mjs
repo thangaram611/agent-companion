@@ -28,6 +28,8 @@ const AGENT_SENTINEL = '# AUTO-INSTALLED by agent-companion plugin (hooks/instal
 const FIXTURE_PATHS = [
   '.claude-plugin',
   '.codex-plugin',
+  '.github/plugin',
+  'extensions',
   'opencode-plugin',
   'assets',
   'bridge-server',
@@ -384,7 +386,7 @@ test('setup discovers the same test files as root discovery, including cross-cut
       import { spawnSync } from 'node:child_process';
       const args = process.argv.slice(2);
       if (args[0] === '--test') {
-        writeFileSync(${JSON.stringify(capture)}, JSON.stringify(args.slice(1)));
+        writeFileSync(${JSON.stringify(capture)}, JSON.stringify(args.filter(a => !a.startsWith('--'))));
       } else {
         const r = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' });
         process.exit(r.status ?? 1);
@@ -714,7 +716,23 @@ exit 0
 `);
   const conf = path.join(f.home, 'xdg');
   const config = path.join(conf, 'opencode/opencode.jsonc');
-  const env = { XDG_CONFIG_HOME: conf };
+  const copilotHome = path.join(f.tmp, 'custom Copilot home');
+  const env = { XDG_CONFIG_HOME: conf, COPILOT_HOME: copilotHome };
+  mkdirSync(copilotHome);
+  writeExecutable(path.join(f.bin, 'copilot'), `#!/bin/bash
+set -eu
+cd "$COPILOT_HOME"
+case "$*" in
+  "plugin marketplace list --help") ;;
+  "plugin marketplace list --json") if [ -f market ]; then cat market; else echo '[]'; fi ;;
+  "plugin marketplace add "*) test ! -e market; jq -n --arg src "Local: $4" '[{name:"agent-companion",source:$src}]' > market ;;
+  "config experimental true") echo '{"experimental":true}' > settings.json ;;
+  "plugin install agent-companion@agent-companion") test -f market; echo agent-companion > plugin ;;
+  *) exit 2 ;;
+esac
+`);
+  // Seed the package copied by the dependency installer (the fake npm is offline).
+  writeExecutable(path.join(f.bin, 'npm'), '#!/bin/bash\nif [ "$1" = --version ]; then echo 10; else mkdir -p node_modules/@modelcontextprotocol/sdk; echo "{}" > node_modules/@modelcontextprotocol/sdk/package.json; fi\n');
   const args = ['--companion', 'none', '--skip-tests'];
   for (const extra of [['--host', 'both', '--opencode-idle-timeout=false'],
     ['--host', 'opencode', '--opencode-idle-timeout', 'wrong']]) {
@@ -733,6 +751,7 @@ exit 0
     assert.equal(r.status, 0, r.stdout + r.stderr);
     if (host === 'both') {
       assert.equal(existsSync(path.join(conf, 'opencode')), false);
+      assert.equal(existsSync(path.join(copilotHome, 'settings.json')), false);
     } else {
       assert.equal(JSON.parse(readFileSync(config)).experimental.location_idle_timeout, host === 'opencode' ? false : undefined);
       assert.match(r.stdout, /opencode service restart/);
@@ -741,5 +760,13 @@ exit 0
       assert.equal(realpathSync(path.join(conf, 'opencode/plugins/agent-companion')), path.join(f.source, 'opencode-plugin'));
     }
   }
+  const rerun = f.run(['--host', 'copilot', ...args], env);
+  assert.equal(rerun.status, 0, rerun.stdout + rerun.stderr);
+  assert.match(rerun.stdout, /whole Copilot profile/);
+  assert.equal(JSON.parse(readFileSync(path.join(copilotHome, 'market'))).length, 1);
+  assert.equal(readFileSync(path.join(copilotHome, 'plugin'), 'utf8').trim(), 'agent-companion');
+  assert.deepEqual(JSON.parse(readFileSync(path.join(copilotHome, 'settings.json'))), { experimental: true });
+  assert.equal(readFileSync(path.join(copilotHome, 'agent-companion/.host'), 'utf8'), 'copilot\n');
+  assert.equal(existsSync(path.join(f.home, '.copilot')), false);
   assert.deepEqual(readFileSync(path.join(f.home, 'plugin-add'), 'utf8').trim().split('\n'), Array(2).fill(path.join(f.source, 'opencode-plugin')));
 });
