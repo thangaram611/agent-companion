@@ -98,7 +98,9 @@ const scenarios = {
     }
     const row = (s, title) => ({ thread: s.thread, unread: 0, title, companion: 'claude', cwd: realpathSync(h.dir), state: 'running',
       job_id: s.job_id, started_at: new Date(h.clock.now()).toISOString() });
-    assert.deepEqual((await h.call('status')).threads, [row(first, 'Review')]);
+    const listed = await h.call('status');
+    assert.deepEqual([listed.threads, Object.hasOwn(listed, 'companions')], [[row(first, 'Review')], false]);
+    assert.equal((await h.call('status', { diagnostics: true })).companions.length, 5);
     assert.deepEqual((await h.call('status', {}, sub)).threads, [row(second, task.split('\n')[0])]);
     assert.deepEqual((await h.call('status', {}, { session: 'session-b' })).threads, []);
     assert.deepEqual(diskSnapshot(h.dir), before);

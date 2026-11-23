@@ -2,6 +2,7 @@
 // directories with running, finished, failed and older jobs, the companions'
 // transcripts and the callers' own records, all under one temp dir. The model
 // reads only these paths: its env points HOME, CLAUDE_CONFIG_DIR and CODEX_HOME here.
+import { COMPANIONS } from '../lib/companion-registry.mjs';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -69,7 +70,7 @@ export function uiFixture(t) {
   const rateLimit = 'Failed to get response from the AI model; retried 5 times (total retry wait time: 5.00 seconds) Last error: 429 FIXTURE overloaded: HTTP 429';
 
   const locator = (companion, path, sessionId) => ({ companion, kind: 'jsonl', path, sessionId });
-  const record = fields => ({ generation: 1, state: 'closed', writer: 'controller', ...fields });
+  const record = fields => ({ generation: 1, state: 'closed', writer: 'controller', companionName: COMPANIONS[fields.companion]?.shortName, ...fields });
   const records = {
     [claude]: [
       [record({ jobId: 'run-1', thread: 'th-run', hostSessionId: 'lead-1', companion: 'codex', cwd: repo, text: 'Step 1b-2 of the live-view plan',

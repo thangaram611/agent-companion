@@ -11,7 +11,7 @@ import { JobTranscript } from './follow.mjs';
 import { defaults as readDefaults } from './defaults.mjs';
 import { takeOutcome, writeRequest } from './inbox.mjs';
 import { branchOf, createJobSource } from './jobs.mjs';
-import { Pane, age, boxRows, cardHead, clean, cut, fitSegs, jobBlocks, layoutLine, one, pendingInputs, pendingLine, segsWidth, width, COMPANION_NAMES, MODE_HINTS, supportedModes } from './rows.mjs';
+import { Pane, age, boxRows, cardHead, clean, cut, fitSegs, jobBlocks, layoutLine, one, pendingInputs, pendingLine, segsWidth, width, MODE_HINTS, supportedModes } from './rows.mjs';
 
 const DAY = 86_400_000;
 export const WIDE = 110;
@@ -24,7 +24,7 @@ const HELP = [['↑↓ j k', 'jobs, or transcript items when the transcript has 
   ['', 'In a running job, the message box has the keys:'], ['typing ⏎', 'write; send in the shown mode'], ['shift+⇥ ctrl+j', 'next mode; new line'],
   ['↑↓ PgUp PgDn', 'scroll the transcript'], ['ctrl+o', 'expand or fold all outputs'], ['ctrl+x', 'cancel the job, after one confirmation'],
   ['esc', 'back to the list, keeping the draft'], ['ctrl+c', 'clear the draft; on an empty box, quit']];
-const NAMES = COMPANION_NAMES, MODES = MODE_HINTS;
+const MODES = MODE_HINTS;
 const supported = job => supportedModes(job.record);
 const REFUSED = { state: 'the job takes no more messages', capability: 'not supported by this companion', text_too_long: 'too long', request_too_large: 'too long' };
 // Typed or pasted text: a carriage return inside it is a new line; escapes and control characters go, as in native text.
@@ -401,7 +401,7 @@ export class Model {
       content = layoutLine({ segs: [['Cancel this job?', 'bad'], [' The lead is told you cancelled it.', 'normal']],
         right: [['y', 'title'], [' yes  ', 'dim'], ['n', 'title'], [' no', 'dim']], wrap: false }, w - 4);
     } else if (!box.draft) {
-      const name = NAMES[job.companion] ?? clean(job.companion);
+      const name = clean(job.record.companionName ?? job.companion);
       content = [[['› ', 'title'], [box.mode ? `Message ${name}…` : `${name} takes no messages while it works`, 'faint']]];
     } else content = layoutLine({ segs: [['› ', 'title'], [clean(box.draft), 'normal'], ...(focused ? [['▌', 'normal']] : [])], hang: 2 }, w - 4);
     const shown = pending.slice(-Math.max(0, Math.min(pending.length, room - 4)));

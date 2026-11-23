@@ -363,7 +363,7 @@ export class Controller {
   async wait({ thread, jobId, signal, timeoutMs = 30_000 }) {
     this._requireThread(thread);
     const job = this.records.readJob(jobId);
-    if (!job || job.thread !== thread) throw error('execution_unknown');
+    if (!job || job.thread !== thread) throw error('job_unknown');
     if (signal?.aborted) return this.status({ jobId });
     const result = this.records.readResult(jobId);
     if (result) return this._userNotice(thread, jobId) ?? result;
@@ -401,7 +401,7 @@ export class Controller {
     if (from === 'caller') {
       this._requireThread(thread);
       const job = this.records.readJob(jobId);
-      if (!job || job.thread !== thread) throw error('execution_unknown');
+      if (!job || job.thread !== thread) throw error('job_unknown');
     }
     if (typeof text !== 'string' || !text.length) throw error('INVALID_TEXT');
     const a = this.live.get(jobId);
@@ -444,11 +444,11 @@ export class Controller {
   async cancel({ thread, jobId }) {
     this._requireThread(thread);
     const job = this.records.readJob(jobId);
-    if (!job || job.thread !== thread) throw error('execution_unknown');
+    if (!job || job.thread !== thread) throw error('job_unknown');
     const result = this.records.readResult(jobId);
     if (result) return result;
     const a = this.live.get(jobId);
-    if (!a || a.handedOff || a.closed) throw error('execution_unknown');
+    if (!a || a.handedOff || a.closed) throw error('job_unknown');
     return this._close(a, 'owner_stop');
   }
   status({ jobId, thread } = {}) {

@@ -197,10 +197,11 @@ function handleStatus({ job_id, diagnostics, lead }, active) {
     });
     const running = row => ['starting', 'delivering', 'running', 'stopping'].includes(row.state);
     threads.sort((a, b) => running(b) - running(a) || b.started_at.localeCompare(a.started_at));
-    response = { ok: true, action: 'status', default_companion: defaultCompanionInfo(active.env), companions: listCompanions(active.env), threads };
+    response = { ok: true, action: 'status', default_companion: defaultCompanionInfo(active.env), threads };
   }
   response.contractStatus = getCodexContractStatus();
-  if (diagnostics) response.diagnostics = { companions: lastCompanionChecks() };
+  // The companions' fixed details are about 15 KB; they land in the lead's own context, so only on request.
+  if (diagnostics) Object.assign(response, { companions: listCompanions(active.env), diagnostics: { companions: lastCompanionChecks() } });
   return asJson(response);
 }
 
@@ -342,7 +343,7 @@ export const tools = [
   tool('wait', 'Wait for a result, a user intervention, or the wait budget to expire.', {
     thread, job_id, max_wait_sec: field('number', number, { description: 'Default 480 seconds, maximum 1200.' }),
   }, { oneOf: reference }, handleWait),
-  tool('status', 'List your threads or inspect one job. Diagnostics includes cached companion checks.', {
+  tool('status', 'Inspect a thread or job; with neither, list your threads. Diagnostics adds every companion\'s details and cached checks.', {
     thread, job_id, diagnostics: field('boolean', boolean),
   }, { not: { required: ['thread', 'job_id'] } }, handleStatus),
   tool('cancel', 'Stop a job. A later send can resume its thread.', { thread, job_id }, { oneOf: reference }, handleCancel),
@@ -379,7 +380,7 @@ export async function dispatch(params, { controller: active, host = detectHost()
     let threadRecord;
     if (args.job_id) {
       const job = active.records.readJob(args.job_id);
-      if (!job) return refuse(action, 'execution_unknown', { status: 'unknown_job', job_id: args.job_id });
+      if (!job) return refuse(action, 'job_unknown', { status: 'unknown_job', job_id: args.job_id });
       args.thread = job.thread;
     }
     if (args.thread) {
@@ -393,7 +394,7 @@ export async function dispatch(params, { controller: active, host = detectHost()
     if (!err.code) throw err;
     return refuse(action, err.code, { error: err.message,
       ...(args?.thread && { thread: args.thread }), ...(args?.job_id && { job_id: args.job_id }),
-      ...(err.code === 'execution_unknown' && { status: 'unknown_job' }) });
+      ...(err.code === 'job_unknown' && { status: 'unknown_job' }) });
   }
 }
 

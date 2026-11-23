@@ -26,6 +26,5 @@ export class Pane {
   readonly total: number
   slice(top: number, height: number): { block: number; row: Seg[]; first: boolean }[]
 }
-export const COMPANION_NAMES: Record<string, string>
 export const MODE_HINTS: Record<string, string>
 export function supportedModes(record: any): string[]

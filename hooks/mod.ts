@@ -1,7 +1,7 @@
 import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import { Pane, cardHead, clean, clock, fitSegs, jobBlocks, layoutLine, liveLines, outcomeLabel, pendingInputs, pendingLine, cut, width,
-  type Block, type Seg, COMPANION_NAMES, MODE_HINTS, supportedModes } from '../bridge-server/ui/rows.mjs'
+  type Block, type Seg, MODE_HINTS, supportedModes } from '../bridge-server/ui/rows.mjs'
 import { jobModel } from '../lib/model-name.mjs'
 
 // Claude Code's mod for agent-companion (Codex ignores hooks modules). The
@@ -407,7 +407,7 @@ export const register: Register = on => {
       const jobsButton = h(Button, { key: 'jobs', label: '← jobs', plain: true, dimColor: true, hotkey: 'b', ...(box ? {} : { autoFocus: true as const }), onPress: back })
       if (!box) return column(...jobRows(a, follow!, now, w, e.props.scroll.bodyRows).map(row),
         h(Box, { flexDirection: 'row', justifyContent: 'space-between' }, row([[focused ? 'esc returns' : 'ctrl+x tab for keys', 'faint']]), jobsButton))
-      const jobId = a.jobId, modes = supportedModes(record), name = COMPANION_NAMES[record.companion] ?? clean(record.companion)
+      const jobId = a.jobId, modes = supportedModes(record), name = clean(record.companionName ?? record.companion)
       const redraw = () => $.ui.invalidate('ui.render')
       // The box as Claude Code draws its own prompt: a faint rule above and
       // below, the field the pane's full width between them. The engine sizes

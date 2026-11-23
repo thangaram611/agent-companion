@@ -440,7 +440,7 @@ The bridge checks that a thread belongs to that lead before acting on it.
 | `companion_send` | `task`, absolute `cwd` for a new thread or `thread` to continue. Optional `title`, `companion`, `model`, `effort`, `mode`. | Start a job, resume saved history, or send new text to a running job. |
 | `companion_wait` | `thread` or `job_id`, optional `max_wait_sec` | Wait for a result, a user intervention or the budget to elapse. |
 | `companion_read` | `thread`, optional `after`, `offset`, `limit` | Read posts in order. Follow the next call in the footer to page a long answer. |
-| `companion_status` | Optional `thread` or `job_id`, optional `diagnostics` | With no arguments, list this lead's threads, titles, states and unread counts. A reference selects one job. |
+| `companion_status` | Optional `thread` or `job_id`, optional `diagnostics` | With no arguments, list this lead's threads in one short row each: title, companion, state, latest job and unread count. A reference selects one job. `diagnostics: true` adds every companion's details and cached readiness checks. |
 | `companion_cancel` | `thread` or `job_id` | Stop the job. |
 
 A new thread needs an absolute existing directory. A follow-up inherits that

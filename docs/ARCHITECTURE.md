@@ -84,10 +84,12 @@ The lead uses the six tools defined in `bridge-server/tools.mjs`.
   and `limit`. It reads posts in generation order. The default page is 8,000
   characters and the maximum is 40,000. Continue with the footer's exact
   `after` and `offset`, even when an earlier page advanced the read cursor.
-- `companion_status` with no arguments lists the caller's threads, with title,
-  companion, state and unread count. It also returns `default_companion` and
-  `companions`. A thread or job id selects one job. With `diagnostics: true`,
-  `diagnostics.companions` contains the cached readiness checks.
+- `companion_status` with no arguments lists the caller's threads, one short
+  row each: thread, title, companion, state, latest job and unread count, plus
+  `default_companion`. A thread or job id selects one job. With
+  `diagnostics: true` it adds `companions`, every companion's fixed details
+  (about 15 KB, which is why they are not in the default answer), and
+  `diagnostics.companions`, the cached readiness checks.
 - `companion_cancel` takes a thread or job id and stops the job. The thread remains
   available for a supported follow-up.
 
@@ -398,7 +400,7 @@ as `censusError`, as the periodic census notes its own, and never ends the job.
 Codex retries that pid on its next report. Before 2026-11-18 such a failure
 failed three healthy Codex jobs as `ProviderLost`.
 A previous job still running elsewhere or never verified gone refuses the next send
-with `previous_execution_unverified`. Closure attempts native interrupt
+with `previous_job_unverified`. Closure attempts native interrupt
 and protocol close with bounded waits, then SIGTERM to the group and recorded
 pids, SIGKILL to survivors after 2 s, and absence verification by pid plus birth
 identity. The cleanup target is at most 5 s on an awake machine after the close
@@ -793,7 +795,7 @@ on either host. Step 4 will publish the companion qualification report.
   SIGTERM/SIGKILL returned EPERM, cleanup was `cleanup_unverified`, and the
   conversation refused every follow-up as `unknown_job`. The guard is birth
   order (nothing we spawned predates the root); the refusal now has its own
-  code, `previous_execution_unverified`.
+  code, `previous_job_unverified`.
 
 **Historical Phase 2 host findings (2026-11-05)**
 

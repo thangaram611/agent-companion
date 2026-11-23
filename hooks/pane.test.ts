@@ -12,9 +12,12 @@ const pane = (bodyRows = 18, bodyColumns = 64, isFocused = false) => ({
   plugin: 'agent-companion', surface: 'terminal' as const, component: 'Pane' as const, requestId: 'companions',
   props: { title: 'Companions', isFocused, bodyColumns, placement: 'dock' as const, scroll: { offset: 0, bodyRows }, view: {} },
 })
+// The display name the bridge writes into each job record from the companion registry.
+const NAMES: Record<string, string> = { codex: 'Codex', opencode: 'OpenCode', claude: 'Claude Code', antigravity: 'Antigravity', copilot: 'Copilot' }
 const record = (id: string, fields: Record<string, unknown> = {}) => ({
   jobId: id, thread: 'a', companion: 'codex', state: 'running', startedAt: START, cwd: '/work',
   interventions: [], interventionModes: MODES, progress: {}, ...fields,
+  companionName: NAMES[(fields.companion as string) ?? 'codex'],
 })
 // Thread records naming each thread's title, as the bridge writes them.
 const titled = (titles: Record<string, string>) => Object.fromEntries(Object.entries(titles).map(([thread, title]) =>

@@ -4,6 +4,10 @@ import { BASE_DIR } from '../../lib/state.mjs';
 import { refuseRealHomeUnderTest, stateDirs } from '../../lib/hosts/index.mjs';
 import { writePrivateFileAtomic } from '../../lib/runtime-paths.mjs';
 import { sumUsage } from '../../lib/usage.mjs';
+import { COMPANIONS } from '../../lib/companion-registry.mjs';
+
+// The views show this name; old records without it get it on migration.
+const companionName = (companion) => COMPANIONS[companion]?.shortName ?? companion;
 
 const segment = (id) => {
   if (typeof id !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(id)) throw new Error('invalid record id');
@@ -114,6 +118,7 @@ function migrateRecords(dir) {
         record.thread ??= owner;
         record.jobId ??= executionId ?? (inPlace ? file.name.slice(0, -5) : undefined);
         record.companion ??= provider;
+        if (destination === 'jobs') record.companionName ??= companionName(record.companion);
         // Normal 1.0.0 results got their companion from the job.
         if (inPlace && !record.companion) record.companion = readMigrationRecord(join(dir, 'jobs', file.name))?.companion;
         for (const terminal of [record, record.terminal]) {
@@ -204,7 +209,7 @@ export class Records {
     // a wait can acknowledge an old job after close or bridge handoff.
     return this._locked(thread, () => {
       const job = this.readJob(jobId);
-      if (!job || job.thread !== thread) throw error('execution_unknown');
+      if (!job || job.thread !== thread) throw error('job_unknown');
       const reported = this.read('intervention-notices', jobId)?.reported ?? [];
       const input = job.interventions?.find(input => input.from === 'user' && !reported.includes(input.id));
       if (!input) return null;
@@ -260,11 +265,11 @@ export class Records {
         const result = this.readResult(old.jobId);
         // The previous tree was never verified gone; a new companion process could
         // overlap it. Running elsewhere or closed without verified cleanup: a distinct refusal, not an unknown job.
-        if (!(job?.state === 'closed' && job.cleanup?.gone) && !result?.stopEvidence?.gone) throw error('previous_execution_unverified');
+        if (!(job?.state === 'closed' && job.cleanup?.gone) && !result?.stopEvidence?.gone) throw error('previous_job_unverified');
       }
       const generation = expectedGeneration + 1;
-      if (this.readJob(jobId)) throw error('execution_id_busy');
-      const job = { thread, jobId, generation, companion, cwd, text, modelOverride, effortOverride, permissionMode, hostSessionId, state: 'starting', writer: 'controller', startedAt: now, processes: null,
+      if (this.readJob(jobId)) throw error('job_id_busy');
+      const job = { thread, jobId, generation, companion, companionName: companionName(companion), cwd, text, modelOverride, effortOverride, permissionMode, hostSessionId, state: 'starting', writer: 'controller', startedAt: now, processes: null,
         interventionModes: { default: null, steer: false, queue: false, interrupt: false, ...interventionModes },
         interventions: [], turns: [], nativeTurnIds: [] };
       this._write('jobs', jobId, job);

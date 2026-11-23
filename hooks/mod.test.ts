@@ -33,9 +33,12 @@ async function rows(ui: { drawn: () => Promise<unknown> }): Promise<string[]> {
   return root?.type === 'Box' ? root.children.map((row: unknown) => text(row).trimEnd()) : []
 }
 
+// The display name the bridge writes into each job record from the companion registry.
+const NAMES: Record<string, string> = { codex: 'Codex', opencode: 'OpenCode', claude: 'Claude Code', antigravity: 'Antigravity', copilot: 'Copilot' }
 const record = (id: string, fields: Record<string, unknown> = {}) => ({
   jobId: id, thread: 't', companion: 'codex', state: 'running', startedAt: START, cwd: '/work',
   interventions: [], interventionModes: { default: 'steer', steer: true, queue: 'bridge', interrupt: true }, progress: {}, ...fields,
+  companionName: NAMES[(fields.companion as string) ?? 'codex'],
 })
 
 test("a send from the main conversation lists its thread above the prompt: title, companion · model, what it does, elapsed", async ($, on) => {

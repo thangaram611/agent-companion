@@ -170,7 +170,7 @@ test('user notices accepted before a wait are ordered, persisted, owner-bound an
   await h.controller.cancel({ thread: 'child', jobId });
   const next = await h.send();
   const fresh = new Controller({ records: new Records({ dir: h.records.dir, log() {} }), clock: h.clock });
-  await assert.rejects(fresh.wait({ thread: 'other', jobId }), { code: 'execution_unknown' });
+  await assert.rejects(fresh.wait({ thread: 'other', jobId }), { code: 'job_unknown' });
   assert.equal((await fresh.wait({ thread: 'child', jobId })).intervention.text, 'first');
   assert.equal((await h.controller.wait({ thread: 'child', jobId })).intervention.text, 'second');
   assert.equal((await fresh.wait({ thread: 'child', jobId })).outcome, 'interrupted');
@@ -320,7 +320,7 @@ test('a rejected steer never joins the answer and accepted input is persisted as
 test('caller ownership and aborted requests are checked before accepting input', async t => {
   const h = setup(t), { jobId } = await h.send();
   await assert.rejects(h.input(jobId, 'queue', { from: 'caller' }), { code: 'NATIVE_OWNER_REQUIRED' });
-  await assert.rejects(h.input(jobId, 'queue', { from: 'caller', thread: 'other' }), { code: 'execution_unknown' });
+  await assert.rejects(h.input(jobId, 'queue', { from: 'caller', thread: 'other' }), { code: 'job_unknown' });
   const abort = new AbortController(); abort.abort();
   assert.deepEqual(await h.input(jobId, 'queue', { from: 'caller', thread: 'child', signal: abort.signal }),
     { ok: false, status: 'intervention_unavailable', reason: 'state' });

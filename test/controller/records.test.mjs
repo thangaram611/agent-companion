@@ -20,7 +20,7 @@ test('an unverified previous cleanup refuses a new job with its own code', () =>
   const first = records.begin(input(), 0);
   records.writeResult({ ...first, outcome: 'completed', cause: 'native_complete', text: 'answer', stopEvidence: { gone: false, survivors: [{ pid: 1129 }] } });
   records.writeJob({ ...first, state: 'closed', cleanup: { gone: false, survivors: [{ pid: 1129 }] } });
-  assert.throws(() => records.begin(input('e2'), 1), { code: 'previous_execution_unverified' });
+  assert.throws(() => records.begin(input('e2'), 1), { code: 'previous_job_unverified' });
   records.writeJob({ ...first, state: 'closed', cleanup: { gone: true } });
   assert.equal(records.begin(input('e2'), 1).generation, 2);
 });
@@ -122,7 +122,7 @@ test('migrates a 1.0.0 store, finishes a dead archiver\'s 0.x archive and takes 
   for (const file of ['threads/old', 'jobs/old', 'stops/old', 'daemon.log'])
     assert.equal(readFileSync(join(dir, 'legacy', file), 'utf8'), file.split('/')[0]);
   assert.deepEqual(records.readThread('th-1'), renamed);
-  assert.deepEqual(records.readJob('j1'), renamed);
+  assert.deepEqual(records.readJob('j1'), { ...renamed, companionName: 'Codex' });
   assert.deepEqual(records.readResult('j1'), { ...renamed, cause: 'companion_error' });
   assert.equal(readFileSync(join(dir, 'results/j1.json.delivery'), 'utf8'), 'owner\n');
   const reopen = () => execFileSync(process.execPath, ['--input-type=module', '-e',

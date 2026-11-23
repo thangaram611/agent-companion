@@ -114,7 +114,7 @@ test('status-only second bridge writes nothing, renews nothing and refuses overl
   assert.equal(observer.live.size, 0);
   assert.equal(h.controller.live.size, 1);
   assert.equal(calls(h.adapters[0], 'deliver').length, 1);
-  await assert.rejects(observer.send({ thread: 'child', companion: 'fake', cwd: h.dir, text: 'new' }), { code: 'previous_execution_unverified' });
+  await assert.rejects(observer.send({ thread: 'child', companion: 'fake', cwd: h.dir, text: 'new' }), { code: 'previous_job_unverified' });
   assert.deepEqual(disk(h.dir), before);
   assert.equal((await h.finish(sent.jobId)).cause, 'native_complete');
 });
@@ -241,7 +241,7 @@ test('unverified cleanup never claims stopped or permits overlapping job', async
   const h = setup({ gone: false }); const sent = await h.send();
   const result = await h.controller.cancel({ thread: 'child', jobId: sent.jobId });
   assert.equal(result.outcome, 'failed'); assert.equal(result.detail, 'cleanup_unverified');
-  await assert.rejects(h.send({ text: 'new' }), { code: 'previous_execution_unverified' });
+  await assert.rejects(h.send({ text: 'new' }), { code: 'previous_job_unverified' });
 });
 
 test('bridge loss serializes all live jobs and fences late provider writes', async () => {

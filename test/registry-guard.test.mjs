@@ -7,7 +7,6 @@ import { COMPANION_IDS } from '../lib/companion-registry.mjs';
 const root = new URL('../', import.meta.url);
 // File, permitted source, reason. Keep temporary exceptions local to their callers.
 const exceptions = [
-  ['bridge-server/ui/rows.mjs', /export const COMPANION_NAMES = \{[^}]+\}/, "Claude's mod loads these names without Node imports"],
   ['hooks/host-paths.sh', /"codex"\)/, 'shell copy of the host path rules, checked against the registry'],
   ['setup.sh', /"\$COMPANION" = "copilot"/, 'installs the Copilot-specific reviewer'],
   ['setup.sh', /transport.env.AGENT_COMPANION_HOST == "codex"/, 'verifies the installed Codex MCP registration'],
