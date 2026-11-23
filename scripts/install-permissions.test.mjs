@@ -1,3 +1,6 @@
+import '../test/sandbox-home.mjs';
+import { tools } from '../bridge-server/tools.mjs';
+import { HOSTS } from '../lib/hosts/index.mjs';
 // Tests for scripts/install-permissions.mjs.
 //
 // The script resolves ~/.claude/settings.json from HOME at module load and
@@ -17,14 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'install-permissions.mjs');
-const REQUIRED_PERMISSIONS = [
-  'mcp__plugin_agent-companion_agent-bridge__agent_catalog',
-  'mcp__plugin_agent-companion_agent-bridge__agent_send',
-  'mcp__plugin_agent-companion_agent-bridge__agent_wait',
-  'mcp__plugin_agent-companion_agent-bridge__agent_status',
-  'mcp__plugin_agent-companion_agent-bridge__agent_reply',
-  'mcp__plugin_agent-companion_agent-bridge__agent_cancel',
-];
+const REQUIRED_PERMISSIONS = tools.map(tool => HOSTS.claude.toolPrefix + tool.name);
 
 function withHome(fn) {
   const home = mkdtempSync(join(tmpdir(), 'claude-perms-test-'));
@@ -88,7 +84,7 @@ test('stale session-scope names are replaced by the plugin-qualified names', () 
   withHome((home) => {
     mkdirSync(join(home, '.claude'), { recursive: true });
     writeFileSync(settingsPath(home), JSON.stringify({
-      permissions: { allow: ['Bash(git status:*)', 'mcp__agent-bridge__agent_send', 'mcp__agent-bridge__agent_wait'] },
+      permissions: { allow: ['Bash(git status:*)', 'mcp__agent-bridge__agent_send', 'mcp__agent-bridge__agent_wait', 'Agent(agent-companion)', HOSTS.claude.toolPrefix + 'agent_reply'] },
     }));
     const r = runScript(home);
     assert.equal(r.code, 0, r.stderr);

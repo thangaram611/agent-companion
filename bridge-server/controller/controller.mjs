@@ -90,7 +90,7 @@ export class Controller {
     if (!request) return null;
     return this._close(request.a, 'owner_stop');
   }
-  async send({ owner, provider, cwd, text, model, effort, savedEffortHint, requestId, signal, hostSessionId }) {
+  async send({ owner, lead, title, provider, cwd, text, model, effort, savedEffortHint, requestId, signal, hostSessionId }) {
     this._owner(owner);
     if (this.lost) throw error('bridge_loss');
     if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw error('INVALID_CWD');
@@ -112,12 +112,12 @@ export class Controller {
     if (!selected?.enabled) throw error('TARGET_UNSUPPORTED');
     if (!selected.ready) throw error('CAPABILITY_UNAVAILABLE');
     if (modelOverride !== undefined && (typeof modelOverride !== 'string' || !selected.modelAllowed?.(modelOverride))) throw error('MODEL_NOT_ALLOWED');
-    const historyId = conversation ? conversation.historyId : this.records.readLegacyHistory(owner, provider);
+    const historyId = conversation?.historyId ?? null;
     const adapter = selected.create();
     if (historyId && (!adapter.capabilities.loadsHistory || !adapter.capabilities.followUp)) throw error('FOLLOWUP_UNSUPPORTED');
     const executionId = randomUUID();
     const permissionMode = probePermission(getTargetById(provider), this.env)?.mode ?? null;
-    const record = this.records.begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes: adapter.capabilities.interventions,
+    const record = this.records.begin({ owner, lead, title, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes: adapter.capabilities.interventions,
       historyId, executionId, text, hostSessionId, now: this.clock.now() }, conversation?.generation ?? 0);
     const a = { record, adapter, savedEffortHint, held: [], requests: new Set(), waiters: new Set(), inboxRequests: new Set(), ready: deferred(), done: deferred() };
     a.supervisor = this.createSupervisor({ clock: this.clock, onRecord: (processes) => { a.record.processes = processes; this._eventWrite(a); } });

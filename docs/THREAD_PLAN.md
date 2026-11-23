@@ -1,7 +1,8 @@
 # Threads: the lead talks to the companion without a subagent: plan
 
-Status: planned (2026-11-22). Nothing is built. Every fact under Evidence was
-measured on that date unless it says otherwise.
+Status: building on `feat/threads` (2026-11-23). Steps 0 to 2 are done;
+steps 3 to 7 are next, in three tracks. Every fact under Evidence was measured on
+2026-11-22 unless it says otherwise.
 
 ## Goal
 
@@ -303,6 +304,8 @@ change by design:
 | The pane opens on entering a companion subagent's view; a card opens that view | The pane opens on `/companion`; a card opens the job |
 | Setup and session start install the agent file | Removed with the role |
 | The Claude companion denies `Agent(agent-companion)` | It keeps denying the bridge's tools; the role no longer exists |
+| Ambiguous legacy history is refused (`thread_ambiguous`) | Legacy history is not read at all (decision 22) |
+| `agent_status` without a job lists every execution in the store | It lists the caller's threads only (decisions 10 and 13) |
 
 ## Structure
 

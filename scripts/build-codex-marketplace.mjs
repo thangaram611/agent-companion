@@ -92,7 +92,6 @@ for (const relPath of [
   'hooks',
   'lib',
   'scripts',
-  'templates',
   'LICENSE',
   'README.md',
 ]) {

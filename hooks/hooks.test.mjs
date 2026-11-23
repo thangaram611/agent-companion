@@ -1,4 +1,6 @@
 import '../test/sandbox-home.mjs';
+import { tools } from '../bridge-server/tools.mjs';
+import { HOSTS } from '../lib/hosts/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -9,21 +11,23 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-for (const [host, manifest, rootVar, installer] of [
-  ['claude', 'hooks.json', 'CLAUDE_PLUGIN_ROOT', 'install-agent.sh'],
-  ['codex', 'hooks-codex.json', 'PLUGIN_ROOT', 'install-agent-codex.sh'],
+for (const [host, manifest, rootVar] of [
+  ['claude', 'hooks.json', 'CLAUDE_PLUGIN_ROOT'],
+  ['codex', 'hooks-codex.json', 'PLUGIN_ROOT'],
 ]) {
   test(`${host} hook commands run the intended scripts from a plugin path containing spaces`, (t) => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-companion-hooks-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const root = join(dir, 'plugin root');
     mkdirSync(join(root, 'hooks'), { recursive: true });
-    const scripts = [installer, 'install-deps.sh', 'drain-completions.sh'];
+    const scripts = [ 'install-deps.sh', 'drain-completions.sh'];
     for (const script of [...scripts, 'name-thread.sh', 'stop-owner.sh']) {
       writeFileSync(join(root, 'hooks', script),
         `printf '%s\\n' '${script}' "\${AGENT_COMPANION_HOST:-claude}"\n`);
     }
     const hooks = JSON.parse(readFileSync(join(HERE, manifest), 'utf8')).hooks;
+    if (host === 'claude') assert.deepEqual(hooks.PreToolUse.flatMap(g => g.hooks.map(h => h.onFailure)), ['block', 'continue']);
+    else for (const group of Object.values(hooks).flat()) assert.ok(group.hooks.every(h => !Object.hasOwn(h, 'onFailure')));
     const expected = {
       PostToolUse: ['drain-completions.sh'],
       SessionStart: scripts,
@@ -50,15 +54,12 @@ for (const [host, manifest, rootVar, installer] of [
   });
 }
 
-// Claude Code shows a subagent's agent_id to hooks only, never to the MCP
-// server, so the hook is what carries it to the bridge as the thread name.
-test('claude overwrites thread for every owner tool and clears fabricated root identities', () => {
+test('Claude stamps the host lead on every protected tool and preserves the requested thread', () => {
   const [group] = JSON.parse(readFileSync(join(HERE, 'hooks.json'), 'utf8')).hooks.PreToolUse;
-  assert.equal(group.hooks[0].onFailure, 'block');
   const matcher = new RegExp(group.matcher);
-  for (const prefix of ['mcp__agent-bridge__', 'mcp__plugin_agent-companion_agent-bridge__']) {
-    for (const action of ['send', 'wait', 'reply', 'cancel']) assert.ok(matcher.test(`${prefix}agent_${action}`));
-    for (const action of ['catalog', 'status', 'send_extra']) assert.ok(!matcher.test(`${prefix}agent_${action}`));
+  for (const prefix of ['mcp__agent-bridge__', HOSTS.claude.toolPrefix]) {
+    for (const { name, action } of tools) assert.equal(matcher.test(prefix + name), action !== 'catalog');
+    assert.ok(!matcher.test(prefix + 'agent_send_extra'));
   }
   const run = (payload) => spawnSync('/bin/bash', ['-c', group.hooks[0].command], {
     env: { ...process.env, CLAUDE_PLUGIN_ROOT: dirname(HERE) },
@@ -67,21 +68,12 @@ test('claude overwrites thread for every owner tool and clears fabricated root i
     timeout: 10_000,
     killSignal: 'SIGKILL',
   });
-  for (const action of ['send', 'wait', 'reply', 'cancel']) {
-    const call = { hook_event_name: 'PreToolUse', tool_name: `mcp__plugin_agent-companion_agent-bridge__agent_${action}`, tool_input: { task: 'review', cwd: '/repo', thread: 'invented' } };
-
-    const subagent = run({ ...call, agent_id: 'a7aae695fc8e1726b', agent_type: 'agent-companion' });
-    assert.equal(subagent.status, 0, subagent.stderr);
-    assert.deepEqual(JSON.parse(subagent.stdout), {
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        updatedInput: { task: 'review', cwd: '/repo', thread: 'a7aae695fc8e1726b' },
-      },
-    });
-
-    const main = run(call);
-    assert.equal(main.status, 0, main.stderr);
-    assert.equal(JSON.parse(main.stdout).hookSpecificOutput.updatedInput.thread, '');
+  for (const agent of [null, 'native-child']) {
+    const input = { thread: 'th-123', task: 'review', lead: { session: 'invented' } };
+    const result = run({ session_id: 'native-session', agent_id: agent ?? undefined, tool_input: input });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout).hookSpecificOutput.updatedInput,
+      { ...input, lead: { session: 'native-session', agent } });
   }
 });
 

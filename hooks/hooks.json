@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^mcp__(plugin_agent-companion_)?agent-bridge__agent_(send|wait|reply|cancel)$",
+        "matcher": "^mcp__(plugin_agent-companion_)?agent-bridge__agent_(send|wait|cancel|status)$",
         "hooks": [
           {
             "type": "command",
@@ -51,11 +51,6 @@
     "SessionStart": [
       {
         "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/install-agent.sh\"",
-            "timeout": 5
-          },
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/install-deps.sh\"",

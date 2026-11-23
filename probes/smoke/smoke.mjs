@@ -1,4 +1,5 @@
 // Real Codex app-server work through the controller. Spends one Codex turn.
+import { tools as registry } from '../../bridge-server/tools.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,7 +12,7 @@ writeFileSync(join(work, 'README.md'), '# smoke\nThe magic word is BANANA.\n');
 const bridge = await startBridge(session);
 try {
   const tools = await bridge.rpc('tools/list', {});
-  assert.deepEqual(tools.tools.map((t) => t.name).sort(), ['agent_cancel', 'agent_catalog', 'agent_reply', 'agent_send', 'agent_status', 'agent_wait']);
+  assert.deepEqual(tools.tools.map((t) => t.name).sort(), registry.map(t => t.name).sort());
   const refusal = await bridge.tool('agent_send', { target: 'codex', model: 'invalid model', task: 'noop', cwd: work }, `${owner}-refusal`);
   assert.equal(refusal.code, 'MODEL_NOT_ALLOWED');
   const sent = await bridge.tool('agent_send', { target: 'codex', cwd: work,
@@ -22,7 +23,7 @@ try {
   const execution = record('executions', sent.job_id);
   assert.ok(execution.historyId);
   assert.ok(execution.nativeTurnId);
-  const status = await bridge.tool('agent_status', { job_id: sent.job_id });
+  const status = await bridge.tool('agent_status', { job_id: sent.job_id }, owner);
   assert.equal(status.job_id, sent.job_id);
   assert.equal(status.native_refs.historyId, execution.historyId);
   const final = await bridge.wait(sent.job_id, owner);

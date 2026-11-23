@@ -1,5 +1,5 @@
 import { SANDBOX_HOME } from '../sandbox-home.mjs';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Controller } from '../../bridge-server/controller/controller.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
@@ -167,4 +167,10 @@ export function setupController(options = {}) {
     adapter.terminal.resolve(outcome); return done(executionId);
   };
   return { controller, clock, records, dir, adapters, supervisors, send, done, finish };
+}
+
+export function diskSnapshot(dir = SANDBOX_HOME) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { recursive: true }).sort().filter((f) => statSync(join(dir, f)).isFile())
+    .map((f) => [f, statSync(join(dir, f)).mtimeMs, readFileSync(join(dir, f), 'base64')]);
 }

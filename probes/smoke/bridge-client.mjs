@@ -71,7 +71,7 @@ export async function startBridge(session, { env = process.env, repo: root = rep
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
   });
   const tool = async (name, args, owner) => {
-    const response = await rpc('tools/call', { name, arguments: args,
+    const response = await rpc('tools/call', { name, arguments: owner && env.AGENT_COMPANION_HOST !== 'codex' ? { ...args, lead: { session, agent: owner } } : args,
       ...(owner ? { _meta: { 'x-codex-turn-metadata': { thread_id: owner, thread_source: 'subagent', session_id: session } } } : {}) });
     return response.structuredContent ?? JSON.parse(response.content.find((c) => c.type === 'text').text);
   };

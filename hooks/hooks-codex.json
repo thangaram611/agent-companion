@@ -28,11 +28,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/install-agent-codex.sh\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
             "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/install-deps.sh\"",
             "timeout": 55
           },

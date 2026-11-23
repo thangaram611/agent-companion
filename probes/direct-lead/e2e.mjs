@@ -1,12 +1,13 @@
 // End-to-end direct-main proof. Usage: node e2e.mjs NAME [--sleeps N] [--wall N] [--model M]
 // The MAIN conversation of an isolated headless Claude calls the REAL bridge itself; the bridge runs a free
 // OpenCode model in disposable homes. No installed plugin, no operator companion home, no production code change:
-// the only difference from production is lead-hook.mjs, which names the lead session as owner.
+// the hooks are the plugin's own (hooks/hooks.json), pointed at the run's isolated homes.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { tools } from '../../bridge-server/tools.mjs';
 import { companionEnv, repo } from '../../probes/free-backends/run.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -27,8 +28,17 @@ const node = `'${process.execPath}'`;
 const record = { type: 'command', command: `exec ${node} '${here}/hook.mjs' '${run}'`, timeout: 5 };
 const events = ['SessionStart', 'SessionEnd', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'Stop'];
 const hooks = Object.fromEntries(events.map(e => [e, [{ ...(e.includes('ToolUse') ? { matcher: '.*' } : {}), hooks: [record] }]]));
-hooks.PreToolUse.push({ matcher: '^mcp__agent-bridge__agent_(send|wait|reply|cancel)$',
-  hooks: [{ type: 'command', command: `exec ${node} '${here}/lead-hook.mjs'`, timeout: 5 }] });
+// The plugin's own hooks as Claude Code runs them from the plugin root, pointed at this run's isolated
+// homes (the runtime dir follows HOME, so a hook must never see the operator's). The dependency
+// installer is left out: the worktree has its dependencies.
+const isolate = `HOME='${bridgeEnv.HOME}' AGENT_COMPANION_HOME='${bridgeEnv.AGENT_COMPANION_HOME}' AGENT_COMPANION_HOST=claude CLAUDE_PLUGIN_ROOT='${repo}'`;
+for (const [event, groups] of Object.entries(JSON.parse(fs.readFileSync(path.join(repo, 'hooks/hooks.json'), 'utf8')).hooks)) {
+  for (const group of groups) {
+    const shipped = group.hooks.filter(h => !h.command.includes('install-deps.sh'))
+      .map(h => ({ ...h, command: `${isolate} ${h.command.replaceAll('${CLAUDE_PLUGIN_ROOT}', repo)}` }));
+    if (shipped.length) (hooks[event] ??= []).push({ ...group, hooks: shipped });
+  }
+}
 fs.writeFileSync(run + '/settings.json', JSON.stringify({ hooks }, null, 2));
 fs.writeFileSync(run + '/mcp.json', JSON.stringify({ mcpServers: { 'agent-bridge': {
   type: 'stdio', command: process.execPath, args: [path.join(repo, 'bridge-server/server.mjs')], env: bridgeEnv, timeout: 1320000 } } }, null, 2));
@@ -50,7 +60,7 @@ const env = { ...Object.fromEntries(allowed.filter(k => process.env[k] !== undef
 const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
   '--model', opt.model, '--max-budget-usd', '0.60', '--setting-sources', '', '--settings', run + '/settings.json',
   '--strict-mcp-config', '--mcp-config', run + '/mcp.json', '--no-session-persistence', '--permission-prompts', 'none',
-  '--allowedTools', ['agent_send', 'agent_wait', 'agent_status', 'agent_catalog'].map(t => 'mcp__agent-bridge__' + t).concat('Read', 'ToolSearch').join(',')];
+  '--allowedTools', tools.filter(t => t.action !== 'cancel').map(t => 'mcp__agent-bridge__' + t.name).concat('Read', 'ToolSearch').join(',')];
 const child = spawn('claude', args, { cwd: run + '/workspace', env, stdio: ['pipe', 'pipe', 'pipe'] });
 const stream = fs.createWriteStream(run + '/stream.jsonl');
 const started = Date.now();

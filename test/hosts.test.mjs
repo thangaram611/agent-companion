@@ -108,3 +108,12 @@ for (const host of Object.values(HOSTS)) test(`${host.id} paths, shell hooks and
   assert.equal(bridge[wall], 1320 * scale);
   assert.ok(bridge[wall] / scale > 1200);
 });
+
+test('both bridge registrations expose identical capability settings', () => {
+  const knobs = Object.keys(HOSTS).map(host => {
+    const manifest = JSON.parse(readFileSync(new URL(`../.${host}-plugin/plugin.json`, import.meta.url)));
+    const { AGENT_COMPANION_HOST, ...capabilities } = manifest.mcpServers['agent-bridge'].env;
+    return capabilities;
+  });
+  for (const env of knobs) assert.deepEqual(env, knobs[0]);
+});

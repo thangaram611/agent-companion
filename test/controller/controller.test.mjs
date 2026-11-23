@@ -4,8 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, symlinkSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createBridgeController, dispatch, recoverController } from '../../bridge-server/server.mjs';
-import { diskSnapshot as disk, terminalRows } from './codex-dispatch-fixture.mjs';
+import { diskSnapshot as disk } from './helpers.mjs';
 import { Controller } from '../../bridge-server/controller/controller.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
 import { setupController as setup, deferred } from './helpers.mjs';
@@ -138,8 +137,6 @@ test('status-only second bridge writes nothing, renews nothing and refuses overl
   const before = disk(h.dir);
   const allFiles = disk();
   const attachment = h.records.readAttachment(sent.executionId);
-  const response = await dispatch({ action: 'status', job_id: sent.executionId }, { controller: observer });
-  assert.equal(response.structuredContent.status, 'unknown');
   for (let i = 0; i < 5; i++) {
     assert.equal(observer.status({ executionId: sent.executionId }).state, 'unknown');
     h.controller.status({ owner: 'child' });
@@ -196,7 +193,7 @@ test('startup crash becomes failed runtime_unavailable and cleans up', async () 
 });
 
 test('native completion racing stop keeps completed and publishes one immutable result', async () => {
-  const h = setup({ racingComplete: true, createController: createBridgeController }); const sent = await h.send();
+  const h = setup({ racingComplete: true }); const sent = await h.send();
   const result = await h.controller.cancel({ owner: 'child', executionId: sent.executionId });
   assert.equal(result.outcome, 'completed'); assert.equal(result.cause, 'native_complete');
   assert.equal(result.text, 'native answer'); assert.deepEqual(result.usage, { tokens: 7 });
@@ -204,15 +201,6 @@ test('native completion racing stop keeps completed and publishes one immutable 
   assert.deepEqual(await h.controller.cancel({ owner: 'child', executionId: sent.executionId }), result);
   assert.equal(readFileSync(h.records.path('results', sent.executionId), 'utf8'), bytes);
   assert.equal(readdirSync(join(h.dir, 'results')).length, 1);
-  const wait = { action: 'wait', thread: 'child', job_id: sent.executionId };
-  await dispatch(wait, { controller: h.controller });
-  const second = createBridgeController({ records: new Records({ dir: h.dir }), env: h.controller.env });
-  await recoverController(second);
-  await dispatch(wait, { controller: second });
-  await recoverController(second);
-  assert.equal(terminalRows(sent.executionId).length, 1);
-  assert.equal(terminalRows(sent.executionId)[0].consumed, true);
-  assert.deepEqual(second.records.read('completions', sent.executionId), { executionId: sent.executionId });
 });
 
 test('two same-provider executions: closing one leaves the other untouched', async () => {
@@ -238,14 +226,10 @@ test('pending owner requests attach the owner; observers and other children cann
 });
 
 test('retry progress stays nonterminal and fresh activity is persisted as provider activity', async () => {
-  const h = setup({ createController: createBridgeController }); const sent = await h.send(); await h.clock.advance(5000);
+  const h = setup(); const sent = await h.send(); await h.clock.advance(5000);
   h.adapters[0].progress({ lastActivityAt: h.clock.now(), retry: { willRetry: true, attempt: 2, cause: 'reconnect' }, activeCommand: 'fake-command', partialText: 'recovering' });
   const status = h.controller.status({ executionId: sent.executionId });
-  const response = await dispatch({ action: 'status', job_id: sent.executionId }, { controller: h.controller });
-  assert.equal(response.structuredContent.status, 'running');
-  assert.equal(response.structuredContent.retry.willRetry, true);
   assert.equal(h.records.readExecution(sent.executionId).terminal, undefined);
-  assert.equal(terminalRows(sent.executionId).length, 0);
   assert.equal(status.result, null);
   assert.equal(status.execution.progress.lastActivityAt, h.clock.now());
   assert.equal((await h.finish(sent.executionId, { outcome: 'completed', text: 'recovered' })).text, 'recovered');
@@ -287,14 +271,12 @@ test('unqualified follow-up and history failure never create replacement convers
   assert.equal(calls(broken.adapters[0], 'deliver').length, 0);
 });
 
-test('validate owner, canonical cwd, provider, model and ambiguous legacy history before start', async () => {
+test('validate owner, canonical cwd, provider, model before start', async () => {
   const h = setup();
   await assert.rejects(h.send({ owner: '' }), { code: 'NATIVE_OWNER_REQUIRED' });
   await assert.rejects(h.send({ cwd: 'relative' }), { code: 'INVALID_CWD' });
   await assert.rejects(h.send({ provider: 'absent' }), { code: 'TARGET_UNSUPPORTED' });
   await assert.rejects(h.send({ model: 'not-allowed' }), { code: 'MODEL_NOT_ALLOWED' });
-  mkdirSync(join(h.dir, 'threads')); writeFileSync(join(h.dir, 'threads', 'ambiguous.ambiguous'), 'two histories');
-  await assert.rejects(h.send({ owner: 'ambiguous' }), { code: 'AMBIGUOUS_HISTORY' });
   const link = join(h.dir, 'alias'); symlinkSync(h.dir, link);
   const sent = await h.send({ cwd: link });
   assert.equal(h.records.readConversation('child').cwd, realpathSync(h.dir));

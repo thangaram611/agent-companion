@@ -12,8 +12,8 @@ const session = `agysmoke-${Date.now().toString(36)}`, owner = `${session}-child
 const work = mkdtempSync(join(tmpdir(), 'agentco-antigravity-smoke-'));
 writeFileSync(join(work, 'README.md'), '# smoke\nThe magic word is BANANA.\n');
 let bridge = await startBridge(session), replacement;
-const send = async (task, thread = owner, extra = {}) => {
-  const response = await bridge.tool('agent_send', { target: 'antigravity', cwd: work, task, ...extra }, thread);
+const send = async (task, lead = owner, extra = {}) => {
+  const response = await bridge.tool('agent_send', { target: 'antigravity', cwd: work, task, ...extra }, lead);
   assert.equal(response.ok, true, JSON.stringify(response));
   return response.job_id;
 };
@@ -29,7 +29,7 @@ try {
   assert.equal(first.meta.stop_evidence.gone, true);
   assert.match(await bridge.readResource(first.meta.digest_uri), /BANANA/i);
 
-  const secondId = await send('What magic word did you just report? Reply from memory; do not read any file.');
+  const secondId = await send('What magic word did you just report? Reply from memory; do not read any file.', owner, { thread: first.thread });
   const secondExecution = record('executions', secondId);
   assert.notEqual(secondExecution.processes.pid, firstExecution.processes.pid);
   const second = await bridge.wait(secondId, owner);
@@ -40,12 +40,12 @@ try {
   const steerOwner = `${session}-steer`;
   const steerId = await send('Run `sleep 15` with run_command. After it finishes, reply with exactly the word ORBIT.', steerOwner);
   const status = await eventually(async () => {
-    const status = await bridge.tool('agent_status', { job_id: steerId });
+    const status = await bridge.tool('agent_status', { job_id: steerId }, steerOwner);
     assert.equal(status.status, 'running', JSON.stringify(status));
     return status.active_command && status;
   }, 'active command before steer', 120_000);
   assert.deepEqual(status.interventions, { default: 'steer', steer: true, queue: true, interrupt: true });
-  const reply = await bridge.tool('agent_reply', { job_id: steerId, message: 'Also append the word LUNAR after the original word, separated by a space.' }, steerOwner);
+  const reply = await bridge.tool('agent_send', { thread: status.thread, task: 'Also append the word LUNAR after the original word, separated by a space.' }, steerOwner);
   assert.equal(reply.accepted, true, JSON.stringify(reply));
   const steered = await bridge.wait(steerId, steerOwner);
   assert.equal(steered.status, 'completed', JSON.stringify(steered));
@@ -53,7 +53,7 @@ try {
 
   const cancelOwner = `${session}-cancel`;
   const cancelId = await send('Run `sleep 60`, wait for it to finish, then reply FINISHED.', cancelOwner);
-  assert.equal((await bridge.tool('agent_status', { job_id: cancelId })).status, 'running');
+  assert.equal((await bridge.tool('agent_status', { job_id: cancelId }, cancelOwner)).status, 'running');
   const cancel = await bridge.tool('agent_cancel', { job_id: cancelId }, cancelOwner);
   assert.equal(cancel.status, 'cancelled');
   assert.equal(cancel.meta.stop_evidence.gone, true);
@@ -76,7 +76,7 @@ try {
 
   const lossOwner = `${session}-loss`;
   const lossId = await send('Run `sleep 60`, wait for it to finish, then reply DONE.', lossOwner);
-  assert.equal((await bridge.tool('agent_status', { job_id: lossId })).status, 'running');
+  assert.equal((await bridge.tool('agent_status', { job_id: lossId }, lossOwner)).status, 'running');
   await bridge.stop(); bridge = null;
   const result = await eventually(() => record('results', lossId), 'bridge-loss cleanup');
   assert.equal(result.cause, 'bridge_loss');

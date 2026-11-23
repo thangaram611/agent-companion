@@ -33,7 +33,6 @@ const FIXTURE_PATHS = [
   'hooks',
   'lib',
   'scripts',
-  'templates',
   'test',
   'LICENSE',
   'README.md',
@@ -156,10 +155,6 @@ if (args[0] === 'plugin' && args[1] === 'add') {
   rmSync(installedPath, { recursive: true, force: true });
   mkdirSync(path.dirname(installedPath), { recursive: true });
   cpSync(pluginRoot, installedPath, { recursive: true });
-  appendFileSync(
-    path.join(installedPath, 'templates', 'agent-companion.toml'),
-    '\\n# installed-copy-provenance\\n',
-  );
   printJson({
     pluginId: 'agent-companion@agent-companion',
     name: 'agent-companion',
@@ -333,16 +328,7 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
     assert.ok(existsSync(path.join(pluginRoot, 'hooks', 'launch-agent-bridge.sh')));
     assert.equal(existsSync(path.join(pluginRoot, 'stale-cache-marker')), false);
 
-    const expectedAgent = `${AGENT_SENTINEL}\n${readFileSync(
-      path.join(pluginRoot, 'templates', 'agent-companion.toml'),
-      'utf8',
-    )}`;
-    assert.equal(readFileSync(agentPath, 'utf8'), expectedAgent);
-    assert.match(expectedAgent, /# installed-copy-provenance/);
-    assert.doesNotMatch(
-      readFileSync(path.join(sourceRoot, 'templates', 'agent-companion.toml'), 'utf8'),
-      /# installed-copy-provenance/,
-    );
+    assert.equal(existsSync(agentPath), false);
 
     const hooks = JSON.parse(readFileSync(hooksPath, 'utf8'));
     assert.deepEqual(hooks.customTopLevel, { preserve: true });
@@ -357,9 +343,7 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
     assert.equal(existsSync(path.join(home, '.codex')), false);
 
     const stableTime = new Date('2020-01-02T03:04:05.000Z');
-    utimesSync(agentPath, stableTime, stableTime);
     utimesSync(hooksPath, stableTime, stableTime);
-    const stableAgentBytes = readFileSync(agentPath);
     const stableHooksBytes = readFileSync(hooksPath);
     writeFileSync(path.join(pluginRoot, 'stale-cache-marker-again'), 'old package again\n');
 
@@ -367,9 +351,8 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
     assert.equal(second.status, 0, second.stderr || second.stdout);
     assert.match(second.stdout, /UI launcher unchanged/);
     assert.equal(existsSync(path.join(pluginRoot, 'stale-cache-marker-again')), false);
-    assert.deepEqual(readFileSync(agentPath), stableAgentBytes);
+    assert.equal(existsSync(agentPath), false);
     assert.deepEqual(readFileSync(hooksPath), stableHooksBytes);
-    assert.equal(statSync(agentPath).mtimeMs, stableTime.getTime());
     assert.equal(statSync(hooksPath).mtimeMs, stableTime.getTime());
     assert.equal(hookBackups(codexHome).length, 1);
 
@@ -564,7 +547,7 @@ test('both harnesses preserve the shared default, legacy profiles and unrelated 
   const result = f.run(['--host', 'both', '--skip-tests']);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /companion: opencode \(config\); needs attention/);
-  assert.match(result.stdout, /Claude: agent and permissions installed; companion: opencode/);
+  assert.match(result.stdout, /Claude: permissions installed; companion: opencode/);
   assert.equal(readFileSync(path.join(f.state(), 'profiles.json'), 'utf8'), profiles);
   assert.deepEqual(f.settings(), { target: 'opencode' });
   const saved = JSON.parse(readFileSync(settings));
@@ -594,8 +577,8 @@ test('partial installation reports completed stages, preserves defaults and succ
   const failed = f.run(args, { FAKE_CODEX_BAD_MCP: '1' });
   assert.equal(failed.status, 1, failed.stdout + failed.stderr);
   assert.match(failed.stdout, /Setup incomplete: Codex plugin installation/);
-  assert.match(failed.stdout, /Claude: agent and permissions installed/);
-  assert.match(failed.stdout, /Codex: plugin installed; MCP, agent and hooks pending verification/);
+  assert.match(failed.stdout, /Claude: permissions installed/);
+  assert.match(failed.stdout, /Codex: plugin installed; MCP and hooks pending verification/);
   assert.match(failed.stdout, /rerun the same command/);
   assert.equal(f.settings().target, 'copilot');
   const repaired = f.run(args);
@@ -603,7 +586,7 @@ test('partial installation reports completed stages, preserves defaults and succ
   assert.equal(f.settings().target, 'codex');
 });
 
-test('failed dependency install and user-owned agents never replace companion configuration', async (t) => {
+test('setup preserves user-owned roles and applies settings only after installation succeeds', async (t) => {
   for (const owned of [false, true]) await t.test(owned ? 'user-owned agent' : 'npm failure', (t) => {
     const f = setupFixture(t);
     f.seedSettings({ target: 'copilot' });
@@ -613,11 +596,11 @@ test('failed dependency install and user-owned agents never replace companion co
       writeFileSync(agent, '# user-owned\n');
     }
     const r = f.run(['--host', 'codex', '--target', 'codex', '--skip-tests'], owned ? {} : { FAKE_NPM_EXIT: '1' });
-    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.equal(r.status, owned ? 0 : 1, r.stdout + r.stderr);
     assert.match(r.stdout, owned ? /User-owned agent preserved/ : /Setup incomplete: bridge dependencies/);
-    assert.equal(f.settings().target, 'copilot');
-    if (owned) { f.assertNoInstall(); assert.equal(readFileSync(agent, 'utf8'), '# user-owned\n'); }
-    assert.equal(existsSync(installedPluginRoot(f.codexHome)), false);
+    assert.equal(f.settings().target, owned ? 'codex' : 'copilot');
+    if (owned) assert.equal(readFileSync(agent, 'utf8'), '# user-owned\n');
+    assert.equal(existsSync(installedPluginRoot(f.codexHome)), owned);
   });
 });
 
@@ -638,6 +621,9 @@ test('setup accepts independent Claude host and companion selections without a s
   const claude = path.join(f.bin, 'claude');
   // The host fixture succeeds without JSON; it cannot establish companion auth.
   writeExecutable(claude, '#!/bin/sh\nexit 0\n');
+  const retired = path.join(f.home, '.claude', 'agents', 'agent-companion.md');
+  mkdirSync(path.dirname(retired), { recursive: true });
+  writeFileSync(retired, '---\n# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent.sh)\n');
   const args = ['--host', 'claude', '--target', 'claude'];
   const preview = f.run([...args, '--dry-run'], { CLAUDE_BIN: claude });
   assert.equal(preview.status, 0, preview.stdout + preview.stderr);
@@ -652,8 +638,9 @@ test('setup accepts independent Claude host and companion selections without a s
   const result = f.run([...args, '--skip-tests'], { CLAUDE_BIN: claude });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(f.settings().target, 'claude');
+  assert.equal(existsSync(retired), false);
   assert.equal(existsSync(path.join(f.codexHome, 'agent-companion/default-target')), false);
-  assert.match(result.stdout, /Claude: agent and permissions installed; companion: claude/);
+  assert.match(result.stdout, /Claude: permissions installed; companion: claude/);
 });
 
 test('setup rejects model arguments without an explicit companion before preflight', (t) => {

@@ -26,6 +26,7 @@ import {
   mkdirSync,
   renameSync,
 } from 'node:fs';
+import { tools } from '../bridge-server/tools.mjs';
 import { HOSTS, settingsFile } from '../lib/hosts/index.mjs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
@@ -59,8 +60,8 @@ if (host === HOSTS.codex.id) {
 }
 
 const SETTINGS = settingsFile(host);
-const PERMISSIONS = ['agent_catalog', 'agent_send', 'agent_wait', 'agent_status', 'agent_reply', 'agent_cancel']
-  .map(tool => HOSTS[host].toolPrefix + tool);
+const PERMISSIONS = tools.map(({ name }) => HOSTS[host].toolPrefix + name);
+const isStale = p => STALE.test(p) || p === 'Agent(agent-companion)' || p === HOSTS[host].toolPrefix + 'agent_reply';
 mkdirSync(path.dirname(SETTINGS), { recursive: true });
 
 let cfg = {};
@@ -92,8 +93,8 @@ const allow = Array.isArray(cfg.permissions.allow)
   ? cfg.permissions.allow.slice()
   : [];
 
-const stale = allow.filter((permission) => STALE.test(permission));
-const kept = allow.filter((permission) => !STALE.test(permission));
+const stale = allow.filter(isStale);
+const kept = allow.filter((permission) => !isStale(permission));
 const missing = PERMISSIONS.filter((permission) => !kept.includes(permission));
 if (missing.length === 0 && stale.length === 0) {
   ok(`agent-companion permissions already in ${SETTINGS}`);

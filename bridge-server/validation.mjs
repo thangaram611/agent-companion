@@ -1,15 +1,3 @@
-// Tool argument validation and runtime logging for the agent-bridge MCP server.
-//
-// Internal action validator for the split MCP tools:
-// agent_catalog | agent_send | agent_wait | agent_status | agent_reply | agent_cancel.
-// The server injects the action before validation. Error
-// messages are prefixed with `agent:` so MCP clients can surface them as
-// synchronous tool-call rejections.
-//
-// Nothing in here opens sockets, spawns processes, or reads state files —
-// it's safe to import from tests without side effects other than appending
-// a line to the private runtime bridge log on the `log()` helper.
-
 import {
   statSync,
   appendFileSync,
@@ -51,143 +39,49 @@ export function log(level, ...args) {
   }
 }
 
-// --- Constants --------------------------------------------------------------
-
-export const VALID_ACTIONS = new Set(['catalog', 'send', 'wait', 'status', 'reply', 'cancel']);
-import { TARGET_IDS as VALID_TARGETS } from '../lib/target-registry.mjs';
-export { VALID_TARGETS };
-
-// Thread is an internal field injected by the host, not a model-facing input.
-const ALLOWED_FIELDS = {
-  catalog: new Set(['action']),
-  send:   new Set(['action', 'task', 'cwd', 'thread', 'target', 'model', 'effort', 'max_wait_sec']),
-  wait:   new Set(['action', 'job_id', 'max_wait_sec']),
-  status: new Set(['action', 'job_id', 'verbose', 'diagnostics']),
-  reply:  new Set(['action', 'job_id', 'message', 'mode']),
-  cancel: new Set(['action', 'job_id']),
-};
-
-function assertKnownFields(action, args) {
-  const allowed = ALLOWED_FIELDS[action];
-  for (const key of Object.keys(args)) {
-    if (!allowed.has(key)) {
-      throw new Error(`agent: unknown field "${key}" for action="${action}" (allowed: ${[...allowed].join(', ')})`);
-    }
-  }
+export function invalid(message) {
+  throw Object.assign(new Error('agent: ' + message), { code: 'INVALID_ARGUMENTS' });
 }
 
-function assertString(name, value, { optional = false } = {}) {
-  if (value === undefined || value === null || value === '') {
-    if (optional) return;
-    throw new Error(`agent: ${name} is required`);
-  }
-  if (typeof value !== 'string') throw new Error(`agent: ${name} must be a string`);
+export function string(value, key) {
+  if (typeof value !== 'string' || !value.length) invalid(key + ' must be a nonempty string');
+  return value;
 }
 
-function assertBoolean(name, value) {
-  if (value === undefined) return;
-  if (typeof value !== 'boolean') throw new Error(`agent: ${name} must be a boolean`);
+export function optionalString(value, key) {
+  if (value == null) return undefined;
+  if (typeof value !== 'string') invalid(key + ' must be a string');
+  return value.trim() || undefined;
 }
 
-function assertThreadName(value) {
-  if (value === undefined || value === null || value === '') return;
-  if (typeof value !== 'string') throw new Error('agent: thread must be a string');
-  if (!/^[a-zA-Z0-9._-]+$/.test(value)) {
-    throw new Error(`agent: thread must match [a-zA-Z0-9._-]+ (got "${value}")`);
-  }
+export function recordId(value, key) {
+  if (!/^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(string(value, key))) invalid('invalid ' + key);
+  return value;
+}
+export function number(value, key) {
+  if (!Number.isFinite(value)) invalid(key + ' must be a number');
+  return value;
+}
+export function boolean(value, key) {
+  if (typeof value !== 'boolean') invalid(key + ' must be a boolean');
+  return value;
 }
 
-function assertCwd(cwd) {
-  if (cwd === undefined || cwd === null || cwd === '') {
-    throw new Error(
-      'agent: cwd is required for action="send" ' +
-      '(pass the absolute target repo/worktree path; refusing to default to the bridge process cwd)',
-    );
+export function assertCwd(value) {
+  if (typeof value === 'string' && isAbsolute(value)) {
+    try { if (statSync(value).isDirectory()) return value; } catch {}
   }
-  if (typeof cwd !== 'string') throw new Error('agent: cwd must be a string');
-  if (!isAbsolute(cwd)) throw new Error(`agent: cwd must be an absolute path, got "${cwd}"`);
-  let st;
-  try { st = statSync(cwd); }
-  catch { throw new Error(`agent: cwd does not exist: ${cwd}`); }
-  if (!st.isDirectory()) throw new Error(`agent: cwd is not a directory: ${cwd}`);
+  throw Object.assign(new Error('cwd must be an absolute path to an existing directory'), { code: 'INVALID_CWD' });
 }
 
-export function validateAgentArgs(rawArgs) {
-  const args = (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) ? rawArgs : {};
-  const action = args.action;
-  if (!action) throw new Error('agent: action is required (one of: catalog, send, wait, status, reply, cancel)');
-  if (!VALID_ACTIONS.has(action)) {
-    throw new Error(`agent: action must be one of catalog|send|wait|status|reply|cancel, got "${action}"`);
+export function validateFields(args, { fields, inputSchema }) {
+  const values = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (!Object.hasOwn(fields, key)) invalid('unknown field "' + key + '"');
+    values[key] = fields[key].check(value, key);
   }
-  assertKnownFields(action, args);
-  switch (action) {
-    case 'catalog': return { action: 'catalog' };
-    case 'send':   return validateSend(args);
-    case 'wait':   return validateWait(args);
-    case 'status': return validateStatus(args);
-    case 'reply':  return validateReply(args);
-    case 'cancel': return validateCancel(args);
-    default:       throw new Error(`agent: unhandled action "${action}"`);
+  for (const key of inputSchema.required ?? []) {
+    if (values[key] === undefined) invalid(key + ' is required');
   }
-}
-
-function validateReply(args) {
-  assertString('job_id', args.job_id);
-  assertString('message', args.message);
-  if (args.message.length > 8000) {
-    throw new Error(`agent: reply.message too long (${args.message.length} > 8000 chars)`);
-  }
-  if (args.mode !== undefined && !['steer', 'queue', 'interrupt'].includes(args.mode)) {
-    throw new Error('agent: reply.mode must be steer, queue or interrupt');
-  }
-  return { action: 'reply', job_id: args.job_id, message: args.message, ...(args.mode === undefined ? {} : { mode: args.mode }) };
-}
-
-function validateCancel(args) {
-  assertString('job_id', args.job_id);
-  return { action: 'cancel', job_id: args.job_id };
-}
-
-function validateWait(args) {
-  assertString('job_id', args.job_id);
-  if (args.max_wait_sec !== undefined && typeof args.max_wait_sec !== 'number') {
-    throw new Error('agent: max_wait_sec must be a number');
-  }
-  return { action: 'wait', job_id: args.job_id, max_wait_sec: args.max_wait_sec };
-}
-
-function validateStatus(args) {
-  assertString('job_id', args.job_id, { optional: true });
-  assertBoolean('verbose', args.verbose);
-  assertBoolean('diagnostics', args.diagnostics);
-  return {
-    action: 'status',
-    job_id: args.job_id || null,
-    verbose: !!args.verbose,
-    diagnostics: !!args.diagnostics,
-  };
-}
-
-function validateSend(args) {
-  assertString('task', args.task);
-  try { assertCwd(args.cwd); }
-  catch (err) { err.code = 'INVALID_CWD'; throw err; }
-  assertThreadName(args.thread);
-  assertString('target', args.target, { optional: true });
-  assertString('model', args.model, { optional: true });
-  assertString('effort', args.effort, { optional: true });
-  const target = String(args.target || '').trim().toLowerCase();
-  if (args.max_wait_sec !== undefined && typeof args.max_wait_sec !== 'number') {
-    throw new Error('agent: max_wait_sec must be a number');
-  }
-  return {
-    action: 'send',
-    task: args.task,
-    cwd: args.cwd,
-    thread: args.thread || null,
-    target: target || null,
-    model: args.model?.trim() || null,
-    effort: args.effort?.trim() || null,
-    max_wait_sec: args.max_wait_sec,
-  };
+  return values;
 }

@@ -22,8 +22,7 @@ first-run screens; never type into it blind.
 | `fixture.mjs` | Fake job server (newline JSON-RPC over stdio): a job that sleeps, then returns N KB. It can post back to the session's inbox socket. |
 | `run.mjs` | Headless Claude (stream-json) whose main conversation calls the fake server: inline vs file results, move to the background, wake. |
 | `tui-run.mjs`, `tui-send.mjs`, `tui.py`, `screen.py` | The same in an interactive terminal under a scripted PTY. |
-| `e2e.mjs` | Main conversation → the real bridge → a free OpenCode job → result back to the lead. |
-| `lead-hook.mjs` | Probe-only PreToolUse hook that names the lead session as owner. |
+| `e2e.mjs` | Main conversation → the real bridge, with the plugin's own hooks → a free OpenCode job → result back to the lead. |
 | `hook.mjs`, `env-hook.mjs` | Record hook payloads, and which messaging variables a hook process gets. |
 | `sock.mjs` | Post one line to a session's own inbox socket. |
 | `rewake.mjs`, `stop-inject.mjs`, `modprobe/` | Wakes measured and not used: an `asyncRewake` hook, a Stop hook that holds and injects, a mod's `$.prompt.submit`. |

@@ -116,36 +116,14 @@ export class Records {
       return { from, mode, text, at };
     });
   }
-  listExecutions() {
+  list(kind) {
     let files;
-    try { files = readdirSync(join(this.dir, 'executions')); }
+    try { files = readdirSync(join(this.dir, kind)); }
     catch (err) { if (err.code === 'ENOENT') return []; throw err; }
-    return files.filter((f) => f.endsWith('.json')).map((f) => this.readExecution(f.slice(0, -5)));
+    return files.filter(f => f.endsWith('.json')).map(f => this.read(kind, f.slice(0, -5)));
   }
-  readLegacyHistory(owner, provider) {
-    const file = (suffix) => {
-      try { return readFileSync(join(this.dir, 'threads', `${segment(owner)}.${suffix}`), 'utf8').trim(); }
-      catch (err) { if (err.code === 'ENOENT') return null; throw err; }
-    };
-    const conflict = file('ambiguous');
-    if (conflict) throw Object.assign(error('AMBIGUOUS_HISTORY'), { message: `legacy thread ${owner} has conflicting histories: ${conflict}` });
-    const sid = file('sid');
-    if (!sid) return null;
-    // A bare legacy sid has no provider identity. Adopt it only when the last
-    // ledger job for this owner proves the same target; never silently reset.
-    let files = [];
-    try { files = readdirSync(join(this.dir, 'jobs')); }
-    catch (err) { if (err.code !== 'ENOENT') throw err; }
-    const jobs = files.filter((f) => f.endsWith('.json')).map((f) => this.read('jobs', f.slice(0, -5)))
-      .filter((job) => job?.thread === owner).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
-    const latest = jobs[0];
-    if (!latest?.target || latest.target !== provider) {
-      throw Object.assign(error('thread_ambiguous'), {
-        message: `legacy thread ${owner} belongs to ${latest?.target || 'an unknown target'}; requested ${provider}`,
-      });
-    }
-    return sid;
-  }
+  listExecutions() { return this.list('executions'); }
+  listConversations() { return this.list('conversations'); }
   readStop(owner) {
     const value = this.read('stops', owner);
     if (!value) return null;
@@ -181,7 +159,7 @@ export class Records {
     }
     return true;
   }
-  begin({ owner, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes, historyId = null, executionId, text, hostSessionId, now }, expectedGeneration) {
+  begin({ owner, lead, title, provider, cwd, modelOverride, effortOverride, permissionMode, interventionModes, historyId = null, executionId, text, hostSessionId, now }, expectedGeneration) {
     return this._locked(owner, () => {
       const old = this.readConversation(owner);
       if ((old?.generation ?? 0) !== expectedGeneration) {
@@ -202,7 +180,8 @@ export class Records {
         interventions: [], turns: [], nativeTurnIds: [] };
       this._write('executions', executionId, execution);
       // Effort becomes a conversation override only after openHistory accepts it.
-      this._write('conversations', owner, { owner, generation, executionId, provider, cwd, modelOverride, effortOverride: old?.effortOverride, historyId });
+      this._write('conversations', owner, { owner, lead: old ? old.lead : lead, title: old ? old.title : title ?? firstLine(text),
+        generation, executionId, provider, cwd, modelOverride, effortOverride: old?.effortOverride, historyId });
       return execution;
     });
   }

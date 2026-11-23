@@ -231,17 +231,13 @@ SURFACE_PATHS=(
 if [ "$DO_CLAUDE" = 1 ]; then
   SURFACE_PATHS+=(
     "$SCRIPT_DIR/.claude-plugin/plugin.json"
-    "$SCRIPT_DIR/templates/agent-companion.md"
     "$SCRIPT_DIR/hooks/hooks.json"
-    "$SCRIPT_DIR/hooks/install-agent.sh"
   )
 fi
 if [ "$DO_CODEX" = 1 ]; then
   SURFACE_PATHS+=(
     "$SCRIPT_DIR/.codex-plugin/plugin.json"
-    "$SCRIPT_DIR/templates/agent-companion.toml"
     "$SCRIPT_DIR/hooks/launch-agent-bridge.sh"
-    "$SCRIPT_DIR/hooks/install-agent-codex.sh"
     "$SCRIPT_DIR/scripts/build-codex-marketplace.mjs"
     "$SCRIPT_DIR/scripts/install-codex-hooks.mjs"
   )
@@ -309,20 +305,22 @@ for h in "${HOSTS[@]}"; do
     jq -r 'if .plan.ready then empty else "  Readiness deferred by --no-target-check; companion is not ready." end' "$PLAN_DIR/$h.json"
   fi
   host_paths "$h" "$SCRIPT_DIR"
-  AGENT_FILE="$HOST_AGENT_FILE"
-  if [ -f "$AGENT_FILE" ] && ! grep -qF '# AUTO-INSTALLED by agent-companion plugin' "$AGENT_FILE"; then
-    fail "User-owned agent preserved: $AGENT_FILE. Move or reconcile it manually before rerunning."; exit 1
+  if [ -f "$HOST_AGENT_FILE" ]; then
+    if grep -q '^# AUTO-INSTALLED by agent-companion plugin' "$HOST_AGENT_FILE"; then
+      echo "  Remove the retired plugin role at $HOST_AGENT_FILE."
+    else
+      echo "  User-owned agent preserved: $HOST_AGENT_FILE"
+    fi
   fi
-  [ ! -e "$AGENT_FILE" ] || echo "Existing $h agent found; setup will refresh and verify it."
 done
 
 echo "Intended installation changes:"
 echo "  Install bridge-server dependencies in $SCRIPT_DIR/bridge-server."
 echo "  Install or refresh the live-view launcher ~/.local/bin/agent-companion (runs this checkout's hooks/launch-ui.sh)."
-[ "$DO_CLAUDE" = 0 ] || echo "  Materialize the Claude agent; merge companion permissions into ~/.claude/settings.json."
+[ "$DO_CLAUDE" = 0 ] || echo "  Merge companion permissions into ~/.claude/settings.json."
 if [ "$DO_CODEX" = 1 ]; then
   host_paths codex "$SCRIPT_DIR"
-  echo "  Create $HOST_CONFIG_DIR if needed; refresh the Codex plugin, verify MCP and agent, and remove legacy managed hooks."
+  echo "  Create $HOST_CONFIG_DIR if needed; refresh the Codex plugin, verify MCP, and remove legacy managed hooks."
 fi
 echo "  Write diagnostic install markers after each harness finishes."
 if [ "$MODEL" = inherit ]; then
@@ -402,23 +400,17 @@ if [ "$TARGET" = "copilot" ] || command -v copilot >/dev/null 2>&1; then
   echo ""
 fi
 
-# --- Claude-host install (subagent + permissions) -------------------
+remove_retired_role() {
+  if [ -f "$HOST_AGENT_FILE" ] && grep -q '^# AUTO-INSTALLED by agent-companion plugin' "$HOST_AGENT_FILE"; then
+    rm -- "$HOST_AGENT_FILE"
+  fi
+}
 
 if [ "$DO_CLAUDE" = 1 ]; then
-  STEP="Claude agent and permissions"
+  STEP="Claude permissions"
   printf "=== Claude Code host install ===\n"
-
-  # 5a. Eagerly materialize the Markdown subagent. Idempotent.
   host_paths claude "$SCRIPT_DIR"
-  printf "Materializing subagent at ~/.claude/agents/agent-companion.md...\n"
-  CLAUDE_PLUGIN_ROOT="$SCRIPT_DIR" bash "$SCRIPT_DIR/hooks/install-agent.sh"
-  if [ -f "$HOST_AGENT_FILE" ]; then
-    CLAUDE_STATUS="agent installed; permissions pending"
-    ok "subagent installed at ~/.claude/agents/agent-companion.md"
-  else
-    fail "subagent install hook ran but file not found — check $SCRIPT_DIR/hooks/install-agent.sh"
-    exit 1
-  fi
+  remove_retired_role
 
   # 5b. Permission allow-list — without an explicit allow rule, the first
   # invocation of a agent-bridge MCP tool can surface a permission
@@ -435,20 +427,13 @@ if [ "$DO_CLAUDE" = 1 ]; then
   # 5c. Diagnostic marker.
   mkdir -p "$HOST_STATE_DIR"
   printf "claude\n" > "$HOST_STATE_DIR/.host"
-  CLAUDE_STATUS="agent and permissions installed"
+  CLAUDE_STATUS="permissions installed"
   ok "diagnostic marker: ~/.claude/agent-companion/.host"
 
   echo ""
 fi
 
-# --- Codex-host install (local marketplace plugin + subagent TOML) ---
-#
-# Current Codex deliberately ignores mcp_servers added by an agent role: a
-# child may inherit its parent's MCP authority but may not expand it. Installing
-# the Codex-only plugin manifest is therefore required even for source-checkout
-# development. Re-adding the same local plugin atomically refreshes its cached
-# package, so this path remains idempotent during iteration.
-
+# --- Codex marketplace installation ---
 if [ "$DO_CODEX" = 1 ]; then
   STEP="Codex plugin installation"
   printf "=== Codex CLI host install ===\n"
@@ -479,7 +464,7 @@ if [ "$DO_CODEX" = 1 ]; then
 
   PLUGIN_RESULT=""
   if PLUGIN_RESULT="$(codex plugin add agent-companion@agent-companion --json)"; then
-    CODEX_STATUS="plugin installed; MCP, agent and hooks pending verification"
+    CODEX_STATUS="plugin installed; MCP and hooks pending verification"
     ok "Codex plugin installed/refreshed"
   else
     fail "Codex plugin install failed"
@@ -518,30 +503,10 @@ if [ "$DO_CODEX" = 1 ]; then
     fail "Codex installed the plugin but did not register its agent-bridge MCP transport"
     exit 1
   fi
-  STEP="Codex agent and hooks"
+  STEP="Codex hooks"
   ok "Codex agent-bridge MCP registration verified"
 
-  # 6b. Eagerly materialize the TOML subagent from the installed package.
-  # SessionStart repeats this after upgrades, but doing it now makes the next
-  # fresh Codex session usable even before any hook has run.
-  printf "Materializing subagent at %s/agents/agent-companion.toml...\n" "$HOST_CONFIG_DIR"
-  CLAUDE_PLUGIN_ROOT="$INSTALLED_PLUGIN_ROOT" \
-    /bin/bash "$INSTALLED_PLUGIN_ROOT/hooks/install-agent-codex.sh"
-  AGENT_DEST="$HOST_AGENT_FILE"
-  AGENT_SENTINEL="# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent-codex.sh) — edits will be overwritten on next session"
-  AGENT_EXPECTED="$(mktemp)"
-  {
-    printf '%s\n' "$AGENT_SENTINEL"
-    /bin/cat "$INSTALLED_PLUGIN_ROOT/templates/agent-companion.toml"
-  } > "$AGENT_EXPECTED"
-  if [ -f "$AGENT_DEST" ] && cmp -s "$AGENT_DEST" "$AGENT_EXPECTED"; then
-    ok "subagent installed at $AGENT_DEST"
-    rm -f "$AGENT_EXPECTED"
-  else
-    rm -f "$AGENT_EXPECTED"
-    fail "cannot verify $AGENT_DEST; a user-owned file at that path is preserved and must be moved or reconciled manually"
-    exit 1
-  fi
+  remove_retired_role
 
   # 6c. Remove only this project's pre-plugin managed global hook entries.
   # Current installs use hooks/hooks-codex.json from plugin scope; leaving the
@@ -569,7 +534,7 @@ if [ "$DO_CODEX" = 1 ]; then
   # 6e. Diagnostic marker.
   mkdir -p "$HOST_STATE_DIR"
   printf "codex\n" > "$HOST_STATE_DIR/.host"
-  CODEX_STATUS="plugin, MCP, agent and hooks installed/verified"
+  CODEX_STATUS="plugin, MCP and hooks installed/verified"
   ok "diagnostic marker: $HOST_STATE_DIR/.host"
 
   echo ""

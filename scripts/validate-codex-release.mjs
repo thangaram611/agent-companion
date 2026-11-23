@@ -11,7 +11,6 @@ import {
   realpathSync,
   rmSync,
 } from 'node:fs';
-import { codex } from '../lib/hosts/codex.mjs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -117,10 +116,6 @@ function validateMarketplaceTree(marketplaceRoot) {
   assertExists(path.join(pluginRoot, 'hooks', 'hooks-codex.json'), 'Codex hook manifest');
   assertExists(path.join(pluginRoot, 'hooks', 'launch-agent-bridge.sh'), 'Codex bridge launcher');
   assertExists(path.join(pluginRoot, 'hooks', 'host-paths.sh'), 'Codex hook path helper');
-  assertExists(path.join(pluginRoot, 'templates', 'agent-companion.toml'), 'Codex agent template');
-  const roleTemplate = readFileSync(path.join(pluginRoot, 'templates', 'agent-companion.toml'), 'utf8');
-  assert(roleTemplate.includes(codex.toolPrefix + 'agent_send'), 'Codex role does not use normalized agent_bridge tool names');
-  assert(!roleTemplate.includes('mcp__agent-bridge__'), 'Codex role contains unsanitized agent-bridge tool names');
   assertExists(path.join(pluginRoot, 'bridge-server', 'server.mjs'), 'bridge server');
   const adapters = 'bridge-server/adapters';
   for (const name of readdirSync(path.join(REPO_ROOT, adapters)).filter(name => name.endsWith('-protocol.mjs'))) {
@@ -159,7 +154,6 @@ function validateInstalledTree(codexHome, installedPath) {
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'hooks-codex.json'), 'installed Codex hook manifest');
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'launch-agent-bridge.sh'), 'installed Codex bridge launcher');
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'host-paths.sh'), 'installed Codex hook path helper');
-  assertExists(path.join(resolvedInstalledPath, 'templates', 'agent-companion.toml'), 'installed Codex agent template');
   assertExists(path.join(resolvedInstalledPath, 'bridge-server', 'server.mjs'), 'installed bridge server');
   assertExists(path.join(resolvedInstalledPath, 'assets', 'readme', 'hero.png'), 'installed README assets');
   assertExists(path.join(resolvedInstalledPath, 'assets', 'readme', 'architecture.png'), 'installed README architecture asset');

@@ -3,8 +3,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Controller } from '../bridge-server/controller/controller.mjs';
 import { Records } from '../bridge-server/controller/records.mjs';
-import { codexDispatchFixture, diskSnapshot, terminalRows } from './controller/codex-dispatch-fixture.mjs';
-import { until } from './controller/helpers.mjs';
+import { codexDispatchFixture, terminalRows } from './controller/codex-dispatch-fixture.mjs';
+import { diskSnapshot, until } from './controller/helpers.mjs';
 import { note } from './codex-wire-frames.mjs';
 
 // Phase 3 mapping: a wait budget is not an execution timeout. Silence never
@@ -12,7 +12,7 @@ import { note } from './codex-wire-frames.mjs';
 test('CONTRACT: timeout must stop work or avoid claiming process termination', async (t) => {
   const h = codexDispatchFixture(t);
   const { job_id } = await h.send();
-  const waiting = h.call({ action: 'wait', thread: 'child', job_id, max_wait_sec: 1 });
+  const waiting = h.call({ action: 'wait', job_id, max_wait_sec: 1 });
   await until(() => h.active.requests.size === 1, 'attached wait');
   await h.clock.advance(1000);
   const response = await waiting;
@@ -23,28 +23,15 @@ test('CONTRACT: timeout must stop work or avoid claiming process termination', a
   assert.equal((await h.active.live.get(job_id).supervisor.verifyGone()).gone, false);
   await h.clock.advance(3_600_000);
   assert.equal(h.records.readResult(job_id), null, 'an hour of owner silence closes nothing');
-  await h.call({ action: 'cancel', thread: 'child', job_id });
+  await h.call({ action: 'cancel', job_id });
   await until(() => h.records.readResult(job_id), 'cancel cleanup');
   const result = h.records.readResult(job_id);
   assert.equal(result.outcome, 'stopped');
   assert.equal(result.cause, 'owner_stop');
   assert.equal(result.stopEvidence.gone, true);
   assert.deepEqual(result.stopEvidence.survivors, []);
-  const terminal = await h.call({ action: 'wait', thread: 'child', job_id });
+  const terminal = await h.call({ action: 'wait', job_id });
   assert.equal(terminal.meta.stop_evidence.gone, true);
-});
-
-// Phase 3 mapping: new work on a busy conversation is an explicit refusal;
-// it does not silently attach to, replace, or steer the original native turn.
-test('CONTRACT: new instructions must be delivered or explicitly rejected while native turn is active', async (t) => {
-  const h = codexDispatchFixture(t);
-  const first = await h.send();
-  const refused = await h.send('NEW_DECISION_MUST_REACH_PROVIDER');
-  assert.equal(refused.ok, false);
-  assert.equal(refused.status, 'thread_busy');
-  assert.equal(refused.job_id, first.job_id);
-  assert.deepEqual(h.frames().filter((f) => f.method === 'turn/start').map((f) => f.params.input[0].text), ['original']);
-  assert.equal(h.frames().some((f) => f.method === 'turn/steer'), false);
 });
 
 // Phase 3 mapping: refusal allocates no execution; the old answer remains
@@ -52,9 +39,9 @@ test('CONTRACT: new instructions must be delivered or explicitly rejected while 
 test('CONTRACT: old native answer must not be labeled the successful result of an undelivered new task', async (t) => {
   const h = codexDispatchFixture(t);
   const first = await h.send();
-  assert.equal((await h.send('undelivered')).status, 'thread_busy');
+  assert.equal((await h.call({ action: 'send', thread: first.thread, task: 'undelivered', model: 'other' })).status, 'thread_busy');
   await h.complete(first.job_id, 'OLD_ANSWER');
-  const result = await h.call({ action: 'wait', thread: 'child', job_id: first.job_id });
+  const result = await h.call({ action: 'wait', job_id: first.job_id });
   assert.equal(result.status, 'completed');
   assert.equal(result.job_id, first.job_id);
   assert.equal(result.content, 'OLD_ANSWER');
@@ -76,7 +63,7 @@ test('CONTRACT: a recovered native answer must remain observable after a retryab
   const h = await retryFixture(t);
   await h.complete(h.job_id, 'RECOVERED_AND_FINISHED');
   for (let i = 0; i < 2; i++) {
-    const result = await h.call({ action: 'wait', thread: 'child', job_id: h.job_id });
+    const result = await h.call({ action: 'wait', job_id: h.job_id });
     assert.equal(result.status, 'completed');
     assert.equal(result.content, 'RECOVERED_AND_FINISHED');
   }
@@ -93,7 +80,7 @@ test('CONTRACT: an older observer must not overwrite an already persisted termin
   await h.complete(job_id);
   const result = h.records.readResult(job_id);
   assert.equal(second.records.writeResult({ ...result, outcome: 'failed' }), false);
-  const next = await h.send('follow-up');
+  const next = await h.send('follow-up', stale.owner);
   assert.notEqual(next.job_id, job_id);
   assert.equal(second.records.writeExecution(stale), false);
   assert.equal(second.records.writeResult({ ...result, outcome: 'failed' }), false);
@@ -149,7 +136,7 @@ test('CONTROL: native completion preserves text and verified exit', async (t) =>
 test('CONTROL: dispatch cancel interrupts the fake turn and verifies exit', async (t) => {
   const h = codexDispatchFixture(t);
   const { job_id } = await h.send();
-  const result = await h.call({ action: 'cancel', thread: 'child', job_id });
+  const result = await h.call({ action: 'cancel', job_id });
   assert.equal(result.status, 'cancelled');
   assert.equal(result.meta.cause, 'owner_stop');
   assert.equal(result.meta.stop_evidence.gone, true);
