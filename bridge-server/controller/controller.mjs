@@ -95,7 +95,7 @@ export class Controller {
       if (a.stopping) return;
       a.startSnapshot = this._snapshot(a);
       a.started = true;
-      await bounded(this.clock, () => a.adapter.start({ cwd: a.record.cwd, env: this.env, ...selection, supervisor: a.supervisor, historyId: this.records.readThread(a.record.thread).historyId }), PROTOCOL_MS, 'runtime_unavailable');
+      await bounded(this.clock, () => a.adapter.start({ cwd: a.record.cwd, env: { ...this.env, AGENT_COMPANION_JOB: a.record.jobId }, ...selection, supervisor: a.supervisor, historyId: this.records.readThread(a.record.thread).historyId }), PROTOCOL_MS, 'runtime_unavailable');
       if (a.stopping) return;
       const threadRecord = this.records.readThread(a.record.thread);
       // A follow-up opens saved history; a new thread creates it. The lead needs to know which one failed.

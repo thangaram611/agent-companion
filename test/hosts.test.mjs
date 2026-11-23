@@ -1,5 +1,6 @@
 // Host detection + per-host path resolution tests.
 
+import './sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -35,6 +36,7 @@ test('detectHost handles defaults, valid/invalid env values, trimming, and memoi
   const cases = [
     [undefined, 'claude'],
     ['codex', 'codex'],
+    ['opencode', 'opencode'],
     ['claude', 'claude'],
     ['gemini', 'claude'],
     ['  codex  ', 'codex'],
@@ -84,6 +86,7 @@ test('CODEX_HOME relocates every Codex path without affecting Claude paths', () 
 });
 
 const paths = {
+  opencode: { config: '/fake home/.config/opencode', data: '/plugin root', settings: 'opencode.json' },
   claude: { config: '/fake home/.claude', data: '/plugin root/.plugin-data', settings: 'settings.json', wall: 'timeout', scale: 1000 },
   codex: { config: '/custom codex', data: '/custom codex/plugins/data/agent-companion-agent-companion', settings: 'config.toml', wall: 'tool_timeout_sec', scale: 1 },
 };
@@ -92,7 +95,7 @@ for (const host of Object.values(HOSTS)) test(`${host.id} paths, shell hooks and
   const root = '/plugin root';
   const { config, data, settings, wall, scale } = paths[host.id];
   const script = '. ./hooks/host-paths.sh && host_paths "$1" "$2" && printf "%s\\n" "$HOST_CONFIG_DIR" "$HOST_STATE_DIR" "$HOST_PLUGIN_DATA"';
-  for (const overrides of [{ CODEX_HOME: '/custom codex' }, {}, { CODEX_HOME: ' ./old/../custom codex/ ' }, { PLUGIN_DATA: '/plugin data', CLAUDE_PLUGIN_DATA: '/claude data' }]) {
+  for (const overrides of [{ CODEX_HOME: '/custom codex' }, { XDG_CONFIG_HOME: '/xdg config' }, {}, { CODEX_HOME: ' ./old/../custom codex/ ' }, { PLUGIN_DATA: '/plugin data', CLAUDE_PLUGIN_DATA: '/claude data' }]) {
     const env = { HOME: '/fake home', ...overrides };
     const dirs = [host.configDir(env), host.stateDir(env), host.pluginDataDir(env, root)];
     if (env.CODEX_HOME === '/custom codex') {
@@ -102,6 +105,7 @@ for (const host of Object.values(HOSTS)) test(`${host.id} paths, shell hooks and
     const shell = execFileSync('/bin/bash', ['-c', script, 'bash', host.id, root], { cwd: new URL('..', import.meta.url), env, encoding: 'utf8' });
     assert.deepEqual(shell.trimEnd().split('\n'), dirs);
   }
+  if (!wall) return; // OpenCode registers through its server plugin, exercised with a fake ctx.
   const manifest = JSON.parse(readFileSync(new URL(`../.${host.id}-plugin/plugin.json`, import.meta.url)));
   const bridge = manifest.mcpServers['agent-bridge'];
   assert.equal(bridge.env.AGENT_COMPANION_HOST, host.id);
@@ -110,7 +114,7 @@ for (const host of Object.values(HOSTS)) test(`${host.id} paths, shell hooks and
 });
 
 test('both bridge registrations expose identical capability settings', () => {
-  const knobs = Object.keys(HOSTS).map(host => {
+  const knobs = ['claude', 'codex'].map(host => {
     const manifest = JSON.parse(readFileSync(new URL(`../.${host}-plugin/plugin.json`, import.meta.url)));
     const { AGENT_COMPANION_HOST, ...capabilities } = manifest.mcpServers['agent-bridge'].env;
     return capabilities;

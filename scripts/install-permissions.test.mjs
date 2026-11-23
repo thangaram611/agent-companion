@@ -100,6 +100,10 @@ test('codex host is an explicit no-op and malformed claude settings are not over
     assert.equal(codex.code, 0, codex.stderr);
     assert.equal(existsSync(settingsPath(home)), false);
 
+    const opencode = runScript(home, ['--host', 'opencode']);
+    assert.equal(opencode.code, 0, opencode.stderr);
+    assert.equal(existsSync(join(home, '.config', 'opencode')), false);
+
     const f = settingsPath(home);
     mkdirSync(dirname(f), { recursive: true });
     writeFileSync(f, '{ invalid json');

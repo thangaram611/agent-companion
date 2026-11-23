@@ -227,3 +227,15 @@ AGENT_COMPANION_HOST=claude node probes/smoke/effort.mjs opencode
 AGENT_COMPANION_HOST=claude node probes/smoke/effort.mjs antigravity
 AGENT_COMPANION_HOST=claude node probes/smoke/effort.mjs copilot
 ```
+
+### OpenCode host
+
+Run `python3 probes/opencode-host/run.py` from the checkout with Node 26+, npm,
+jq and OpenCode on PATH. It installs twice in a temporary checkout and home,
+sets an isolated service port, checks doctor and the active plugin, then uses
+`opencode/flint-40b-free` for a short job and a foreground `sleep 170` job.
+It reads the isolated session database while waiting so observation cannot keep
+the lead loaded. A Node preload counts bridge launches, including short-lived
+children. The probe checks idle unloading, stops its service on exit and
+prints its final status. Allow several minutes. The controller needs permission
+to run `ps` for the successful-job checks.

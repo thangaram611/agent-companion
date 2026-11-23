@@ -50,11 +50,9 @@ const fail = (m, code = 1) => {
   process.exit(code);
 };
 
-// Codex permission model is not addressed by this plan — emit a clear
-// no-op marker so setup.sh's exit-code check stays happy and a future
-// Codex-permission implementation has an obvious place to plug in.
-if (host === HOSTS.codex.id) {
-  ok('permission injection skipped: Codex permission model not handled by this plan');
+// Only Claude consumes these allow-list entries.
+if (!HOSTS[host].permissionAllowList) {
+  ok(`permission injection skipped: ${HOSTS[host].displayName} manages its own tool permissions`);
   process.exit(0);
 }
 

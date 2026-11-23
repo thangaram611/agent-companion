@@ -22,6 +22,8 @@ if (event === 'pre-tool') {
       mkdirSync(dirname(current), { recursive: true, mode: 0o700 });
       writePrivateFileAtomic(current, JSON.stringify({ socket, session, at: Date.now() }) + '\n');
     }
+  }
+  if (event === 'session-start' && host.oldAgentFile) {
     const file = join(host.configDir(), 'agents', host.oldAgentFile);
     refuseRealHomeUnderTest(file, 'agent file');
     try {

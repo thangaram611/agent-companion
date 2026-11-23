@@ -76,11 +76,16 @@ export function assertCwd(value) {
 
 export function validateFields(args, { fields, inputSchema }) {
   const values = {};
+  const required = inputSchema.required ?? [];
   for (const [key, value] of Object.entries(args)) {
     if (!Object.hasOwn(fields, key)) invalid('unknown field "' + key + '"');
+    // Smaller lead models fill every optional field, with "" or null for "none" (measured: gpt-oss:20b in
+    // OpenCode sent thread "" and mode "" on a new send). An empty optional value means omitted, unless the
+    // field gives "" its own meaning.
+    if ((value === null || value === '') && !required.includes(key) && !fields[key].keepEmpty) continue;
     values[key] = fields[key].check(value, key);
   }
-  for (const key of inputSchema.required ?? []) {
+  for (const key of required) {
     if (values[key] === undefined) invalid(key + ' is required');
   }
   return values;

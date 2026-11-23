@@ -1,0 +1,6 @@
+{
+  "name": "agent-companion",
+  "private": true,
+  "type": "module",
+  "exports": { "./server": "./server.js" }
+}

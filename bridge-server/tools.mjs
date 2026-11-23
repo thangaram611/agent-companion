@@ -6,10 +6,9 @@ import { lastCompanionChecks, probePermission } from '../lib/companion-diagnosti
 import { defaultCompanionInfo, getCompanion, COMPANIONS, modelHint, listCompanions, listCompanionIds } from '../lib/companion-registry.mjs';
 import { lastRuns } from './last-runs.mjs';
 import { getCodexContractStatus } from './adapters/codex.mjs';
-import { jobStatus, publish, toolAnswer, wakeNotice } from './delivery.mjs';
+import { jobStatus, publish, needsStartupWake, toolAnswer, wakeNotice } from './delivery.mjs';
 import { Controller } from './controller/controller.mjs';
 import { Records, firstLine, isCompanionSession } from './controller/records.mjs';
-import { systemClock } from './controller/clock.mjs';
 import { createProviders } from './providers.mjs';
 import { log } from './validation.mjs';
 import { renderDigest } from '../lib/digest.mjs';
@@ -257,8 +256,8 @@ function refuse(action, code, fields = {}) {
   return asJson({ ok: false, action, status: code, code, ...fields });
 }
 
-function sendDelivery(lead, env) {
-  return { ...HOSTS[lead.host].wakeStatus(lead, env), fallback: 'companion_wait' };
+async function sendDelivery(lead, env) {
+  return { ...await HOSTS[lead.host].wakeStatus(lead, env), fallback: 'companion_wait' };
 }
 
 async function handleSend(args, active, request, threadRecord) {
@@ -283,7 +282,7 @@ async function handleSend(args, active, request, threadRecord) {
           mode: selected, text: task, ...request });
         if (!ack.ok) return asJson({ action: 'send', ...ack });
         return asJson({ ...ack, action: 'send', status: 'intervened', thread, job_id: e.jobId, mode: selected, intervention_id: id,
-          delivery: sendDelivery(lead, active.env) });
+          delivery: await sendDelivery(lead, active.env) });
       }
     }
   }
@@ -302,7 +301,7 @@ async function handleSend(args, active, request, threadRecord) {
     return refuse('send', sent.error ?? 'bridge_loss', { thread, job_id: sent.jobId, status: sent.state });
   }
   if (sent.outcome) return terminalResponse(active.records, active.records.readJob(sent.jobId), sent, 'send', request);
-  return asJson({ ok: true, status: 'still_running', thread, job_id: sent.jobId, companion, delivery: sendDelivery(lead, active.env),
+  return asJson({ ok: true, status: 'still_running', thread, job_id: sent.jobId, companion, delivery: await sendDelivery(lead, active.env),
     selected_model: sent.selectedModel ?? null, selected_effort: sent.selectedEffort ?? null,
     effective_model: sent.effectiveModel ?? null, effective_effort: sent.effectiveEffort ?? null, permission_mode: sent.permissionMode ?? null });
 }
@@ -337,7 +336,7 @@ export const tools = [
     title: field('string', string),
   }, { required: ['task'], anyOf: [{ required: ['cwd'] }, { required: ['thread'] }] }, handleSend),
   tool('read', 'Read thread posts in order. Continue a page with the exact after and offset in its footer.', {
-    thread, after: field('string', (v, k) => v === '' ? v : recordId(v, k)),
+    thread, after: { ...field('string', (v, k) => v === '' ? v : recordId(v, k)), keepEmpty: true },
     offset: pageInteger(0), limit: pageInteger(1, 40000),
   }, { required: ['thread'] }, readThread),
   tool('wait', 'Wait for a result, a user intervention, or the wait budget to expire.', {
@@ -483,7 +482,7 @@ function terminalResponse(records, job, result, action, { signal }) {
 }
 
 export function createBridgeController({ env = process.env, records = new Records(), ...options } = {}) {
-  const controller = new Controller({ env, records, clock: systemClock, providers: createProviders(env), ...options,
+  const controller = new Controller({ env, records, providers: createProviders(env), ...options,
     onResult(job, result) {
       try {
         const lead = publish(records, job, result);
@@ -497,14 +496,21 @@ export function createBridgeController({ env = process.env, records = new Record
   return controller;
 }
 export async function recoverController(active) {
+  const notices = new Map();
   for (const job of active.records.listJobs()) {
     const threadRecord = active.records.readThread(job.thread);
     if (threadRecord?.jobId === job.jobId && job.state !== 'closed') {
       await active.recover({ thread: job.thread });
     }
-    // A startup scan can observe another bridge's live completion. Restore
-    // news here; only the bridge finishing the job attempts its wake.
     const result = active.records.readResult(job.jobId);
-    if (result) publish(active.records, job, result);
+    if (!result) continue;
+    const lead = publish(active.records, job, result);
+    if (!HOSTS[lead?.host]?.startupWake || !needsStartupWake(active.records, job)) continue;
+    if (!notices.has(lead.session)) notices.set(lead.session, { lead, messages: [] });
+    notices.get(lead.session).messages.push(wakeNotice(job, result));
+  }
+  for (const { lead, messages } of notices.values()) {
+    HOSTS[lead.host].wake(lead, messages.join('\n'), active.env, true)
+      .catch(err => log('WARN', 'startup wake failed:', err.message));
   }
 }

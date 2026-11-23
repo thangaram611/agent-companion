@@ -32,6 +32,12 @@ SDK_PACKAGE="${HOST_DEPS_LINK:-$HOST_PLUGIN_DATA/bridge-server/node_modules}/@mo
 # the manifest's 120s startup timeout and let an in-flight installer finish.
 DEPS_READY=0
 for _attempt in 1 2; do
+  # Checkout plugins use the dependencies installed by setup.sh.
+  if [ "$HOST_PLUGIN_DATA" = "$PLUGIN_PACKAGE_ROOT" ] && [ -z "$HOST_DEPS_LINK" ] && [ -z "$HOST_BRIDGE_IMPORT" ]; then
+    [ -r "$SDK_PACKAGE" ] || { echo "agent-companion: run setup.sh --host $AGENT_COMPANION_HOST to install dependencies" >&2; exit 1; }
+    DEPS_READY=1
+    break
+  fi
   CLAUDE_PLUGIN_ROOT="$PLUGIN_PACKAGE_ROOT" \
     AGENT_COMPANION_REQUIRE_DEPS=1 \
     /bin/bash "$PLUGIN_PACKAGE_ROOT/hooks/install-deps.sh" >&2

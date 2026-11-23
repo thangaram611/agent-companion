@@ -42,6 +42,8 @@ SKIP_TESTS=0
 YES=0
 DRY_RUN=0
 UNLOAD_DELAY=""
+OPENCODE_IDLE=""
+idle_writer="$SCRIPT_DIR/scripts/install-opencode-idle-timeout.mjs"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host)   [ "$#" -ge 2 ] && [ -n "$2" ] || { fail "--host requires a value"; exit 2; }; HOST="$2"; shift 2 ;;
@@ -52,6 +54,16 @@ while [ "$#" -gt 0 ]; do
     --model=*) MODEL="${1#--model=}"; [ -n "$MODEL" ] || { fail "--model requires a value"; exit 2; }; shift ;;
     --codex-unload-delay) [[ "${2:-}" =~ ^([0-9]+|default)$ ]] || { fail "--codex-unload-delay takes seconds or default"; exit 2; }; UNLOAD_DELAY="$2"; shift 2 ;;
     --codex-unload-delay=*) UNLOAD_DELAY="${1#--codex-unload-delay=}"; [[ "$UNLOAD_DELAY" =~ ^([0-9]+|default)$ ]] || { fail "--codex-unload-delay takes seconds or default"; exit 2; }; shift ;;
+    --opencode-idle-timeout|--opencode-idle-timeout=*)
+      if [[ "$1" == *=* ]]; then
+        OPENCODE_IDLE="${1#*=}"
+      else
+        shift
+        OPENCODE_IDLE="${1:-}"
+      fi
+      node "$idle_writer" --check "$OPENCODE_IDLE" || exit 2
+      shift
+      ;;
     --no-companion-check) NO_COMPANION_CHECK=1; shift ;;
     --skip-tests)      SKIP_TESTS=1; shift ;;
     --yes|-y) YES=1; shift ;;
@@ -59,11 +71,12 @@ while [ "$#" -gt 0 ]; do
     -h|--help)
       read_registry_ids
       cat <<EOF
-Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both] [--companion ${COMPANION_IDS// /|}|auto|none]
+Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both|all] [--companion ${COMPANION_IDS// /|}|auto|none]
                         [--model <id|inherit>] [--codex-unload-delay <seconds|default>]
+                        [--opencode-idle-timeout <duration|false|default>]
                         [--no-companion-check] [--skip-tests] [--yes] [--dry-run]
 
-  --host ${HOST_IDS// /|}|both   install that host surface (default: detect installed CLIs)
+  --host ${HOST_IDS// /|}|both|all   install that host surface (default: detect installed CLIs)
   --companion ${COMPANION_IDS// /|}|auto|none
                              choose a default companion (default: preserve existing config,
                              otherwise select the only ready companion). none preserves
@@ -73,6 +86,10 @@ Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both] [--companion ${COMPANION_
                              how long Codex keeps a conversation you left loaded
                              (thread_unload_delay_secs, Codex default 60). Lower ends
                              its wakes and its running jobs sooner; default removes it.
+  --opencode-idle-timeout <duration|false|default>
+                             how long OpenCode keeps an idle directory loaded (e.g. "8 hours").
+                             false keeps every directory's servers loaded until the service stops.
+                             default removes the global override (OpenCode default: 60 minutes).
   --no-companion-check       select the companion without failing on not-ready
   --skip-tests               skip the unit-test step
   --yes                      apply without interactive confirmation
@@ -95,8 +112,8 @@ has_id() {
   return 1
 }
 
-if ! has_id "$HOST" "" $HOST_IDS both; then
-  fail "--host must be one of: ${HOST_IDS// /, }, both (got: $HOST)"; exit 2
+if ! has_id "$HOST" "" $HOST_IDS both all; then
+  fail "--host must be one of: ${HOST_IDS// /, }, both, all (got: $HOST)"; exit 2
 fi
 if ! has_id "$COMPANION" "" $COMPANION_IDS auto none; then
   fail "--companion must be one of: ${COMPANION_IDS// /, }, auto, none (got: $COMPANION)"; exit 2
@@ -113,28 +130,35 @@ if [ -z "$HOST" ]; then
   DETECTED=()
   for h in $HOST_IDS; do command -v "$h" >/dev/null 2>&1 && DETECTED+=("$h"); done
   case "${#DETECTED[@]}" in
-    0) fail "No supported host found. Install Claude Code or Codex CLI, then rerun with --host ${HOST_IDS// /|}."; exit 1 ;;
+    0) fail "No supported host found. Install a supported CLI, then rerun with --host ${HOST_IDS// /|}."; exit 1 ;;
     1) HOST="${DETECTED[0]}"; ok "detected host: $HOST" ;;
     *)
       if [ -t 0 ] && [ "$YES" = 0 ]; then
-        read -r -p "Installed hosts: ${HOST_IDS// /, }. Install for [${HOST_IDS// /\/}/both]: " HOST
-        has_id "$HOST" $HOST_IDS both || { fail "Select ${HOST_IDS// /, } or both."; exit 2; }
+        read -r -p "Installed hosts: ${HOST_IDS// /, }. Install for [${HOST_IDS// /\/}/both/all]: " HOST
+        has_id "$HOST" $HOST_IDS both all || { fail "Select ${HOST_IDS// /, } or both/all."; exit 2; }
       else
-        fail "Both hosts are installed. Select --host ${HOST_IDS// /|}|both."; exit 2
+        fail "Multiple hosts are installed. Select --host ${HOST_IDS// /|}|both|all."; exit 2
       fi
       ;;
   esac
 fi
+case "$HOST" in
+  both) HOSTS=(claude codex) ;;
+  all) HOSTS=($HOST_IDS) ;;
+  *) HOSTS=("$HOST") ;;
+esac
 DO_CLAUDE=0
 DO_CODEX=0
-HOSTS=()
-case "$HOST" in
-  claude) DO_CLAUDE=1; HOSTS=(claude) ;;
-  codex) DO_CODEX=1; HOSTS=(codex) ;;
-  both) DO_CLAUDE=1; DO_CODEX=1; HOSTS=($HOST_IDS) ;;
-esac
+DO_OPENCODE=0
+for h in "${HOSTS[@]}"; do
+  case "$h" in claude) DO_CLAUDE=1 ;; codex) DO_CODEX=1 ;; opencode) DO_OPENCODE=1 ;; esac
+done
 if [ -n "$UNLOAD_DELAY" ] && [ "$DO_CODEX" = 0 ]; then
-  fail "--codex-unload-delay needs a Codex host (--host codex or both)"; exit 2
+  fail "--codex-unload-delay needs a Codex host (--host codex, both or all)"; exit 2
+fi
+
+if [ -n "$OPENCODE_IDLE" ] && [ "$DO_OPENCODE" = 0 ]; then
+  fail "--opencode-idle-timeout needs an OpenCode host (--host opencode or all)"; exit 2
 fi
 
 DEPS_STATUS="not installed this run"
@@ -174,6 +198,9 @@ finish() {
     if [ "$APPLY_STARTED" = 1 ]; then
       echo "  Run codex to start a fresh session. Approve the agent-companion plugin hooks if asked."
     fi
+  fi
+  if [ "$DO_OPENCODE" = 1 ] && [ "$APPLY_STARTED" = 1 ] && [ -n "${OPENCODE_INSTALLED:-}" ]; then
+    echo "OpenCode plugin installed. Run: opencode service restart"
   fi
   echo "Unverified: live delegation and provider/model access (no quota-spending smoke run)."
 }
@@ -233,6 +260,10 @@ echo ""
 # Per-host the surface differs. We always check the host-agnostic shared
 # files, then add per-host files when that host is in scope.
 
+if [ "$DO_OPENCODE" = 1 ] && ! opencode plugin add --help >/dev/null 2>&1; then
+  fail "OpenCode with plugin add support is required."; exit 1
+fi
+
 printf "Checking plugin surface...\n"
 
 SURFACE_PATHS=(
@@ -255,6 +286,9 @@ if [ "$DO_CODEX" = 1 ]; then
   )
 fi
 
+if [ "$DO_OPENCODE" = 1 ]; then
+  SURFACE_PATHS+=("$SCRIPT_DIR/opencode-plugin/package.json" "$SCRIPT_DIR/opencode-plugin/server.js" "$SCRIPT_DIR/hooks/launch-agent-bridge.sh")
+fi
 for path in "${SURFACE_PATHS[@]}"; do
   if [ -f "$path" ]; then
     ok "$(basename "$path")"
@@ -338,6 +372,16 @@ if [ "$DO_CODEX" = 1 ]; then
     default) echo "  Remove thread_unload_delay_secs from $HOST_CONFIG_DIR/config.toml (applies when Codex's daemon restarts)." ;;
     *) echo "  Set thread_unload_delay_secs to $UNLOAD_DELAY in $HOST_CONFIG_DIR/config.toml (applies when Codex's daemon restarts)." ;;
   esac
+fi
+if [ "$DO_OPENCODE" = 1 ]; then
+  host_paths opencode "$SCRIPT_DIR"
+  echo "  Register the OpenCode plugin from $SCRIPT_DIR/opencode-plugin."
+  case "$OPENCODE_IDLE" in
+    '') ;;
+    default) echo "  Remove experimental.location_idle_timeout from the global config in $HOST_CONFIG_DIR." ;;
+    *) echo "  Set experimental.location_idle_timeout to $OPENCODE_IDLE in the global config in $HOST_CONFIG_DIR." ;;
+  esac
+  [ -z "$OPENCODE_IDLE" ] || echo "  Apply the timeout to open directories with opencode reload or the plugin service restart."
 fi
 echo "  Write diagnostic install markers after each host finishes."
 if [ "$MODEL" = inherit ]; then
@@ -564,6 +608,37 @@ if [ "$DO_CODEX" = 1 ]; then
   ok "diagnostic marker: $HOST_STATE_DIR/.host"
 
   echo ""
+fi
+
+if [ "$DO_OPENCODE" = 1 ]; then
+  STEP="OpenCode plugin"
+  host_paths opencode "$SCRIPT_DIR"
+  plugin="$SCRIPT_DIR/opencode-plugin"
+  if output=$(opencode plugin add "$plugin" 2>&1); then
+    ok "$output"
+  elif [[ "$output" == *"Plugin target must be an npm registry package or Git package specifier"* ]]; then
+    # OpenCode 2.3.2 discovers local packages under plugins/ but rejects
+    # checkout paths on its plugin-add command line.
+    local_plugin="$HOST_CONFIG_DIR/plugins/agent-companion"
+    mkdir -p "$HOST_CONFIG_DIR/plugins"
+    if ! [ "$plugin" -ef "$local_plugin" ]; then
+      if [ -e "$local_plugin" ] || [ -L "$local_plugin" ]; then
+        fail "Another plugin already occupies $local_plugin"; exit 1
+      fi
+      ln -s "$plugin" "$local_plugin"
+    fi
+    ok "registered local OpenCode plugin: $local_plugin"
+  else
+    fail "$output"; exit 1
+  fi
+  if [ -n "$OPENCODE_IDLE" ]; then
+    STEP="OpenCode global idle timeout"
+    node "$idle_writer" "$OPENCODE_IDLE"
+    warn "OpenCode reloads open directories and their MCP servers on 'opencode reload'. The plugin service restart below also applies the timeout."
+  fi
+  mkdir -p "$HOST_STATE_DIR"
+  printf 'opencode\n' > "$HOST_STATE_DIR/.host"
+  OPENCODE_INSTALLED=1
 fi
 
 # --- Syntax-check all .mjs files ------------------------------------

@@ -119,3 +119,14 @@ test('through launch-ui.sh: jobs prints one JSON line without the UI packages an
     assert.match(refused.stderr, /^usage: agent-companion jobs <state dir> <session id> <limit>/);
   }
 });
+
+test('live job source discovers OpenCode leads in the XDG config directory', t => {
+  const env = { HOME: temp(t), XDG_CONFIG_HOME: temp(t) };
+  const dir = join(env.XDG_CONFIG_HOME, 'opencode/agent-companion');
+  write(join(dir, 'jobs/oc.json'), { jobId: 'oc', thread: 'th-oc', companion: 'codex', state: 'running' });
+  write(join(dir, 'threads/th-oc.json'), { lead: { host: 'opencode', session: 'lead', agent: null } });
+  const [job] = createJobSource({ env }).list();
+  assert.equal(job.host, 'opencode');
+  assert.equal(job.dir, dir);
+  assert.equal(job.threadRecord.lead.session, 'lead');
+});

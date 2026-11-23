@@ -30,6 +30,13 @@ codex_config_dir() {
 host_paths() {
   local host="$1" root="$2"
   case "$host" in
+    opencode)
+      HOST_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+      HOST_PLUGIN_DATA="$root"
+      HOST_DEPS_LINK=""
+      HOST_BRIDGE_IMPORT=""
+      HOST_AGENT_FILE=""
+      ;;
     "codex")
       codex_config_dir
       HOST_PLUGIN_DATA="${PLUGIN_DATA:-${HOST_CONFIG_DIR%/}/plugins/data/agent-companion-agent-companion}"

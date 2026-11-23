@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 const HERE = import.meta.dirname;
 
 const manifest = host => JSON.parse(readFileSync(join(HERE, host === 'codex' ? 'hooks-codex.json' : 'hooks.json'))).hooks;
-for (const host of Object.keys(HOSTS)) test(`${host} runs manifest commands from a plugin path with spaces`, () => {
+for (const host of ['claude', 'codex']) test(`${host} runs manifest commands from a plugin path with spaces`, () => {
   const root = mkdtempSync(join(process.env.HOME, 'plugin root '));
   mkdirSync(join(root, 'hooks'));
   for (const file of ['hook.sh', 'install-deps.sh']) {
@@ -65,7 +65,7 @@ test('empty news path starts no process; an unavailable identity rewrite denies 
 });
 
 test('session start removes only sentinel-marked legacy agent files on each host', async () => {
-  for (const host of Object.values(HOSTS)) {
+  for (const host of Object.values(HOSTS).filter(h => h.oldAgentFile)) {
     const env = { AGENT_COMPANION_HOST: host.id, CODEX_HOME: join(process.env.HOME, 'custom codex') };
     const dir = join(host.configDir({ ...process.env, ...env }), 'agents');
     mkdirSync(dir, { recursive: true });

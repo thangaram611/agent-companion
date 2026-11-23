@@ -324,6 +324,20 @@ const scenarios = {
       assert.equal((await h.call(action, args)).code, 'INVALID_ARGUMENTS', action);
     }
     assert.deepEqual(h.records.listJobs(), []);
+    // A required field stays required when a model sends it empty.
+    assert.equal((await h.call('send', { task: '', cwd: h.dir })).code, 'INVALID_ARGUMENTS');
+    assert.deepEqual(h.records.listJobs(), []);
+  },
+  async 'empty or null optional fields count as omitted, as smaller lead models send them'() {
+    const h = fixture();
+    const sent = await h.send({ thread: '', mode: '', model: null, effort: '', title: '' });
+    assert.equal(sent.status, 'still_running');
+    assert.match(sent.thread, /^th-[0-9a-f]{10}$/);
+    assert.equal(sent.selected_model, null); assert.equal(sent.selected_effort, null);
+    assert.equal(h.records.readThread(sent.thread).title.trim(), 'First line.', 'an empty title falls back to the task');
+    // An empty `after` keeps its own meaning: read from the first post.
+    assert.match((await h.raw('read', { thread: sent.thread, after: '' })).content[0].text, new RegExp(`## ${sent.job_id} `));
+    assert.equal((await h.call('status', { thread: '', job_id: sent.job_id })).job_id, sent.job_id);
   },
   async 'durable outcomes map to the original job and thread after restart'() {
     for (const [outcome, status] of [['completed', 'completed'], ['failed', 'failed'], ['interrupted', 'cancelled'],

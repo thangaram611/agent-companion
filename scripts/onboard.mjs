@@ -38,7 +38,7 @@ import { Controller } from '../bridge-server/controller/controller.mjs';
 import { createProviders } from '../bridge-server/providers.mjs';
 import { HOSTS, stateDirs } from '../lib/hosts/index.mjs';
 import { Records } from '../bridge-server/controller/records.mjs';
-const VALID_HOSTS = new Set([...Object.keys(HOSTS), 'both']);
+const VALID_HOSTS = new Set([...Object.keys(HOSTS), 'both', 'all']);
 const VALID_COMPANION_OPTS = new Set([...COMPANION_IDS, 'auto', 'none']);
 
 export function parseArgs(argv) {
@@ -220,7 +220,7 @@ async function main() {
   const settings = options.plan ? previewDefaults({ env }) : migrateDefaults({ env });
   if (!options.plan) {
     for (const { dir, host } of stateDirs(env)) {
-      if (options.host === 'both' || options.host === host || env.AGENT_COMPANION_HOME) new Records({ dir });
+      if (options.host === 'all' || (options.host === 'both' && [HOSTS.claude.id, HOSTS.codex.id].includes(host)) || options.host === host || env.AGENT_COMPANION_HOME) new Records({ dir });
     }
   }
   const defaultCompanion = readDefaultCompanion(env, console.warn, settings);

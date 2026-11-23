@@ -21,6 +21,11 @@ function mark(session) {
 
 const receipt = (records, id) => records.path('results', id) + '.delivery';
 
+export function needsStartupWake(records, job) {
+  return !existsSync(receipt(records, job.jobId))
+    && job.generation > (records.read('reads', job.thread)?.generation ?? 0);
+}
+
 export function publish(records, job, result) {
   const lead = records.readThread(job.thread)?.lead;
   const path = receipt(records, result.jobId);

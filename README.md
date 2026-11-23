@@ -160,15 +160,23 @@ A longer delay gives them more time. Codex writes the setting to its config file
 and preserves comments. Restart Codex to apply it, or run `codex app-server daemon restart`.
 Restarting the daemon stops running Codex work.
 
-Three more hosts are planned. [Hosts built later](docs/THREAD_PLAN.md#hosts-built-later-1)
+**OpenCode.** Install with `setup.sh --host opencode`, then run
+`opencode service restart` to load the plugin. When the lead is idle, jobs
+that outlive the directory's idle timeout stop with `bridge_loss`. To allow
+longer jobs, pass `--opencode-idle-timeout "8 hours"` during setup. OpenCode's
+default is 60 minutes. With `false`, every opened directory keeps its MCP and
+language servers loaded until the service stops. Use `default` to remove the
+global override. For a timeout change alone, run `opencode reload` after
+running jobs finish. It rebuilds open directories and restarts their MCP servers.
 
-- **OpenCode** will keep the bridge and jobs alive with its server.
+Two more hosts are planned. [Hosts built later](docs/THREAD_PLAN.md#hosts-built-later-1)
+
 - **GitHub Copilot CLI** will use a session extension for wakes in experimental mode.
 - **Google Antigravity** will use a permitted wake command, with wait as the fallback.
 
 ## Live view
 
-`agent-companion ui` lists jobs from both hosts, running first, then the last 24 hours.
+`agent-companion ui` lists jobs from all installed hosts, running first, then the last 24 hours.
 Setup installs the launcher in `~/.local/bin`. If that directory is off your PATH,
 run `~/.local/bin/agent-companion ui` or `bash hooks/launch-ui.sh ui` from the checkout.
 
@@ -223,10 +231,11 @@ to the bridge. Use saved defaults or name the model in your request.
 
 | Setup flag | Effect |
 | --- | --- |
-| `--host` | Install for `claude`, `codex` or `both`. Setup detects a sole host. With both present, choose at the prompt or pass the flag for unattended setup. |
+| `--host` | Install for `claude`, `codex`, `opencode` or `all`. `both` selects Claude Code and Codex. Setup detects a sole host. With multiple hosts present, choose at the prompt or pass the flag for unattended setup. |
 | `--companion` | Choose `opencode`, `copilot`, `codex`, `antigravity` or `claude`. Omit to preserve existing defaults. On a clean install, setup selects the only ready companion or asks you to choose. `auto` selects the only ready one. `none` installs the host and preserves defaults. |
 | `--model` | Save a model for an explicitly named companion. Use `inherit` to clear it. |
-| `--codex-unload-delay` | For `codex` or `both`, set idle seconds (zero allowed). `default` removes the setting. |
+| `--codex-unload-delay` | For `codex`, `both` or `all`, set idle seconds (zero allowed). `default` removes the setting. |
+| `--opencode-idle-timeout` | For `opencode` or `all`, set a global idle duration such as `"90 minutes"`. `false` disables idle unloading. `default` removes the setting. Omit to keep the current value. |
 | `--no-companion-check` | Allow an explicit selection despite a readiness failure. |
 | `--skip-tests` | Skip setup's unit tests. |
 | `--yes`, `-y` | Apply without the interactive confirmation. |

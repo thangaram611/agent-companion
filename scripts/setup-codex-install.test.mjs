@@ -28,6 +28,7 @@ const AGENT_SENTINEL = '# AUTO-INSTALLED by agent-companion plugin (hooks/instal
 const FIXTURE_PATHS = [
   '.claude-plugin',
   '.codex-plugin',
+  'opencode-plugin',
   'assets',
   'bridge-server',
   'hooks',
@@ -510,7 +511,7 @@ test('preflight refuses missing hosts, missing authentication and ambiguous comp
         args = ['--host', 'codex', '--skip-tests']; message = /multiple companions ready/;
       } else {
         writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
-        args = ['--companion', 'none', '--yes']; message = /Both hosts are installed/;
+        args = ['--companion', 'none', '--yes']; message = /Multiple hosts are installed/;
       }
       const r = f.run(args, env);
       assert.notEqual(r.status, 0, r.stdout + r.stderr);
@@ -698,4 +699,47 @@ test('setup passes model to plan and apply, previews intent, and clears a saved 
 test('setup shell syntax is valid', () => {
   const r = spawnSync('/bin/bash', ['-n', path.join(REPO_ROOT, 'setup.sh')], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
+});
+
+test('OpenCode and all register the checkout plugin and marker; both skips it', t => {
+  const f = setupFixture(t);
+  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
+  writeExecutable(path.join(f.bin, 'opencode'), `#!/bin/sh
+if [ "$1 $2" = "plugin add" ] && [ "$3" != --help ]; then
+  echo "$3" >> "$HOME/plugin-add"
+  echo 'Plugin target must be an npm registry package or Git package specifier' >&2
+  exit 1
+fi
+exit 0
+`);
+  const conf = path.join(f.home, 'xdg');
+  const config = path.join(conf, 'opencode/opencode.jsonc');
+  const env = { XDG_CONFIG_HOME: conf };
+  const args = ['--companion', 'none', '--skip-tests'];
+  for (const extra of [['--host', 'both', '--opencode-idle-timeout=false'],
+    ['--host', 'opencode', '--opencode-idle-timeout', 'wrong']]) {
+    assert.equal(f.run([...args, ...extra], env).status, 2);
+  }
+  const preview = f.run([...args, '--host', 'opencode', '--opencode-idle-timeout', '8 hours', '--dry-run'], env);
+  assert.equal(preview.status, 0, preview.stdout + preview.stderr);
+  assert.match(preview.stdout, /Set experimental.location_idle_timeout to 8 hours/);
+  assert.match(preview.stdout, /opencode reload/);
+  assert.equal(existsSync(config), false);
+  // The fake npm does not install packages.
+  const packageDir = 'bridge-server/node_modules/jsonc-parser';
+  cpSync(path.join(REPO_ROOT, packageDir), path.join(f.source, packageDir), { recursive: true });
+  for (const [host, flag] of [['both', []], ['opencode', ['--opencode-idle-timeout=false']], ['all', ['--opencode-idle-timeout', 'default']]]) {
+    const r = f.run(['--host', host, ...args, ...flag, '--yes'], env);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    if (host === 'both') {
+      assert.equal(existsSync(path.join(conf, 'opencode')), false);
+    } else {
+      assert.equal(JSON.parse(readFileSync(config)).experimental.location_idle_timeout, host === 'opencode' ? false : undefined);
+      assert.match(r.stdout, /opencode service restart/);
+      assert.equal(readFileSync(path.join(conf, 'opencode/agent-companion/.host'), 'utf8'), 'opencode\n');
+      assert.deepEqual(readdirSync(path.join(conf, 'opencode/plugins')), ['agent-companion']);
+      assert.equal(realpathSync(path.join(conf, 'opencode/plugins/agent-companion')), path.join(f.source, 'opencode-plugin'));
+    }
+  }
+  assert.deepEqual(readFileSync(path.join(f.home, 'plugin-add'), 'utf8').trim().split('\n'), Array(2).fill(path.join(f.source, 'opencode-plugin')));
 });

@@ -22,26 +22,30 @@ the five agents can lead and any can be the companion.
    on send and stopping the companion when the link is cut. Hosts cancel a tool
    call at 1,320 s (Claude Code and Codex, measured), Esc would discard the
    companion's work, and the lead could not work in parallel.
-3. **Keep running jobs alive with a heartbeat.** OpenCode unloads a directory's
-   services, the bridge included, after `experimental.location_idle_timeout`
-   without session activity, even with the TUI open. While a lead has running
-   jobs, the plugin updates that session's metadata well inside the timeout.
+3. **Make directory lifetime a setup option.** `--opencode-idle-timeout` sets
+   the global `experimental.location_idle_timeout`. The user's own install
+   uses `false`. Omitting the option preserves the existing config. With no
+   override OpenCode unloads an idle directory after 60 minutes.
 4. **Nothing on the companion side.** A companion that stops to ask a question
    ends its turn and the question reaches the lead as the result. Progress comes
    from the companion's own transcript in the live view.
 
 ## Measured (OpenCode 2.3.2, 2026-11-23)
 
-All runs used isolated `HOME` and XDG folders, the free model
-`opencode/flint-40b-free`, their own service port and a fixture MCP server that
-logs what it sees. Scripts and logs: `.drafts/opencode-host/`.
+Runs used isolated `HOME` and XDG folders and their own service ports. Session
+turns used the free model `opencode/flint-40b-free`. Directory lifetime was
+observed through a fixture MCP server. The live companion harness is in
+`probes/opencode-host/`.
 
 | Question | Result |
 | --- | --- |
 | Where does the MCP server run? | The TUI starts a shared background service, `opencode serve --service`, as its child. The service runs the MCP server. `opencode run` and `opencode api` in the same home reuse it. Without a running service, `opencode run` uses a private server and its MCP server exits with it. |
 | Service lifetime | It outlives the TUI and ran idle for 60 minutes without exiting. Service settings are only `disabled`, `remote`, `hostname`, `port`, `password`, `cors` and `env`. |
 | Directory lifetime | With `location_idle_timeout: "1 minute"` and the TUI open on an idle session, the MCP server got EOF 65 s later. An MCP call in flight (the lead blocked in a 150 s call) kept it loaded. The default is 60 minutes; `false` never unloads. |
-| What keeps a directory loaded | A running session, a host background job (subagent, shell, codemode, image) or an internal retain counter plugins cannot reach. Durable session events reset the timer; `session.update` metadata is one (2.3.2 binary). |
+| What keeps a directory loaded? | With a 1-minute timeout, the control, a session metadata PATCH every 20 s, a POST to the session's `/view` every 20 s, and an in-flight `POST /api/shell` running `sleep 170` all unloaded at 118–120 s. A running lead turn with an in-flight tool call kept the directory loaded. |
+| Long companion job with an idle lead | The 3-minute job stopped with `bridge_loss` at 91 s while the metadata heartbeat was running. |
+| Global config writer | `PATCH /api/experimental/config` accepts only `shell`. A shell PATCH edited the existing JSONC file and kept its comments. A timeout PATCH returned HTTP 400 and left it untouched. OpenCode reads global `opencode.json` first, then `opencode.jsonc`. |
+| When does an edit apply? | With the global timeout changed from `false` to `"1 second"`, an open directory kept its original MCP process for 130 s. A control with a 1-second timeout unloaded. `opencode reload` rebuilt the open directory's MCP server and the config API reported `"1000 millis"`. At the 128 s check its MCP had exited and the directory had unloaded. |
 | One bridge per what? | One MCP process per directory open in the service. Sessions in the same directory share it. |
 | Who is calling? | Each `tools/call` carries `_meta["ai.opencode/sessionID"]` (plus `progressToken`). The MCP process environment has no OpenCode variables. |
 | A subagent's call | Carries the subagent's own session id. `GET /api/session/<id>` returns its `parentID` and `agent`. |
@@ -64,9 +68,6 @@ logs what it sees. Scripts and logs: `.drafts/opencode-host/`.
   `AGENT_COMPANION_HOST=opencode`) through `ctx.mcp.transform`. When the
   environment marks a companion job (`AGENT_COMPANION_JOB`, set by the bridge
   for every companion it starts), it registers nothing.
-- The heartbeat lives in the bridge, not the plugin: while a lead has running
-  jobs, the bridge calls `PATCH /api/session/<lead>` with metadata through
-  `opencode api` every 10 minutes (or half the configured timeout if shorter).
 - A TUI part (running-thread band and a `/companion` page, as in Claude Code)
   is a later step; it needs the 2.4.0 renderer contract and is not required
   for the tools or the wake.
@@ -95,9 +96,15 @@ installs every host; `both` keeps meaning Claude Code and Codex CLI.
 (the startup scan already restores them) and wakes their leads once. It covers
 a service restart or an unload that happened after a job finished.
 
-**Lifetime**: jobs live while the directory stays loaded; the heartbeat keeps it
-loaded while they run. `opencode service stop`, an upgrade or a reboot is
-bridge loss and the cleanup watcher records it.
+**Lifetime.** While the lead is idle, OpenCode can unload the directory and
+stop its bridge. The cleanup watcher records unfinished jobs as `bridge_loss`.
+`setup.sh --host opencode --opencode-idle-timeout "8 hours"` gives jobs more
+time. Setup edits the highest-precedence global JSONC or JSON document and
+preserves its comments. `false` disables idle unloading. `default` removes
+the key from both global documents if present. Run `opencode reload` after
+jobs finish to apply the edit to open directories. The plugin installation's
+service restart also loads the edited config. Stopping the service, upgrading
+or rebooting still ends running jobs.
 
 **Views**: `agent-companion ui` lists OpenCode-led jobs from the new state
 folder.
@@ -112,10 +119,12 @@ folder.
    companion-job marker in every companion's environment. Check: in an
    isolated home, `opencode plugin add` loads it, a session sees
    `agent-bridge_companion_*`, and an OpenCode companion job starts no bridge.
-3. **Heartbeat and startup re-wake.** Check: with `location_idle_timeout`
-   at 1 minute, a 3-minute job survives an idle lead and its result wakes the
-   lead; with no running jobs the directory unloads; an unread stored result
-   wakes its lead once when a bridge starts, a delivered one does not.
+3. **Idle timeout and startup re-wake.** In an isolated home, set the option to
+   `false` and check that a 3-minute job survives an idle lead and wakes it.
+   With a 1-minute timeout, check that an idle directory unloads and a job
+   that outlives it stops with `bridge_loss`. Test that setup preserves comments
+   when setting a duration, disabling unloads and restoring the default.
+   On startup, unread results wake their lead once and delivered results do not.
 4. **Install.** `setup.sh --host opencode|all`, `scripts/onboard.mjs`, doctor.
    Check: in an isolated home, setup adds the plugin once (rerun keeps one),
    doctor reports it, and the user's real config is untouched.
@@ -134,8 +143,8 @@ folder.
 - The service port is machine-wide: a test that leaves its service running
   blocks the user's OpenCode. Every probe sets its own port and stops its
   service on exit.
-- The heartbeat writes a metadata event into the lead's session log every
-  interval while jobs run.
+- A finite idle timeout can stop companion jobs. With `false`, every opened
+  directory keeps its MCP and language servers loaded until the service stops.
 - OpenCode's 2.x plugin API is young (2.4.0 changed the TUI contract). The
   server part uses only `mcp.transform`, which keeps the surface small.
 - `opencode api` resolves the service from the user's home. The bridge inherits
