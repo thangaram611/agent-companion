@@ -13,7 +13,6 @@ test('CONTRACT: timeout must stop work or avoid claiming process termination', a
   const h = codexDispatchFixture(t);
   const { job_id } = await h.send();
   const waiting = h.call({ action: 'wait', job_id, max_wait_sec: 1 });
-  await until(() => h.active.requests.size === 1, 'attached wait');
   await h.clock.advance(1000);
   const response = await waiting;
   assert.equal(response.status, 'still_running');

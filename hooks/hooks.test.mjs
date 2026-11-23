@@ -4,7 +4,7 @@ import { HOSTS } from '../lib/hosts/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,20 +21,19 @@ for (const [host, manifest, rootVar] of [
     const root = join(dir, 'plugin root');
     mkdirSync(join(root, 'hooks'), { recursive: true });
     const scripts = [ 'install-deps.sh', 'drain-completions.sh'];
-    for (const script of [...scripts, 'name-thread.sh', 'stop-owner.sh']) {
+    for (const script of [...scripts, 'name-thread.sh']) {
       writeFileSync(join(root, 'hooks', script),
         `printf '%s\\n' '${script}' "\${AGENT_COMPANION_HOST:-claude}"\n`);
     }
     const hooks = JSON.parse(readFileSync(join(HERE, manifest), 'utf8')).hooks;
-    if (host === 'claude') assert.deepEqual(hooks.PreToolUse.flatMap(g => g.hooks.map(h => h.onFailure)), ['block', 'continue']);
+    if (host === 'claude') assert.deepEqual(hooks.PreToolUse.flatMap(g => g.hooks.map(h => h.onFailure)), ['block']);
     else for (const group of Object.values(hooks).flat()) assert.ok(group.hooks.every(h => !Object.hasOwn(h, 'onFailure')));
     const expected = {
       PostToolUse: ['drain-completions.sh'],
       SessionStart: scripts,
       UserPromptSubmit: ['drain-completions.sh'],
-      SubagentStop: ['stop-owner.sh'],
       // Codex names the thread itself, in MCP _meta.
-      ...(host === 'claude' ? { PreToolUse: ['name-thread.sh', 'stop-owner.sh'] } : {}),
+      ...(host === 'claude' ? { PreToolUse: ['name-thread.sh'] } : {}),
     };
     assert.deepEqual(Object.keys(hooks).sort(), Object.keys(expected).sort());
     for (const [event, names] of Object.entries(expected)) {
@@ -87,48 +86,3 @@ test('claude blocks owner calls if Node cannot run the identity rewrite', (t) =>
   });
   assert.equal(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision, 'deny');
 });
-
-for (const host of ['claude', 'codex']) {
-  test(`${host} stop markers use native child ids and the bridge state directory`, (t) => {
-    const home = mkdtempSync(join(tmpdir(), 'ac-stop-'));
-    t.after(() => rmSync(home, { recursive: true, force: true }));
-    const manifest = JSON.parse(readFileSync(join(HERE, host === 'claude' ? 'hooks.json' : 'hooks-codex.json')));
-    // Registration pins the host even if the parent shell came from the other host.
-    const env = { ...process.env, HOME: home, CODEX_HOME: join(home, 'codex home'), CLAUDE_PLUGIN_ROOT: dirname(HERE), PLUGIN_ROOT: dirname(HERE), AGENT_COMPANION_HOST: host === 'claude' ? 'codex' : 'claude' };
-    delete env.AGENT_COMPANION_HOME;
-    const run = (event, payload, extra = {}) => {
-      const group = event === 'PreToolUse'
-        ? manifest.hooks[event].find((g) => g.matcher === 'TaskStop')
-        : manifest.hooks[event][0];
-      assert.ok(group, `${event} must be registered`);
-      if (event === 'PreToolUse') assert.equal(group.hooks[0].onFailure, 'continue');
-      const result = spawnSync('/bin/bash', ['-c', group.hooks[0].command], {
-        env: { ...env, ...extra }, input: JSON.stringify({ hook_event_name: event, session_id: 'parent-session', ...payload }), encoding: 'utf8', timeout: 10_000,
-      });
-      assert.equal(result.status, 0, result.stderr);
-      assert.equal(result.stdout, '', 'markers are not model messages');
-    };
-    const base = host === 'claude' ? join(home, '.claude/agent-companion') : join(env.CODEX_HOME, 'agent-companion');
-    const started = Date.now();
-    run('SubagentStop', { agent_id: 'child-1' });
-    const file = join(base, 'stops/child-1.json');
-    const marker = JSON.parse(readFileSync(file));
-    assert.deepEqual({ ...marker, t: 0 }, { owner: 'child-1', source: 'SubagentStop', t: 0, session_id: 'parent-session' });
-    assert.ok(marker.t >= started && marker.t <= Date.now());
-    assert.equal(statSync(file).mode & 0o777, 0o600);
-    assert.deepEqual(readdirSync(join(base, 'stops')), ['child-1.json']);
-    const override = join(home, 'state override');
-    run('SubagentStop', { agent_id: 'child-2' }, { AGENT_COMPANION_HOME: override });
-    assert.ok(existsSync(join(override, 'stops/child-2.json')));
-    assert.ok(!existsSync(join(base, 'stops/child-2.json')));
-    for (const agent_id of [undefined, '', '../escape', 123]) {
-      run('SubagentStop', { agent_id, thread_id: 'do-not-guess' });
-    }
-    assert.deepEqual(readdirSync(join(base, 'stops')), ['child-1.json']);
-    if (host === 'claude') {
-      run('PreToolUse', { tool_name: 'TaskStop', agent_id: 'parent-agent', tool_input: { task_id: 'child-1' } });
-      assert.equal(JSON.parse(readFileSync(file)).source, 'TaskStop');
-      assert.deepEqual(readdirSync(join(base, 'stops')), ['child-1.json']);
-    }
-  });
-}

@@ -98,13 +98,12 @@ await cleanupExecution({ records, execution: records.readExecution(process.argv[
   assert.equal(Object.hasOwn(trace.find((x) => x.method === 'turn/start').params, 'model'), false);
 });
 
-test('running send steers the acknowledged native turn and confirms injection while attaching the owner', async (t) => {
+test('running send steers the acknowledged native turn and confirms injection', async (t) => {
   const h = codexDispatchFixture(t);
   const { job_id, thread } = await h.send();
   assert.equal((await h.call({ action: 'status', job_id })).interventions.steer, true);
-  const reply = h.call({ action: 'send', thread, task: 'use ripgrep' }, { requestId: 'steer-request' });
+  const reply = h.call({ action: 'send', thread, task: 'use ripgrep' });
   await until(() => h.frames().some((f) => f.method === 'turn/steer'), 'native steer');
-  assert.deepEqual(h.records.readAttachment(job_id).requestIds, ['steer-request']);
   await h.clock.advance(4000);
   assert.equal(h.records.readResult(job_id), null);
   await h.emit(job_id, [note('item/completed', { threadId: 'T1', turnId: 'TURN1',
@@ -115,8 +114,6 @@ test('running send steers the acknowledged native turn and confirms injection wh
   assert.equal(response.confirmed, true);
   assert.equal(response.nativeTurnId, 'TURN1');
   assert.equal(response.job_id, job_id);
-  assert.equal(h.active.requests.size, 0);
-  assert.equal(h.records.readAttachment(job_id).attached, false);
   assert.deepEqual(h.frames().filter((f) => f.method === 'turn/steer').map((f) => f.params), [
     { threadId: 'T1', expectedTurnId: 'TURN1', input: [{ type: 'text', text: 'use ripgrep' }] },
   ]);
@@ -135,24 +132,20 @@ test('running send reports acknowledgement without claiming unobserved injection
   assert.equal(response.accepted, true);
   assert.equal(response.confirmed, false);
   assert.equal((await h.call({ action: 'status', job_id })).interventions.steer, true);
-  assert.equal(h.records.readAttachment(job_id).attached, false);
 });
 
-test('cancelled running send stops its execution and releases its owner request', async (t) => {
+test('aborting a pending steer leaves the native turn running', async (t) => {
   const h = codexDispatchFixture(t);
   const { job_id, thread } = await h.send();
   const abort = new AbortController();
-  const reply = h.call({ action: 'send', thread, task: 'pending' }, { requestId: 'cancel-reply', signal: abort.signal });
+  const reply = h.call({ action: 'send', thread, task: 'pending' }, { signal: abort.signal });
   await until(() => h.frames().some((f) => f.method === 'turn/steer'), 'pending steer');
   abort.abort();
+  await h.complete(job_id, 'continued answer');
   const response = await reply;
   assert.equal(response.accepted, true);
   assert.equal(response.confirmed, false);
-  await until(() => h.records.readResult(job_id), 'reply cancellation cleanup');
-  assert.equal(h.records.readResult(job_id).cause, 'owner_stop');
-  assert.equal(h.records.readResult(job_id).stopEvidence.gone, true);
-  assert.equal(h.active.requests.size, 0);
-  assert.equal((await h.call({ action: 'status', job_id })).interventions.steer, false);
+  assert.equal((await h.call({ action: 'wait', job_id })).content, 'continued answer');
 });
 
 test('Claude provider uses cached readiness, accepts aliases and creates independent adapters', () => {

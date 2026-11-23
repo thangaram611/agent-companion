@@ -216,9 +216,10 @@ const scenarios = {
     const h = fixture();
     const { thread, job_id } = await h.send();
     for (const [ref, max, seconds] of [[{ thread }, undefined, 480], [{ job_id }, 5000, 1200]]) {
-      const wait = h.call('wait', { ...ref, ...(max && { max_wait_sec: max }) });
+      let returned = false;
+      const wait = h.call('wait', { ...ref, ...(max && { max_wait_sec: max }) }).then(value => { returned = true; return value; });
       await h.clock.advance(seconds * 1000 - 1);
-      assert.equal(h.controller.requests.size, 1);
+      assert.equal(returned, false);
       await h.clock.advance(1);
       const running = await wait;
       assert.equal(running.current_status, 'running');

@@ -12,28 +12,6 @@
             "timeout": 5
           }
         ]
-      },
-      {
-        "matcher": "TaskStop",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "AGENT_COMPANION_HOST=claude bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-owner.sh\"",
-            "onFailure": "continue",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "AGENT_COMPANION_HOST=claude bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-owner.sh\"",
-            "timeout": 5
-          }
-        ]
       }
     ],
     "PostToolUse": [

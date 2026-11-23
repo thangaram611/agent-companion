@@ -154,11 +154,10 @@ function handleCatalog(args, { env }) {
 
 function handleStatus({ job_id, diagnostics, lead }, active) {
   const project = (view) => {
-    const { execution: e, result: r, attachment, state } = view;
+    const { execution: e, result: r, state } = view;
     return { ok: true, action: 'status', job_id: e.executionId, thread: e.owner, target: e.provider, cwd: e.cwd,
       status: r ? executionStatus(r) : state, native_turn_state: e.terminal?.outcome ?? e.state,
       started_at: iso(e.startedAt), terminal_at: iso(r?.finishedAt),
-      owner_attached: attachment?.attached ?? null, owner_detached_at: iso(attachment?.detachedAt),
       last_native_activity: e.progress?.lastActivityAt ?? null, active_command: e.progress?.activeCommand ?? null,
       activity: r || e.terminal ? null : e.progress?.activity !== undefined ? e.progress.activity
         : e.progress?.activeCommand ? `running ${e.progress.activeCommand}` : e.progress?.partialText ? 'responding' : null,

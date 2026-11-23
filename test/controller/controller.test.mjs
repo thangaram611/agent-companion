@@ -1,7 +1,7 @@
 import '../sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, symlinkSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, symlinkSync, realpathSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { diskSnapshot as disk } from './helpers.mjs';
@@ -78,20 +78,12 @@ test('lost acknowledgement becomes delivery_unknown with no resend', async () =>
   assert.equal((await h.done(result.executionId)).outcome, 'delivery_unknown');
 });
 
-test('a quiet owner is never closed for silence: its job runs to native completion and status shows since when it is detached', async () => {
-  // An owner retrying offline (Claude's retry watchdog waits up to ~6 h) makes
-  // no bridge call, exactly like one stopped without a signal. Silence proves
-  // neither, so only stop evidence or the native turn may end the job.
-  const h = setup(); const sent = await h.send();
-  const detachedAt = h.clock.now();
-  for (let minute = 0; minute < 6 * 60; minute++) await h.clock.advance(60_000);
-  assert.equal(h.records.readResult(sent.executionId), null);
-  const view = h.controller.status({ executionId: sent.executionId });
-  assert.equal(view.attachment.attached, false);
-  assert.equal(view.attachment.detachedAt, detachedAt);
-  const result = await h.finish(sent.executionId);
-  assert.equal(result.cause, 'native_complete');
-  assert.equal(h.controller.status({ executionId: sent.executionId }).attachment.detachedAt, null);
+test('a job without pending calls survives six hours and ends on native completion', async () => {
+  const h = setup(), { executionId } = await h.send();
+  await h.clock.advance(6 * 60 * 60_000);
+  assert.equal(h.controller.status({ executionId }).state, 'running');
+  assert.equal((await h.finish(executionId)).cause, 'native_complete');
+  for (const kind of ['attachments', 'stops']) assert.equal(existsSync(join(h.dir, kind)), false);
 });
 
 test('missed terminal event stays open until cancelled and preserves partial text', async () => {
@@ -108,44 +100,18 @@ test('missed terminal event stays open until cancelled and preserves partial tex
   assert.equal('detectionDelayMs' in result.stopEvidence, false);
 });
 
-test('a failed attachment write blocks neither the request nor its cancel', async () => {
-  const h = setup(); const sent = await h.send();
-  h.records.writeAttachment = () => { throw Object.assign(new Error('RECORD_BUSY'), { code: 'RECORD_BUSY' }); };
-  const abort = new AbortController();
-  const waiting = h.controller.wait({ owner: 'child', executionId: sent.executionId, requestId: 'busy-wait', signal: abort.signal, timeoutMs: 10_000 });
-  abort.abort();
-  const result = await waiting;
-  assert.equal(result.cause, 'owner_stop');
-  assert.equal(h.controller.requests.has('busy-wait'), false);
-});
-
-test('status reports a handed-off or finished job as detached, with or without an attachment record', async () => {
-  const h = setup();
-  const lost = await h.send({ owner: 'lost' });
-  const pending = h.controller.wait({ owner: 'lost', executionId: lost.executionId, timeoutMs: 10_000 });
-  assert.equal(h.controller.status({ executionId: lost.executionId }).attachment.attached, true);
-  await h.controller.bridgeLost(); await h.clock.advance(10_000); await pending;
-  assert.equal(h.controller.status({ executionId: lost.executionId }).attachment.attached, false);
-  const h2 = setup(); const done = await h2.send(); await h2.finish(done.executionId);
-  rmSync(join(h2.dir, 'attachments'), { recursive: true, force: true }); // a job finished before attachment records existed
-  assert.deepEqual(h2.controller.status({ executionId: done.executionId }).attachment, { attached: false, requestIds: [], detachedAt: null });
-});
-
 test('status-only second bridge writes nothing, renews nothing and refuses overlapping execution', async () => {
   const h = setup(); const sent = await h.send();
   const observer = new Controller({ records: new Records({ dir: h.dir }), providers: h.controller.providers, clock: h.clock });
   const before = disk(h.dir);
   const allFiles = disk();
-  const attachment = h.records.readAttachment(sent.executionId);
   for (let i = 0; i < 5; i++) {
     assert.equal(observer.status({ executionId: sent.executionId }).state, 'unknown');
     h.controller.status({ owner: 'child' });
   }
   assert.deepEqual(disk(h.dir), before);
   assert.deepEqual(disk(), allFiles);
-  assert.deepEqual(observer.records.readAttachment(sent.executionId), attachment);
   assert.equal(observer.live.size, 0);
-  assert.equal(observer.requests.size, 0);
   assert.equal(h.controller.live.size, 1);
   assert.equal(calls(h.adapters[0], 'deliver').length, 1);
   await assert.rejects(observer.send({ owner: 'child', provider: 'fake', cwd: h.dir, text: 'new' }), { code: 'previous_execution_unverified' });
@@ -153,35 +119,26 @@ test('status-only second bridge writes nothing, renews nothing and refuses overl
   assert.equal((await h.finish(sent.executionId)).cause, 'native_complete');
 });
 
-test('cancelled pending owner request closes only its execution', async () => {
-  const h = setup(); const sent = await h.send();
-  const waiting = h.controller.wait({ owner: 'child', executionId: sent.executionId, requestId: 'owner-wait' });
-  const result = await h.controller.cancelRequest('owner-wait');
-  assert.equal(result.cause, 'owner_stop');
-  assert.deepEqual(await waiting, result);
-  assert.equal(h.supervisors[0].terminated, 1);
-  assert.equal(await h.controller.cancelRequest('unrelated'), null);
+test('aborting a pending wait returns running status and a later wait receives native completion', async () => {
+  const h = setup(), { executionId } = await h.send();
+  const args = { owner: 'child', executionId };
+  const abort = new AbortController();
+  const waiting = h.controller.wait({ ...args, signal: abort.signal });
+  abort.abort();
+  assert.equal((await waiting).state, 'running');
+  const later = h.controller.wait(args);
+  h.adapters[0].terminal.resolve({ outcome: 'completed', text: 'answer' });
+  assert.equal((await later).text, 'answer');
+  assert.equal(h.records.readResult(executionId).cause, 'native_complete');
 });
 
-test('AbortSignal during pending send closes startup and never delivers', async () => {
-  const h = setup(); const abort = new AbortController();
-  const sent = h.send({ signal: abort.signal }); abort.abort();
-  const result = await sent;
-  assert.equal(result.cause, 'owner_stop');
-  assert.equal(calls(h.adapters[0], 'deliver').length, 0);
-  assert.equal(result.stopEvidence.gone, true);
-});
-
-test('SubagentStop or TaskStop marker closes on next tick; old marker does not stop cold follow-up', async () => {
-  const h = setup(); const sent = await h.send();
-  mkdirSync(join(h.dir, 'stops'));
-  writeFileSync(join(h.dir, 'stops', 'child.json'), JSON.stringify({ owner: 'child', at: h.clock.now(), source: 'SubagentStop' }));
-  await h.clock.advance(1000);
-  assert.equal((await h.done(sent.executionId)).cause, 'owner_stop');
-  const next = await h.send({ text: 'follow-up' });
-  await h.clock.advance(1000);
-  assert.equal(h.records.readResult(next.executionId), null);
-  await h.finish(next.executionId, undefined, h.adapters[1]);
+test('aborting a send during startup leaves native delivery running', async () => {
+  const h = setup(), abort = new AbortController();
+  const sent = h.send({ signal: abort.signal });
+  abort.abort();
+  const { executionId } = await sent;
+  assert.equal(calls(h.adapters[0], 'deliver').length, 1);
+  assert.equal((await h.finish(executionId)).cause, 'native_complete');
 });
 
 test('startup crash becomes failed runtime_unavailable and cleans up', async () => {
@@ -210,19 +167,6 @@ test('two same-provider executions: closing one leaves the other untouched', asy
   assert.equal(h.supervisors[1].terminated, 0);
   assert.deepEqual(h.records.readExecution(two.executionId), siblingBefore);
   await h.finish(two.executionId, undefined, h.adapters[1]);
-});
-
-test('pending owner requests attach the owner; observers and other children cannot attach', async () => {
-  const h = setup(); const sent = await h.send();
-  await h.clock.advance(2000);
-  assert.throws(() => h.controller.beginRequest({ owner: 'other', executionId: sent.executionId, kind: 'wait' }), { code: 'execution_unknown' });
-  assert.throws(() => h.controller.beginRequest({ owner: 'child', executionId: sent.executionId, kind: 'status' }), { code: 'invalid_owner_request' });
-  const wait = h.controller.wait({ owner: 'child', executionId: sent.executionId, timeoutMs: 10_000 });
-  assert.deepEqual(h.controller.status({ executionId: sent.executionId }).attachment.attached, true);
-  await h.clock.advance(10_000); await wait;
-  const detached = h.controller.status({ executionId: sent.executionId }).attachment;
-  assert.equal(detached.attached, false); assert.equal(detached.detachedAt, h.clock.now());
-  assert.equal((await h.finish(sent.executionId)).cause, 'native_complete');
 });
 
 test('retry progress stays nonterminal and fresh activity is persisted as provider activity', async () => {
@@ -405,17 +349,15 @@ test('explicit adapter refusal codes survive history and observe failures', asyn
   }
 });
 
-test('watcher terminal result releases the observed attachment without rewriting the record', async () => {
+test('status reads the watcher result without rewriting the record', async () => {
   const h = setup(); const sent = await h.send();
-  h.controller.beginRequest({ owner: 'child', executionId: sent.executionId, requestId: 'pending', kind: 'wait' });
   await h.controller.bridgeLost();
   const execution = h.records.readExecution(sent.executionId);
   h.records.writeResult({ owner: 'child', executionId: sent.executionId, generation: execution.generation,
     outcome: 'stopped', cause: 'bridge_loss', stopEvidence: { gone: true } }, 'watcher');
   const before = disk(h.dir);
   const view = h.controller.status({ executionId: sent.executionId });
-  assert.equal(view.attachment.attached, false);
-  assert.equal(view.attachment.detachedAt, null);
+  assert.equal(view.result.cause, 'bridge_loss');
   assert.deepEqual(disk(h.dir), before);
 });
 

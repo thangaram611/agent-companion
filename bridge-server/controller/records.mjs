@@ -1,4 +1,4 @@
-import { readFileSync, readSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, statSync, lstatSync, fstatSync, rmSync, constants } from 'node:fs';
+import { readFileSync, readSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, lstatSync, fstatSync, rmSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { BASE_DIR } from '../../lib/state.mjs';
 import { refuseRealHomeUnderTest } from '../../lib/hosts/index.mjs';
@@ -30,6 +30,20 @@ export function resultText(execution, fallback = execution.terminal?.text ?? exe
 export const resultUsage = (execution, fallback = execution.terminal?.usage) =>
   (execution.turns?.length ?? 0) > 1 ? sumUsage(execution.turns.map(turn => turn.usage)) : fallback;
 
+// The one result shape, for normal close, recovery and the cleanup watcher;
+// each passes only how its job ended.
+export function buildResult(execution, { outcome, cause, detail, workSummary, stopEvidence, finishedAt }) {
+  const { owner, executionId, generation, turns, interventions, nativeTurnIds, terminal } = execution;
+  return {
+    workSummary, owner, executionId, generation, outcome, cause, detail, text: resultText(execution),
+    turns, interventions, nativeTurnIds, usage: resultUsage(execution),
+    nativeRefs: { historyId: execution.historyId, nativeTurnId: execution.nativeTurnId, nativeTurnIds, ...execution.nativeRefs, ...terminal?.nativeRefs },
+    selectedModel: execution.modelOverride, selectedEffort: execution.effortOverride,
+    effectiveModel: terminal?.effectiveModel ?? execution.effectiveModel, effectiveEffort: terminal?.effectiveEffort ?? execution.effectiveEffort,
+    stopEvidence, finishedAt,
+  };
+}
+
 export function discardInterventions(execution) {
   for (const input of execution.interventions ?? []) {
     if (input.state !== 'answered') input.state = 'not_delivered';
@@ -52,7 +66,6 @@ export class Records {
   }
   readConversation(owner) { return this.read('conversations', owner); }
   readExecution(id) { return this.read('executions', id); }
-  readAttachment(id) { return this.read('attachments', id); }
   readResult(id) { return this.read('results', id); }
   inboxPath(executionId) { return join(this.dir, 'inbox', segment(executionId)); }
   readInbox(executionId) {
@@ -124,14 +137,6 @@ export class Records {
   }
   listExecutions() { return this.list('executions'); }
   listConversations() { return this.list('conversations'); }
-  readStop(owner) {
-    const value = this.read('stops', owner);
-    if (!value) return null;
-    try {
-      const stat = statSync(this.path('stops', owner));
-      return { value, mtimeMs: stat.mtimeMs, ino: stat.ino };
-    } catch (err) { if (err.code === 'ENOENT') return null; throw err; }
-  }
   _write(kind, id, data) {
     mkdirSync(join(this.dir, kind), { recursive: true, mode: 0o700 });
     writePrivateFileAtomic(this.path(kind, id), JSON.stringify(data) + '\n');
@@ -195,12 +200,6 @@ export class Records {
     return this._locked(record.owner, () => {
       if (!this._fenced(record, writer)) return false;
       this._write('executions', record.executionId, record); return true;
-    });
-  }
-  writeAttachment(record) {
-    return this._locked(record.owner, () => {
-      if (!this._fenced(record)) return false;
-      this._write('attachments', record.executionId, record); return true;
     });
   }
   writeResult(record, writer = 'controller') {

@@ -8,7 +8,6 @@ const root = new URL('../', import.meta.url);
 const later = 'removed or rewritten in a later step';
 // File, permitted source, reason. Keep temporary exceptions local to their callers.
 const exceptions = [
-  ['hooks/stop-owner.sh', /.*/, later],
   ['hooks/drain-completions.sh', /.*/, later],
   ['hooks/mod.ts', /.*/, later],
   ['bridge-server/ui/jobs.mjs', /locate\('(?:claude|codex)'|job\.host === 'codex'/, later],

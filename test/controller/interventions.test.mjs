@@ -43,14 +43,14 @@ for (const steer of [false, true]) for (const queue of [false, 'native', 'bridge
   });
 }
 
-for (const mode of ['steer', 'queue', 'interrupt']) test(`${mode} refuses unavailable states without writing or attaching`, async t => {
+for (const mode of ['steer', 'queue', 'interrupt']) test(`${mode} refuses unavailable states without recording input`, async t => {
   const h = setup(t), { executionId } = await h.send(), a = h.controller.live.get(executionId);
   for (const fields of [{ record: { state: 'starting' } }, { record: { state: 'delivering' } }, { record: { terminal: {} } },
     { stopping: true }, { closed: true }, { handedOff: true }]) {
-    const old = { ...a, record: { ...a.record } }, attachment = h.records.readAttachment(executionId);
+    const old = { ...a, record: { ...a.record } };
     Object.assign(a, { ...fields, record: { ...a.record, ...fields.record } });
     assert.deepEqual(await h.input(executionId, mode), { ok: false, status: 'intervention_unavailable', reason: 'state' });
-    assert.deepEqual(h.records.readAttachment(executionId), attachment);
+    assert.deepEqual(h.records.readExecution(executionId).interventions, []);
     Object.assign(a, old);
   }
   await h.finish(); await h.result(executionId);
@@ -69,7 +69,6 @@ function inbox(h, executionId, requestId, fields = {}) {
 
 for (const mode of ['steer', 'queue', 'interrupt']) test(`inbox ${mode}: tick accepts, records, acknowledges privately and removes request`, async t => {
   const h = setup(t), { executionId } = await h.send();
-  const attachment = h.records.readAttachment(executionId);
   const request = inbox(h, executionId, 'request', { mode });
   await h.clock.advance(1000);
   const [input] = h.records.readExecution(executionId).interventions;
@@ -80,7 +79,6 @@ for (const mode of ['steer', 'queue', 'interrupt']) test(`inbox ${mode}: tick ac
   assert.equal(statSync(request.outcomePath).mode & 0o777, 0o600);
   assert.equal(existsSync(request.path), false);
   assert.deepEqual(readdirSync(request.dir), ['request.outcome.json']);
-  assert.deepEqual(h.records.readAttachment(executionId), attachment, 'inbox input does not attach the owner');
   await h.clock.advance(1000);
   assert.equal(h.records.readExecution(executionId).interventions.length, 1, 'outcomes are never replayed');
   await h.controller.cancel({ owner: 'child', executionId });
@@ -113,19 +111,13 @@ for (const kind of ['ended', 'unsupported', 'json', 'symlink', 'large file', 'lo
   });
 }
 
-test('stop markers take precedence over inbox delivery; close removes outstanding requests and outcomes', async t => {
-  for (const stop of ['marker', 'completed']) {
-    const h = setup(t), { executionId } = await h.send();
-    const request = inbox(h, executionId, 'pending');
-    writeFileSync(join(request.dir, 'old.outcome.json'), '{}');
-    if (stop === 'marker') h.records._write('stops', 'child', { t: h.clock.now(), source: 'SubagentStop' });
-    if (stop === 'completed') await h.finish();
-    else await h.clock.advance(1000);
-    const result = await h.result(executionId);
-    assert.equal(result.cause, { marker: 'owner_stop', completed: 'native_complete' }[stop]);
-    assert.equal(result.interventions.length, 0);
-    assert.equal(existsSync(request.dir), false);
-  }
+test('native completion removes outstanding inbox requests and outcomes', async t => {
+  const h = setup(t), { executionId } = await h.send();
+  const request = inbox(h, executionId, 'pending');
+  writeFileSync(join(request.dir, 'old.outcome.json'), '{}');
+  await h.finish();
+  assert.equal((await h.result(executionId)).interventions.length, 0);
+  assert.equal(existsSync(request.dir), false);
 });
 
 test('inbox cancel is a normal terminal result with user_cancel, even on a cancel-only companion', async t => {
@@ -155,13 +147,12 @@ test('a completion during user cancel keeps the native answer and the user_cance
   assert.equal(result.cause, 'user_cancel');
 });
 
-test('user notice wakes an attached wait before native acknowledgement and reports exactly once', async t => {
+test('user notice wakes a pending wait before native acknowledgement and reports exactly once', async t => {
   const h = setup(t), { executionId } = await h.send(), gate = deferred();
   h.adapter.steer = () => gate.promise;
   const waiting = h.controller.wait({ owner: 'child', executionId });
   const pending = h.input(executionId, 'steer');
   await h.clock.flush();
-  assert.equal(h.controller.requests.size, 0, 'early notice releases the wait');
   const notice = await waiting;
   assert.deepEqual(notice, { status: 'user_intervened', executionId,
     intervention: { from: 'user', mode: 'steer', text: 'new text\nsecond line', at: h.clock.now() } });
@@ -187,18 +178,11 @@ test('user notices accepted before a wait are ordered, persisted, owner-bound an
   await h.controller.cancel({ owner: 'child', executionId: next.executionId });
 });
 
-test('collecting an earlier notice is an owner wait; an aborted wait still cancels the job', async t => {
+test('a pre-aborted wait leaves a pending user notice for the next wait', async t => {
   const h = setup(t), { executionId } = await h.send();
-  const sentAt = h.records.readAttachment(executionId).detachedAt;
-  await h.clock.advance(2000);
   await h.input(executionId, 'queue');
-  assert.equal(h.records.readAttachment(executionId).detachedAt, sentAt, 'user input does not attach the owner');
+  assert.equal((await h.controller.wait({ owner: 'child', executionId, signal: AbortSignal.abort() })).state, 'running');
   assert.equal((await h.controller.wait({ owner: 'child', executionId })).status, 'user_intervened');
-  assert.equal(h.records.readAttachment(executionId).detachedAt, h.clock.now(), 'collecting the notice is an owner request');
-  await h.input(executionId, 'queue');
-  const abort = new AbortController(); abort.abort();
-  const result = await h.controller.wait({ owner: 'child', executionId, signal: abort.signal });
-  assert.equal(result.cause, 'owner_stop');
 });
 
 test('concurrent waits and a timeout boundary never duplicate or lose a user notice', async t => {
@@ -261,12 +245,10 @@ test('bridge turns without native ids retain separate answers', async t => {
   assert.match(result.text, /Task\n\nfirst/); assert.match(result.text, /queued.*\n\nsecond/);
 });
 
-test('user intervention does not attach the owner; held input is not delivered after an owner stop', async t => {
+test('explicit cancellation discards held user input', async t => {
   const h = setup(t), { executionId } = await h.send();
-  await h.clock.advance(2000); const attachment = h.records.readAttachment(executionId);
-  await h.input(executionId, 'queue'); assert.deepEqual(h.records.readAttachment(executionId), attachment);
-  h.records._write('stops', 'child', { t: h.clock.now(), source: 'SubagentStop' });
-  await h.clock.advance(1000); const result = await h.result(executionId);
+  await h.input(executionId, 'queue');
+  const result = await h.controller.cancel({ owner: 'child', executionId });
   assert.equal(result.cause, 'owner_stop'); assert.equal(result.interventions[0].state, 'not_delivered');
 });
 
@@ -342,8 +324,9 @@ test('caller ownership and aborted requests are checked before accepting input',
   const abort = new AbortController(); abort.abort();
   assert.deepEqual(await h.input(executionId, 'queue', { from: 'caller', owner: 'child', signal: abort.signal }),
     { ok: false, status: 'intervention_unavailable', reason: 'state' });
-  const result = await h.result(executionId);
-  assert.equal(result.cause, 'owner_stop'); assert.deepEqual(result.interventions, []);
+  const view = h.controller.status({ executionId });
+  assert.equal(view.state, 'running');
+  assert.deepEqual(view.execution.interventions, []);
 });
 
 test('a failed native turn closes without waiting for an outstanding input acknowledgement', async t => {
