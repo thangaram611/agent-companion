@@ -46,12 +46,25 @@ A job runs native turns on its own companion process while accepted input remain
 A later send to the thread starts a new process and loads its saved history
 where supported. Each job has its own process group and protocol connection.
 
+[Illustrated job lifecycle](../assets/readme/architecture.png)
+
 ### MCP registration boundary
 
 Both plugin manifests register `agent-bridge` at session scope. Their launcher
 selects the host and resolves Node and the bridge dependencies. Claude sets
 `timeout: 1320000` in milliseconds. Codex sets `tool_timeout_sec: 1320` and
 pre-approves the tools for headless sessions, subject to user and managed policy.
+Claude exposes the installed tools as `mcp__plugin_agent-companion_agent-bridge__companion_*`.
+Codex exposes deferred tools as `mcp__agent_bridge__companion_*`. Its manifest
+registers the server and hooks directly. A root `.mcp.json` would also register
+the server with Claude.
+
+Both launchers load dependencies from plugin data. Claude uses a
+`bridge-server/node_modules` link. Codex rejects symlinks in installed bundles,
+so its launcher resolves imports from the data directory. Setup removes only
+entries marked `_managed_by: "agent-companion"` from the old Codex hooks file.
+The same cleanup is available from a checkout with
+`node scripts/install-codex-hooks.mjs --plugin-root "$(pwd)" --uninstall --yes`.
 
 `lib/hosts/` derives the lead identity for every call that needs it. On Claude,
 PreToolUse replaces any supplied `lead` with the hook's `session_id` and optional
@@ -78,16 +91,20 @@ a live job and cannot claim cleanup until absence is verified.
 The lead uses the six tools defined in `bridge-server/tools.mjs`.
 
 - `companion_send` starts a thread, follows up or intervenes in a running job.
-- `companion_wait` takes a thread or job id and an optional wait budget. A result,
+- `companion_wait` takes exactly one of `thread` or `job_id` and an optional numeric
+  `max_wait_sec`. See [Host budgets](#host-budgets) for the default and cap. A result,
   a user intervention or the budget ending returns control to the lead.
 - `companion_read` takes a thread and optional `after` (job id), character `offset`
   and `limit`. It reads posts in generation order. The default page is 8,000
-  characters and the maximum is 40,000. Continue with the footer's exact
-  `after` and `offset`, even when an earlier page advanced the read cursor.
+  characters and the maximum is 40,000. An empty `after` starts before the first
+  post. Both character counts are integers, with `offset` ≥ 0 and `limit` ≥ 1.
+  Continue with the footer's exact `after` and `offset`, even when an earlier
+  page advanced the read cursor.
 - `companion_status` with no arguments lists the caller's threads, one short
-  row each: thread, title, companion, state, latest job and unread count, plus
-  `default_companion`. A thread or job id selects one job. With
-  `diagnostics: true` it adds `companions`, every companion's fixed details
+  row each: `thread`, `title`, `companion`, `cwd`, `state`, `job_id`, `started_at`
+  and `unread`. Running jobs sort first, then newest start time. The response
+  also carries `default_companion`. Either `thread` or `job_id` selects one
+  job. With `diagnostics: true` it adds `companions`, every companion's fixed details
   (about 15 KB, which is why they are not in the default answer), and
   `diagnostics.companions`, the cached readiness checks.
 - `companion_cancel` takes a thread or job id and stops the job. The thread remains
@@ -195,6 +212,8 @@ error, and retains that turn's latest nonempty assistant text. Codex supplies
 turn/error notification messages; ACP supplies prompt errors.
 Claude supplies `result.result` and `errors[]`, including failures before init.
 
+After native delivery acknowledgement, send returns `status: still_running`. A
+successful intervention returns `status: intervened`, `mode` and `intervention_id`.
 The send acknowledgement includes `thread`, `job_id`, `delivery`, `companion`, `selected_model`, `selected_effort`,
 `effective_model`, `effective_effort` and `permission_mode`. The controller resolves
 these from records and history/delivery metadata, including Claude's init model;
@@ -220,6 +239,12 @@ modes usable now. All booleans are false after closure or when the bridge does
 not own the live job. Catalog reports the registry's
 `capabilities.interventions`: supported modes, with queue `false`, `bridge` or
 `native`. Job status reports whether those modes are usable now.
+
+Terminal tool responses map stored outcomes to three statuses. `completed` stays
+`completed`, `interrupted` and `stopped` become `cancelled`, and `failed` and
+`delivery_unknown` become `failed`. The second text block carries `meta.cause`,
+`detail`, `native_refs` and `stop_evidence` with process absence, signal and
+survivor counts, cleanup time and protocol steps when available.
 
 ### Turn loop, interventions and user inbox
 
@@ -478,21 +503,24 @@ proven, state stays `unknown` and a new job is refused. Status does not
 reconcile or publish a completion. The watcher writes only its
 fenced result; the startup scan restores pending news from stored results.
 
+On first open per process, `Records` archives coexisting 0.x state under `legacy/`,
+moves 1.0.0 records into `threads/` and `jobs/`, and updates result fields in place.
+Existing destination records win. Delivery receipts keep their names and contents.
+
+Threads consist of jobs in
+generation order with their results and interventions. There is no second event log.
+
+### Job digests and work summaries
+
 `job-digest://<jobId>` is rendered on demand by `lib/digest.mjs` from
 job/result records and the companion's own transcript. Resource listing
-uses job records; no digest file is written. The renderer uses the same
+uses job records. Reads write nothing, including to any older files in `runtime/digests/`. The renderer uses the same
 turn selection as the work summary, collapses preamble to a count, and caps each
 item's output at about 2 KB with a truncation marker and the native path for more.
-It presents task and job metadata, final/partial answer, work summary and
+It presents the request, selected and effective model and effort, status, timestamps,
+final or partial answer, work summary and
 ordered transcript items; running reads add the in-flight progress line. Missing
 or unrecognized transcripts are explicit. Terminal metadata includes `work_summary` and `digest_uri`.
-
-`agent-companion ui` reads both hosts' job records and follows the selected
-job's native transcript. The job title comes from the thread. The view writes
-user messages and cancels to the inbox and saves defaults through
-`bridge-server/ui/defaults.mjs`. In Claude Code, `hooks/mod.ts` lists running
-threads above the prompt. `/companion` opens the session's cards. Selecting a
-card opens that thread's newest job in the pane.
 
 The controller starts a bounded, asynchronous worktree snapshot alongside runtime
 startup and awaits it before delivery. Each snapshot copies the worktree index to
@@ -528,12 +556,38 @@ Claude keeps its own transcripts under `~/.claude/projects` (or
 `CLAUDE_CONFIG_DIR/projects`). The bridge stores only the native session id as
 `historyId`, not a copy of the transcript; it does not remove native transcripts.
 
-On first open per process, `Records` archives coexisting 0.x state under `legacy/`,
-moves 1.0.0 records into `threads/` and `jobs/`, and updates result fields in place.
-Existing destination records win. Delivery receipts keep their names and contents.
+### Live view
 
-Threads consist of jobs in
-generation order with their results and interventions. There is no second event log.
+`agent-companion ui` reads both hosts' job records and follows the selected
+job's native transcript. The job title comes from the thread. The view writes
+user messages and cancels to the inbox and saves defaults through
+`bridge-server/ui/defaults.mjs`. In Claude Code, `hooks/mod.ts` lists running
+threads above the prompt. `/companion` opens the session's cards. Selecting a
+card opens that thread's newest job in the pane.
+
+The terminal view's performance test compares the cost of appending, scrolling, typing, resizing and expanding output at about
+500 and 10,000 transcript items. Median append, scroll and keystroke times may
+grow by at most a factor of three. Expand and resize times may grow in proportion
+to transcript size. After an intentional UI change, regenerate and
+review `bridge-server/ui/ui.test.mjs.snapshot` with
+`node --test --test-update-snapshots bridge-server/ui/ui.test.mjs`.
+[Live view measurements](LIVE_VIEW_PLAN.md#step-2-read-only-terminal-ui)
+
+### Job usage
+
+`lib/usage.mjs` normalizes native counters for stored results, status, terminal
+metadata and digests. A missing breakdown stays null. The total uses the native
+value when available, otherwise the sum of reported input and output. Input
+includes cache reads. A result without counters can omit `usage` or carry
+`usage: null`. Cost comes from provider reports. Check actual charges with the provider.
+
+| Companion | Source and scope |
+| --- | --- |
+| Codex CLI | The difference from the thread's usage before the turn's first model call. A follow-up counts only its new work. |
+| OpenCode | Native turn events and messages supply tokens and cost when reported. |
+| GitHub Copilot CLI | Prompt counters take precedence over the prompt's OTEL span. Streamed `usage_update` measures context occupancy. |
+| Google Antigravity | Sum the counters from the job's prompt responses. Later streamed work can lack counters, which marks usage `partial`. An upstream error can leave usage absent. |
+| Claude Code | Per-turn tokens and fresh-history cost follow the [companion protocol](#companion-matrix). |
 
 ## Host budgets
 
