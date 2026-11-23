@@ -1,10 +1,11 @@
 import './sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { symlinkSync, realpathSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { symlinkSync, realpathSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeCompanionDefaults, writeTargetChecks } from '../lib/state.mjs';
-import { queuePath } from '../lib/runtime-paths.mjs';
+import { hookAnswer } from '../bridge-server/delivery.mjs';
+import { decodeTool } from './tool-call.mjs';
 import { setupController, diskSnapshot, deferred } from './controller/helpers.mjs';
 import { tools, dispatch, createBridgeController, recoverController } from '../bridge-server/tools.mjs';
 
@@ -17,11 +18,12 @@ const task = '  First line.\n\nSecond line: `quoted` — keep whitespace.  \n';
 function fixture(options = {}) {
   const h = setupController({ provider: 'claude', capabilities: { interventions: { default: 'steer', steer: true, queue: 'native', interrupt: true } }, ...options });
   h.controller.env.AGENT_COMPANION_HOME = h.dir;
-  const call = async (action, args = {}, lead = main, extra = {}) =>
-    (await dispatch({ name: 'agent_' + action, arguments: { lead, ...args } },
-      { controller: h.controller, host: 'claude', ...extra })).structuredContent;
+  const raw = (action, args = {}, lead = main, extra = {}) =>
+    dispatch({ name: 'agent_' + action, arguments: { lead, ...args } },
+      { controller: h.controller, host: 'claude', ...extra });
+  const call = async (...args) => decodeTool(await raw(...args));
   const send = (args = {}, lead = main) => call('send', { task, target: 'claude', cwd: h.dir, ...args }, lead);
-  return { ...h, call, send };
+  return { ...h, call, raw, send };
 }
 
 const scenarios = {
@@ -35,7 +37,7 @@ const scenarios = {
     for (const tool of listed) {
       assert.equal(tool.inputSchema.additionalProperties, false);
       assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'lead'));
-      for (const field of ['prompt_id', 'session_id', 'debug']) assert.ok(!Object.hasOwn(tool.outputSchema.properties, field));
+      assert.ok(!Object.hasOwn(tool, 'outputSchema'));
     }
   },
 
@@ -65,7 +67,7 @@ const scenarios = {
     const before = diskSnapshot(h.dir);
     for (const [lead, other] of [[main, second], [sub, first]]) {
       for (const { action } of tools.filter(t => t.action !== 'catalog')) {
-        for (const ref of action === 'send' ? [{ thread: other.thread, task }] : [{ thread: other.thread }, { job_id: other.job_id }]) {
+        for (const ref of action === 'send' ? [{ thread: other.thread, task }] : action === 'read' ? [{ thread: other.thread }] : [{ thread: other.thread }, { job_id: other.job_id }]) {
           assert.equal((await h.call(action, ref, lead)).code, 'THREAD_NOT_YOURS');
         }
       }
@@ -75,7 +77,7 @@ const scenarios = {
       assert.equal(r.code, 'thread_unknown');
       assert.equal(r.status, 'unknown_thread');
     }
-    const row = (s, title) => ({ thread: s.thread, title, target: 'claude', cwd: realpathSync(h.dir), state: 'running',
+    const row = (s, title) => ({ thread: s.thread, unread: 0, title, target: 'claude', cwd: realpathSync(h.dir), state: 'running',
       job_id: s.job_id, started_at: new Date(h.clock.now()).toISOString() });
     assert.deepEqual((await h.call('status')).threads, [row(first, 'Review')]);
     assert.deepEqual((await h.call('status', {}, sub)).threads, [row(second, task.split('\n')[0])]);
@@ -85,17 +87,17 @@ const scenarios = {
 
   async 'Codex binds the metadata session and ignores a forged lead on every call'() {
     const h = fixture();
-    const call = async (action, args, source = 'user', session = 'root') => (await dispatch({
+    const call = async (action, args, source = 'user', session = 'root') => decodeTool(await dispatch({
       name: 'agent_' + action, arguments: { ...args, lead: main },
       _meta: { 'x-codex-turn-metadata': { session_id: session, thread_source: source, thread_id: source === 'user' ? session : 'child' } },
-    }, { controller: h.controller, host: 'codex' })).structuredContent;
+    }, { controller: h.controller, host: 'codex' }));
     const before = diskSnapshot(h.dir);
     assert.equal((await h.call('status', {}, main, { host: 'codex' })).code, 'LEAD_REQUIRED');
     for (const thread_id of [null, undefined, '']) {
       const malformed = await dispatch({ name: 'agent_status', arguments: { lead: main }, _meta: {
         'x-codex-turn-metadata': { session_id: 'root', thread_source: 'subagent', thread_id },
       } }, { controller: h.controller, host: 'codex' });
-      assert.equal(malformed.structuredContent.code, 'LEAD_REQUIRED');
+      assert.equal(decodeTool(malformed).code, 'LEAD_REQUIRED');
     }
     assert.equal((await call('catalog', {}, 'user', 'other')).ok, true);
     assert.deepEqual(diskSnapshot(h.dir), before);
@@ -268,7 +270,6 @@ const scenarios = {
       assert.equal(status.activity, expected);
       assert.equal(status.status, 'running');
     }
-    assert.equal(h.records.read('completions', job_id), null);
     const before = diskSnapshot(h.dir);
     const status = await h.call('status', { thread, diagnostics: true });
     assert.deepEqual(status.diagnostics.targets.claude, { ready: true, checkedAt: 'cached' });
@@ -290,10 +291,7 @@ const scenarios = {
       await recoverController(other);
       assert.equal((await h.call('wait', { job_id }, main, { controller: other })).content, cancel.content);
     }
-    const rows = readFileSync(queuePath(), 'utf8').trim().split('\n').map(JSON.parse).filter(r => r.jobId === job_id);
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].consumed, true);
-    assert.equal(rows[0].claudeSessionId, main.session);
+
   },
 
   async 'invalid arguments are refused before a tool starts work'() {
@@ -320,3 +318,70 @@ const scenarios = {
   },
 };
 for (const [name, scenario] of Object.entries(scenarios)) test(name, scenario);
+
+test('read pages stay anchored as the cursor advances, and never claim delivery', async () => {
+  const h = fixture();
+  const a = await h.send();
+  const read = async args => (await h.raw('read', { thread: a.thread, ...args })).content[0].text;
+  const unread = async () => (await h.call('status')).threads[0].unread;
+  assert.equal(await read(), `## ${a.job_id} · running · claude · running\nTask: ${task.split('\n')[0]}\n[end · 0 unread]`);
+  const posts = [];
+  for (const [i, answer] of ['one', 'tw🧪\n'.repeat(17500)].entries()) {
+    const sent = i ? await h.call('send', { thread: a.thread, task }) : a;
+    const result = await h.finish(sent.job_id, { outcome: 'completed', text: answer }, h.adapters.at(-1));
+    posts.push(`## ${sent.job_id} · completed · claude · ${new Date(result.finishedAt).toISOString()}\nTask: ${task.split('\n')[0]}\n${answer}`);
+  }
+  const chars = [...posts.join('\n\n')];
+  const page = (start, end) => chars.slice(start, end).join('');
+  assert.equal(await unread(), 2);
+  const footer = (end, from, first, last) => `\n[posts ${first}–${last} of 2 · characters ${from}–${end} of ${chars.length} · next: agent_read({ thread: "${a.thread}", after: "", offset: ${end} })]`;
+  assert.equal(await read(), page(0, 8000) + footer(8000, 0, 1, 2));
+  assert.equal(await unread(), 1);
+  assert.equal(await read({ after: '', offset: 8000, limit: 40000 }), page(8000, 48000) + footer(48000, 8000, 2, 2));
+  assert.equal(await read({ after: '', offset: 48000, limit: 40000 }), page(48000) + '\n[end · 0 unread]');
+  assert.equal(await unread(), 0);
+  for (const args of [{}, { after: a.job_id }]) {
+    assert.ok((await read(args)).startsWith([...posts[1]].slice(0, 8000).join('')));
+  }
+  const cursor = h.records.path('reads', a.thread);
+  assert.equal(statSync(cursor).mode & 0o777, 0o600);
+  assert.equal(statSync(join(h.dir, 'reads')).mode & 0o777, 0o700);
+  assert.equal(existsSync(h.records.path('results', a.job_id) + '.delivery'), false);
+  for (const args of [{ limit: 40001 }, { offset: -1 }, { after: 'foreign-job' }, { limit: 1.5 }]) {
+    assert.equal((await h.call('read', { thread: a.thread, ...args })).code, 'INVALID_ARGUMENTS');
+  }
+});
+
+test('tool and hook excerpts preserve raw text, include read references and bound the whole injection', async () => {
+  const h = fixture();
+  const lead = { host: 'claude', ...main };
+  const finish = async length => {
+    const { thread, job_id } = await h.send();
+    const answer = 'a'.repeat(length - 2) + '🧪b';
+    await h.finish(job_id, { outcome: 'completed', text: answer }, h.adapters.at(-1));
+    return { thread, job_id, answer };
+  };
+  for (const n of [8000, 8001]) {
+    const { thread, job_id, answer } = await finish(n);
+    const raw = await h.raw('wait', { job_id });
+    assert.deepEqual(Object.keys(raw), ['content']);
+    assert.deepEqual(raw.content.map(b => b.type), ['text', 'text']);
+    assert.equal(raw.content[0].text, n === 8000 ? answer : [...answer].slice(0, 8000).join('') + `\n[… 1 more characters. agent_read({ thread: "${thread}", offset: 8000 }) reads on.]`);
+    const meta = JSON.parse(raw.content[1].text);
+    assert.equal(meta.meta.digest_uri, 'agent-digest://' + job_id);
+    assert.equal('content' in meta, false);
+  }
+  const batch = [];
+  for (const n of [4000, 4001, 70000]) batch.push(await finish(n));
+  const injection = hookAnswer(h.records, lead);
+  assert.ok(injection.length < 9000);
+  for (const { thread, job_id } of batch) {
+    assert.ok(injection.includes(`agent_read({ thread: "${thread}"`));
+    assert.equal((await h.call('wait', { job_id })).meta.delivered_by, 'hook');
+  }
+  for (const n of [4000, 4001]) {
+    const { thread, answer } = await finish(n);
+    const text = hookAnswer(h.records, lead);
+    assert.ok(text.endsWith(n === 4000 ? answer : [...answer].slice(0, 4000).join('') + `\n[… 1 more characters. agent_read({ thread: "${thread}", offset: 4000 }) reads on.]`));
+  }
+});

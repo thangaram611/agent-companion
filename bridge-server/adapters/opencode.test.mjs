@@ -23,7 +23,7 @@ for (const source of ['both', 'idle', 'assistant', 'empty-final']) test(`OpenCod
     FAKE_OPENCODE_PARTIAL: partial ? '1' : '0', FAKE_OPENCODE_EMPTY_FINAL: source === 'empty-final' ? '1' : '0' });
   const sent = await h.send();
   await h.finish(sent);
-  const call = async action => (await callTool({ action, job_id: sent.executionId }, { controller: h.controller })).structuredContent;
+  const call = action => callTool({ action, job_id: sent.executionId }, { controller: h.controller });
   const waited = await call('wait'), status = await call('status');
   const message = 'Add usage credits or subscribe and save up to 66%: https://ollama.com/plans (ref: quota-fixture)';
   assert.equal(waited.status, 'failed'); assert.equal(waited.meta.cause, 'provider_error'); assert.equal(waited.meta.detail, null);
@@ -288,8 +288,8 @@ for (const [model, effort, message] of [
   await h.finish(await h.send({ model: 'fixture/first#high' }));
   const saved = readFileSync(join(h.dir, 'history.json'), 'utf8');
   const offset = h.requests().length;
-  const refused = (await h.settle(callTool({ action: 'send', target: 'opencode', thread: 'child', cwd: h.dir,
-    task: 'refuse', effort, ...(model ? { model } : {}) }, { controller: h.controller }))).structuredContent;
+  const refused = await h.settle(callTool({ action: 'send', target: 'opencode', thread: 'child', cwd: h.dir,
+    task: 'refuse', effort, ...(model ? { model } : {}) }, { controller: h.controller }));
   assert.equal(refused.status, 'failed'); assert.equal(refused.meta.detail, 'EFFORT_NOT_ALLOWED');
   assert.match(refused.content, message);
   assert.equal(h.requests().slice(offset).some(r => r.method === 'POST' && /\/(model|prompt)$/.test(r.path)), false);
@@ -317,8 +317,8 @@ test('OpenCode effort overrides an older variant, accepts matching aliases, and 
 
 test('OpenCode effort selects a variant on its configured model', async t => {
   const h = setup(t, { AGENT_COMPANION_OPENCODE_MODEL: 'fixture/chosen#fast' });
-  const sent = (await h.settle(callTool({ action: 'send', target: 'opencode', cwd: h.dir,
-    task: 'select high', effort: 'high' }, { controller: h.controller }))).structuredContent;
+  const sent = await h.settle(callTool({ action: 'send', target: 'opencode', cwd: h.dir,
+    task: 'select high', effort: 'high' }, { controller: h.controller }));
   assert.equal(sent.status, 'still_running');
   assert.equal(sent.effective_effort, 'high');
   await h.finish({ executionId: sent.job_id });
@@ -338,8 +338,8 @@ for (const [mode, code] of [
 
 test('OpenCode effort overrides the variant named on the same send', async t => {
   const h = setup(t);
-  const sent = (await h.settle(callTool({ action: 'send', target: 'opencode', cwd: h.dir,
-    task: 'select low', model: 'fixture/first#high', effort: 'low' }, { controller: h.controller }))).structuredContent;
+  const sent = await h.settle(callTool({ action: 'send', target: 'opencode', cwd: h.dir,
+    task: 'select low', model: 'fixture/first#high', effort: 'low' }, { controller: h.controller }));
   assert.equal(sent.status, 'still_running');
   assert.equal(sent.selected_model, 'fixture/first#high');
   assert.equal(sent.effective_model.variant, 'soft');
@@ -354,11 +354,11 @@ for (const effort of [undefined, 'low']) test(`routing keeps OpenCode's starting
   const h = setup(t, { AGENT_COMPANION_OPENCODE_MODEL: 'fixture/first#high' });
   let thread;
   const send = async args => {
-    const { structuredContent } = await h.settle(callTool({ action: 'send', target: 'opencode', ...(thread && { thread }),
+    const sent = await h.settle(callTool({ action: 'send', target: 'opencode', ...(thread && { thread }),
       cwd: h.dir, task: 'hello', ...args }, { controller: h.controller }));
-    thread = structuredContent.thread;
-    assert.equal(structuredContent.selected_model, 'fixture/first#high');
-    return h.finish({ executionId: structuredContent.job_id });
+    thread = sent.thread;
+    assert.equal(sent.selected_model, 'fixture/first#high');
+    return h.finish({ executionId: sent.job_id });
   };
   await send({ effort });
   h.env.AGENT_COMPANION_OPENCODE_MODEL = 'fixture/second#high';

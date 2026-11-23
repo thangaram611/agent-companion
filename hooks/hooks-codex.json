@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/drain-completions.sh\"",
+            "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/hook.sh\" post-tool",
             "timeout": 5
           }
         ]
@@ -22,7 +22,7 @@
           },
           {
             "type": "command",
-            "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/drain-completions.sh\"",
+            "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/hook.sh\" session-start",
             "timeout": 5
           }
         ]
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/drain-completions.sh\"",
+            "command": "AGENT_COMPANION_HOST=codex bash \"${PLUGIN_ROOT}/hooks/hook.sh\" prompt",
             "timeout": 5
           }
         ]

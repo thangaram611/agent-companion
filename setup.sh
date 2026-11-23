@@ -225,7 +225,8 @@ echo ""
 printf "Checking plugin surface...\n"
 
 SURFACE_PATHS=(
-  "$SCRIPT_DIR/hooks/drain-completions.sh"
+  "$SCRIPT_DIR/hooks/hook.sh"
+  "$SCRIPT_DIR/hooks/hook.mjs"
   "$SCRIPT_DIR/hooks/install-deps.sh"
 )
 if [ "$DO_CLAUDE" = 1 ]; then

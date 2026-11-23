@@ -1,18 +1,17 @@
 import { randomBytes } from 'node:crypto';
-import { realpathSync, readFileSync, renameSync, existsSync, unlinkSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { detectHost, HOSTS } from '../lib/hosts/index.mjs';
 import { readDefaultModel, readDefaultEffort, readSettings, settingsPath, isModelAllowedFor, readDefaultTarget } from '../lib/state.mjs';
 import { lastTargetChecks, probePermission } from '../lib/target-diagnostics.mjs';
 import { defaultTargetInfo, getTarget, TARGETS, modelHint, listTargets, listTargetIds } from '../lib/target-registry.mjs';
 import { lastRuns } from './last-runs.mjs';
 import { getCodexContractStatus } from './adapters/codex.mjs';
-import { resolve } from 'node:path';
+import { executionStatus, publish, toolAnswer } from './delivery.mjs';
 import { Controller } from './controller/controller.mjs';
 import { Records, firstLine } from './controller/records.mjs';
 import { systemClock } from './controller/clock.mjs';
 import { createProviders } from './providers.mjs';
 import { log } from './validation.mjs';
-import { queuePath, appendPrivateFile, writePrivateFile } from '../lib/runtime-paths.mjs';
 import { renderDigest } from '../lib/digest.mjs';
 import { invalid, validateFields, assertCwd, recordId, string, optionalString, number, boolean } from './validation.mjs';
 
@@ -175,9 +174,13 @@ function handleStatus({ job_id, diagnostics, lead }, active) {
     const view = active.status({ executionId: job_id });
     response = view ? project(view) : { ok: false, action: 'status', status: 'unknown_job', error: 'unknown job_id' };
   } else {
+    const executions = active.records.listExecutions();
     const threads = active.records.listConversations().filter(c => sameLead(c.lead, lead)).map(c => {
       const view = active.status({ executionId: c.executionId });
-      return { thread: c.owner, title: c.title, target: c.provider, cwd: c.cwd,
+      const generation = active.records.read('reads', c.owner)?.generation ?? 0;
+      const unread = executions.filter(e => e.owner === c.owner && e.generation > generation
+        && existsSync(active.records.path('results', e.executionId))).length;
+      return { thread: c.owner, unread, title: c.title, target: c.provider, cwd: c.cwd,
         state: view.result ? executionStatus(view.result) : view.state,
         job_id: c.executionId, started_at: iso(view.execution.startedAt) };
     });
@@ -188,6 +191,50 @@ function handleStatus({ job_id, diagnostics, lead }, active) {
   response.contractStatus = getCodexContractStatus();
   if (diagnostics) response.diagnostics = { targets: lastTargetChecks() };
   return asJson(response);
+}
+
+function readThread({ thread, after, offset = 0, limit = 8000 }, { records }) {
+  const posts = records.listExecutions().filter(e => e.owner === thread).sort((a, b) => a.generation - b.generation);
+  const cursor = records.read('reads', thread)?.job_id;
+  const index = id => posts.findIndex(e => e.executionId === id);
+  const original = index(cursor);
+  let lastRead = original;
+  // An empty anchor means before the first post. Continuation links keep the
+  // same anchor even if an earlier page advanced the durable read cursor.
+  const start = after === undefined ? Math.min(lastRead + 1, posts.length - 1) : after ? index(after) + 1 : 0;
+  if (after && start === 0) invalid('after must name a job in this thread');
+  let length = 0, first, last;
+  const page = [];
+  for (const [i, e] of posts.slice(start).entries()) {
+    const result = records.readResult(e.executionId);
+    const status = result ? executionStatus(result) : 'running';
+    const time = result ? new Date(result.finishedAt ?? e.startedAt).toISOString() : 'running';
+    const header = `## ${e.executionId} · ${status} · ${e.provider} · ${time}\nTask: ${e.text.split(/\r?\n/, 1)[0]}`;
+    const chars = Array.from((i ? '\n\n' : '') + header + (result ? '\n' + (result.text ?? '') : ''));
+    const finish = length + chars.length;
+    if (finish > offset && length < offset + limit) {
+      first ??= start + i + 1;
+      last = start + i + 1;
+      page.push(chars.slice(Math.max(0, offset - length), offset + limit - length).join(''));
+      if (result && offset + limit >= finish) lastRead = Math.max(lastRead, start + i);
+    }
+    length = finish;
+  }
+  const end = Math.min(offset + limit, length);
+  if (lastRead > original) {
+    records._locked(thread, () => {
+      const { executionId: job_id, generation } = posts[lastRead];
+      const saved = records.read('reads', thread);
+      if (!saved || generation > saved.generation) records._write('reads', thread, { job_id, generation });
+      else lastRead = posts.findLastIndex(e => e.generation <= saved.generation);
+    });
+  }
+  const unread = posts.slice(lastRead + 1).filter(e => existsSync(records.path('results', e.executionId))).length;
+  const anchor = posts[start - 1]?.executionId ?? '';
+  const next = `agent_read({ thread: ${JSON.stringify(thread)}, after: ${JSON.stringify(anchor)}, offset: ${end} })`;
+  const footer = end === length ? `[end · ${unread} unread]`
+    : `[posts ${first ?? start + 1}–${last ?? start + 1} of ${posts.length} · characters ${offset}–${end} of ${length} · next: ${next}]`;
+  return { content: [{ type: 'text', text: page.join('') + '\n' + footer }] };
 }
 
 function sameLead(saved, caller) {
@@ -246,6 +293,13 @@ const job_id = field('string', recordId);
 const modes = ['steer', 'queue', 'interrupt'];
 const reference = [{ required: ['thread'] }, { required: ['job_id'] }];
 
+function pageInteger(minimum, maximum) {
+  return field('integer', (v, k) => {
+    if (!Number.isSafeInteger(v) || v < minimum || (maximum && v > maximum)) invalid('invalid ' + k);
+    return v;
+  }, { minimum, ...(maximum && { maximum }) });
+}
+
 function tool(action, description, fields, conditions, handler, annotations) {
   const properties = Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, field.schema]));
   return { name: 'agent_' + action, action, description, fields, handler, annotations,
@@ -262,6 +316,10 @@ export const tools = [
     mode: field('string', v => modes.includes(v) ? v : invalid('unknown intervention mode'), { enum: modes }),
     title: field('string', string),
   }, { required: ['task'], anyOf: [{ required: ['cwd'] }, { required: ['thread'] }] }, handleSend),
+  tool('read', 'Read thread posts in order. Continue a page with the exact after and offset in its footer.', {
+    thread, after: field('string', (v, k) => v === '' ? v : recordId(v, k)),
+    offset: pageInteger(0), limit: pageInteger(1, 40000),
+  }, { required: ['thread'] }, readThread),
   tool('wait', 'Wait for a result, a user intervention, or the wait budget to expire.', {
     thread, job_id, max_wait_sec: field('number', number, { description: 'Default 480 seconds, maximum 1200.' }),
   }, { oneOf: reference }, handleWait),
@@ -322,52 +380,6 @@ export async function dispatch(params, { controller: active, host = detectHost()
 
 // Digest resources and terminal delivery
 
-function getQueuePath() {
-  return queuePath();
-}
-
-function appendQueueLines(path, lines) {
-  if (!Array.isArray(lines) || lines.length === 0) return;
-  appendPrivateFile(path, lines.join('\n') + '\n');
-}
-
-function rewriteQueueByMoveAside(suffix, transform) {
-  const queuePath = getQueuePath();
-  if (!existsSync(queuePath)) return false;
-  const drainPath = `${queuePath}.${suffix}.${process.pid}.${Date.now()}`;
-  try {
-    renameSync(queuePath, drainPath);
-  } catch {
-    return false;
-  }
-  try {
-    const lines = readFileSync(drainPath, 'utf8').split('\n').filter(Boolean);
-    const nextLines = transform(lines) || [];
-    appendQueueLines(queuePath, nextLines);
-    return true;
-  } finally {
-    try { unlinkSync(drainPath); } catch {}
-  }
-}
-
-function markQueueConsumed(jobId) {
-  try {
-    rewriteQueueByMoveAside('consume', (lines) => {
-      let changed = false;
-      const updated = lines.map((line) => {
-        try {
-          const e = JSON.parse(line);
-          if (e.jobId === jobId && !e.consumed) { e.consumed = true; changed = true; }
-          return JSON.stringify(e);
-        } catch { return line; }
-      });
-      return changed ? updated : lines;
-    });
-  } catch (err) {
-    log('WARN', 'markQueueConsumed failed:', err.message);
-  }
-}
-
 const DIGEST_RESOURCE_SCHEME = 'agent-digest';
 const DIGEST_RESOURCE_MIME_TYPE = 'text/markdown';
 const DIGEST_RESOURCE_URI_RE = /^agent-digest:\/\/([a-zA-Z0-9._-]+)$/;
@@ -425,33 +437,11 @@ export function readDigestResource(uri, active) {
   };
 }
 
-function digestResourceLinkForResult(obj) {
-  const jobId = obj?.job_id || obj?.meta?.job_id;
-  const advertisedUri = obj?.digest_uri || obj?.meta?.digest_uri;
-  if (!jobId || !advertisedUri) return null;
-  if (advertisedUri !== digestResourceUri(jobId)) return null;
-  return { type: 'resource_link', uri: advertisedUri, name: `agent-digest-${jobId}`, mimeType: DIGEST_RESOURCE_MIME_TYPE };
-}
-
 function asJson(obj) {
-  const content = [{ type: 'text', text: JSON.stringify(obj) }];
-  const digestResourceLink = digestResourceLinkForResult(obj);
-  if (digestResourceLink) content.push(digestResourceLink);
-  const result = {
-    content,
-    structuredContent: obj,
-  };
-  if (obj?.ok === false) result.isError = true;
-  return result;
+  return { content: [{ type: 'text', text: JSON.stringify(obj) }], ...(obj.ok === false && { isError: true }) };
 }
 
-// Controller-owned executions never enter the legacy worker/job cache. These
-// envelopes are projections of durable records, including on repeated waits.
-function executionStatus(result) {
-  return ({ completed: 'completed', failed: 'failed', interrupted: 'cancelled', stopped: 'cancelled', delivery_unknown: 'failed' })[result.outcome];
-}
-
-function terminalEnvelope(execution, result, action = 'wait') {
+function ownerTerminalResponse(records, execution, result, action, { signal }) {
   const status = executionStatus(result);
   const evidence = result.stopEvidence;
   const meta = {
@@ -466,52 +456,17 @@ function terminalEnvelope(execution, result, action = 'wait') {
     ...(result.interventions?.length ? { interventions: result.interventions.map(({ from, mode, state, text }) =>
       ({ from, mode, state, first_line: firstLine(text) })) } : {}),
   };
-  return { ok: true, action, status, thread: result.owner, job_id: result.executionId, target: execution.provider,
-    content: result.text ?? '', meta };
-}
-
-function publishResult(records, execution, result, ownerRequest) {
-  const id = execution.executionId;
-  const resultPath = resolve(records.path('results', id));
-  const receiptPath = resultPath + '.delivery';
-  return records._locked(execution.owner, () => {
-    if (!records.read('completions', id)) {
-      const envelope = terminalEnvelope(execution, result);
-      appendPrivateFile(getQueuePath(), JSON.stringify({ ts: result.finishedAt, consumed: false, receiptPath,
-        claudeSessionId: execution.hostSessionId ?? null, kind: 'terminal', jobId: id,
-        content: envelope.content, meta: envelope.meta }) + '\n');
-      records._write('completions', id, { executionId: id });
-    }
-    if (!ownerRequest || ownerRequest.signal?.aborted) return;
-
-    // The hook creates an empty receipt. The lock serializes owner calls, so
-    // another owner cannot see our exclusive create before its write completes.
-    try { writePrivateFile(receiptPath, 'owner\n', 'wx'); }
-    catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-      if (readFileSync(receiptPath, 'utf8') === '') return resultPath;
-      return;
-    }
-    markQueueConsumed(id); // Also suppress queue rows written without a receipt path.
-  });
-}
-
-function ownerTerminalResponse(records, execution, result, action, request) {
-  const envelope = terminalEnvelope(execution, result, action);
-  const path = publishResult(records, execution, result, request);
-  if (path) {
-    envelope.content = `This result was already delivered to this session by the completion hook. Read ${JSON.stringify(path)} for the full text.`;
-    envelope.meta.delivered_by = 'hook';
-    envelope.meta.result_path = path;
-  }
-  return asJson(envelope);
+  const { text, delivered_by } = toolAnswer(records, result, signal);
+  if (delivered_by) meta.delivered_by = delivered_by;
+  const metadata = { ok: true, action, status, thread: result.owner, job_id: result.executionId, target: execution.provider, meta };
+  return { content: [{ type: 'text', text }, { type: 'text', text: JSON.stringify(metadata) }] };
 }
 
 export function createBridgeController({ env = process.env, records = new Records(), ...options } = {}) {
   const safely = (fn) => (...args) => { try { fn(...args); } catch (err) { log('WARN', 'execution publication failed:', err.message); } };
   return new Controller({ env, records, clock: systemClock,
     providers: createProviders(env),
-    ...options, onResult: safely((execution, result) => publishResult(records, execution, result)),
+    ...options, onResult: safely((execution, result) => publish(records, execution, result)),
   });
 }
 export async function recoverController(active) {
@@ -521,6 +476,6 @@ export async function recoverController(active) {
       await active.recover({ owner: execution.owner });
     }
     const result = active.records.readResult(execution.executionId);
-    if (result) publishResult(active.records, execution, result);
+    if (result) publish(active.records, execution, result);
   }
 }

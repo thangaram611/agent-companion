@@ -45,8 +45,8 @@ if (process.argv.includes('generate-json-schema')) appendFileSync(${JSON.stringi
       const { callTool } = await import('../../test/tool-call.mjs');
       const { setupController } = await import('../../test/controller/helpers.mjs');
       const { controller } = setupController();
-      assert.equal((await callTool({ action: 'status' }, { controller })).structuredContent.contractStatus, verdict);
-      const catalog = (await callTool({ action: 'catalog' }, { controller })).structuredContent;
+      assert.equal((await callTool({ action: 'status' }, { controller })).contractStatus, verdict);
+      const catalog = await callTool({ action: 'catalog' }, { controller });
       assert.equal(catalog.targets.find((target) => target.id === 'codex').contractStatus, verdict);
     }
   });

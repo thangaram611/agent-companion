@@ -227,9 +227,11 @@ do not hold a turn open.
   the call if it cannot run. Codex: `thread_id`, `session_id` and `thread_source`
   from turn metadata. The thread reference is a short bridge-minted id.
 - **Store.** A thread is today's conversation record, keyed by the thread id
-  instead of the owner, with `lead`, `title` and a read cursor added. Its posts
-  are its executions in generation order with their results and interventions.
-  No new event log.
+  instead of the owner, with `lead` and `title` added. Its read cursor is a
+  sibling record, `reads/<thread>.json`, written under the thread's lock: the
+  controller rewrites the conversation record after awaits, which would drop a
+  cursor written in between. Its posts are its executions in generation order
+  with their results and interventions. No new event log.
 - **Removed records:** `stops/`, `attachments/` and the "owner away" display.
 
 ### Delivery

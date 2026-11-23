@@ -4,7 +4,7 @@
 // The precondition lives in production code, at the choke points every path
 // goes through — lib/hosts/index.mjs's refuseRealHomeUnderTest, called by
 // runtime-paths' runtimeDir() and by state.mjs's BASE_DIR at import, and its
-// bash twin in hooks/drain-completions.sh. It keys on NODE_TEST_CONTEXT, which
+// bash twin in hooks/hook.sh. It keys on NODE_TEST_CONTEXT, which
 // `node --test` sets in every test child and which everything a test spawns
 // inherits. So there is no list of suites or hooks to keep current: a suite
 // that forgets to sandbox fails the moment it touches the path, with a message
@@ -20,7 +20,7 @@ import './sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -28,7 +28,7 @@ import { dirname, join } from 'node:path';
 import { refuseRealHomeUnderTest } from '../lib/hosts/index.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const HOOK = join(REPO_ROOT, 'hooks', 'drain-completions.sh');
+const HOOK = join(REPO_ROOT, 'hooks', 'hook.sh');
 const REAL_HOME = userInfo().homedir;
 
 // This suite runs under NODE_TEST_CONTEXT itself, so the pure helper can be
@@ -38,7 +38,7 @@ assert.ok(process.env.NODE_TEST_CONTEXT, 'node --test sets NODE_TEST_CONTEXT in 
 
 const baseEnv = () => {
   const env = { ...process.env };
-  for (const key of ['AGENT_RUNTIME_DIR', 'AGENT_HEARTBEAT_DIR', 'AGENT_COMPANION_HOME', 'AGENT_QUEUE_PATH']) delete env[key];
+  for (const key of ['AGENT_RUNTIME_DIR', 'AGENT_COMPANION_HOME']) delete env[key];
   env.HOME = REAL_HOME;
   return env;
 };
@@ -121,22 +121,18 @@ test('settings access checks the XDG path per call even with a sandboxed state i
   } finally { rmSync(sandbox, { recursive: true, force: true }); }
 });
 
-test('the drain-completions hook refuses the real runtime dir under test with exit 78, and writes into a sandbox', () => {
-  const run = (env) => spawnSync('bash', [HOOK], {
+test('the hook refuses the real runtime dir with exit 78 and accepts an empty sandbox', () => {
+  const run = (env) => spawnSync('bash', [HOOK, 'post-tool'], {
     input: JSON.stringify({ session_id: 'guard-sid', tool_response: {} }),
     env, encoding: 'utf8', timeout: 30_000, killSignal: 'SIGKILL',
   });
   const bare = run(baseEnv());
   assert.equal(bare.status, 78, `stdout=${bare.stdout} stderr=${bare.stderr}`);
-  assert.match(bare.stderr, /refusing to use the operator's real runtime dir .* from inside node --test/);
-  assert.equal(existsSync(join(REAL_HOME, '.claude', 'agent-companion', 'runtime', 'heartbeats', 'guard-sid.heartbeat')), false,
-    'the refusal must come before the heartbeat write');
-
   const sandbox = mkdtempSync(join(tmpdir(), 'guard-hook-'));
   try {
     const ok = run({ ...baseEnv(), AGENT_RUNTIME_DIR: sandbox });
     assert.equal(ok.status, 0, ok.stderr);
-    assert.ok(existsSync(join(sandbox, 'heartbeats', 'guard-sid.heartbeat')), 'heartbeat lands in the sandbox');
+    assert.deepEqual(readdirSync(sandbox), []);
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }

@@ -7,7 +7,12 @@ codex_config_dir() {
   path="${path#"${path%%[![:space:]]*}"}"
   path="${path%"${path##*[![:space:]]}"}"
   if [ -z "$path" ]; then HOST_CONFIG_DIR="$HOME/.codex"; return; fi
-  [[ "$path" = /* ]] || path="$(pwd -P)/$path"
+  if [[ "$path" != /* ]]; then
+    # Resolve the physical cwd with builtins, including on the empty-news path.
+    local PWD="$PWD" OLDPWD="${OLDPWD:-}"
+    cd -P . || return
+    path="$PWD/$path"
+  fi
   path="$path/"
   HOST_CONFIG_DIR=""
   while [ -n "$path" ]; do

@@ -3,11 +3,11 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^mcp__(plugin_agent-companion_)?agent-bridge__agent_(send|wait|cancel|status)$",
+        "matcher": "^(mcp__(plugin_agent-companion_)?agent-bridge__)?agent_(send|wait|cancel|status|read)$",
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/name-thread.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" pre-tool",
             "onFailure": "block",
             "timeout": 5
           }
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/drain-completions.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" post-tool",
             "timeout": 5
           }
         ]
@@ -36,7 +36,7 @@
           },
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/drain-completions.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" session-start",
             "timeout": 5
           }
         ]
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/drain-completions.sh\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.sh\" prompt",
             "timeout": 5
           }
         ]

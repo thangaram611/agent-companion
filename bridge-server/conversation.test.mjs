@@ -31,7 +31,7 @@ test('catalog is ownerless, spawns no process and leaves cold and populated stat
   rmSync(BASE_DIR, { recursive: true, force: true });
   rmSync(process.env.AGENT_RUNTIME_DIR, { recursive: true, force: true });
   const cold = [snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)];
-  const first = (await call('catalog-owner-a')).structuredContent;
+  const first = JSON.parse((await call('catalog-owner-a')).content[0].text);
   assert.deepEqual([snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)], cold);
   assert.equal(first.targets.length, 5);
   assert.equal(first.targets.find((t) => t.id === 'antigravity').model.enumeration, 'not enumerable without a session');
@@ -70,7 +70,7 @@ test('catalog is ownerless, spawns no process and leaves cold and populated stat
     writeFileSync(join(process.env.AGENT_RUNTIME_DIR, name), `unchanged ${name}\n`);
   }
   const before = [snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)];
-  const result = (await call('catalog-owner-b')).structuredContent;
+  const result = JSON.parse((await call('catalog-owner-b')).content[0].text);
   assert.equal(result.targets.find((t) => t.id === 'claude').installed_version, 'claude cached');
   assert.equal(result.targets.find((t) => t.id === 'claude').readiness.ready, true);
   assert.equal(result.default_target.target, 'codex');
@@ -88,7 +88,7 @@ test('catalog reports effort levels and permissions from the execution environme
   const { probePermission } = await import('../lib/target-diagnostics.mjs');
   const { getTarget } = await import('../lib/target-registry.mjs');
   const env = { AGENT_COMPANION_CLAUDE_PERMISSION: 'plan', AGENT_COMPANION_DEFAULT_TARGET: 'claude' };
-  const catalog = (await dispatch({ name: 'agent_catalog' }, { controller: { env } })).structuredContent;
+  const catalog = JSON.parse((await dispatch({ name: 'agent_catalog' }, { controller: { env } })).content[0].text);
   assert.equal(catalog.default_target.target, 'claude');
   for (const target of catalog.targets) {
     assert.equal(target.effort.selection, true);
@@ -139,7 +139,7 @@ test('catalog reads saved defaults and each last reported field across hosts, sk
     return readExecution.call(this, id);
   });
   const before = snapshot(BASE_DIR);
-  const catalog = (await dispatch({ name: 'agent_catalog' }, { controller: { env } })).structuredContent;
+  const catalog = JSON.parse((await dispatch({ name: 'agent_catalog' }, { controller: { env } })).content[0].text);
   assert.equal(catalog.targets.length, 5);
   for (const { id, model, effort } of catalog.targets) {
     assert.deepEqual(model.last_run, { value: (id === 'opencode' ? 'opencode/' : '') + id + '-reported', at: new Date(now - 2000).toISOString(), age_ms: 2000, host: 'claude' });

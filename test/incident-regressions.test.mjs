@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Controller } from '../bridge-server/controller/controller.mjs';
 import { Records } from '../bridge-server/controller/records.mjs';
-import { codexDispatchFixture, terminalRows } from './controller/codex-dispatch-fixture.mjs';
+import { codexDispatchFixture } from './controller/codex-dispatch-fixture.mjs';
 import { diskSnapshot, until } from './controller/helpers.mjs';
 import { note } from './codex-wire-frames.mjs';
 
@@ -34,7 +34,7 @@ test('CONTRACT: timeout must stop work or avoid claiming process termination', a
 });
 
 // Phase 3 mapping: refusal allocates no execution; the old answer remains
-// attributable only to the original execution id, including its queue event.
+// attributable only to the original execution id, including its metadata.
 test('CONTRACT: old native answer must not be labeled the successful result of an undelivered new task', async (t) => {
   const h = codexDispatchFixture(t);
   const first = await h.send();
@@ -43,10 +43,9 @@ test('CONTRACT: old native answer must not be labeled the successful result of a
   const result = await h.call({ action: 'wait', job_id: first.job_id });
   assert.equal(result.status, 'completed');
   assert.equal(result.job_id, first.job_id);
+  assert.equal(result.meta.job_id, first.job_id);
   assert.equal(result.content, 'OLD_ANSWER');
   assert.deepEqual(h.records.listExecutions().map((e) => [e.executionId, e.text]), [[first.job_id, 'original']]);
-  assert.equal(terminalRows(first.job_id).length, 1);
-  assert.equal(terminalRows(first.job_id)[0].meta.job_id, first.job_id);
 });
 
 async function retryFixture(t) {

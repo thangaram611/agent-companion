@@ -9,7 +9,6 @@ import { fixtureSupervisor } from './fixture-table.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
 import { systemClock } from '../../bridge-server/controller/clock.mjs';
 import { writeTargetChecks } from '../../lib/state.mjs';
-import { queuePath } from '../../lib/runtime-paths.mjs';
 import { createBridgeController } from '../../bridge-server/tools.mjs';
 import { callTool } from '../tool-call.mjs';
 
@@ -50,7 +49,7 @@ if (process.argv[2] === 'app-server') {
     return adapter;
   };
   const call = async (args, request = {}, controller = active) =>
-    (await callTool(args, { controller, ...request })).structuredContent;
+    await callTool(args, { controller, ...request });
   const send = (task = 'original', thread) => call({ action: 'send', target: 'codex', cwd: dir, task, ...(thread && { thread }) });
   const adapter = (id) => active.live.get(id).adapter;
   const emit = (id, frames) => adapter(id)._call('fake/emit', { frames });
@@ -65,9 +64,4 @@ if (process.argv[2] === 'app-server') {
     for (const a of [...active.live.values()]) await active.cancel({ owner: a.record.owner, executionId: a.record.executionId });
   });
   return { dir, bin, env, records, clock, active, call, send, adapter, emit, complete, frames, spawns };
-}
-
-export function terminalRows(id) {
-  return existsSync(queuePath()) ? readFileSync(queuePath(), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
-    .filter((row) => row.kind === 'terminal' && row.jobId === id) : [];
 }

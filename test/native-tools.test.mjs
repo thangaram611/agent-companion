@@ -9,7 +9,7 @@ import { SANDBOX_HOME } from './sandbox-home.mjs';
 import { fakeCodexBin } from './fake-codex-app-server.mjs';
 import { fakeClaudeBin } from './fake-claude-stream.mjs';
 import { note, threadItem } from './codex-wire-frames.mjs';
-import { codexDispatchFixture, terminalRows } from './controller/codex-dispatch-fixture.mjs';
+import { codexDispatchFixture } from './controller/codex-dispatch-fixture.mjs';
 import { fixtureSupervisor } from './controller/fixture-table.mjs';
 import { until } from './controller/helpers.mjs';
 import { callTool } from './tool-call.mjs';
@@ -69,7 +69,7 @@ await cleanupExecution({ records, execution: records.readExecution(process.argv[
       await once(watcher, 'spawn');
       return { pid: watcher.pid };
     } });
-  const call = async (args) => (await callTool(args, { controller: active })).structuredContent;
+  const call = (args) => callTool(args, { controller: active });
   const send = task => call({ action: 'send', target: 'codex', cwd: dir, task });
   t.after(async () => {
     for (const supervisor of supervisors) await supervisor.terminate({ graceMs: 0 });
@@ -89,7 +89,7 @@ await cleanupExecution({ records, execution: records.readExecution(process.argv[
   await until(() => records.readResult(lost.job_id), 'cleanup watcher result');
   const fresh = createBridgeController({ env, records, createSupervisor });
   await recoverController(fresh);
-  const recovered = (await callTool({ action: 'wait', job_id: lost.job_id }, { controller: fresh })).structuredContent;
+  const recovered = await callTool({ action: 'wait', job_id: lost.job_id }, { controller: fresh });
   assert.equal(recovered.meta.cause, 'bridge_loss'); assert.equal(recovered.meta.stop_evidence.gone, true);
   assert.equal(recovered.status, 'cancelled');
   const trace = readFileSync(env.CODEX_FAKE_TRACE, 'utf8').trim().split('\n').map(JSON.parse);
@@ -180,7 +180,7 @@ test('dispatch wires the Claude provider through fake native send and cold resum
     for (const supervisor of supervisors) await supervisor.terminate({ graceMs: 0 });
     writeTargetChecks({});
   });
-  const call = async (args) => (await callTool(args, { controller: active })).structuredContent;
+  const call = (args) => callTool(args, { controller: active });
   const answers = [];
   let thread;
   for (const task of [EXACT_TASK, 'follow-up']) {
@@ -228,7 +228,7 @@ test('Codex accepts effort and exposes adapter refusals through send, status and
     const refused = await send(effort);
     assert.equal(refused.status, 'failed');
     assert.equal(refused.action, 'send');
-    assert.equal(readFileSync(terminalRows(refused.job_id)[0].receiptPath, 'utf8'), 'owner\n', 'terminal send claimed before any wait');
+    assert.equal(readFileSync(h.records.path('results', refused.job_id) + '.delivery', 'utf8'), 'tool\n', 'terminal send claimed before any wait');
     assert.equal(refused.meta.detail, code);
     assert.match(refused.content, message);
     assert.doesNotMatch(refused.content, /saved default/i);

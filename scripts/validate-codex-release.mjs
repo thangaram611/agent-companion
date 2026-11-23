@@ -115,6 +115,7 @@ function validateMarketplaceTree(marketplaceRoot) {
   assert(manifest.mcpServers?.['agent-bridge']?.tool_timeout_sec === 1320, 'plugin MCP tool timeout mismatch');
   assertExists(path.join(pluginRoot, 'hooks', 'hooks-codex.json'), 'Codex hook manifest');
   assertExists(path.join(pluginRoot, 'hooks', 'launch-agent-bridge.sh'), 'Codex bridge launcher');
+  for (const file of ['hook.sh', 'hook.mjs']) assertExists(path.join(pluginRoot, 'hooks', file));
   assertExists(path.join(pluginRoot, 'hooks', 'host-paths.sh'), 'Codex hook path helper');
   assertExists(path.join(pluginRoot, 'bridge-server', 'server.mjs'), 'bridge server');
   const adapters = 'bridge-server/adapters';
@@ -153,6 +154,7 @@ function validateInstalledTree(codexHome, installedPath) {
   assert(manifest.mcpServers?.['agent-bridge']?.default_tools_approval_mode === 'approve', 'installed plugin MCP approval mode mismatch');
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'hooks-codex.json'), 'installed Codex hook manifest');
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'launch-agent-bridge.sh'), 'installed Codex bridge launcher');
+  for (const file of ['hook.sh', 'hook.mjs']) assertExists(path.join(resolvedInstalledPath, 'hooks', file));
   assertExists(path.join(resolvedInstalledPath, 'hooks', 'host-paths.sh'), 'installed Codex hook path helper');
   assertExists(path.join(resolvedInstalledPath, 'bridge-server', 'server.mjs'), 'installed bridge server');
   assertExists(path.join(resolvedInstalledPath, 'assets', 'readme', 'hero.png'), 'installed README assets');

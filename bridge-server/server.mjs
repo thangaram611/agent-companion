@@ -54,28 +54,9 @@ mcp.setRequestHandler(ReadResourceRequestSchema, async (req) => (
   readDigestResource(req.params.uri, controller)
 ));
 
-const AGENT_OUTPUT_SCHEMA = {
-  type: 'object',
-  additionalProperties: true,
-  required: ['ok'],
-  properties: {
-    ok: { type: 'boolean' },
-    action: { type: 'string' },
-    status: { type: 'string' },
-    code: { type: 'string' },
-    error: { type: 'string' },
-    job_id: { type: 'string' },
-    target: { type: 'string' },
-    thread: { type: 'string' },
-    digest_uri: { type: ['string', 'null'] },
-    meta: { type: 'object', additionalProperties: true },
-    content: { type: 'string' },
-  },
-};
-
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: tools.map(({ name, description, inputSchema, annotations }) =>
-    ({ name, description, inputSchema, annotations, outputSchema: AGENT_OUTPUT_SCHEMA })),
+    ({ name, description, inputSchema, annotations })),
 }));
 mcp.setRequestHandler(CallToolRequestSchema, (req, { requestId, signal } = {}) =>
   dispatch(req.params, { controller, requestId, signal }));
