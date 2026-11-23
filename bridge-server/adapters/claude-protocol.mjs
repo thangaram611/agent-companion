@@ -6,7 +6,7 @@ export function claudeArgs({ historyId, resume, model, effort, env }) {
   return ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--replay-user-messages', '--include-partial-messages', '--permission-mode', resolveClaudePermission(env),
     '--permission-prompts', 'none', '--disallowedTools', 'mcp__plugin_agent-companion_agent-bridge__*',
-    'mcp__agent-bridge__*', 'Agent(agent-companion)', resume ? '--resume' : '--session-id', historyId,
+    'mcp__agent-bridge__*', resume ? '--resume' : '--session-id', historyId,
     ...(model === undefined ? [] : ['--model', model]), ...(effort === undefined ? [] : ['--effort', effort])];
 }
 

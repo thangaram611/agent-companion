@@ -8,7 +8,7 @@ import { lastRuns } from './last-runs.mjs';
 import { getCodexContractStatus } from './adapters/codex.mjs';
 import { executionStatus, publish, toolAnswer, wakeNotice } from './delivery.mjs';
 import { Controller } from './controller/controller.mjs';
-import { Records, firstLine } from './controller/records.mjs';
+import { Records, firstLine, isCompanionSession } from './controller/records.mjs';
 import { systemClock } from './controller/clock.mjs';
 import { createProviders } from './providers.mjs';
 import { log } from './validation.mjs';
@@ -264,12 +264,13 @@ async function handleSend(args, active, request, conversation) {
   const { task, mode, lead } = args;
   const cwd = args.cwd ?? conversation?.cwd;
   let thread = args.thread;
+  const live = conversation && active.live.has(conversation.executionId);
   if (conversation) {
     const mismatch = args.target && args.target !== conversation.provider ? 'provider_mismatch'
       : args.cwd && realpathSync(args.cwd) !== conversation.cwd ? 'cwd_mismatch' : null;
     if (mismatch) return refuse('send', mismatch, { thread, job_id: conversation.executionId, target: conversation.provider,
       hint: `This thread is bound to ${conversation.provider} in ${conversation.cwd}. Omit thread to start a new thread.` });
-    if (active.live.has(conversation.executionId)) {
+    if (live) {
       const e = active.records.readExecution(conversation.executionId);
       if ((args.model && args.model !== e.modelOverride) || (args.effort && args.effort !== e.effortOverride)) {
         return refuse('send', 'thread_busy', { thread, job_id: e.executionId, target: e.provider, current_status: e.state });
@@ -286,6 +287,8 @@ async function handleSend(args, active, request, conversation) {
     }
   }
   if (mode !== undefined) invalid('mode requires new text on a running thread');
+  // Work a send would start is refused to a companion session a bridge started.
+  if (!live && isCompanionSession(lead.session, active.env)) return refuse('send', 'RECURSION_REFUSED');
   const route = resolveRouting({ ...args, target: conversation?.provider ?? args.target }, active.env, !conversation);
   if (!route.ok) return asJson({ ...route, action: 'send', status: route.code });
   const { companion, model, effort, savedEffortHint } = route.resolved;

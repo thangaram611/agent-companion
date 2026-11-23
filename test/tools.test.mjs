@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { writeCompanionDefaults, writeTargetChecks } from '../lib/state.mjs';
 import { hookAnswer } from '../bridge-server/delivery.mjs';
 import { decodeTool } from './tool-call.mjs';
+import { HOSTS } from '../lib/hosts/index.mjs';
 import { setupController, diskSnapshot, deferred } from './controller/helpers.mjs';
 import { tools, dispatch, createBridgeController, recoverController } from '../bridge-server/tools.mjs';
 
@@ -58,6 +59,24 @@ const scenarios = {
     assert.deepEqual(diskSnapshot(h.dir), before);
   },
 
+  async 'companion history in another host refuses new and resumed jobs'() {
+    const h = fixture();
+    delete h.controller.env.AGENT_COMPANION_HOME;
+    h.controller.env.HOME = h.dir;
+    const conversations = join(HOSTS.codex.stateDir(h.controller.env), 'conversations');
+    const saveHistory = historyId => writeFileSync(join(conversations, 'other.json'), JSON.stringify({ historyId }));
+    mkdirSync(conversations, { recursive: true }); writeFileSync(join(conversations, 'broken.json'), '{'); saveHistory('nested');
+    const before = diskSnapshot(h.dir);
+    assert.deepEqual([(await h.send({}, { session: 'nested' })).code, h.adapters.length], ['RECURSION_REFUSED', 0]);
+    assert.deepEqual(diskSnapshot(h.dir), before);
+    const { thread, job_id } = await h.send();
+    saveHistory(main.session);
+    assert.equal((await h.send({ thread })).job_id, job_id);
+    assert.equal((await h.send({ thread, task: 'steer' })).status, 'intervened');
+    await h.finish(job_id);
+    assert.equal((await h.send({ thread })).code, 'RECURSION_REFUSED');
+    assert.equal(h.adapters.length, 1);
+  },
   async 'subagents and sessions have independent thread lists and cannot use foreign references'() {
     const h = fixture();
     const sub = { ...main, agent: 'native-child' };

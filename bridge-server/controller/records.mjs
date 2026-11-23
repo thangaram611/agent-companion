@@ -1,7 +1,7 @@
 import { readFileSync, readSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, lstatSync, fstatSync, rmSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { BASE_DIR } from '../../lib/state.mjs';
-import { refuseRealHomeUnderTest } from '../../lib/hosts/index.mjs';
+import { refuseRealHomeUnderTest, stateDirs } from '../../lib/hosts/index.mjs';
 import { writePrivateFileAtomic } from '../../lib/runtime-paths.mjs';
 import { sumUsage } from '../../lib/usage.mjs';
 
@@ -219,4 +219,20 @@ export class Records {
       return true;
     });
   }
+}
+
+export function isCompanionSession(session, env) {
+  for (const { dir } of stateDirs(env)) {
+    const records = new Records({ dir });
+    let entries;
+    try { entries = readdirSync(join(dir, 'conversations'), { withFileTypes: true }); }
+    catch { continue; }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      try {
+        if (records.readConversation(entry.name.slice(0, -5))?.historyId === session) return true;
+      } catch { /* Skip unreadable records and continue checking this host. */ }
+    }
+  }
+  return false;
 }
