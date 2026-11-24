@@ -106,7 +106,7 @@ test('status-only second bridge writes nothing, renews nothing and refuses overl
   const before = disk(h.dir);
   const allFiles = disk();
   for (let i = 0; i < 5; i++) {
-    assert.equal(observer.status({ jobId: sent.jobId }).state, 'unknown');
+    assert.equal(observer.status({ jobId: sent.jobId }).state, 'job_not_controlled');
     h.controller.status({ thread: 'child' });
   }
   assert.deepEqual(disk(h.dir), before);
@@ -266,7 +266,7 @@ test('startup recovery verifies absence without adopting live work or mutating s
   let gone = false;
   const fresh = new Controller({ records: h.records, clock: h.clock, providers: h.controller.providers, createSupervisor: () => ({ verifyGone: async () => ({ gone, survivors: gone ? [] : [{ pid: 91001 }] }) }) });
   const before = disk(h.dir);
-  assert.equal((await fresh.recover({ thread: 'old' })).state, 'unknown');
+  assert.equal((await fresh.recover({ thread: 'old' })).state, 'job_not_controlled');
   assert.deepEqual(disk(h.dir), before);
   gone = true;
   const recovered = await fresh.recover({ thread: 'old' });

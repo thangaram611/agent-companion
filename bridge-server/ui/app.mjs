@@ -44,14 +44,14 @@ export function run({ model, stdout = process.stdout, stdin = process.stdin, pol
 
 const USAGE = `usage: agent-companion ui
 
-A live view of companion jobs from both hosts' state directories: running
+A live view of companion jobs from configured hosts: running
 jobs first, then the last 24 hours. A running job's message box sends to its
 bridge's inbox. Press ? in the list for keys.
 `;
 if (import.meta.main) {
   const args = process.argv.slice(2);
   if (args.length !== 1 || args[0] !== 'ui') {
-    const help = ['help', '--help', '-h'].includes(args[0]);
+    const help = ['help', '--help', '-h'].includes(args[0]) || (args.length === 2 && args[0] === 'ui' && args[1] === '--help');
     (help ? process.stdout : process.stderr).write(USAGE);
     process.exitCode = help ? 0 : 2;
   } else if (!process.stdout.isTTY || !process.stdin.isTTY) {

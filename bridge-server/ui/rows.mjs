@@ -274,7 +274,7 @@ export function liveLines(job, { now, lastText = null, activeAt = null }) {
   const doing = progress.activeCommand ? `running $ ${commandText(progress.activeCommand)}`
     : progress.activity ? clean(progress.activity) : partial ? 'responding' : job.record.state === 'running' ? 'working' : clean(job.record.state);
   const segs = [[`● ${doing}`, 'ok']];
-  if (progress.retry) segs.push([` · retrying${progress.retry.attempt ? ` (attempt ${progress.retry.attempt})` : ''}`, 'warn']);
+  if (progress.retry) segs.push([`${doing === 'retrying' ? '' : ' · retrying'}${progress.retry.attempt ? ` (attempt ${progress.retry.attempt})` : ''}`, 'warn']);
   if (activeAt != null) segs.push([` · ${clock(now - activeAt)}`, 'ok']);
   out.push({ segs, hang: 2 });
   return out;

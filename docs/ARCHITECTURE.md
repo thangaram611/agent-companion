@@ -114,14 +114,15 @@ All three tools check thread ownership.
   and `limit`. It reads posts in generation order. The default page is 8,000
   characters and the maximum is 40,000. An empty `after` starts before the first
   post. Both character counts are integers, with `offset` ≥ 0 and `limit` ≥ 1.
-  Continue with the footer's exact `after` and `offset`, even when an earlier
+  Pass only `thread` for the first read. Continue with the footer's exact `after` and `offset`, even when an earlier
   page advanced the read cursor.
 - `companion_status` with no arguments lists the caller's threads, one short
   row each: `thread`, `title`, `companion`, `cwd`, `state`, `job_id`, `started_at`
   and `unread`. Running jobs sort first, then newest start time. The response
-  also carries `default_companion`. With `diagnostics: true` it adds `companions`, every companion's fixed details
-  (about 15 KB, which is why they are not in the default answer), and
-  `diagnostics.companions`, the cached readiness checks.
+  also carries `default_companion`. Unread counts completed posts remaining at the read cursor.
+  A running job can include the latest 512 characters of partial text. Diagnostics add
+  cached readiness verdicts, blockers and next steps. For a job they include native
+  references, stop evidence and the Codex contract verdict when applicable.
 - `companion_cancel` takes a thread or job id and stops the job. The thread remains
   available for a supported follow-up.
 
@@ -133,6 +134,7 @@ Both `model` and `effort` include `saved` from `settings.json` and `last_run` fr
 newest job across hosts that reported that field. Either can be null.
 `last_run` contains `{ value, at, age_ms, host }`, with an ISO start time.
 `model.model` and `model.source` account for the environment override.
+When a readiness check is missing, catalog points to `node scripts/onboard.mjs --list-companions`.
 Catalog requires no lead identity, starts no process and writes no state. If model enumeration needs a
 session, it reports "not enumerable without a session". A missing catalog entry
 alone does not prove an explicitly requested model invalid.
@@ -204,14 +206,13 @@ Copilot receives no spawn effort flag. The bridge reapplies its model override a
 Claude rejects off-enum effort before spawn. Its CLI selection persistence
 was not measured here.
 
-`records.begin` records the attempted effort on the job and retains the
-thread's previous effort. The controller saves the new override only after
+`records.begin` records the attempted model and effort on the job and retains the thread’s previous selections. The controller saves new overrides only after
 `openHistory` succeeds. A refused send therefore leaves omitted follow-ups on the
 previous override or inheritance. While validation is pending, duplicate sends
-compare against the active job's effort. Refusals use the existing terminal
+compare against the active job's requested selections. Refusals use the existing terminal
 result: the code is `detail`, the explanation is `text`, projected as send/wait
-`meta.detail` and the answer text block, or status `detail` and `partial_text`. A send that fails
-before acknowledgement returns that terminal envelope immediately.
+`meta.detail` and the answer text block, and in status `detail`. A failure before delivery returns an MCP error with
+`ok: false`, its job ID and the provider explanation.
 
 Provider failures use the same text path. The controller appends the provider's
 explanation after a blank line when partial assistant text exists; an identical
@@ -257,9 +258,8 @@ not own the live job. Catalog reports the registry's
 
 Terminal tool responses map stored outcomes to three statuses. `completed` stays
 `completed`, `interrupted` and `stopped` become `cancelled`, and `failed` and
-`delivery_unknown` become `failed`. The second text block carries `meta.cause`,
-`detail`, `native_refs` and `stop_evidence` with process absence, signal and
-survivor counts, cleanup time and protocol steps when available.
+`delivery_unknown` become `failed`. The second text block carries `meta.cause`, optional detail and a cleanup summary with process absence, signal and survivor
+counts and elapsed cleanup time. Job status with diagnostics includes protocol steps.
 
 ### Turn loop, interventions and user inbox
 
@@ -336,7 +336,7 @@ same-version pair under `$CODEX_HOME/plugins/.plugin-appserver/`. It does not
 change Homebrew links or quarantine attributes. `approvalPolicy: never` is fixed;
 the default sandbox is `workspace-write` with network enabled. A busy native
 history is refused before `turn/start`. The advisory schema probe runs once per
-bridge; catalog's Codex entry and status expose `contractStatus` as
+bridge. A Codex job’s status with diagnostics exposes `contractStatus` as
 `match|drift|unverified`. A version-only change is not schema drift.
 
 ACP pins protocol v1. The descriptor supplies argv, permissions, usage and model
@@ -535,9 +535,10 @@ Record writes are atomic and private, with thread-generation and writer
 fences. A native terminal outcome is persisted before cleanup; the final immutable
 result includes cleanup evidence. Startup reconciliation reads watcher results
 or verifies process absence. It never adopts old live work; until absence is
-proven, state stays `unknown` and a new job is refused. Status does not
-reconcile or publish a completion. The watcher writes only its
-fenced result; the startup scan restores pending news from stored results.
+proven, an observing bridge reports `job_not_controlled` and directs the caller to the owning session. Status does not
+reconcile or publish a completion. The bridge log records job starts, ends and wake decisions with job ID, thread ID,
+host, transport and reason. Successful transport events report the socket write,
+queue exit, prompt API return or extension acknowledgement. A watcher failure records a bounded code. On successful cleanup the watcher writes its fenced result. The startup scan restores pending news from stored results.
 
 On first open per process, `Records` archives coexisting 0.x state under `legacy/`,
 moves 1.0.0 records into `threads/` and `jobs/`, and updates result fields in place.
@@ -564,7 +565,7 @@ a temporary file, stages there and writes a tree; it never changes the real inde
 HEAD, refs or working files. Loose objects remain for git gc. After terminating the
 provider tree, the controller takes the end snapshot and reads the native transcript.
 It records a locator after acknowledgement, retrying at terminal if none was found.
-Terminal envelopes expose the immutable result's `workSummary` as `meta.work_summary`,
+Terminal envelopes expose the immutable result's `workSummary` as `meta.work_summary` with empty collections and null values omitted,
 including after hook delivery. Commands (20), deduplicated
 edits (50), errors (20) and diff files (50) have omitted counts. Binary diff entries
 have `binary: true` and null line counts. The diff includes changes by any writer

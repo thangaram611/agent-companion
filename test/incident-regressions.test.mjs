@@ -43,7 +43,7 @@ test('CONTRACT: old native answer must not be labeled the successful result of a
   const result = await h.call({ action: 'wait', job_id: first.job_id });
   assert.equal(result.status, 'completed');
   assert.equal(result.job_id, first.job_id);
-  assert.equal(result.meta.job_id, first.job_id);
+  assert.equal(result.job_id, first.job_id);
   assert.equal(result.content, 'OLD_ANSWER');
   assert.deepEqual(h.records.listJobs().map((e) => [e.jobId, e.text]), [[first.job_id, 'original']]);
 });

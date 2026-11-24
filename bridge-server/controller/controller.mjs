@@ -6,7 +6,7 @@ import { getCompanionById } from '../../lib/companion-registry.mjs';
 import { probePermission } from '../../lib/companion-diagnostics.mjs';
 import { ProcessSupervisor } from './process-supervisor.mjs';
 import { systemClock, bounded } from './clock.mjs';
-import { cleanupJob, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';
+import { spawnCleanupWatcher, runCleanup } from './watcher.mjs';
 import { appendProviderError } from '../provider-error.mjs';
 import { locateTranscript, readTranscript } from '../../lib/transcripts.mjs';
 import { snapshotWorktree, diffWorktrees } from '../../lib/worktree-snapshot.mjs';
@@ -56,17 +56,17 @@ export class Controller {
     const threadRecord = this.records.readThread(thread);
     if (threadRecord && threadRecord.companion !== companion) throw error('companion_mismatch');
     if (threadRecord && threadRecord.cwd !== cwd) throw error('cwd_mismatch');
-    const modelOverride = model === undefined ? threadRecord?.modelOverride : model;
     const existing = threadRecord && this.live.get(threadRecord.jobId);
-    const effortOverride = effort === undefined
-      ? (existing && !existing.closed ? existing.record.effortOverride : threadRecord?.effortOverride) : effort;
+    const selection = existing && !existing.closed ? existing.record : threadRecord;
+    const modelOverride = model === undefined ? selection?.modelOverride : model;
+    const effortOverride = effort === undefined ? selection?.effortOverride : effort;
     if (existing && !existing.closed) {
       if (existing.record.text !== text || existing.record.modelOverride !== modelOverride || existing.record.effortOverride !== effortOverride) throw error('thread_busy');
       return existing.ready.promise;
     }
     const selected = this.providers?.[companion];
     if (!selected?.enabled) throw error('COMPANION_UNSUPPORTED');
-    if (!selected.ready) throw error('CAPABILITY_UNAVAILABLE');
+    if (!selected.ready) throw Object.assign(error('CAPABILITY_UNAVAILABLE'), { companion });
     if (modelOverride !== undefined && (typeof modelOverride !== 'string' || !selected.modelAllowed?.(modelOverride))) throw error('MODEL_NOT_ALLOWED');
     const historyId = threadRecord?.historyId ?? null;
     const adapter = selected.create();
@@ -106,7 +106,7 @@ export class Controller {
       a.record.historyId = history.historyId;
       a.record.effectiveModel = history.effectiveModel;
       a.record.effectiveEffort = history.effectiveEffort;
-      this.records.writeThread({ ...threadRecord, historyId: history.historyId, effortOverride: a.record.effortOverride });
+      this.records.writeThread({ ...threadRecord, historyId: history.historyId, modelOverride: a.record.modelOverride, effortOverride: a.record.effortOverride });
       a.record.nativeRefs = history.nativeRefs ?? {};
       a.record.startSnapshot = await a.startSnapshot;
       if (a.stopping) return;
@@ -370,7 +370,7 @@ export class Controller {
     if (result) return this._userNotice(thread, jobId) ?? result;
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 1_200_000) throw error('invalid_wait');
     const a = this.live.get(jobId);
-    if (!a || a.handedOff) return this._userNotice(thread, jobId) ?? this.status({ jobId });
+    if (!a || a.handedOff) return this.status({ jobId });
     const notice = this._userNotice(thread, jobId);
     if (notice) return notice;
     return new Promise(resolve => {
@@ -449,7 +449,7 @@ export class Controller {
     const result = this.records.readResult(jobId);
     if (result) return result;
     const a = this.live.get(jobId);
-    if (!a || a.handedOff || a.closed) throw error('job_unknown');
+    if (!a || a.handedOff || a.closed) throw error('job_not_controlled');
     return this._close(a, 'owner_stop');
   }
   status({ jobId, thread } = {}) {
@@ -462,7 +462,7 @@ export class Controller {
     const interventions = { default: job.interventionModes?.default ?? null,
       ...Object.fromEntries(['steer', 'queue', 'interrupt'].map(mode => [mode, !result && interventionUnavailable(live, mode) === null])) };
     return { job, result, interventions,
-      state: result?.stopEvidence?.gone || job.cleanup?.gone ? 'closed' : live ? job.state : 'unknown' };
+      state: result?.stopEvidence?.gone || job.cleanup?.gone ? 'closed' : live && !live.handedOff ? job.state : result ? 'unknown' : 'job_not_controlled' };
   }
   // Explicit startup reconciliation, never invoked by an observer. It never
   // adopts or signals an old runtime: only positive absence permits recovery.
@@ -505,7 +505,11 @@ export class Controller {
         if (!this.records.handoff(a.record)) throw error('writer_fenced');
         let watcher;
         try { watcher = await this.launchWatcher({ stateDir: this.records.dir, jobId: a.record.jobId }); }
-        catch { watcher = { result: await cleanupJob({ records: this.records, job: a.record, clock: this.clock, createSupervisor: this.createSupervisor }) }; }
+        catch {
+          const handedOff = this.records.readJob(a.record.jobId);
+          this.records.writeJob({ ...handedOff, watcherFailure: 'watcher_spawn_failed' }, 'watcher');
+          watcher = { result: await runCleanup({ records: this.records, job: a.record, clock: this.clock, createSupervisor: this.createSupervisor }) };
+        }
         a.supervisor.detach();
         const response = { jobId: a.record.jobId, state: 'cleanup_pending', watcher };
         a.ready.resolve(response); a.done.resolve(response); handoffs.push(response);

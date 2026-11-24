@@ -53,9 +53,10 @@ Omit the mode to use the companion's default. Status shows which modes work now.
 An unavailable mode returns `intervention_unavailable`. Changing model or effort
 mid-job returns `thread_busy`. Repeating the original send returns the existing job.
 
-**Get the answer.** End your turn or ask the lead to wait. The hook checks at session
-start, at your next prompt and after a tool call. A wake sends a short notice to the
-main conversation and triggers its hook. The send tells you which wake is available. Claude inbox wakes
+**Get the answer.** Check the send acknowledgement. If it includes a terminal result,
+handle it immediately. If `delivery.wake` is null, wait using the returned job ID.
+With an armed wake you can continue other work. Claude, Codex and Copilot can deliver
+answers through a hook. OpenCode sends a prompt with a call to read the result. Claude inbox wakes
 need Claude Code 2.1.228 or later. A relocated `CODEX_HOME` prevents the Codex wake from reaching the lead.
 A lead inside a native subagent also uses wait. Each wait defaults to 480 seconds
 and allows up to 1,200. If a message from the live view returns `user_intervened`,
@@ -70,7 +71,7 @@ If you asked for tests, check the commands and exit codes. Ask the lead to cance
 | --- | --- |
 | `companion_catalog` | Show companions, capabilities, defaults, last-checked readiness and installed versions. Some model lists need a live session. |
 | `companion_send` | Start a thread, follow up or send new text to running work. |
-| `companion_status` | List this lead's threads and unread counts, or inspect one thread or job. Request diagnostics for cached companion checks. |
+| `companion_status` | List this lead's threads and completed posts remaining at the read cursor, or inspect a job. Diagnostics include cached readiness and native job evidence. |
 | `companion_wait` | Wait on a thread or job until an answer, a user message or the time limit. |
 | `companion_read` | Read a thread in order, in pages of 8,000 characters by default (up to 40,000). |
 | `companion_cancel` | Stop the job by thread or job id. |
@@ -188,14 +189,17 @@ In the transcript,
 Below 110 columns the list and transcript share one pane. Opening a running job focuses
 its message box. Drafts stay in memory. A sent message shows its state until it appears
 in the transcript. A refusal shows the reason and restores the text if the box is empty.
+In Claude's pane, “acknowledgement pending” means the request was submitted. The pane
+checks that request until the bridge answers and preserves any newer draft.
 
 | Where | Keys | Action |
 | --- | --- | --- |
 | List or transcript | ↑ ↓ or `j` `k`, Enter, Tab, Esc | Select, open, switch pane or return to the list. |
 | Transcript | PgUp, PgDn or Space, `g`, `G` | Page up or down, go to the top, or go to the end and follow. |
 | Transcript | `e` / `E`, `p`, `f` | Fold one item or all items, toggle the preamble or toggle follow. |
-| List | `/`, `o`, `d` | Filter (Enter keeps, Esc clears), include older jobs, or edit defaults. |
+| List | `/`, `o`, `d` | Filter by text, job ID or thread ID (Enter keeps, Esc clears), include older jobs, or edit defaults. |
 | List or transcript | `?`, `q` or Ctrl+C | Show keys, or quit. |
+| Help | ↑ ↓, PgUp, PgDn, Esc | Scroll the shortcuts or close help. |
 | Message box | Enter, Shift+Tab, Ctrl+J | Send, change mode, or add a line. Shift+Enter or Alt+Enter also adds a line where supported. |
 | Message box | ↑ ↓, PgUp, PgDn, Ctrl+O | Scroll or fold all outputs. Scrolling to the end resumes follow. |
 | Message box | Ctrl+X, Esc, Ctrl+C | Confirm cancel with `y` or decline with `n`. Esc keeps the draft. Ctrl+C clears it, or quits if empty. |

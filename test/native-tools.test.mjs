@@ -199,7 +199,9 @@ test('dispatch wires the Claude provider through fake native send and cold resum
     answers.push(answer);
   }
   assert.notEqual(supervisors[0].child.pid, supervisors[1].child.pid);
-  assert.equal(answers[0].meta.native_refs.historyId, answers[1].meta.native_refs.historyId);
+  const statuses = await Promise.all(answers.map(({ job_id }) => call({ action: 'status', job_id, diagnostics: true })));
+  assert.ok(statuses[0].native_refs.historyId);
+  assert.equal(statuses[0].native_refs.historyId, statuses[1].native_refs.historyId);
   const frames = readFileSync(env.FAKE_CLAUDE_TRACE, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(frames.filter((f) => f.type === 'user').map((f) => f.message.content), [EXACT_TASK, 'follow-up']);
   const argv = frames.filter((f) => f.type === 'argv').map((f) => f.args);
@@ -207,7 +209,7 @@ test('dispatch wires the Claude provider through fake native send and cold resum
   assert.ok(argv[1].includes('--resume'));
   assert.equal(argv.some((args) => args.includes('--model')), false);
   assert.ok(argv.every((args) => args[args.indexOf('--effort') + 1] === 'low'));
-  assert.ok(answers.every((answer) => answer.meta.selected_effort === 'low' && answer.meta.effective_effort === null));
+  assert.ok(answers.every((answer) => answer.meta.selected_effort === 'low' && answer.meta.effective_effort === undefined));
 });
 
 test('Codex accepts effort and exposes adapter refusals through send, status and saved results', async (t) => {
@@ -233,19 +235,24 @@ test('Codex accepts effort and exposes adapter refusals through send, status and
     assert.match(refused.content, message);
     assert.doesNotMatch(refused.content, /saved default/i);
     assert.equal(refused.meta.selected_effort, effort);
-    assert.equal(refused.meta.native_refs.historyId, undefined);
+    assert.equal(refused.meta.native_refs, undefined);
     const status = await h.call({ action: 'status', job_id: refused.job_id });
     assert.equal(status.detail, code);
-    assert.equal(status.partial_text, refused.content);
+    assert.equal(status.partial_text, undefined);
     const waited = await h.call({ action: 'wait', job_id: refused.job_id });
-    assert.deepEqual(waited, { ...refused, action: 'wait' });
+    const { error, ...failedSend } = refused;
+    assert.equal(refused.ok, false);
+    assert.match(error, message);
+    assert.deepEqual(waited, { ...failedSend, action: 'wait', ok: true });
     assert.equal(new Records({ dir: h.records.dir }).readResult(refused.job_id).text, refused.content);
     if (code === 'EFFORT_NOT_ALLOWED') t.diagnostic('EFFORT_ENVELOPE codex ' + JSON.stringify(refused));
     const saved = await send();
     assert.equal(saved.meta?.detail, code);
     assert.match(saved.content, message);
     assert.ok(saved.content.includes(join(h.dir, 'settings.json')));
-    assert.deepEqual(await h.call({ action: 'wait', job_id: saved.job_id }), { ...saved, action: 'wait' });
+    const { error: savedError, ...savedSend } = saved;
+    assert.match(savedError, /saved default/);
+    assert.deepEqual(await h.call({ action: 'wait', job_id: saved.job_id }), { ...savedSend, action: 'wait', ok: true });
   }
   assert.equal(h.frames().filter((frame) => frame.method === 'turn/start').length, 1);
 });

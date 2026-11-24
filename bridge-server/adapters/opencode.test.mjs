@@ -26,9 +26,9 @@ for (const source of ['both', 'idle', 'assistant', 'empty-final']) test(`OpenCod
   const call = action => callTool({ action, job_id: sent.jobId }, { controller: h.controller });
   const waited = await call('wait'), status = await call('status');
   const message = 'Add usage credits or subscribe and save up to 66%: https://ollama.com/plans (ref: quota-fixture)';
-  assert.equal(waited.status, 'failed'); assert.equal(waited.meta.cause, 'companion_error'); assert.equal(waited.meta.detail, null);
+  assert.equal(waited.status, 'failed'); assert.equal(waited.meta.cause, 'companion_error'); assert.equal(waited.meta.detail, undefined);
   assert.equal(waited.content, (partial ? 'answer: hello\n\n' : '') + message);
-  assert.equal(status.partial_text, waited.content);
+  assert.equal(status.partial_text, undefined);
   assert.equal(h.records.readResult(sent.jobId).text, waited.content);
   assert.doesNotMatch(JSON.stringify([waited, status]), /SECRET_|response|authorization/i);
   if (source === 'both') t.diagnostic('PROVIDER_ERROR_ENVELOPE opencode ' + JSON.stringify({ status: waited.status,

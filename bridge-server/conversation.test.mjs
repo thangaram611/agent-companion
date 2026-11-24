@@ -34,6 +34,8 @@ test('catalog is ownerless, spawns no process and leaves cold and populated stat
   const first = JSON.parse((await call('catalog-owner-a')).content[0].text);
   assert.deepEqual([snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)], cold);
   assert.equal(first.companions.length, 5);
+  assert.match(first.readiness_check, /node scripts\/onboard.mjs --list-companions/);
+  assert.match(first.inheritance, /follow-up keeps the last accepted selections/i);
   assert.equal(first.companions.find((t) => t.id === 'antigravity').model.enumeration, 'not enumerable without a session');
   const copilot = first.companions.find(t => t.id === 'copilot');
   assert.equal(copilot.model.enumeration, 'not enumerable without a session');
@@ -100,13 +102,9 @@ test('catalog reports effort levels and permissions from the execution environme
       copilot: /account's default/i,
       antigravity: /account's default/i,
     }[companion.id];
-    for (const field of [companion.model, companion.effort]) {
-      assert.match(field.description, /omitted.*saved default/i);
-      assert.match(field.description, native);
-    }
-    assert.match(companion.effort.description, /follow-up keeps.*effort/i);
+    assert.match(companion.model.native_default, native);
+    assert.match(catalog.inheritance, /omitted model.*saved model/);
     assert.deepEqual(companion.effort.levels, companion.id === 'claude' ? ['low', 'medium', 'high', 'xhigh', 'max'] : null);
-    assert.equal(typeof companion.effort.description, 'string');
     const { mode, source, risk } = probePermission(getCompanion(companion.id), env);
     assert.deepEqual(companion.permission, { mode, source, risk });
   }

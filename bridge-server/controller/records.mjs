@@ -1,5 +1,6 @@
 import { readFileSync, readSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, lstatSync, fstatSync, rmSync, rmdirSync, renameSync, existsSync, constants } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { logJob } from '../validation.mjs';
 import { BASE_DIR } from '../../lib/state.mjs';
 import { refuseRealHomeUnderTest, stateDirs } from '../../lib/hosts/index.mjs';
 import { writePrivateFileAtomic } from '../../lib/runtime-paths.mjs';
@@ -273,9 +274,10 @@ export class Records {
         interventionModes: { default: null, steer: false, queue: false, interrupt: false, ...interventionModes },
         interventions: [], turns: [], nativeTurnIds: [] };
       this._write('jobs', jobId, job);
-      // Effort becomes a thread override only after openHistory accepts it.
+      // A requested selection becomes a thread override only after openHistory accepts it.
       this._write('threads', thread, { thread, lead: old ? old.lead : lead, title: old ? old.title : title ?? firstLine(text),
-        generation, jobId, companion, cwd, modelOverride, effortOverride: old?.effortOverride, historyId });
+        generation, jobId, companion, cwd, modelOverride: old?.modelOverride, effortOverride: old?.effortOverride, historyId });
+      logJob('job.start', job, (old?.lead ?? lead)?.host, null, 'starting');
       return job;
     });
   }
@@ -297,6 +299,7 @@ export class Records {
       if (!['completed', 'failed', 'interrupted', 'stopped', 'delivery_unknown'].includes(record.outcome)) throw error('invalid_outcome');
       if (record.outcome === 'stopped' && !record.stopEvidence?.gone) throw error('exit_unverified');
       this._write('results', record.jobId, record);
+      logJob('job.end', record, this.readThread(record.thread)?.lead?.host, null, record.outcome);
       this.removeInbox(record.jobId);
       return true;
     });

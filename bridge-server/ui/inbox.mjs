@@ -5,7 +5,7 @@
 // with mode 0600, and the deletion of the `<requestId>.outcome.json` it has read.
 // The owning bridge's controller applies requests on its tick and removes the
 // job's inbox directory when the job closes.
-import { mkdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmdirSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writePrivateFileAtomic } from '../../lib/runtime-paths.mjs';
@@ -37,11 +37,28 @@ const ID = /^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/;
 // the inbox on its tick, once a second) and take it. Resolves
 // { requestId, outcome }, the outcome null when none came within `waitMs`.
 export async function send({ dir, jobId, mode, text, waitMs = 10_000, now = Date.now }) {
+  let job;
+  try { job = JSON.parse(readFileSync(join(dir, 'jobs', jobId + '.json'), 'utf8')); }
+  catch (err) { if (err.code !== 'ENOENT') throw err; }
+  const refused = reason => ({ requestId: null, outcome: { ok: false, status: 'not_submitted', reason } });
+  if (!job) return refused('Unknown job. Check the job ID in agent-companion ui.');
+  const closed = () => existsSync(join(dir, 'results', jobId + '.json'));
+  if (closed() || !['starting', 'delivering', 'running'].includes(job.state) || job.writer === 'watcher') {
+    return refused('This job no longer takes requests. Check it in agent-companion ui.');
+  }
   const request = { requestId: randomUUID(), jobId, mode, ...(mode === 'cancel' ? {} : { text }), at: now() };
   writeRequest(dir, request);
+  // Close can race the preflight and remove the inbox before our write.
+  if (closed()) {
+    const path = inboxDir(dir, jobId);
+    try { unlinkSync(join(path, request.requestId + '.json')); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+    try { rmdirSync(path); } catch (err) { if (!['ENOENT', 'ENOTEMPTY'].includes(err.code)) throw err; }
+  }
   for (const end = now() + waitMs; ; await new Promise(resolve => setTimeout(resolve, 200))) {
     const outcome = takeOutcome(dir, jobId, request.requestId);
-    if (outcome || now() >= end) return { requestId: request.requestId, outcome };
+    if (outcome) return { requestId: request.requestId, outcome };
+    if (closed() || now() >= end) return { requestId: request.requestId, outcome: null, status: 'pending',
+      hint: 'Inspect the job and this request’s outcome before retrying.' };
   }
 }
 
@@ -51,7 +68,11 @@ if (import.meta.main) {
   const valid = dir && isAbsolute(dir) && ID.test(jobId ?? '') && MODES.has(mode) && !rest.length
     && (mode === 'cancel' ? text === undefined : typeof text === 'string' && text.trim().length > 0);
   if (!valid) {
-    process.stderr.write('usage: launch-ui.sh send <absolute state dir> <jobId> <steer|queue|interrupt|cancel> [text]\n');
+    process.stderr.write('usage: agent-companion send <absolute state dir> <jobId> <steer|queue|interrupt|cancel> [text]\n');
     process.exitCode = 2;
-  } else process.stdout.write(JSON.stringify(await send({ dir, jobId, mode, text })) + '\n');
+  } else {
+    const sent = await send({ dir, jobId, mode, text });
+    process.stdout.write(JSON.stringify(sent) + '\n');
+    if (sent.outcome?.ok === false) process.exitCode = 1;
+  }
 }

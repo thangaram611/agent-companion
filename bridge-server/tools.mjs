@@ -3,37 +3,33 @@ import { existsSync, realpathSync } from 'node:fs';
 import { detectHost, HOSTS } from '../lib/hosts/index.mjs';
 import { readDefaultModel, readDefaultEffort, readSettings, settingsPath, isModelAllowedFor, readDefaultCompanion } from '../lib/state.mjs';
 import { lastCompanionChecks, probePermission } from '../lib/companion-diagnostics.mjs';
-import { defaultCompanionInfo, getCompanion, COMPANIONS, modelHint, listCompanions, listCompanionIds } from '../lib/companion-registry.mjs';
+import { defaultCompanionInfo, getCompanion, COMPANIONS, modelHint, listCompanionIds } from '../lib/companion-registry.mjs';
 import { lastRuns } from './last-runs.mjs';
 import { getCodexContractStatus } from './adapters/codex.mjs';
-import { jobStatus, publish, needsStartupWake, toolAnswer, wakeNotice } from './delivery.mjs';
+import { jobStatus, publish, needsStartupWake, toolAnswer, wakeNotice, readCall, postHeader, threadPosts, toolName } from './delivery.mjs';
 import { Controller } from './controller/controller.mjs';
 import { Records, firstLine, isCompanionSession } from './controller/records.mjs';
 import { createProviders } from './providers.mjs';
-import { log } from './validation.mjs';
+import { logJob } from './validation.mjs';
 import { renderDigest } from '../lib/digest.mjs';
 import { invalid, validateFields, assertCwd, recordId, string, optionalString, number, boolean } from './validation.mjs';
 
 export function clampWaitSec(input) {
-  const cap = 1200;
-  return Math.max(1, Math.min(Number(input) || 480, cap));
+  return Math.max(1, Math.min(input ?? 480, 1200));
 }
 
 function iso(ts) { return ts ? new Date(ts).toISOString() : null; }
 // --- Companion routing and capability gate ------------------------------------
 
 const UNCONFIGURED_SEND_ERROR =
-  'no default companion configured and none passed. Pass companion on companion_send, ' +
-  'or set a default with `node scripts/onboard.mjs --companion <id> --set-default`.';
-function effortDescription(native = "the companion's configuration") {
-  return `Reasoning effort override. When omitted, a new thread uses the saved default, then ${native}. A follow-up keeps its current effort.`;
-}
+  'No default companion is configured. Pass a companion ID from catalog, or choose a default with node scripts/onboard.mjs.';
+const readinessCheck = 'Run node scripts/onboard.mjs --list-companions from the checkout.';
 
 function effortRefusal(descriptor, effort) {
   if (!descriptor || effort == null) return null;
   const companion = descriptor.id, { effortSelection, effortLevels } = descriptor.capabilities;
   if (!effortSelection) return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion,
-    error: `companion "${companion}" cannot select effort` };
+    error: `companion "${companion}" cannot select effort. Omit effort or choose another companion.` };
   if (effortLevels && !effortLevels.includes(effort)) return { ok: false, code: 'EFFORT_NOT_ALLOWED', companion, effort,
     error: `effort "${effort}" is not valid for ${companion}`,
     hint: `Use one of: ${effortLevels.join(', ')}, or omit it to inherit configuration.` };
@@ -61,7 +57,7 @@ export function resolveRouting({ companion: requested = null, model = null, effo
   const selectedModel = model ?? (newThread ? readDefaultModel(companion, env).model : null);
   if (selectedModel && !descriptor.capabilities.modelSelection) {
     return { ok: false, code: 'CAPABILITY_UNAVAILABLE', companion,
-      error: `companion "${companion}" cannot select a model` };
+      error: `companion "${companion}" cannot select a model. Omit model or choose another companion.` };
   }
   if (selectedModel && !isModelAllowedFor(companion, selectedModel)) {
     return { ok: false, code: 'MODEL_NOT_ALLOWED', companion, model: selectedModel,
@@ -72,13 +68,18 @@ export function resolveRouting({ companion: requested = null, model = null, effo
   return selection.refusal || { ok: true, resolved: { companion, model: selectedModel, effort: selection.effort, capabilities: descriptor.capabilities, savedEffortHint: selection.savedEffortHint } };
 }
 
-function runningEnvelope(view, action, now) {
+function runningEnvelope(view, action, now, host) {
   const job = view.job;
   return { ok: true, action, status: 'still_running', job_id: job.jobId, companion: job.companion,
     thread: job.thread, current_status: view.state, started_at: iso(job.startedAt),
     age_s: Math.round((now - job.startedAt) / 1000),
     digest_uri: digestResourceUri(job.jobId),
-    hint: 'call companion_wait({ job_id, max_wait_sec }) again to continue blocking.' };
+    hint: `Call ${toolName(host, 'wait')}({ job_id: ${JSON.stringify(job.jobId)} }) to continue waiting.` };
+}
+
+function notControlled(action, job, host) {
+  return refuse(action, 'job_not_controlled', { thread: job.thread, job_id: job.jobId,
+    hint: `Use the owning session, or check ${toolName(host, 'status')}({ job_id: ${JSON.stringify(job.jobId)} }) later.` });
 }
 
 // Observe only MCP waits on this bridge. Controller requests also include
@@ -97,14 +98,15 @@ async function handleWait(args, active, request) {
   if (response?.status === 'user_intervened') return asJson({ ok: true, action: 'wait', status: response.status,
     thread: args.thread, job_id: args.job_id, intervention: response.intervention });
   const view = active.status({ jobId: args.job_id });
-  if (!view.result) return asJson(runningEnvelope(view, 'wait', active.clock.now()));
+  if (view.state === 'job_not_controlled') return notControlled('wait', view.job, args.lead.host);
+  if (!view.result) return asJson(runningEnvelope(view, 'wait', active.clock.now(), args.lead.host));
   return terminalResponse(active.records, view.job, view.result, 'wait', request);
 }
 
 async function handleCancel(args, active, request) {
   await active.cancel({ thread: args.thread, jobId: args.job_id, ...request });
   const view = active.status({ jobId: args.job_id });
-  if (!view.result) return asJson(runningEnvelope(view, 'cancel', active.clock.now()));
+  if (!view.result) return asJson(runningEnvelope(view, 'cancel', active.clock.now(), args.lead.host));
   return terminalResponse(active.records, view.job, view.result, 'cancel', request);
 }
 
@@ -120,12 +122,13 @@ function handleCatalog(args, { env }) {
   return asJson({
     ok: true, action: 'catalog',
     default_companion: defaultCompanion,
+    inheritance: 'On a new thread an omitted model uses the environment override, then the saved model, then the native default. Omitted effort uses the saved effort, then native configuration. A follow-up keeps the last accepted selections.',
+    ...(listCompanionIds().some(id => !checks[id]) && { readiness_check: readinessCheck }),
     companions: Object.values(COMPANIONS).filter((t) => t.implemented).map((companion) => {
       const model = readDefaultModel(companion.id, env, undefined, settings);
       const saved = settings.companions?.[companion.id];
       const reports = last.get(companion.id);
-      const { nativeDefault: native, adapterKind, modelNote, modelEnumeration, effortDefaultPrefix } = companion.runtime;
-      const modelDefault = model.source === 'env' ? 'the environment override ahead of the saved default' : 'the saved default';
+      const { nativeDefault: native, modelNote, modelEnumeration } = companion.runtime;
       const permission = probePermission(companion, env);
       const checked = checks[companion.id];
       return {
@@ -136,26 +139,23 @@ function handleCatalog(args, { env }) {
           ...model,
           saved: saved?.model ?? null,
           last_run: catalogLastRun(reports?.model, 'model'),
-          description: `When the model is omitted, a new thread uses ${modelDefault}, then ${native}.` +
-            (modelNote ?? ''),
+          native_default: native,
+          ...(modelNote && { description: modelNote.trim() }),
           enumeration: modelEnumeration ?? 'not enumerable without a session',
         },
         effort: { selection: companion.capabilities.effortSelection, levels: companion.capabilities.effortLevels ?? null,
           saved: saved?.effort ?? null,
           last_run: catalogLastRun(reports?.effort, 'effort'),
-          description: !companion.capabilities.effortSelection ? 'Effort selection is unsupported.'
-            : (companion.capabilities.effortLevels ? '' : 'Levels depend on the model and are checked at send. ') +
-              effortDescription((effortDefaultPrefix ?? '') + native) },
+          ...(!companion.capabilities.effortLevels && companion.capabilities.effortSelection && { description: 'Levels depend on the model and are checked at send.' }) },
         permission: permission ? { mode: permission.mode, source: permission.source, risk: permission.risk } : null,
         capabilities: Object.fromEntries(['interventions', 'resume', 'cancel', 'modelSelection', 'effortSelection']
           .map((key) => [key, companion.capabilities[key]])),
         readiness: {
           ready: checked?.ready ?? null,
-          summary: checked ? (checked.ready ? 'ready at last check' : checked.blockers?.[0]?.message || 'not ready') : 'not checked; run companion_status with diagnostics',
+          summary: checked ? (checked.ready ? 'ready at last check' : checked.blockers?.[0]?.message || 'not ready') : 'not checked',
           checked_at: checked?.checkedAt || null,
         },
         installed_version: checked?.version || null,
-        ...(adapterKind === 'app-server' ? { contractStatus: getCodexContractStatus() } : {}),
       };
     }),
   });
@@ -170,18 +170,24 @@ function handleStatus({ job_id, diagnostics, lead }, active) {
       last_native_activity: e.progress?.lastActivityAt ?? null, active_command: e.progress?.activeCommand ?? null,
       activity: r || e.terminal ? null : e.progress?.activity !== undefined ? e.progress.activity
         : e.progress?.activeCommand ? `running ${e.progress.activeCommand}` : e.progress?.partialText ? 'responding' : null,
-      retry: e.progress?.retry ?? null, partial_text: r?.text ?? e.progress?.partialText ?? '',
-      stop_evidence: r?.stopEvidence ?? e.cleanup ?? null, usage: r?.usage,
+      retry: e.progress?.retry ?? null,
+      ...(state === 'running' && !r && e.progress?.partialText && { partial_text: Array.from(e.progress.partialText.slice(-1024)).slice(-512).join('') }),
+      usage: r?.usage,
       selected_model: r?.selectedModel ?? e.modelOverride ?? null,
       selected_effort: r?.selectedEffort ?? e.effortOverride ?? null, permission_mode: e.permissionMode ?? null,
       effective_model: r?.effectiveModel ?? e.progress?.effectiveModel ?? e.effectiveModel ?? null,
       effective_effort: r?.effectiveEffort ?? e.progress?.effectiveEffort ?? e.effectiveEffort ?? null,
-      cause: r?.cause ?? null, detail: r?.detail ?? null, native_refs: r?.nativeRefs ?? { historyId: e.historyId, nativeTurnId: e.nativeTurnId },
+      cause: r?.cause ?? null, detail: r?.detail ?? null, ...(diagnostics && {
+        native_refs: r?.nativeRefs ?? { historyId: e.historyId, nativeTurnId: e.nativeTurnId },
+        stop_evidence: r?.stopEvidence ?? e.cleanup ?? null,
+        ...(COMPANIONS[e.companion]?.runtime.adapterKind === 'app-server' && { contractStatus: getCodexContractStatus() }),
+      }),
       digest_uri: digestResourceUri(e.jobId), interventions: view.interventions };
   };
   let response;
   if (job_id) {
     const view = active.status({ jobId: job_id });
+    if (view?.state === 'job_not_controlled') return notControlled('status', view.job, lead.host);
     response = view ? project(view) : { ok: false, action: 'status', status: 'unknown_job', error: 'unknown job_id' };
   } else {
     const jobs = active.records.listJobs();
@@ -198,14 +204,18 @@ function handleStatus({ job_id, diagnostics, lead }, active) {
     threads.sort((a, b) => running(b) - running(a) || b.started_at.localeCompare(a.started_at));
     response = { ok: true, action: 'status', default_companion: defaultCompanionInfo(active.env), threads };
   }
-  response.contractStatus = getCodexContractStatus();
-  // The companions' fixed details are about 15 KB; they land in the lead's own context, so only on request.
-  if (diagnostics) Object.assign(response, { companions: listCompanions(active.env), diagnostics: { companions: lastCompanionChecks() } });
+  if (diagnostics) {
+    const checks = lastCompanionChecks();
+    response.diagnostics = { companions: Object.fromEntries(Object.entries(checks).map(([id, report]) => {
+      const { ready, checkedAt, version, blockers, nextSteps } = report;
+      return [id, { ready, checkedAt, version, blockers: blockers?.map(({ code, message }) => ({ code, message })), nextSteps }];
+    })), readiness_check: readinessCheck };
+  }
   return asJson(response);
 }
 
-function readThread({ thread, after, offset = 0, limit = 8000 }, { records }) {
-  const posts = records.listJobs().filter(e => e.thread === thread).sort((a, b) => a.generation - b.generation);
+function readThread({ thread, after, offset = 0, limit = 8000, lead }, { records }, _request, threadRecord) {
+  const posts = threadPosts(records, thread);
   const cursor = records.read('reads', thread)?.job_id;
   const index = id => posts.findIndex(e => e.jobId === id);
   const original = index(cursor);
@@ -213,14 +223,12 @@ function readThread({ thread, after, offset = 0, limit = 8000 }, { records }) {
   // An empty anchor means before the first post. Continuation links keep the
   // same anchor even if an earlier page advanced the durable read cursor.
   const start = after === undefined ? Math.min(lastRead + 1, posts.length - 1) : after ? index(after) + 1 : 0;
-  if (after && start === 0) invalid('after must name a job in this thread');
+  if (after && start === 0) invalid('after excludes a job in this thread. First pass only thread, then copy the next call in the footer.');
   let length = 0, first, last;
   const page = [];
   for (const [i, e] of posts.slice(start).entries()) {
     const result = records.readResult(e.jobId);
-    const status = result ? jobStatus(result) : 'running';
-    const time = result ? new Date(result.finishedAt ?? e.startedAt).toISOString() : 'running';
-    const header = `## ${e.jobId} · ${status} · ${e.companion} · ${time}\nTask: ${e.text.split(/\r?\n/, 1)[0]}`;
+    const header = postHeader(e, result, threadRecord.title);
     const chars = Array.from((i ? '\n\n' : '') + header + (result ? '\n' + (result.text ?? '') : ''));
     const finish = length + chars.length;
     if (finish > offset && length < offset + limit) {
@@ -242,8 +250,9 @@ function readThread({ thread, after, offset = 0, limit = 8000 }, { records }) {
   }
   const unread = posts.slice(lastRead + 1).filter(e => existsSync(records.path('results', e.jobId))).length;
   const anchor = posts[start - 1]?.jobId ?? '';
-  const next = `companion_read({ thread: ${JSON.stringify(thread)}, after: ${JSON.stringify(anchor)}, offset: ${end} })`;
-  const footer = end === length ? `[end · ${unread} unread]`
+  const next = readCall(lead.host, thread, anchor, end);
+  const recovery = !page.length && unread ? ` · unread posts: ${readCall(lead.host, thread)}` : '';
+  const footer = end === length ? `[end · ${unread} unread${recovery}]`
     : `[posts ${first ?? start + 1}–${last ?? start + 1} of ${posts.length} · characters ${offset}–${end} of ${length} · next: ${next}]`;
   return { content: [{ type: 'text', text: page.join('') + '\n' + footer }] };
 }
@@ -256,8 +265,10 @@ function refuse(action, code, fields = {}) {
   return asJson({ ok: false, action, status: code, code, ...fields });
 }
 
-async function sendDelivery(lead, env) {
-  return { ...await HOSTS[lead.host].wakeStatus(lead, env), fallback: 'companion_wait' };
+async function sendDelivery(lead, env, job) {
+  const eligibility = await HOSTS[lead.host].wakeStatus(lead, env);
+  logJob(eligibility.wake ? 'wake.armed' : 'wake.ineligible', job, lead.host, eligibility.wake, eligibility.reason ?? 'acknowledgement');
+  return { ...eligibility, fallback: toolName(lead.host, 'wait') };
 }
 
 async function handleSend(args, active, request, threadRecord) {
@@ -273,22 +284,27 @@ async function handleSend(args, active, request, threadRecord) {
     if (live) {
       const e = active.records.readJob(threadRecord.jobId);
       if ((args.model && args.model !== e.modelOverride) || (args.effort && args.effort !== e.effortOverride)) {
-        return refuse('send', 'thread_busy', { thread, job_id: e.jobId, companion: e.companion, current_status: e.state });
+        return refuse('send', 'thread_busy', { thread, job_id: e.jobId, companion: e.companion, current_status: e.state, hint: `Wait for ${toolName(lead.host, 'wait')}({ job_id: ${JSON.stringify(e.jobId)} }) before changing model or effort.` });
       }
       if (task !== e.text) {
         if (task.length > 8000) invalid('intervention text exceeds 8000 characters');
         const selected = mode ?? e.interventionModes.default;
         const { id, ...ack } = await active.intervene({ from: 'caller', thread, jobId: e.jobId,
           mode: selected, text: task, ...request });
-        if (!ack.ok) return asJson({ action: 'send', ...ack });
+        if (!ack.ok) {
+          const view = active.status({ jobId: e.jobId });
+          const modes = Object.entries(view.interventions).filter(([, allowed]) => allowed === true).map(([mode]) => mode);
+          return asJson({ action: 'send', ...ack, current_status: view.state, supported_modes: modes,
+            hint: modes.length ? `Use one of: ${modes.join(', ')}.` : 'Wait for the job to finish, then send a follow-up.' });
+        }
         return asJson({ ...ack, action: 'send', status: 'intervened', thread, job_id: e.jobId, mode: selected, intervention_id: id,
-          delivery: await sendDelivery(lead, active.env) });
+          delivery: await sendDelivery(lead, active.env, e) });
       }
     }
   }
   if (mode !== undefined) invalid('mode requires new text on a running thread');
   // Work a send would start is refused to a companion session a bridge started.
-  if (!live && isCompanionSession(lead.session, active.env)) return refuse('send', 'RECURSION_REFUSED');
+  if (!live && isCompanionSession(lead.session, active.env)) return refuse('send', 'RECURSION_REFUSED', { hint: 'Return the task to the parent lead.' });
   const route = resolveRouting({ ...args, companion: threadRecord?.companion ?? args.companion }, active.env, !threadRecord);
   if (!route.ok) return asJson({ ...route, action: 'send', status: route.code });
   const { companion, model, effort, savedEffortHint } = route.resolved;
@@ -298,25 +314,30 @@ async function handleSend(args, active, request, threadRecord) {
   const sent = await active.send({ thread, lead, title: args.title, text: task, companion, cwd,
     model: model ?? undefined, effort: effort ?? undefined, savedEffortHint, hostSessionId: lead.session, ...request });
   if (!sent.outcome && !sent.acknowledged) {
-    return refuse('send', sent.error ?? 'bridge_loss', { thread, job_id: sent.jobId, status: sent.state });
+    return refuse('send', sent.error ?? 'bridge_loss', { thread, job_id: sent.jobId, status: sent.state,
+      hint: `Check ${toolName(lead.host, 'status')}({ job_id: ${JSON.stringify(sent.jobId)} }) before retrying.` });
   }
   if (sent.outcome) return terminalResponse(active.records, active.records.readJob(sent.jobId), sent, 'send', request);
-  return asJson({ ok: true, status: 'still_running', thread, job_id: sent.jobId, companion, delivery: await sendDelivery(lead, active.env),
+  return asJson({ ok: true, status: 'still_running', thread, job_id: sent.jobId, companion, delivery: await sendDelivery(lead, active.env, { thread, jobId: sent.jobId }),
     selected_model: sent.selectedModel ?? null, selected_effort: sent.selectedEffort ?? null,
     effective_model: sent.effectiveModel ?? null, effective_effort: sent.effectiveEffort ?? null, permission_mode: sent.permissionMode ?? null });
 }
 
 const field = (type, check, schema = {}) => ({ schema: { type, ...schema }, check });
+const described = (field, description) => ({ ...field, schema: { ...field.schema, description } });
 const thread = field('string', recordId);
-const job_id = field('string', recordId);
+const threadRef = described(thread, 'Thread ID returned by send or status. Selects its latest job. Omit when passing job_id.');
+const job_id = field('string', recordId, { description: 'Job ID returned by send or status. Selects that exact job. Omit when passing thread.' });
 const modes = ['steer', 'queue', 'interrupt'];
 const reference = [{ required: ['thread'] }, { required: ['job_id'] }];
 
-function pageInteger(minimum, maximum) {
+function pageInteger(minimum, maximum, description) {
   return field('integer', (v, k) => {
-    if (!Number.isSafeInteger(v) || v < minimum || (maximum && v > maximum)) invalid('invalid ' + k);
+    if (!Number.isSafeInteger(v) || v < minimum || (maximum && v > maximum)) {
+      invalid(`${k} must be a whole number of characters ${maximum ? `from ${minimum} to ${maximum}` : `at least ${minimum}`}.`);
+    }
     return v;
-  }, { minimum, ...(maximum && { maximum }) });
+  }, { description, minimum, ...(maximum && { maximum }) });
 }
 
 function tool(action, description, fields, conditions, handler, annotations) {
@@ -328,42 +349,54 @@ function tool(action, description, fields, conditions, handler, annotations) {
 export const tools = [
   tool('catalog', 'List companions, model defaults and last-checked readiness.', {}, {}, handleCatalog,
     { readOnlyHint: true, destructiveHint: false, idempotentHint: true }),
-  tool('send', 'Delegate background work or request an independent review. The companion sees only your verbatim task and working directory. Start a new thread with task and absolute cwd. Omit thread and mode on the first send. Omit model and effort to inherit defaults. Send returns a thread immediately. Read it on the completion notice, or call companion_wait when delivery.wake is null. Pass the returned thread for a follow-up. New text on a running thread intervenes in its default or requested mode.', {
-    task: field('string', string), cwd: field('string', assertCwd, { description: 'Absolute working directory. Required for a new thread.' }),
-    thread, companion: field('string', (v, k) => optionalString(v, k)?.toLowerCase(), { enum: listCompanionIds() }),
-    model: field('string', optionalString), effort: field('string', optionalString),
-    mode: field('string', v => modes.includes(v) ? v : invalid('unknown intervention mode'), { enum: modes }),
-    title: field('string', string),
+  tool('send', 'Delegate background work or request an independent review. Pass task and absolute cwd on the first send. An armed delivery.wake lets you continue other work. If wake is null, wait using the returned job_id. Handle a terminal result immediately.', {
+    task: field('string', string, { description: 'Required verbatim instructions. The companion sees only this task and cwd, so include context and completion criteria. New text on a running thread intervenes in the current job.' }),
+    cwd: field('string', assertCwd, { description: 'Absolute path to an existing directory. Required on a new thread. Omit on follow-up to reuse its directory.' }),
+    thread: described(thread, 'Omit to start a thread. For a follow-up, copy the thread ID from send or status.'),
+    companion: field('string', (v, k) => optionalString(v, k)?.toLowerCase(), { enum: listCompanionIds(), description: 'Companion ID from catalog. Omit to use the current default on a new thread or the bound companion on a follow-up.' }),
+    model: field('string', optionalString, { description: 'Native model ID or alias accepted by this companion. Omit to inherit defaults on a new thread or keep the last accepted model on a follow-up.' }),
+    effort: field('string', optionalString, { description: 'Reasoning effort level for this model. Catalog lists known levels. Omit to inherit defaults on a new thread or keep the last accepted effort on a follow-up.' }),
+    mode: field('string', v => modes.includes(v) ? v : invalid('mode must be steer, queue or interrupt. Omit it on a new thread.'), { enum: modes,
+      description: 'Only for new text on a running thread. Steer joins the current turn, queue waits for the next turn, interrupt stops the current turn before sending. Omit to use the job’s default mode.' }),
+    title: field('string', string, { description: 'Short display title for a new thread. Defaults to the first line of the task. Follow-ups keep the original title.' }),
   }, { required: ['task'], anyOf: [{ required: ['cwd'] }, { required: ['thread'] }] }, handleSend),
-  tool('read', 'Read thread posts in order. Continue a page with the exact after and offset in its footer.', {
-    thread, after: { ...field('string', (v, k) => v === '' ? v : recordId(v, k)), keepEmpty: true },
-    offset: pageInteger(0), limit: pageInteger(1, 40000),
+  tool('read', 'First read: pass only thread. For the next page, copy the call in the footer.', {
+    thread: described(thread, 'Required thread ID returned by send or status.'),
+    after: { ...field('string', (v, k) => v === '' ? v : recordId(v, k), { description: 'First read: omit to use the read cursor. For continuation copy the footer. Excludes the named job in this thread. An empty string starts at the first post.' }), keepEmpty: true },
+    offset: pageInteger(0, null, 'Characters to skip from the page anchor. Defaults to 0. Copy the offset and after together from the footer.'),
+    limit: pageInteger(1, 40000, 'Maximum characters per page, 1–40000. Defaults to 8000.'),
   }, { required: ['thread'] }, readThread),
-  tool('wait', 'Wait for a result, a user intervention, or the wait budget to expire.', {
-    thread, job_id, max_wait_sec: field('number', number, { description: 'Default 480 seconds, maximum 1200.' }),
+  tool('wait', 'Pass either reference. Wait for a result, a user intervention, or the wait budget to expire.', {
+    thread: threadRef, job_id, max_wait_sec: field('number', (v, k) => {
+      number(v, k);
+      if (v <= 0) invalid('max_wait_sec must be positive. Use status to poll.');
+      return v;
+    }, { description: 'Wait budget in seconds. Defaults to 480, capped at 1200, with a minimum wait of 1 second. Use status to poll.' }),
   }, { anyOf: reference }, handleWait),
-  tool('status', 'Inspect a thread or job; with neither, list your threads. Diagnostics adds every companion\'s details and cached checks.', {
-    thread, job_id, diagnostics: field('boolean', boolean),
+  tool('status', 'Inspect a thread or job. With neither reference, list this lead’s threads. Unread counts completed posts remaining at the read cursor.', {
+    thread: described(threadRef, threadRef.schema.description + ' Omit both IDs to list threads.'),
+    job_id: described(job_id, job_id.schema.description + ' Omit both IDs to list threads.'),
+    diagnostics: field('boolean', boolean, { description: 'Defaults to false. Include cached readiness verdicts, blockers and remedies. For a job, include native IDs, stop evidence and Codex protocol status when applicable.' }),
   }, {}, handleStatus),
-  tool('cancel', 'Stop a job. A later send can resume its thread.', { thread, job_id }, { anyOf: reference }, handleCancel),
+  tool('cancel', 'Pass either reference to stop a job. A later send can resume its thread.', { thread: threadRef, job_id }, { anyOf: reference }, handleCancel),
 ];
 
 // Each controller represents one bridge. A Codex session may have several native leads.
 const hostSessions = new WeakMap();
 function adoptHostSessionId(active, session) {
   const bound = hostSessions.get(active);
-  if (bound && bound !== session) throw Object.assign(new Error('This bridge belongs to another host session.'), { code: 'BRIDGE_SID_CONFLICT' });
+  if (bound && bound !== session) throw Object.assign(new Error('Reconnect from the session that owns this bridge.'), { code: 'BRIDGE_SID_CONFLICT' });
   hostSessions.set(active, session);
 }
 
 function attributedInput(tool, params, host, active) {
   const raw = params.arguments ?? {};
   const lead = HOSTS[host].leadFromCall({ args: raw, meta: params._meta, env: active.env });
-  if (tool.action !== 'catalog' && !lead) throw Object.assign(new Error('Host lead identity is required.'), { code: 'LEAD_REQUIRED' });
+  if (tool.action !== 'catalog' && !lead) throw Object.assign(new Error('Use the registered bridge for this host and check its identity hook or call metadata.'), { code: 'LEAD_REQUIRED' });
   const { lead: injected, ...publicArgs } = raw;
   const args = validateFields(publicArgs, tool);
   if (tool.action === 'send' && !args.thread && args.cwd === undefined) assertCwd(args.cwd);
-  if ((tool.action === 'wait' || tool.action === 'cancel') && !args.thread && !args.job_id) invalid('thread or job_id is required');
+  if ((tool.action === 'wait' || tool.action === 'cancel') && !args.thread && !args.job_id) invalid('Pass a thread or job_id returned by send or status.');
   if (tool.action !== 'catalog' && HOSTS[host].bridgePerSession) adoptHostSessionId(active, lead.session);
   return { ...args, lead };
 }
@@ -378,21 +411,38 @@ export async function dispatch(params, { controller: active, host = detectHost()
     let threadRecord;
     const job = args.job_id && active.records.readJob(args.job_id);
     args.thread ??= job?.thread;
+    const listHint = `Call ${toolName(host, 'status')}({}) in this lead to list its references.`;
     if (args.thread) {
       threadRecord = active.records.readThread(args.thread);
-      if (!threadRecord) return refuse(action, 'thread_unknown', { status: 'unknown_thread', thread: args.thread });
-      if (!sameLead(threadRecord.lead, args.lead)) return refuse(action, 'THREAD_NOT_YOURS');
+      if (!threadRecord) return refuse(action, 'thread_unknown', { status: 'unknown_thread', thread: args.thread, hint: listHint });
+      if (!sameLead(threadRecord.lead, args.lead)) return refuse(action, 'THREAD_NOT_YOURS', { hint: listHint });
     }
     if (args.job_id) {
-      if (!job) return refuse(action, 'job_unknown', { status: 'unknown_job', job_id: args.job_id });
-      if (job.thread !== args.thread) invalid('job_id does not belong to thread');
+      if (!job) return refuse(action, 'job_unknown', { status: 'unknown_job', job_id: args.job_id, hint: listHint });
+      if (job.thread !== args.thread) invalid('job_id does not belong to thread. Pass either reference on its own.');
     } else if (threadRecord) {
       args.job_id = threadRecord.jobId;
     }
     return await tool.handler(args, active, { requestId, signal }, threadRecord);
   } catch (err) {
     if (!err.code) throw err;
-    return refuse(action, err.code, { error: err.message,
+    if (err.code === 'job_not_controlled') return notControlled(action, { thread: args.thread, jobId: args.job_id }, host);
+    const checked = err.code === 'CAPABILITY_UNAVAILABLE' ? lastCompanionChecks()[err.companion] : null;
+    const recovery = {
+      CAPABILITY_UNAVAILABLE: [checked?.blockers?.[0]?.message ?? `Companion ${err.companion ?? 'provider'} is unavailable.`,
+        checked?.nextSteps?.[0] ?? readinessCheck].join(' '),
+      previous_job_unverified: 'Inspect the previous job and verify cleanup before starting more work.',
+      FOLLOWUP_UNSUPPORTED: 'Start a new thread and include the context it needs.',
+      bridge_loss: 'Reconnect to the owning session and check status before retrying.',
+      stale_generation: 'Check the latest job on this thread before retrying.',
+      RECORD_BUSY: 'Retry when the current record update finishes.',
+      writer_fenced: 'Check the job in the owning session.',
+      thread_busy: 'Wait for the current job to finish before changing its selection.',
+      job_id_busy: 'Start a new thread to obtain another job ID.',
+      MODEL_NOT_ALLOWED: 'Choose an accepted model or omit model to keep the current selection.',
+      DeliveryUnknown: 'Inspect the job before retrying because the request may have reached the companion.',
+    };
+    return refuse(action, err.code, { error: err.message === err.code && recovery[err.code] ? recovery[err.code] : err.message,
       ...(args?.thread && { thread: args.thread }), ...(args?.job_id && { job_id: args.job_id }),
       ...(err.code === 'job_unknown' && { status: 'unknown_job' }) });
   }
@@ -461,25 +511,56 @@ function asJson(obj) {
   return { content: [{ type: 'text', text: JSON.stringify(obj) }], ...(obj.ok === false && { isError: true }) };
 }
 
+// Keep meaningful zero counts and false verdicts while dropping absent or empty metadata.
+function compact(value) {
+  if (value == null) return undefined;
+  if (Array.isArray(value)) return value.length ? value.map(compact).filter(v => v !== undefined) : undefined;
+  if (typeof value !== 'object') return value;
+  const entries = Object.entries(value).map(([key, val]) => [key, compact(val)]).filter(([, val]) => val !== undefined);
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
 function terminalResponse(records, job, result, action, { signal }) {
   const status = jobStatus(result);
   const evidence = result.stopEvidence;
   const meta = {
-    status, job_id: result.jobId, thread: result.thread, companion: job.companion,
     cause: result.cause, detail: result.outcome === 'delivery_unknown' ? 'delivery_unknown' : result.detail ?? null,
     work_summary: result.workSummary ?? null, usage: result.usage, selected_model: result.selectedModel ?? null, effective_model: result.effectiveModel ?? null,
-    selected_effort: result.selectedEffort ?? null, effective_effort: result.effectiveEffort ?? null, native_refs: result.nativeRefs ?? {},
+    selected_effort: result.selectedEffort ?? null, effective_effort: result.effectiveEffort ?? null,
     stop_evidence: evidence ? { gone: evidence.gone, signals: evidence.signals?.length ?? 0,
-      survivors: evidence.survivors?.length ?? 0, cleanup_ms: evidence.cleanupMs ?? null,
-      protocol: evidence.protocol ?? [] } : null,
+      survivors: evidence.survivors?.length ?? 0, cleanup_ms: evidence.cleanupMs ?? null } : null,
     digest_uri: digestResourceUri(result.jobId),
     ...(result.interventions?.length ? { interventions: result.interventions.map(({ from, mode, state, text }) =>
       ({ from, mode, state, first_line: firstLine(text) })) } : {}),
   };
   const { text, delivered_by } = toolAnswer(records, result, signal);
   if (delivered_by) meta.delivered_by = delivered_by;
-  const metadata = { ok: true, action, status, thread: result.thread, job_id: result.jobId, companion: job.companion, meta };
-  return { content: [{ type: 'text', text }, { type: 'text', text: JSON.stringify(metadata) }] };
+  const refused = action === 'send' && result.outcome === 'failed' && job.deliveredAt == null;
+  const metadata = { ok: !refused, action, status, thread: result.thread, job_id: result.jobId, companion: job.companion,
+    ...(refused && { error: result.text || result.detail || result.cause }), meta: compact(meta) };
+  return { ...(refused && { isError: true }), content: [{ type: 'text', text }, { type: 'text', text: JSON.stringify(metadata) }] };
+}
+
+// One startup prompt can cover multiple jobs. Log the decision for each.
+async function wakeJobs(records, jobs, lead, env, startup = false) {
+  let transport;
+  const record = (event, reason) => {
+    for (const job of jobs) logJob(event, job, lead.host, transport, reason);
+  };
+  try {
+    const host = HOSTS[lead.host];
+    const eligibility = await host.wakeStatus(lead, env, startup);
+    transport = eligibility.wake;
+    if (!transport) return record('wake.ineligible', eligibility.reason);
+    const notice = jobs.map(job => wakeNotice(records, job, records.readResult(job.jobId))).join('\n');
+    record('wake.attempted', startup ? 'startup' : 'completion');
+    const evidence = await host.wake(lead, notice, env, startup, eligibility);
+    if (evidence) record(evidence.wake ? 'wake.transport' : 'wake.ineligible', evidence.reason);
+  } catch {
+    const reason = { inbox_socket: 'socket_write_unconfirmed', codex_queue: 'queue_exit_unconfirmed',
+      opencode_prompt: 'prompt_request_failed', copilot_session_send: 'extension_ack_unavailable' };
+    record('wake.failed', reason[transport] ?? 'eligibility_check_failed');
+  }
 }
 
 export function createBridgeController({ env = process.env, records = new Records(), ...options } = {}) {
@@ -489,9 +570,10 @@ export function createBridgeController({ env = process.env, records = new Record
         const lead = publish(records, job, result);
         const waits = pendingWaits.get(controller) ?? [];
         const waiting = [...waits].some(w => w.id === job.jobId && !w.signal?.aborted);
-        if (lead && !waiting) HOSTS[lead.host].wake(lead, wakeNotice(job, result), env)
-          .catch(err => log('WARN', 'completion wake failed:', err.message));
-      } catch (err) { log('WARN', 'job publication failed:', err.message); }
+        if (waiting) logJob('wake.skipped', job, lead?.host, null, 'covered_by_wait');
+        else if (!lead) logJob('wake.ineligible', job, null, null, 'missing_lead');
+        else void wakeJobs(records, [job], lead, env);
+      } catch { logJob('wake.failed', job, null, null, 'publication_failed'); }
     },
   });
   return controller;
@@ -506,12 +588,12 @@ export async function recoverController(active) {
     const result = active.records.readResult(job.jobId);
     if (!result) continue;
     const lead = publish(active.records, job, result);
-    if (!HOSTS[lead?.host]?.startupWake || !needsStartupWake(active.records, job)) continue;
-    if (!notices.has(lead.session)) notices.set(lead.session, { lead, messages: [] });
-    notices.get(lead.session).messages.push(wakeNotice(job, result));
+    if (!HOSTS[lead?.host]?.startupWake || !needsStartupWake(active.records, job)) {
+      logJob('wake.skipped', job, lead?.host, null, HOSTS[lead?.host]?.startupWake ? 'already_read_or_claimed' : 'no_startup_wake');
+      continue;
+    }
+    if (!notices.has(lead.session)) notices.set(lead.session, { lead, jobs: [] });
+    notices.get(lead.session).jobs.push(job);
   }
-  for (const { lead, messages } of notices.values()) {
-    HOSTS[lead.host].wake(lead, messages.join('\n'), active.env, true)
-      .catch(err => log('WARN', 'startup wake failed:', err.message));
-  }
+  for (const { lead, jobs } of notices.values()) void wakeJobs(active.records, jobs, lead, active.env, true);
 }

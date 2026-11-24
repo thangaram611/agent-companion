@@ -70,3 +70,8 @@ test("an unrecognized transcript's notice is clean: the reader's detail can quot
   assert.deepEqual(notice.lines()[0].segs, [['transcript not recognized: evil: bad', 'warn']]);
 });
 
+
+test('a retry activity names retrying once with its attempt', () => {
+  const row = liveLines({ record: { progress: { activity: 'retrying', retry: { attempt: 2 } } } }, {});
+  assert.equal(row.at(-1).segs.map(([text]) => text).join(''), '● retrying (attempt 2)');
+});

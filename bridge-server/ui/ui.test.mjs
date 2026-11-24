@@ -527,3 +527,34 @@ test('through Ink\'s stdin: bracketed paste, shift+tab, ctrl+x then y, and ctrl+
   await send('\x03');
   await app.waitUntilExit();
 });
+
+test('an empty filter in a finished detail returns focus to the jobs list', t => {
+  const model = open(uiFixture(t), 'claude:done-1', 80);
+  press(model, '/');
+  type(model, 'no-match');
+  enter(model);
+  press(model, 'g');
+  assert.equal(model.inJob, false);
+  assert.match(screen(model), /No job matches/);
+});
+
+test('filter accepts either ID, short help scrolls, and the empty list reveals older jobs', t => {
+  const f = uiFixture(t);
+  const model = f.model({ size: { columns: 120, rows: 14 } });
+  for (const id of ['run-1', 'th-run']) {
+    press(model, '/');
+    type(model, id);
+    assert.deepEqual(model.jobs.map(j => j.record.jobId), ['run-1']);
+    press(model, 'escape');
+  }
+  press(model, '?', 'pageDown', 'pageDown');
+  assert.match(screen(model), /clear the draft/);
+  assert.match(screen(model), /esc close/);
+  press(model, 'escape');
+  const list = model.source.list.bind(model.source);
+  model.source.list = () => list().filter(job => job.record.jobId === 'old-1');
+  model.tick();
+  assert.match(screen(model), /1 older · o to show/);
+  press(model, 'o');
+  assert.equal(model.jobs[0].record.jobId, 'old-1');
+});

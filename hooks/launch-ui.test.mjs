@@ -84,3 +84,19 @@ test('defaults forwards the companion, edits and --json without UI packages on e
     assert.deepEqual(JSON.parse(result.stdout), args);
   }
 });
+
+test('installed CLI help lists every command before resolving Node or UI packages', t => {
+  const f = fixture(t);
+  const commands = ['ui', 'defaults', 'jobs', 'follow', 'send'];
+  const help = args => {
+    const result = f.run({ FAKE_NODE: '' }, [...args, '--help']);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const main = help([]);
+  assert.match(main, /configured hosts/);
+  for (const command of commands) {
+    assert.ok(main.includes(command));
+    assert.ok(help([command]).includes('agent-companion ' + command));
+  }
+});

@@ -2,7 +2,7 @@ import '../../test/sandbox-home.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SANDBOX_HOME } from '../../test/sandbox-home.mjs';
@@ -11,6 +11,8 @@ import { send } from './inbox.mjs';
 const LAUNCH = fileURLToPath(new URL('../../hooks/launch-ui.sh', import.meta.url));
 const stateDir = t => {
   const dir = mkdtempSync(join(SANDBOX_HOME, 'inbox-send-'));
+  mkdirSync(join(dir, 'jobs'));
+  for (const id of ['run-1', 'run-2', 'run-3']) writeFileSync(join(dir, 'jobs', id + '.json'), JSON.stringify({ jobId: id, state: 'running' }));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 };
@@ -45,6 +47,8 @@ test('a cancel carries no text, and a bridge that never answers leaves the outco
   const dir = stateDir(t);
   const sent = await send({ dir, jobId: 'run-2', mode: 'cancel', text: 'ignored', waitMs: 300 });
   assert.equal(sent.outcome, null);
+  assert.equal(sent.status, 'pending');
+  assert.match(sent.hint, /before retrying/);
   const [name] = readdirSync(join(dir, 'inbox', 'run-2'));
   const request = JSON.parse(readFileSync(join(dir, 'inbox', 'run-2', name), 'utf8'));
   assert.equal(request.mode, 'cancel');
@@ -59,7 +63,7 @@ test('through launch-ui.sh: send prints one JSON line and refuses bad arguments'
   const answered = bridge(join(dir, 'inbox', 'run-3'), { ok: false, status: 'intervention_unavailable', reason: 'state' });
   const code = await new Promise(resolve => child.on('close', resolve));
   await answered;
-  assert.equal(code, 0);
+  assert.equal(code, 1);
   const lines = stdout.split('\n');
   assert.deepEqual(lines.slice(1), ['']);
   assert.deepEqual(JSON.parse(lines[0]).outcome, { requestId: JSON.parse(lines[0]).requestId, ok: false, status: 'intervention_unavailable', reason: 'state' });
@@ -68,4 +72,24 @@ test('through launch-ui.sh: send prints one JSON line and refuses bad arguments'
     const refused = spawnSync('/bin/bash', [LAUNCH, 'send', ...bad], { env: { PATH: process.env.PATH, HOME: process.env.HOME }, encoding: 'utf8', timeout: 20_000 });
     assert.equal(refused.status, 2, `${bad.join(' ')}: ${refused.stderr}`);
   }
+});
+
+test('send refuses an absent job before creating an inbox', async t => {
+  const dir = stateDir(t);
+  const sent = await send({ dir, jobId: 'absent', mode: 'queue', text: 'fixture', waitMs: 0 });
+  assert.equal(existsSync(join(dir, 'inbox')), false);
+  assert.equal(sent.outcome.ok, false);
+  assert.match(sent.outcome.reason, /job/);
+});
+
+test('CLI send promptly refuses absent and closed jobs with JSON and a nonzero exit', t => {
+  const dir = stateDir(t);
+  mkdirSync(join(dir, 'results'));
+  writeFileSync(join(dir, 'results', 'run-1.json'), '{}');
+  for (const job of ['absent', 'run-1']) {
+    const result = spawnSync('/bin/bash', [LAUNCH, 'send', dir, job, 'queue', 'message'], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 1);
+    assert.equal(JSON.parse(result.stdout).outcome.status, 'not_submitted');
+  }
+  assert.equal(existsSync(join(dir, 'inbox')), false);
 });

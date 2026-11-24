@@ -66,7 +66,7 @@ for (const companion of ['copilot', 'antigravity']) test(`ACP AUTH_REQUIRED cont
   assert.equal(result.text.split('Authentication required').length - 1, 1);
   const waited = await callTool({ action: 'wait', job_id: sent.job_id }, { controller: h.controller });
   const status = await callTool({ action: 'status', job_id: sent.job_id }, { controller: h.controller });
-  assert.equal(sent.content, result.text); assert.equal(waited.content, result.text); assert.equal(status.partial_text, result.text);
+  assert.equal(sent.content, result.text); assert.equal(waited.content, result.text); assert.equal(status.partial_text, undefined);
   assert.equal(h.frames('session/new').length, 1); assert.equal(h.frames('session/prompt').length, 0);
   assert.ok(result.stopEvidence.gone);
 });
@@ -82,7 +82,7 @@ for (const fault of ['session-new-error', 'session-new-empty-error', 'session-ne
     else assert.doesNotMatch(sent.content, /data|headers|\[object Object\]/);
     const waited = await callTool({ action: 'wait', job_id: sent.job_id }, { controller: h.controller });
     const status = await callTool({ action: 'status', job_id: sent.job_id }, { controller: h.controller });
-    assert.equal(waited.content, sent.content); assert.equal(status.partial_text, sent.content);
+    assert.equal(waited.content, sent.content); assert.equal(status.partial_text, undefined);
     assert.doesNotMatch(JSON.stringify([sent, waited, status]), /SECRET_|headers|response|permission_denied/);
     assert.equal(h.frames('session/prompt').length, 0);
     if (fault === 'session-new-error') t.diagnostic('PROVIDER_ERROR_ENVELOPE copilot ' + JSON.stringify({ status: sent.status,

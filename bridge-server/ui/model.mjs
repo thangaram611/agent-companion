@@ -101,11 +101,14 @@ export class Model {
     });
     if (this.filter) {
       const needle = this.filter.toLowerCase();
-      listed = listed.filter(job => [job.caller.title, job.caller.lead, job.companion, job.project, job.record.text]
+      listed = listed.filter(job => [job.record.jobId, job.record.thread, job.caller.title, job.caller.lead, job.companion, job.project, job.record.text]
         .some(value => String(value ?? '').toLowerCase().includes(needle)));
     }
     this.jobs = listed;
-    if (!listed.some(job => job.key === this.selected)) this.selected = listed[0]?.key ?? null;
+    if (!listed.some(job => job.key === this.selected)) {
+      this.inJob = false;
+      this.selected = listed[0]?.key ?? null;
+    }
     return this.syncDetail();
   }
   get job() { return this.jobs.find(job => job.key === this.selected) ?? null; }
@@ -203,7 +206,16 @@ export class Model {
       else if (input && !key.ctrl && !key.meta) this.filter += clean(input).replaceAll('\n', '');
       this.refresh(); this.listTop = 0; return this.changed();
     }
-    if (this.help) { if (input === '?' || input === 'q' || key.escape) this.help = false; return this.changed(); }
+    if (this.help) {
+      const page = Math.max(1, this.size.rows - 4);
+      if (input === '?' || input === 'q' || key.escape) this.help = false;
+      else if (key.downArrow || input === 'j') this.helpTop++;
+      else if (key.upArrow || input === 'k') this.helpTop--;
+      else if (key.pageDown) this.helpTop += page;
+      else if (key.pageUp) this.helpTop -= page;
+      this.helpTop = Math.max(0, Math.min(this.helpTop, HELP.length - page));
+      return this.changed();
+    }
     // A ctrl+letter is not the letter's key.
     if (key.ctrl) {
       if (input !== 'o' || !this.detail) return;
@@ -211,7 +223,7 @@ export class Model {
       return this.changed();
     }
     if (input === 'q') return this.exit();
-    if (input === '?') this.help = true;
+    if (input === '?') { this.help = true; this.helpTop = 0; }
     else if (input === 'd') this.openPanel();
     else if (input === '/') this.editing = true;
     else if (input === 'o') { this.showOlder = !this.showOlder; this.refresh(); }
@@ -325,7 +337,7 @@ export class Model {
     if (this.filter && !this.editing) title.push([`  /${this.filter}`, 'dim']);
     let body;
     if (this.panel) body = this.panelRows(bodyH);
-    else if (this.help) body = HELP.map(([keys, text]) => [[' ' + keys.padEnd(16), 'title'], [text, 'dim']]);
+    else if (this.help) body = HELP.slice(Math.min(this.helpTop, Math.max(0, HELP.length - bodyH))).map(([keys, text]) => [[' ' + keys.padEnd(16), 'title'], [text, 'dim']]);
     else if (!this.wide) body = this.inJob && this.detail ? this.paneRows(W, bodyH) : this.listRows(W, bodyH);
     else {
       const list = this.listRows(LIST, bodyH), pane = this.paneRows(W - LIST - 1, bodyH);
@@ -335,6 +347,7 @@ export class Model {
     return this.frame = rows.map(row => fitSegs(row, W));
   }
   hints() {
+    if (this.help) return [[' ↑↓ or PgUp/PgDn scroll   esc close', 'faint']];
     if (this.panel?.edit) return [[' ⏎ save, empty clears to inherit   esc cancel', 'faint']];
     if (this.panel) return [[this.panel.result ? ' ↑↓ fields   ⏎ edit   esc close' : ' esc close', 'faint']];
     if (this.editing) return [[' /', 'title'], [this.filter, 'normal'], ['▌', 'faint'], ['   enter keeps   esc clears', 'faint']];
@@ -346,8 +359,12 @@ export class Model {
   }
   listRows(w, h) {
     const rows = [];
-    if (!this.jobs.length) return [[[' ' + (this.filter ? `No job matches /${this.filter}` : 'No jobs in the last 24 hours'), 'dim']]];
     const olderLine = !this.showOlder && this.counts.older > 0;
+    if (!this.jobs.length) {
+      rows.push([[' ' + (this.filter ? `No job matches /${this.filter}` : 'No jobs in the last 24 hours'), 'dim']]);
+      if (olderLine) rows.push([[` ${this.counts.older} older · o to show`, 'dim']]);
+      return rows;
+    }
     const fits = Math.max(1, Math.floor((h - (olderLine ? 1 : 0)) / 3));
     const at = Math.max(0, this.jobs.findIndex(job => job.key === this.selected));
     if (at < this.listTop) this.listTop = at;

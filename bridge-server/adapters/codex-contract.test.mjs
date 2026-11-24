@@ -44,10 +44,11 @@ if (process.argv.includes('generate-json-schema')) appendFileSync(${JSON.stringi
     if (verdict === 'match') {
       const { callTool } = await import('../../test/tool-call.mjs');
       const { setupController } = await import('../../test/controller/helpers.mjs');
-      const { controller } = setupController();
-      assert.equal((await callTool({ action: 'status' }, { controller })).contractStatus, verdict);
+      const { controller, send } = setupController({ companion: 'codex' });
+      const { jobId } = await send({ lead: { host: 'claude', session: 'test-session', agent: null } });
+      assert.equal((await callTool({ action: 'status', job_id: jobId, diagnostics: true }, { controller })).contractStatus, verdict);
       const catalog = await callTool({ action: 'catalog' }, { controller });
-      assert.equal(catalog.companions.find((companion) => companion.id === 'codex').contractStatus, verdict);
+      assert.equal(catalog.companions.find((companion) => companion.id === 'codex').contractStatus, undefined);
     }
   });
 }

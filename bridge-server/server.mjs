@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import pkg from './package.json' with { type: 'json' };
 import { log } from './validation.mjs';
 import { migrateDefaults } from '../lib/state.mjs';
-import { defaultCompanionId, listCompanionIds } from '../lib/companion-registry.mjs';
+import { listCompanionIds } from '../lib/companion-registry.mjs';
 import { tools, dispatch, createBridgeController, recoverController, listDigestResources, listDigestResourceTemplates, readDigestResource } from './tools.mjs';
 
 const controller = createBridgeController();
@@ -34,12 +34,12 @@ export const mcp = new Server({ name: 'agent-bridge', version: pkg.version }, {
   capabilities: { tools: {}, resources: {} },
   instructions: 'Delegate work to a companion: for a second opinion or a review from another model, ' +
     'for independent work that can run in the background, or whenever the user names a companion. ' +
-    'companion_send with the task and the absolute repo or worktree path (cwd) starts a thread and returns at once. ' +
+    'companion_send with the task and the absolute repo or worktree path (cwd) starts a thread. ' +
     'The companion receives the task verbatim and sees nothing else of this conversation, so state the goal, what is known and what done looks like. ' +
     'Pass the returned thread to companion_send for a follow-up; new text on a running thread is an intervention (mode steer, queue or interrupt). ' +
-    'You may end your turn: the result reaches you through the completion hook, or companion_wait blocks for it. ' +
+    'An armed delivery.wake lets you continue other work. If wake is null, call companion_wait with the returned job_id. Handle a terminal result immediately. ' +
     'companion_status with no arguments lists your threads; companion_cancel stops a job. ' +
-    `Default companion: ${defaultCompanionId() || 'unset'}. Supported companions: ${listCompanionIds().join(', ')}.`,
+    `Use companion_catalog for the current default. Supported companions: ${listCompanionIds().join(', ')}.`,
 });
 
 mcp.setRequestHandler(ListResourcesRequestSchema, async () => ({

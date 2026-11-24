@@ -1,10 +1,10 @@
 import './sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { symlinkSync, realpathSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
+import { symlinkSync, realpathSync, readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeCompanionDefaults, writeCompanionChecks } from '../lib/state.mjs';
-import { hookAnswer } from '../bridge-server/delivery.mjs';
+import { hookAnswer, wakeNotice, toolName } from '../bridge-server/delivery.mjs';
 import { decodeTool } from './tool-call.mjs';
 import { HOSTS } from '../lib/hosts/index.mjs';
 import { setupController, diskSnapshot, deferred } from './controller/helpers.mjs';
@@ -32,6 +32,7 @@ const scenarios = {
     const request = (method, params) => mcp._requestHandlers.get(method)({ method, params });
     const init = await request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
     assert.equal(init.serverInfo.version, pkg.version);
+    for (const word of ['wake is null', 'armed', 'terminal result', 'companion_catalog']) assert.ok(init.instructions.includes(word));
     const listed = (await request('tools/list', {})).tools;
     assert.deepEqual(listed.map(t => t.name), ['catalog', 'send', 'read', 'wait', 'status', 'cancel'].map(action => 'companion_' + action));
     assert.ok(!listed.some(t => Object.hasOwn(t.inputSchema.properties, 'target')));
@@ -41,6 +42,7 @@ const scenarios = {
       assert.deepEqual(conditions, action === 'status' ? {} : { anyOf: [{ required: ['thread'] }, { required: ['job_id'] }] });
     }
     for (const tool of listed) {
+      for (const [key, field] of Object.entries(tool.inputSchema.properties)) assert.ok(field.description?.trim(), tool.name + '.' + key);
       assert.equal(tool.inputSchema.additionalProperties, false);
       assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'lead'));
       assert.ok(!Object.hasOwn(tool, 'outputSchema'));
@@ -53,7 +55,7 @@ const scenarios = {
     assert.match(sent.thread, /^th-[a-f0-9]{10}$/);
     assert.deepEqual(sent, { ok: true, status: 'still_running', thread: sent.thread, job_id: sent.job_id,
       companion: 'claude', selected_model: null, selected_effort: null, effective_model: 'effective-model',
-      effective_effort: null, permission_mode: 'bypassPermissions', delivery: { wake: null, reason: 'missing_socket', fallback: 'companion_wait' } });
+      effective_effort: null, permission_mode: 'bypassPermissions', delivery: { wake: null, reason: 'missing_socket', fallback: 'mcp__plugin_agent-companion_agent-bridge__companion_wait' } });
     assert.deepEqual(h.adapters[0].calls.filter(([name]) => name === 'deliver').map(([, input]) => input.text), [task]);
   },
   async 'host identity gates every protected call before work'() {
@@ -72,7 +74,9 @@ const scenarios = {
     const saveHistory = historyId => writeFileSync(join(threads, 'other.json'), JSON.stringify({ historyId }));
     mkdirSync(threads, { recursive: true }); writeFileSync(join(threads, 'broken.json'), '{'); saveHistory('nested');
     const before = diskSnapshot(h.dir);
-    assert.deepEqual([(await h.send({}, { session: 'nested' })).code, h.adapters.length], ['RECURSION_REFUSED', 0]);
+    const nested = await h.send({}, { session: 'nested' });
+    assert.deepEqual([nested.code, h.adapters.length], ['RECURSION_REFUSED', 0]);
+    assert.match(nested.hint, /parent lead/);
     assert.deepEqual(diskSnapshot(h.dir), before);
     const { thread, job_id } = await h.send();
     saveHistory(main.session);
@@ -105,7 +109,7 @@ const scenarios = {
       job_id: s.job_id, started_at: new Date(h.clock.now()).toISOString() });
     const listed = await h.call('status');
     assert.deepEqual([listed.threads, Object.hasOwn(listed, 'companions')], [[row(first, 'Review')], false]);
-    assert.equal((await h.call('status', { diagnostics: true })).companions.length, 5);
+    assert.ok((await h.call('status', { diagnostics: true })).diagnostics.companions);
     assert.deepEqual((await h.call('status', {}, sub)).threads, [row(second, task.split('\n')[0])]);
     assert.deepEqual((await h.call('status', {}, { session: 'session-b' })).threads, []);
     assert.deepEqual(diskSnapshot(h.dir), before);
@@ -153,7 +157,9 @@ const scenarios = {
       assert.equal((await call('status', { job_id: sent.job_id }, agent ? 'user' : 'subagent')).code, 'THREAD_NOT_YOURS');
       assert.deepEqual((await call('status', {}, source)).threads.map(row => row.thread), [sent.thread]);
     }
-    assert.equal((await call('status', {}, 'user', 'other')).code, 'BRIDGE_SID_CONFLICT');
+    const conflict = await call('status', {}, 'user', 'other');
+    assert.equal(conflict.code, 'BRIDGE_SID_CONFLICT');
+    assert.match(conflict.error, /Reconnect.*owns this bridge/);
   },
 
   async 'cwd is required only for new threads and bindings use the canonical directory'() {
@@ -251,7 +257,9 @@ const scenarios = {
     const sending = h.send();
     const [{ thread }] = h.records.listThreads();
     const follow = mode => h.call('send', { thread, task: 'new text', mode });
-    const refused = reason => ({ ok: false, action: 'send', status: 'intervention_unavailable', reason });
+    const refused = reason => ({ ok: false, action: 'send', status: 'intervention_unavailable', reason,
+      current_status: reason === 'state' ? 'starting' : 'running', supported_modes: reason === 'state' ? [] : ['queue'],
+      hint: reason === 'state' ? 'Wait for the job to finish, then send a follow-up.' : 'Use one of: queue.' });
     assert.deepEqual(await follow('queue'), refused('state'));
     start.resolve();
     await sending;
@@ -300,7 +308,7 @@ const scenarios = {
     const resumed = await h.call('send', { thread: a.thread, task: 'resume' });
     assert.notEqual(resumed.job_id, a.job_id);
     assert.equal(h.adapters.at(-1).calls.find(([op]) => op === 'openHistory')[1].historyId, 'native-history');
-    assert.equal((await h.call('wait', { job_id: a.job_id })).meta.thread, a.thread);
+    assert.equal((await h.call('wait', { job_id: a.job_id })).thread, a.thread);
   },
 
   async 'status projects progress and cached diagnostics, including reads from a second bridge'() {
@@ -319,7 +327,7 @@ const scenarios = {
     const status = await h.call('status', { thread, diagnostics: true });
     assert.deepEqual(status.diagnostics.companions.claude, { ready: true, checkedAt: 'cached' });
     const second = createBridgeController({ records: h.records, env: h.controller.env });
-    assert.equal((await h.call('status', { job_id }, main, { controller: second })).status, 'unknown');
+    assert.equal((await h.call('status', { job_id }, main, { controller: second })).status, 'job_not_controlled');
     assert.deepEqual(diskSnapshot(h.dir), before);
     await h.finish(job_id);
     assert.equal((await h.call('status', { thread })).activity, null);
@@ -371,7 +379,7 @@ const scenarios = {
         cwd: h.dir, text: task, jobId: 'saved', now: h.clock.now() }, 0);
       h.records.writeResult({ ...e, outcome, text: 'saved output', detail: 'native detail', stopEvidence: { gone: true } });
       const response = await h.call('wait', { job_id: e.jobId });
-      assert.deepEqual([response.thread, response.meta.thread, response.status, response.content], [e.thread, e.thread, status, 'saved output']);
+      assert.deepEqual([response.thread, response.status, response.content], [e.thread, status, 'saved output']);
       assert.equal(response.meta.detail, outcome === 'delivery_unknown' ? outcome : 'native detail');
     }
   },
@@ -383,7 +391,7 @@ test('read pages stay anchored as the cursor advances, and never claim delivery'
   const a = await h.send();
   const read = async args => (await h.raw('read', { thread: a.thread, ...args })).content[0].text;
   const unread = async () => (await h.call('status')).threads[0].unread;
-  assert.equal(await read(), `## ${a.job_id} · running · claude · running\nTask: ${task.split('\n')[0]}\n[end · 0 unread]`);
+  assert.equal(await read(), `## ${a.job_id} · running · claude · ${new Date(h.clock.now()).toISOString()}\nTask: ${task.split('\n')[0]}\n[end · 0 unread]`);
   const posts = [];
   for (const [i, answer] of ['one', 'tw🧪\n'.repeat(17500)].entries()) {
     const sent = i ? await h.call('send', { thread: a.thread, task }) : a;
@@ -393,7 +401,7 @@ test('read pages stay anchored as the cursor advances, and never claim delivery'
   const chars = [...posts.join('\n\n')];
   const page = (start, end) => chars.slice(start, end).join('');
   assert.equal(await unread(), 2);
-  const footer = (end, from, first, last) => `\n[posts ${first}–${last} of 2 · characters ${from}–${end} of ${chars.length} · next: companion_read({ thread: "${a.thread}", after: "", offset: ${end} })]`;
+  const footer = (end, from, first, last) => `\n[posts ${first}–${last} of 2 · characters ${from}–${end} of ${chars.length} · next: mcp__plugin_agent-companion_agent-bridge__companion_read({ thread: "${a.thread}", after: "", offset: ${end} })]`;
   assert.equal(await read(), page(0, 8000) + footer(8000, 0, 1, 2));
   assert.equal(await unread(), 1);
   assert.equal(await read({ after: '', offset: 8000, limit: 40000 }), page(8000, 48000) + footer(48000, 8000, 2, 2));
@@ -418,14 +426,15 @@ test('tool and hook excerpts preserve raw text, include read references and boun
     const { thread, job_id } = await h.send();
     const answer = 'a'.repeat(length - 2) + '🧪b';
     await h.finish(job_id, { outcome: 'completed', text: answer }, h.adapters.at(-1));
-    return { thread, job_id, answer };
+    const header = `## ${job_id} · completed · claude · ${new Date(h.clock.now()).toISOString()}\nTask: ${task.split('\n')[0]}\n`;
+    return { thread, job_id, answer, prefix: [...header].length };
   };
   for (const n of [8000, 8001]) {
-    const { thread, job_id, answer } = await finish(n);
+    const { thread, job_id, answer, prefix } = await finish(n);
     const raw = await h.raw('wait', { job_id });
     assert.deepEqual(Object.keys(raw), ['content']);
     assert.deepEqual(raw.content.map(b => b.type), ['text', 'text']);
-    assert.equal(raw.content[0].text, n === 8000 ? answer : [...answer].slice(0, 8000).join('') + `\n[… 1 more characters. companion_read({ thread: "${thread}", offset: 8000 }) reads on.]`);
+    assert.equal(raw.content[0].text, n === 8000 ? answer : [...answer].slice(0, 8000).join('') + `\n[… 1 more characters. mcp__plugin_agent-companion_agent-bridge__companion_read({ thread: "${thread}", after: "", offset: ${prefix + 8000} }) reads on.]`);
     const meta = JSON.parse(raw.content[1].text);
     assert.equal(meta.meta.digest_uri, 'job-digest://' + job_id);
     assert.equal('content' in meta, false);
@@ -439,9 +448,9 @@ test('tool and hook excerpts preserve raw text, include read references and boun
     assert.equal((await h.call('wait', { job_id })).meta.delivered_by, 'hook');
   }
   for (const n of [4000, 4001]) {
-    const { thread, answer } = await finish(n);
+    const { thread, answer, prefix } = await finish(n);
     const text = hookAnswer(h.records, lead);
-    assert.ok(text.endsWith(n === 4000 ? answer : [...answer].slice(0, 4000).join('') + `\n[… 1 more characters. companion_read({ thread: "${thread}", offset: 4000 }) reads on.]`));
+    assert.ok(text.endsWith(n === 4000 ? answer : [...answer].slice(0, 4000).join('') + `\n[… 1 more characters. mcp__plugin_agent-companion_agent-bridge__companion_read({ thread: "${thread}", after: "", offset: ${prefix + 4000} }) reads on.]`));
   }
 });
 
@@ -479,4 +488,176 @@ test('startup republishes a saved result only while it is unclaimed', async () =
   assert.equal((await h.call('wait', { job_id }, lead, { controller: fresh })).content, 'answer');
   await recoverController(fresh);
   assert.equal(existsSync(news), false);
+});
+
+for (const channel of ['wait', 'hook']) test(channel + ' excerpt continues the same job after an earlier unread post', async () => {
+  const h = fixture();
+  const first = await h.send();
+  await h.finish(first.job_id, { outcome: 'completed', text: 'A'.repeat(9000) });
+  await h.call('wait', { job_id: first.job_id });
+  const next = await h.send({ thread: first.thread, task: '🧪 follow-up' });
+  const limit = channel === 'wait' ? 8000 : 4000;
+  await h.finish(next.job_id, { outcome: 'completed', text: '🧪'.repeat(limit) + 'tail-B' }, h.adapters.at(-1));
+  const text = channel === 'wait' ? (await h.call(channel, { job_id: next.job_id })).content : hookAnswer(h.records, { host: 'claude', ...main });
+  const link = /companion_read\(\{ thread: "([^"]+)"(?:, after: "([^"]*)")?, offset: (\d+) \}\)/.exec(text);
+  assert.ok(link);
+  const page = await h.raw('read', { thread: link[1], ...(link[2] !== undefined && { after: link[2] }), offset: Number(link[3]) });
+  assert.equal(page.content[0].text.split('\n')[0], 'tail-B');
+});
+
+test('a refused native model leaves the last accepted model on a follow-up', async () => {
+  const h = fixture();
+  const first = await h.send({ model: 'a' });
+  await h.finish(first.job_id);
+  const provider = h.controller.providers.claude, create = provider.create;
+  provider.create = () => {
+    const adapter = create(), open = adapter.openHistory.bind(adapter);
+    adapter.openHistory = args => {
+      if (args.model === 'b') throw Object.assign(new Error('Model b unavailable. Choose a.'), { code: 'MODEL_NOT_ALLOWED' });
+      return open(args);
+    };
+    return adapter;
+  };
+  const rejected = await h.send({ thread: first.thread, model: 'b' });
+  assert.equal(rejected.ok, false);
+  assert.ok(rejected.job_id);
+  assert.match(rejected.error, /Model b unavailable/);
+  assert.equal(rejected.status, 'failed');
+  assert.equal((await h.send({ thread: first.thread })).selected_model, 'a');
+});
+
+test('a second bridge distinguishes a recorded job from an absent job', async () => {
+  const h = fixture(), { job_id } = await h.send();
+  const controller = createBridgeController({ records: h.records, env: h.controller.env });
+  for (const action of ['status', 'wait', 'cancel']) {
+    const foreign = await h.call(action, { job_id }, main, { controller });
+    assert.equal(foreign.code, 'job_not_controlled');
+    assert.match(foreign.hint, /owning session/);
+    assert.equal((await h.call(action, { job_id: 'absent' }, main, { controller })).code, 'job_unknown');
+  }
+});
+
+test('public status and terminal metadata stay bounded; native evidence is opt-in', async () => {
+  const h = fixture(), { job_id } = await h.send();
+  const answer = '🧪'.repeat(2048);
+  h.adapters[0].progress({ partialText: answer });
+  const status = () => h.call('status', { job_id });
+  assert.equal((await status()).partial_text, '🧪'.repeat(512));
+  await h.finish(job_id, { outcome: 'completed', text: answer });
+  const finished = await status();
+  for (const key of ['partial_text', 'native_refs', 'stop_evidence', 'contractStatus']) assert.ok(!(key in finished));
+  assert.ok(Buffer.byteLength(JSON.stringify(finished)) < 1000);
+  const diagnostic = await h.call('status', { job_id, diagnostics: true });
+  assert.equal(diagnostic.native_refs.historyId, 'native-history');
+  assert.equal(diagnostic.stop_evidence.gone, true);
+  assert.equal('contractStatus' in diagnostic, false);
+  for (const action of ['wait', 'cancel']) {
+    const raw = await h.raw(action, { job_id });
+    const block = raw.content[1].text;
+    assert.ok(Buffer.byteLength(block) < 800, block);
+    assert.doesNotMatch(block, /:null|:\[\]|:\{\}/);
+    for (const key of ['status', 'job_id', 'thread', 'companion']) assert.ok(!(key in JSON.parse(block).meta));
+  }
+});
+
+test('validation gives usable bounds and each host spells its own action hints', async () => {
+  const h = fixture(), { thread, job_id } = await h.send();
+  for (const [action, args, correction] of [
+    ['wait', { job_id, max_wait_sec: 0 }, /use status to poll/i],
+    ['read', { thread, limit: 0 }, /1 to 40000/], ['read', { thread, offset: -1 }, /at least 0/],
+    ['read', { thread, after: null }, /footer/], ['wait', { job_id: '../' }, /returned by send or status/],
+    ['send', { thread, task, mode: 'default' }, /steer, queue or interrupt/],
+  ]) assert.match((await h.call(action, args)).error, correction);
+  for (const [host, name] of Object.entries({ claude: 'mcp__plugin_agent-companion_agent-bridge__companion_read',
+    codex: 'mcp__agent_bridge.companion_read', copilot: 'agent-bridge-companion_read', opencode: 'agent-bridge_companion_read' })) {
+    assert.equal(toolName(host, 'read'), name);
+  }
+  const wait = h.call('wait', { job_id, max_wait_sec: 1 });
+  await h.clock.advance(1000);
+  assert.ok((await wait).hint.includes(`${toolName('claude', 'wait')}({ job_id: "${job_id}" })`));
+});
+
+test('user cancellation and unread recovery identify the right thread in all three views', async () => {
+  const h = fixture(), { thread, job_id } = await h.send({ title: 'Review widgets' });
+  const inbox = h.records.inboxPath(job_id);
+  mkdirSync(inbox, { recursive: true });
+  writeFileSync(join(inbox, 'cancel.json'), JSON.stringify({ jobId: job_id, requestId: 'cancel', mode: 'cancel', at: 1 }));
+  await h.clock.advance(1000);
+  await h.done(job_id);
+  const read = async args => (await h.raw('read', { thread, ...args })).content[0].text;
+  assert.ok((await read({ after: job_id })).includes(`${toolName('claude', 'read')}({ thread: "${thread}" })`));
+  for (const text of [wakeNotice(h.records, h.records.readJob(job_id), h.records.readResult(job_id)),
+    hookAnswer(h.records, { host: 'claude', ...main }), await read({})]) {
+    assert.match(text, /You cancelled this job/);
+    assert.match(text, /Review widgets/);
+  }
+});
+
+test('lifecycle log records wake decisions and transport evidence without message bodies', async t => {
+  const h = fixture({ createController: createBridgeController });
+  const logFile = join(h.dir, 'bridge.log');
+  t.mock.method(HOSTS.claude, 'wakeStatus', () => ({ wake: 'inbox_socket', reason: null }));
+  t.mock.method(HOSTS.claude, 'wake', async () => { throw new Error('PRIVATE transport detail'); });
+  const original = process.env.AGENT_BRIDGE_LOG_FILE;
+  process.env.AGENT_BRIDGE_LOG_FILE = logFile;
+  t.after(() => {
+    if (original === undefined) delete process.env.AGENT_BRIDGE_LOG_FILE;
+    else process.env.AGENT_BRIDGE_LOG_FILE = original;
+  });
+  const sent = await h.send({ task: 'PRIVATE task' });
+  await h.finish(sent.job_id, { outcome: 'completed', text: 'PRIVATE result' });
+  const waited = await h.send({ task: 'PRIVATE task' });
+  const wait = h.call('wait', { thread: waited.thread });
+  await h.finish(waited.job_id, undefined, h.adapters.at(-1));
+  await wait;
+  HOSTS.claude.wakeStatus.mock.mockImplementation(() => ({ wake: null, reason: 'missing_socket' }));
+  const noSocket = await h.send();
+  await h.finish(noSocket.job_id, undefined, h.adapters.at(-1));
+  const raw = readFileSync(logFile, 'utf8');
+  assert.doesNotMatch(raw, /PRIVATE|First line|completion hook/);
+  const rows = raw.trim().split('\n').map(line => JSON.parse(line.slice(line.indexOf('{'))));
+  const events = job => rows.filter(row => row.job === job.job_id).map(row => row.event);
+  assert.deepEqual(events(sent), ['job.start', 'wake.armed', 'job.end', 'wake.attempted', 'wake.failed']);
+  assert.deepEqual(events(waited), ['job.start', 'wake.armed', 'job.end', 'wake.skipped']);
+  assert.deepEqual(events(noSocket), ['job.start', 'wake.ineligible', 'job.end', 'wake.ineligible']);
+  for (const row of rows) {
+    assert.equal(row.host, 'claude');
+    assert.ok(row.thread && row.transport && row.reason);
+  }
+  assert.equal(rows.find(row => row.event === 'wake.failed').reason, 'socket_write_unconfirmed');
+  assert.equal(rows.find(row => row.event === 'wake.skipped').reason, 'covered_by_wait');
+});
+
+test('identity, routing and history refusals tell the lead how to recover', async () => {
+  const h = fixture();
+  assert.match((await h.call('status', {}, null)).error, /registered bridge.*identity hook/);
+  const first = await h.send();
+  const statusHint = toolName('claude', 'status');
+  for (const response of [await h.call('wait', { job_id: 'absent' }),
+    await h.call('read', { thread: 'absent' }), await h.call('cancel', { thread: first.thread }, { ...main, agent: 'child' })]) {
+    assert.ok(response.hint.includes(statusHint));
+  }
+  const busy = await h.send({ thread: first.thread, model: 'a' });
+  assert.ok(busy.hint.includes(first.job_id));
+  assert.ok(busy.hint.includes(toolName('claude', 'wait')));
+  const observer = fixture({ dir: h.dir });
+  assert.match((await observer.send({ thread: first.thread })).error, /inspect the previous job/i);
+  await h.finish(first.job_id);
+  const provider = h.controller.providers.claude, create = provider.create;
+  provider.create = () => {
+    const adapter = create();
+    adapter.capabilities.followUp = false;
+    return adapter;
+  };
+  assert.match((await h.send({ thread: first.thread })).error, /new thread.*context/);
+  writeCompanionChecks({ claude: { ready: false, blockers: [{ code: 'auth', message: 'Sign-in required', extra: 'unprojected' }],
+    nextSteps: ['Sign in again'], binary: 'unprojected' } });
+  try {
+    provider.ready = false;
+    const refusal = await h.send();
+    assert.match(refusal.error, /Sign-in required.*Sign in again/);
+    const diagnostics = await h.call('status', { diagnostics: true });
+    assert.deepEqual(diagnostics.diagnostics.companions.claude, { ready: false, blockers: [{ code: 'auth', message: 'Sign-in required' }], nextSteps: ['Sign in again'] });
+    assert.ok(!JSON.stringify(diagnostics).includes('unprojected'));
+  } finally { writeCompanionChecks({}); }
 });

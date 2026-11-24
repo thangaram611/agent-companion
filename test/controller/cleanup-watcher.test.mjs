@@ -1,7 +1,7 @@
 import '../sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fork } from 'node:child_process';
+import { fork, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -10,7 +10,8 @@ import { SANDBOX_HOME } from '../sandbox-home.mjs';
 import { snapshotWorktree } from '../../lib/worktree-snapshot.mjs';
 import { pidAlive } from '../../bridge-server/controller/process-supervisor.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
-import { cleanupJob, spawnCleanupWatcher } from '../../scripts/cleanup-watcher.mjs';
+import { runCleanup, spawnCleanupWatcher } from '../../bridge-server/controller/watcher.mjs';
+import { cleanupJob } from '../../scripts/cleanup-watcher.mjs';
 import { fixtureSupervisor } from './fixture-table.mjs';
 import { ManualClock, setupController, until } from './helpers.mjs';
 
@@ -98,4 +99,25 @@ test('production watcher CLI writes a durable result and exits without provider 
   await until(() => records.readResult(job.jobId), 'standalone watcher result');
   await until(() => !pidAlive(watcher.pid), 'standalone watcher exit');
   assert.equal(records.readResult(job.jobId).stopEvidence.gone, true);
+});
+
+test('watcher failure persists only a bounded reason', async () => {
+  const records = makeRecords(), job = records.begin(input('failing-watcher'), 0);
+  records.handoff(job);
+  const createSupervisor = () => ({ terminate: async () => { throw new Error('sensitive native detail'); } });
+  await assert.rejects(runCleanup({ records, job, createSupervisor }), /sensitive native detail/);
+  assert.equal(records.readJob(job.jobId).watcherFailure, 'watcher_cleanup_failed');
+  assert.equal(JSON.stringify(records.readJob(job.jobId)).includes('sensitive native detail'), false);
+});
+
+test('a detached watcher records a bounded failure even when its job record cannot be read', () => {
+  const records = makeRecords(), log = join(records.dir, 'bridge.log');
+  mkdirSync(join(records.dir, 'jobs'));
+  writeFileSync(records.path('jobs', 'broken-job'), 'private malformed input');
+  const child = spawnSync(process.execPath, [fileURLToPath(new URL('../../bridge-server/controller/watcher.mjs', import.meta.url)), records.dir, 'broken-job'],
+    { env: { ...process.env, AGENT_BRIDGE_LOG_FILE: log }, encoding: 'utf8', timeout: 5000 });
+  assert.equal(child.status, 1);
+  const saved = readFileSync(log, 'utf8');
+  assert.match(saved, /watcher_input_unavailable/);
+  assert.doesNotMatch(saved, /private malformed input/);
 });

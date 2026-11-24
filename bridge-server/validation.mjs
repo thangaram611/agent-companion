@@ -21,8 +21,8 @@ export function log(level, ...args) {
   const ts = new Date().toISOString();
   const msg = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
   const line = `${ts} [${level}] ${msg}\n`;
-  const logFile = getBridgeLogFile();
   try {
+    const logFile = getBridgeLogFile();
     if (existsSync(logFile) && statSync(logFile).size > BRIDGE_LOG_MAX_BYTES) {
       // Keep the previous log in .bak for diagnostics.
       try {
@@ -37,6 +37,11 @@ export function log(level, ...args) {
   if (level === 'WARN' || level === 'ERROR' || level === 'FATAL') {
     try { process.stderr.write(line); } catch {}
   }
+}
+
+// Lifecycle fields come from record IDs, host descriptors and fixed decision codes.
+export function logJob(event, job, host, transport, reason) {
+  log('INFO', { event, job: job.jobId, thread: job.thread, host: host ?? 'unknown', transport: transport ?? 'none', reason });
 }
 
 export function invalid(message) {
@@ -55,7 +60,10 @@ export function optionalString(value, key) {
 }
 
 export function recordId(value, key) {
-  if (!/^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(string(value, key))) invalid('invalid ' + key);
+  if (typeof value !== 'string' || !/^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(value)) {
+    invalid(key === 'after' ? 'For after, copy the job ID or empty string from the read footer. Omit after on the first read.'
+      : `For ${key}, copy the ${key} returned by send or status.`);
+  }
   return value;
 }
 export function number(value, key) {

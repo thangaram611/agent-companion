@@ -87,7 +87,7 @@ let older = 0, rebuilds = 0, failure: string | undefined
 // A running job's message box, per job: the draft, the mode it sends in (the
 // companion's own default first), the cancel question, and the last send's
 // state. The draft outlives the job's end and the pane's close, in memory only.
-type MessageBox = { draft: string; mode: string | null; confirm: boolean; sending: boolean; refused?: string }
+type MessageBox = { draft: string; mode: string | null; confirm: boolean; sending: boolean; pending?: { requestId: string; mode: string; text?: string }; refused?: string }
 const boxes = new Map<string, MessageBox>()
 function boxOf(jobId: string, record: any): MessageBox {
   let box = boxes.get(jobId)
@@ -102,16 +102,21 @@ function boxOf(jobId: string, record: any): MessageBox {
 // request as the live view does (inbox.mjs) and waits for the owning bridge's
 // outcome. Accepted, the record's own pending line takes over; refused, the
 // reason shows once and the draft stays.
+function applyOutcome(box: MessageBox, outcome: any, mode: string, text?: string) {
+  if (!outcome.ok) box.refused = clean(outcome.reason === 'state' ? 'the job no longer takes messages' : outcome.reason === 'capability' ? `this companion does not take ${mode}` : outcome.reason ?? outcome.status ?? 'refused')
+  else if (mode !== 'cancel' && box.draft === text) box.draft = ''
+}
+
 async function sendRequest($: EngineInterface, jobId: string, box: MessageBox, mode: string, text?: string) {
+  if (box.sending || box.pending) return
   box.sending = true; box.refused = undefined
   $.ui.invalidate('ui.render')
   try {
     const ran = await $.process.run(['bash', `${$.plugin.root}/hooks/launch-ui.sh`, 'send', await stateDir($), jobId, mode, ...(text === undefined ? [] : [text])], { timeoutMs: 20_000 })
-    const outcome = parse(ran.stdout)?.outcome
-    if (ran.exitCode !== 0) box.refused = clean(ran.stderr.trim().split('\n')[0] || `exit ${ran.exitCode}`)
-    else if (!outcome) box.refused = 'no answer from the bridge yet; it reads requests while its session is open'
-    else if (!outcome.ok) box.refused = clean(outcome.reason === 'state' ? 'the job no longer takes messages' : outcome.reason === 'capability' ? `this companion does not take ${mode}` : outcome.reason ?? outcome.status ?? 'refused')
-    else if (mode !== 'cancel') box.draft = ''
+    const reply = parse(ran.stdout)
+    if (reply?.outcome) applyOutcome(box, reply.outcome, mode, text)
+    else if (isId(reply?.requestId)) box.pending = { requestId: reply.requestId, mode, text }
+    else box.refused = clean(ran.stderr.trim().split('\n')[0] || `exit ${ran.exitCode}`)
   } catch (error) { box.refused = clean(String(error)) }
   box.sending = false
   $.ui.invalidate('ui.render')
@@ -150,6 +155,15 @@ async function tick($: EngineInterface) {
     if (!a.looked) {
       a.looked = true
       a.title ||= clean(parse(await readText($, `${base}/threads/${id}.json`))?.title ?? '')
+    }
+    const box = boxes.get(a.jobId!), submitted = box?.pending
+    if (box && submitted) {
+      const outcome = parse(await readText($, `${base}/inbox/${a.jobId}/${submitted.requestId}.outcome.json`))
+      if (outcome?.requestId === submitted.requestId && box.pending === submitted) {
+        applyOutcome(box, outcome, submitted.mode, submitted.text)
+        box.pending = undefined
+        redraw = true
+      }
     }
     const record = await readText($, `${base}/jobs/${a.jobId}.json`)
     const result = await readText($, `${base}/results/${a.jobId}.json`)
@@ -421,9 +435,9 @@ export const register: Register = on => {
               // Drawn again only when the draft needs another number of rows.
               onInput: (value: string) => { box.draft = value; if (boxRowsFor(value, w, bodyRows) !== rows) redraw() },
               // Kept as sent, so a refusal leaves it in the box.
-              onSubmit: (value: string) => { if (!value.trim() || box.sending) return; box.draft = value; void sendRequest($, jobId, box, box.mode!, value) } }), rule()]
+              onSubmit: (value: string) => { if (!value.trim() || box.sending || box.pending) return; box.draft = value; void sendRequest($, jobId, box, box.mode!, value) } }), rule()]
         : [row([[`${name} takes no messages while it works · cancel only`, 'dim']])]
-      const state = box.sending ? [row([['◌ sending…', 'faint']])] : box.refused ? [row([[`✗ not sent: ${box.refused}`, 'bad']])] : []
+      const state = box.sending ? [row([['◌ sending…', 'faint']])] : box.pending ? [row([['Submitted · acknowledgement pending', 'faint']])] : box.refused ? [row([[`✗ not sent: ${box.refused}`, 'bad']])] : []
       const cycle = () => { box.mode = modes[(modes.indexOf(box.mode!) + 1) % modes.length]!; redraw() }
       const controls = box.confirm
         ? h(Box, { flexDirection: 'row', gap: 2 }, row([['Cancel this job? ', 'bad'], ['The lead is told you cancelled it.', 'dim']]),

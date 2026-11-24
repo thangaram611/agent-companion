@@ -36,11 +36,11 @@ type Run = { exitCode: number; stdout: string; stderr: string }
 // the calls). The kit hands no hook of a test a plugin's $.ui.focus (2.1.326):
 // each rejects, so `rings` reads the keys the mod tried from its debug log.
 function engine(on: On, files: Record<string, unknown>, jobs: Record<string, string>, now: number,
-  { sessions = {}, run, outcome = { ok: true, status: 'accepted' } }:
-    { sessions?: Record<string, Listed>; run?: Run; outcome?: Record<string, unknown> | null } = {}) {
+  { sessions = {}, run, delay, outcome = { ok: true, status: 'accepted' } }:
+    { sessions?: Record<string, Listed>; run?: Run; delay?: Promise<void>; outcome?: Record<string, unknown> | null } = {}) {
   mock.env(on, { HOME })
   const sends = Object.entries(jobs)
-  const seen = { reads: 0, opens: [] as unknown[], closes: [] as unknown[], up: false, lists: [] as (readonly string[])[], logs: [] as { text: string }[],
+  const seen = { files, reads: 0, opens: [] as unknown[], closes: [] as unknown[], up: false, lists: [] as (readonly string[])[], logs: [] as { text: string }[],
     sends: [] as (readonly string[])[],
     commands: new Set<string>(), registers: 0, rings: () => seen.logs.flatMap(({ text }) => /ring stays off (\S+) \(/.exec(text)?.[1] ?? []) }
   on('fs.read', (_, e) => {
@@ -52,10 +52,11 @@ function engine(on: On, files: Record<string, unknown>, jobs: Record<string, str
     return { result: {}, text: JSON.stringify({ ok: true, status: 'still_running', thread, job_id, companion: 'codex' }) }
   })
   on('session.id', () => ({ value: SESSION }))
-  on('process.run', (_, e) => {
+  on('process.run', async (_, e) => {
     // `launch-ui.sh send <dir> <job> <mode> [text]`: the bridge's outcome, or none within the wait.
     if (e.argv[2] === 'send') {
       seen.sends.push(e.argv.slice(3))
+      await delay
       const stdout = JSON.stringify({ requestId: 'q1', outcome: outcome && { requestId: 'q1', ...outcome } }) + '\n'
       return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
@@ -386,7 +387,7 @@ test('a failed list says why, and the jobs the mod saw start stay', async ($, on
 })
 
 // A running job opened from its card, as its follow child reports it, for the box's tests.
-async function boxed($: any, on: On, fields: Record<string, unknown> = {}, options: { outcome?: Record<string, unknown> | null } = {}) {
+async function boxed($: any, on: On, fields: Record<string, unknown> = {}, options: { delay?: Promise<void>; outcome?: Record<string, unknown> | null } = {}) {
   const running = record('j1', fields)
   const seen = engine(on, { [`${DIR}/jobs/j1.json`]: running }, { a1: 'j1' }, START + 60_000, options)
   follows(on, { j1: { lines: [{ job: { status: 'running', record: running, result: null, branch: 'main' } },
@@ -465,7 +466,15 @@ test("the mode cycles through the companion's own modes from its default; a brid
   await ui.input({ key: 'message', text: 'stop and do this' })
   await seen.clock.settle()
   expect(seen.sends).toEqual([[DIR, 'j1', 'interrupt', 'stop and do this']])
-  expect((await last(3))[0]).toBe('✗ not sent: no answer from the bridge yet; it reads requests while its session is open')
+  expect((await last(3))[0]).toMatch(/submitted.*acknowledgement pending/i)
+  await ui.input({ key: 'message', text: 'stop and do this' })
+  await seen.clock.settle()
+  expect(seen.sends).toHaveLength(1)
+  seen.files[`${DIR}/inbox/j1/q1.outcome.json`] = { requestId: 'q1', ok: true, status: 'accepted' }
+  await seen.clock.advance(1000)
+  await ui.redraw()
+  expect((await ui.find({ key: 'message' }))?.props.value).toBe('')
+  expect(await screen(ui)).not.toMatch(/acknowledgement pending/i)
   await ui.press({ key: 'mode' })
   expect((await ui.find({ key: 'mode' }))?.props.label).toBe('mode: queue ▸')
   await ui.unmount()
@@ -498,5 +507,18 @@ test('a job whose record has no interventionModes, from a bridge older than the 
   const { ui, last } = await boxed($, on, { interventionModes: undefined })
   expect(await ui.find({ key: 'message' })).toBeUndefined()
   expect(await last(1)).toEqual(['esc returns  b: ← jobs'])
+  await ui.unmount()
+})
+
+test('a delayed acknowledgement preserves a newer draft', async ($, on) => {
+  let release!: () => void
+  const delay = new Promise<void>(resolve => { release = resolve })
+  const { seen, ui } = await boxed($, on, {}, { delay })
+  await ui.input({ key: 'message', text: 'first' })
+  await ui.input({ key: 'message', text: 'second draft', kind: 'change' })
+  release()
+  await seen.clock.settle()
+  expect(seen.sends).toEqual([[DIR, 'j1', 'steer', 'first']])
+  expect((await ui.find({ key: 'message' }))?.props.value).toBe('second draft')
   await ui.unmount()
 })
