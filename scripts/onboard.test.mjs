@@ -191,7 +191,7 @@ test('CLI plan and ordinary reruns preserve existing defaults, models and profil
     ...saved('copilot', { copilot: 'custom-model' }),
     'profiles.json': '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n',
   };
-  for (const args of [['--plan'], [], ['--companion', 'none']]) {
+  for (const args of [['--plan'], [], ['--companion', 'none'], ['--plan', '--companion', 'none']]) {
     const r = run([...args, '--set-default', '--yes', '--json'], {}, files);
     assert.equal(r.code, 0, r.stderr);
     assert.deepEqual(r.stored, files);

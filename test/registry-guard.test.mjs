@@ -9,7 +9,6 @@ const root = new URL('../', import.meta.url);
 // File, permitted source, reason. Keep temporary exceptions local to their callers.
 const exceptions = [
   ['hooks/host-paths.sh', /"codex"\)/, 'shell copy of the host path rules, checked against the registry'],
-  ['setup.sh', /"\$COMPANION" = "copilot"/, 'installs the Copilot-specific reviewer'],
   ['setup.sh', /transport.env.AGENT_COMPANION_HOST == "codex"/, 'verifies the installed Codex MCP registration'],
 ];
 

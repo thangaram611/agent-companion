@@ -238,9 +238,9 @@ if [ "$DEPS_OK" = 0 ]; then
   # Prefer `npm ci` when a lockfile is present: it wipes node_modules first, so
   # a killed prior install (SessionStart timeout) can't leave corrupt state.
   if [ -f "$PERSIST_DIR/package-lock.json" ]; then
-    INSTALL_ARGS=(ci --silent --no-audit --no-fund)
+    INSTALL_ARGS=(ci --no-audit --no-fund)
   else
-    INSTALL_ARGS=(install --silent --no-audit --no-fund)
+    INSTALL_ARGS=(install --no-audit --no-fund)
   fi
 
   cd "$PERSIST_DIR" || { echo "agent-companion: cd $PERSIST_DIR failed" >&2; exit 1; }
@@ -269,7 +269,7 @@ if [ "$DEPS_OK" = 0 ]; then
 
   if [ "$NPM_STATUS" -ne 0 ]; then
     rm -f "$MANIFEST_HASH"
-    echo "agent-companion: npm install failed (see $LOG)" >&2
+    echo "agent-companion: npm ${INSTALL_ARGS[*]} failed (see $LOG)" >&2
     exit 1
   fi
 

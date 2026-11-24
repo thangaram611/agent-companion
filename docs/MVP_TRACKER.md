@@ -1,6 +1,6 @@
 # MVP Tracker
 
-Last updated: 2026-11-23
+Last updated: 2026-11-24
 
 The bridge runs one cold companion process per job. Release qualification is
 tracked in [Release Readiness](RELEASE_READINESS.md).
@@ -15,7 +15,7 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
   Claude's band and `/companion` pane show the running work. [Thread plan](THREAD_PLAN.md)
 - The catalog reports companions, defaults, saved and last-reported model and
   effort, capabilities, cached readiness and the last checked version.
-- Defaults (2026-11-18, docs/DEFAULTS_PLAN.md): one `settings.json` for both hosts
+- Defaults (2026-11-18, docs/DEFAULTS_PLAN.md): one shared `settings.json` for all four hosts
   holds the default companion and each companion's model and effort.
   - A new thread uses the lead's explicit choice, then the model env knob,
     then the saved default, then the companion's own configuration; follow-ups
@@ -26,8 +26,8 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
     `--companion <companion> --model <id|inherit>`.
   - Copilot's model is selected through the session's model option.
 - The bridge sends the lead's task verbatim. Refusals preserve the requested route.
-- Claude Code and Codex CLI support OpenCode, Copilot, Codex, Google
-  Antigravity and Claude Code. The
+- Claude Code, Codex CLI, OpenCode and Copilot CLI hosts share the same five
+  companion options. The
   [companion matrix](ARCHITECTURE.md#companion-matrix) records transport capabilities.
 - One controller owns the job's process group and immutable result. Bridge
   loss hands its tree to the cleanup watcher. Native history survives for a
@@ -223,16 +223,12 @@ tracked in [Release Readiness](RELEASE_READINESS.md).
 
 ## Next Backlog
 
-- **Future hosts.** Build one host per milestone under decision 9's adoption
-  check. All three use the same tools. [Hosts built later](THREAD_PLAN.md#hosts-built-later)
-  1. OpenCode registers MCP in `opencode.json`, takes the session id from call
-     metadata and wakes it with `opencode run -s`. Check idle wake and that a
-     job stops when OpenCode's server exits.
-  2. Copilot CLI needs an experimental extension to join the session and send
-     the wake. Check idle delivery and isolation across `/clear`.
-  3. Antigravity needs a plugin MCP entry and an allowed command the lead runs
-     to start a waiter. Check idle wake with the waiter and delivery through
-     wait without it. Decision 8 still applies.
+- **Host coverage.** OpenCode and Copilot CLI hosts are built. OpenCode registers
+  MCP through its plugin and wakes the lead with a prompt. Copilot uses its
+  notice extension to send the wake. [OpenCode host](OPENCODE_HOST_PLAN.md) · [Copilot host](COPILOT_HOST_PLAN.md)
+- **Antigravity host.** Check adoption under decision 9, then qualify the plugin
+  MCP entry, idle wake with an allowed waiter command and delivery through
+  wait without it. Decision 8 still applies.
 - Walk-away reliability (decision 11):
   1. Outage through the bridge, 8 and 50 min, Codex companion first (`codex exec`
      waited for the network; app-server through the adapter is unmeasured).

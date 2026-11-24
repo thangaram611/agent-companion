@@ -26,8 +26,8 @@ not establish release qualification.
 
 | Component | Version | Evidence |
 | --- | --- | --- |
-| Claude Code | 2.1.330 | `claude --version` |
-| Codex CLI | 0.171.0 | `codex --version` |
+| Claude Code | 2.1.331 | `claude --version` |
+| Codex CLI | 0.172.0 | `codex --version` |
 | OpenCode | 2.4.0 | `opencode --version` |
 | GitHub Copilot CLI | 1.0.114 | `copilot --version` |
 | Antigravity CLI | 1.5.15 | `agy --version` |
@@ -187,8 +187,9 @@ Manual smoke gates before a public tag (real delegations spend model tokens):
 8. Codex controller smokes: `node probes/smoke/smoke.mjs` verifies native work,
    history/turn ids, usage, digest and runtime exit; `node probes/smoke/orphan.mjs`
    verifies EOF-triggered watcher cleanup and immutable recovery. The latter is
-   not uncatchable SIGKILL coverage. Run doctor before/after an upgrade and record
-   the selected executable/helper pair and `contractStatus`.
+   not uncatchable SIGKILL coverage. Before and after an upgrade, inspect the executable/helper pair with
+   `node --input-type=module -e "import {inspectCodexAppServerInstallation as inspect} from './lib/codex-install.mjs'; console.log(inspect())"`.
+   Record `contractStatus` from the Codex companion catalog or status diagnostics.
 9. `node probes/smoke/acp-antigravity.mjs <available-model-id>` starts seven
    jobs on a signed-in CLI. Check completion with usage and digest, cold history
    reuse in a new process, default steer, cancel, a background command's file

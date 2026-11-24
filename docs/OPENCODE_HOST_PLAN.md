@@ -1,7 +1,6 @@
 # OpenCode as a host: plan
 
-Status: decided 2026-11-23 on `feat/vocabulary`; ships in 1.0.0 with the Copilot
-CLI and Antigravity hosts.
+OpenCode and Copilot CLI hosts are implemented. Antigravity hosting remains planned.
 
 ## Goal
 
@@ -56,7 +55,7 @@ observed through a fixture MCP server. The live companion harness is in
 | Wake mid-turn | The same call returned in 0.2 s with `delivery: "steer"`. The lead's running 40 s tool call was not interrupted; the lead answered the notice in that turn. `opencode run -s <id>` also works but blocks until its own turn ends (41 s). |
 | Silent input | `POST /api/session/<id>/synthetic` with `resume: false` ran no turn and waited in the session inbox; the next prompt saw it. (Not used: decision 2.) |
 | Presence | No server-side signal. The TUI writes `time.viewed` only when its terminal is focused and routed to the session after it went idle; our PTY runs never set it. A TUI plugin sees the routed session and focus. (Not used: decision 2.) |
-| Plugins | `@opencode/plugin` 2.4.0: one package exports `./server`, `./tui`, `./gui-experimental` and `./rpc`; config key `plugins`; `opencode plugin add` accepts npm, git or a local path. The server part can register MCP servers (`ctx.mcp.transform`), tools, commands and RPC methods, and runs once per directory. 2.4.0 changed the TUI renderer contract. |
+| Plugins | `@opencode/plugin` 2.4.0: one package exports `./server`, `./tui`, `./gui-experimental` and `./rpc`; config key `plugins`; `opencode plugin add` accepts npm and Git targets. Setup links local packages under `plugins/`. The server part can register MCP servers (`ctx.mcp.transform`), tools, commands and RPC methods, and runs once per directory. 2.4.0 changed the TUI renderer contract. |
 | Keeping the bridge out of companion jobs | The OpenCode companion runs a private `opencode serve`, which loads global plugins and MCP servers. A config override can disable an MCP entry only by restating it whole with `disabled: true`; plugin lists merge rather than replace. |
 | Service port | One fixed port per machine and channel (49374 here). A second home's service on it makes the user's TUI fail to start. Probes set their own port and stop their service on exit. |
 
@@ -130,10 +129,10 @@ Claude and Codex ones):
   10 s limit, like `codex queue`.
 - `toolPrefix`: `agent-bridge_`.
 
-**Install**: `setup.sh --host opencode` runs `opencode plugin add
-<checkout>/opencode-plugin` and installs the bridge's dependencies, then asks
-the user to restart the service (`opencode service restart`). `--host all`
-installs every host; `both` keeps meaning Claude Code and Codex CLI.
+**Install.** Run `bash setup.sh --host opencode` to install the bridge dependencies
+and register the checkout plugin. On 2.4.0 setup links the local package under
+`plugins/`. The next service launch loads it. If the service is already running,
+restart it after jobs finish. `--host all` installs every host. `both` selects Claude Code and Codex CLI.
 
 **Startup re-wake**: a bridge that starts finds stored results nobody has read
 (the startup scan already restores them) and wakes their leads once. It covers
@@ -141,12 +140,11 @@ a service restart or an unload that happened after a job finished.
 
 **Lifetime.** While the lead is idle, OpenCode can unload the directory and
 stop its bridge. The cleanup watcher records unfinished jobs as `bridge_loss`.
-`setup.sh --host opencode --opencode-idle-timeout "8 hours"` gives jobs more
+`bash setup.sh --host opencode --opencode-idle-timeout "8 hours"` gives jobs more
 time. Setup edits the highest-precedence global JSONC or JSON document and
 preserves its comments. `false` disables idle unloading. `default` removes
 the key from both global documents if present. Run `opencode reload` after
-jobs finish to apply the edit to open directories. The plugin installation's
-service restart also loads the edited config. Stopping the service, upgrading
+jobs finish to apply the edit to open directories. A new service also loads the edited config. Stopping the service, upgrading
 or rebooting still ends running jobs.
 
 **Views**: `agent-companion ui` lists OpenCode-led jobs from the new state
@@ -168,7 +166,7 @@ folder.
    that outlives it stops with `bridge_loss`. Test that setup preserves comments
    when setting a duration, disabling unloads and restoring the default.
    On startup, unread results wake their lead once and delivered results do not.
-4. **Install.** `setup.sh --host opencode|all`, `scripts/onboard.mjs`, doctor.
+4. **Install.** `bash setup.sh --host opencode|all`, `scripts/onboard.mjs`, doctor.
    Check: in an isolated home, setup adds the plugin once (rerun keeps one),
    doctor reports it, and the user's real config is untouched.
 5. **Live.** An isolated TUI on its own service port leads a thread on each

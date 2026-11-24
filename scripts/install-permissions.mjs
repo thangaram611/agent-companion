@@ -56,7 +56,8 @@ if (!HOSTS[host].permissionAllowList) {
   process.exit(0);
 }
 
-const SETTINGS = settingsFile(host);
+const SETTINGS = process.env.CLAUDE_CONFIG_DIR
+  ? path.resolve(process.env.CLAUDE_CONFIG_DIR, HOSTS[host].settingsName) : settingsFile(host);
 const PERMISSIONS = tools.map(({ name }) => HOSTS[host].toolPrefix + name);
 const isStale = p => STALE.test(p) || p === 'Agent(agent-companion)';
 mkdirSync(path.dirname(SETTINGS), { recursive: true });

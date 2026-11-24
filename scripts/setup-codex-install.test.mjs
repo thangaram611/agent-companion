@@ -25,33 +25,25 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.dirname(HERE);
 const AGENT_SENTINEL = '# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent-codex.sh) — edits will be overwritten on next session';
-const FIXTURE_PATHS = [
-  '.claude-plugin',
-  '.codex-plugin',
-  '.github/plugin',
-  'extensions',
-  'opencode-plugin',
-  'assets',
-  'bridge-server',
-  'hooks',
-  'lib',
-  'scripts',
-  'test',
-  'LICENSE',
-  'README.md',
-  'setup.sh',
-];
-
 function copySourceFixture(destination) {
-  mkdirSync(destination, { recursive: true });
-  for (const relativePath of FIXTURE_PATHS) {
-    cpSync(path.join(REPO_ROOT, relativePath), path.join(destination, relativePath), {
-      recursive: true,
-      filter(source) {
-        const base = path.basename(source);
-        return base !== 'node_modules' && base !== 'dist' && base !== '.plugin-data';
-      },
-    });
+  // A source archive can itself run setup's tests, without a Git index.
+  if (!existsSync(path.join(REPO_ROOT, '.git'))) {
+    for (const name of ['.claude-plugin', '.codex-plugin', '.github', 'extensions', 'opencode-plugin',
+      'assets', 'bridge-server', 'hooks', 'lib', 'probes', 'scripts', 'test', 'LICENSE', 'README.md', 'setup.sh']) {
+      cpSync(path.join(REPO_ROOT, name), path.join(destination, name), {
+        recursive: true, filter: file => !['node_modules', 'dist', '.plugin-data'].includes(path.basename(file)),
+      });
+    }
+    return;
+  }
+  const files = spawnSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+    cwd: REPO_ROOT, encoding: 'utf8',
+  });
+  assert.equal(files.status, 0, files.stderr);
+  for (const file of files.stdout.split('\0').filter(Boolean)) {
+    const target = path.join(destination, file);
+    mkdirSync(path.dirname(target), { recursive: true });
+    cpSync(path.join(REPO_ROOT, file), target);
   }
 }
 
@@ -71,6 +63,7 @@ else
   [ -z "\${FAKE_NPM_LOG:-}" ] || printf '%s\\n' "$*" >> "$FAKE_NPM_LOG"
   # Like npm ci: empty node_modules first, through a link if it is one.
   [ "\${FAKE_NPM_EMPTY:-}" != 1 ] || [ "\${1:-}" != ci ] || rm -rf node_modules/*
+  [ "\${FAKE_NPM_EXIT:-0}" = 0 ] || echo "fixture npm diagnostic" >&2
   exit "\${FAKE_NPM_EXIT:-0}"
 fi
 exit 0
@@ -124,6 +117,12 @@ if (args.join(' ') === 'login status') {
 
 if (args.join(' ') === 'plugin marketplace add --help' || args.join(' ') === 'plugin add --help') {
   process.stdout.write('fake help\\n');
+  process.exit(0);
+}
+
+if (args.join(' ') === 'plugin marketplace list --json') {
+  const source = existsSync(marketplaceState) && readFileSync(marketplaceState, 'utf8');
+  printJson({ marketplaces: source ? [{ name: 'agent-companion', marketplaceSource: { source } }] : [] });
   process.exit(0);
 }
 
@@ -304,8 +303,7 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
       ['--version'],
       ['plugin', 'marketplace', 'add', '--help'],
       ['plugin', 'add', '--help'],
-      ['--version'],
-      ['login', 'status'],
+      ['plugin', 'marketplace', 'list', '--json'],
       ['plugin', 'marketplace', 'add', marketplaceRoot, '--json'],
       ['plugin', 'add', 'agent-companion@agent-companion', '--json'],
       ['mcp', 'list', '--json'],
@@ -361,9 +359,9 @@ test('Codex source setup installs and refreshes the plugin in a custom CODEX_HOM
     assert.equal(hookBackups(codexHome).length, 1);
 
     const allCalls = readCalls(logPath);
-    assert.equal(allCalls.length, 16);
+    assert.equal(allCalls.length, calls.length * 2);
     assert.deepEqual(
-      allCalls.slice(8).map((call) => call.args),
+      allCalls.slice(calls.length).map((call) => call.args),
       calls.map((call) => call.args),
       'repeat setup must refresh through the same Codex command sequence',
     );
@@ -469,14 +467,17 @@ function setupFixture(t) {
     assertNoInstall() {
       assert.equal(existsSync(npmLog), false, 'preflight must precede npm installation');
       assert.equal(existsSync(installedPluginRoot(codexHome)), false);
-      if (existsSync(log)) assert.ok(readCalls(log).every(({ args }) => !args.includes('--json')), 'no plugin mutation');
+      if (existsSync(log)) assert.ok(readCalls(log).every(({ args }) => !args.includes('--json') || args.includes('list')), 'no plugin mutation');
     },
   };
 }
 
 test('clean setup detects the only host/companion, previews changes and preserves its default on rerun', (t) => {
   const f = setupFixture(t);
+  mkdirSync(path.join(f.source, 'dist/fixture'), { recursive: true });
+  writeFileSync(path.join(f.source, 'dist/fixture/output.mjs'), 'const =');
   const first = f.run(['--skip-tests']);
+  assert.match(first.stdout, /Syntax checked \d+ source files/);
   assert.equal(first.status, 0, first.stdout + first.stderr);
   assert.match(first.stdout, /detected host: codex/);
   assert.ok(first.stdout.indexOf('Intended installation changes:') < first.stdout.indexOf('Installing bridge server dependencies'));
@@ -492,6 +493,13 @@ test('clean setup detects the only host/companion, previews changes and preserve
   assert.match(second.stdout, /preserve companion configuration/);
   assert.equal(statSync(file).mtimeMs, time.getTime());
   assert.ok(readCalls(f.log).every(({ args }) => !['exec', 'app-server'].includes(args[0])));
+});
+
+test('setup unknown options direct the user to setup help', t => {
+  const f = setupFixture(t);
+  const r = f.run(['--unknown']);
+  assert.equal(r.status, 2);
+  assert.match(r.stdout, /bash setup.sh --help/);
 });
 
 test('preflight refuses missing hosts, missing authentication and ambiguous companions without installation', async (t) => {
@@ -512,12 +520,14 @@ test('preflight refuses missing hosts, missing authentication and ambiguous comp
         env.COPILOT_BIN = path.join(f.bin, 'copilot');
         args = ['--host', 'codex', '--skip-tests']; message = /multiple companions ready/;
       } else {
-        writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
+        writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\n[ "$1" != plugin ] || echo \'[]\'\nexit 0\n');
         args = ['--companion', 'none', '--yes']; message = /Multiple hosts are installed/;
       }
       const r = f.run(args, env);
       assert.notEqual(r.status, 0, r.stdout + r.stderr);
       assert.match(r.stdout, message);
+      if (scenario === 'both hosts') assert.match(r.stdout, /installed: claude codex\. Select --host claude\|codex\|both\./);
+      if (scenario === 'none ready') assert.match(r.stdout, /node scripts\/onboard.mjs --list-companions/);
       f.assertNoInstall();
       assert.equal(existsSync(f.settingsFile), false);
     });
@@ -541,7 +551,7 @@ test('dry-run previews a clean install and --no-companion-check explicitly defer
 
 test('both hosts preserve the shared default, legacy profiles and unrelated host settings', (t) => {
   const f = setupFixture(t);
-  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
+  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\n[ "$1" != plugin ] || echo \'[]\'\nexit 0\n');
   const profiles = '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n';
   writeFileSync(path.join(f.state(), 'profiles.json'), profiles);
   f.seedSettings({ companion: 'opencode' });
@@ -575,7 +585,7 @@ test('setup installs dependencies without emptying the target of a linked node_m
 
 test('partial installation reports completed stages, preserves defaults and succeeds on rerun', (t) => {
   const f = setupFixture(t);
-  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
+  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\n[ "$1" != plugin ] || echo \'[]\'\nexit 0\n');
   f.seedSettings({ companion: 'copilot' });
   const args = ['--host', 'both', '--companion', 'codex', '--skip-tests'];
   const failed = f.run(args, { FAKE_CODEX_BAD_MCP: '1' });
@@ -603,6 +613,11 @@ test('setup preserves user-owned roles and applies settings only after installat
     assert.equal(r.status, owned ? 0 : 1, r.stdout + r.stderr);
     assert.match(r.stdout, owned ? /User-owned agent preserved/ : /Setup incomplete: bridge dependencies/);
     assert.equal(f.settings().companion, owned ? 'codex' : 'copilot');
+    if (!owned) {
+      assert.match(r.stderr, /fixture npm diagnostic/);
+      assert.match(r.stdout, /npm ci --no-audit --no-fund exited 1/);
+      assert.doesNotMatch(r.stdout, /Run codex to start/);
+    }
     if (owned) assert.equal(readFileSync(agent, 'utf8'), '# user-owned\n');
     assert.equal(existsSync(installedPluginRoot(f.codexHome)), owned);
   });
@@ -624,7 +639,7 @@ test('setup accepts independent Claude host and companion selections without a s
   const f = setupFixture(t);
   const claude = path.join(f.bin, 'claude');
   // The host fixture succeeds without JSON; it cannot establish companion auth.
-  writeExecutable(claude, '#!/bin/sh\nexit 0\n');
+  writeExecutable(claude, '#!/bin/sh\n[ "$1" != plugin ] || echo \'[]\'\nexit 0\n');
   const retired = path.join(f.home, '.claude', 'agents', 'agent-companion.md');
   mkdirSync(path.dirname(retired), { recursive: true });
   writeFileSync(retired, '---\n# AUTO-INSTALLED by agent-companion plugin (hooks/install-agent.sh)\n');
@@ -635,7 +650,8 @@ test('setup accepts independent Claude host and companion selections without a s
   f.assertNoInstall();
   writeExecutable(claude, `#!${process.execPath}
     const args = process.argv.slice(2).join(' ');
-    if (args === '--version') console.log('Claude fake');
+    if (args === 'plugin marketplace list --json') console.log('[]');
+    else if (args === '--version') console.log('Claude fake');
     else if (args === 'auth status') console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }));
     else process.exit(99);
   `);
@@ -674,7 +690,7 @@ test('setup passes model to plan and apply, previews intent, and clears a saved 
     const r = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' });
     process.exit(r.status ?? 1);
   `);
-  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
+  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\n[ "$1" != plugin ] || echo \'[]\'\nexit 0\n');
   const args = ['--host', 'both', '--companion', 'codex'];
   const legacy = ['claude', 'codex'].map(host => path.join(f.state(host), 'default-target'));
   for (const file of legacy) writeFileSync(file, 'copilot\n');
@@ -692,10 +708,10 @@ test('setup passes model to plan and apply, previews intent, and clears a saved 
     assert.equal(f.settings().companions?.codex?.model, model === 'inherit' ? undefined : model);
   }
   const calls = readCalls(capture);
-  assert.equal(calls.length, 10);
-  assert.equal(calls.filter((args) => args.includes('--plan')).length, 6);
+  assert.equal(calls.length, 5);
+  assert.equal(calls.filter((args) => args.includes('--plan')).length, 3);
   assert.deepEqual(calls.map((args) => args[args.indexOf('--model') + 1]),
-    [...Array(6).fill('gpt-5.4'), ...Array(4).fill('inherit')]);
+    [...Array(3).fill('gpt-5.4'), ...Array(2).fill('inherit')]);
 });
 
 test('setup shell syntax is valid', () => {
@@ -705,7 +721,7 @@ test('setup shell syntax is valid', () => {
 
 test('OpenCode and all register the checkout plugin and marker; both skips it', t => {
   const f = setupFixture(t);
-  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\nexit 0\n');
+  writeExecutable(path.join(f.bin, 'claude'), '#!/bin/sh\n[ "$1" != plugin ] || echo \'[]\'\nexit 0\n');
   writeExecutable(path.join(f.bin, 'opencode'), `#!/bin/sh
 if [ "$1 $2" = "plugin add" ] && [ "$3" != --help ]; then
   echo "$3" >> "$HOME/plugin-add"
@@ -733,6 +749,9 @@ esac
 `);
   // Seed the package copied by the dependency installer (the fake npm is offline).
   writeExecutable(path.join(f.bin, 'npm'), '#!/bin/bash\nif [ "$1" = --version ]; then echo 10; else mkdir -p node_modules/@modelcontextprotocol/sdk; echo "{}" > node_modules/@modelcontextprotocol/sdk/package.json; fi\n');
+  const reviewer = path.join(copilotHome, 'agents/reviewer.agent.md');
+  mkdirSync(path.dirname(reviewer));
+  writeFileSync(reviewer, 'user-owned reviewer');
   const args = ['--companion', 'none', '--skip-tests'];
   for (const extra of [['--host', 'both', '--opencode-idle-timeout=false'],
     ['--host', 'opencode', '--opencode-idle-timeout', 'wrong']]) {
@@ -754,7 +773,8 @@ esac
       assert.equal(existsSync(path.join(copilotHome, 'settings.json')), false);
     } else {
       assert.equal(JSON.parse(readFileSync(config)).experimental.location_idle_timeout, host === 'opencode' ? false : undefined);
-      assert.match(r.stdout, /opencode service restart/);
+      assert.match(r.stdout, /next OpenCode launch loads the plugin/);
+      assert.doesNotMatch(r.stdout, /opencode service restart/);
       assert.equal(readFileSync(path.join(conf, 'opencode/agent-companion/.host'), 'utf8'), 'opencode\n');
       assert.deepEqual(readdirSync(path.join(conf, 'opencode/plugins')), ['agent-companion']);
       assert.equal(realpathSync(path.join(conf, 'opencode/plugins/agent-companion')), path.join(f.source, 'opencode-plugin'));
@@ -763,10 +783,120 @@ esac
   const rerun = f.run(['--host', 'copilot', ...args], env);
   assert.equal(rerun.status, 0, rerun.stdout + rerun.stderr);
   assert.match(rerun.stdout, /whole Copilot profile/);
+  assert.match(rerun.stdout.split('=== Setup complete')[1], /Copilot: installed\n.*approve agent-bridge/);
   assert.equal(JSON.parse(readFileSync(path.join(copilotHome, 'market'))).length, 1);
   assert.equal(readFileSync(path.join(copilotHome, 'plugin'), 'utf8').trim(), 'agent-companion');
   assert.deepEqual(JSON.parse(readFileSync(path.join(copilotHome, 'settings.json'))), { experimental: true });
   assert.equal(readFileSync(path.join(copilotHome, 'agent-companion/.host'), 'utf8'), 'copilot\n');
   assert.equal(existsSync(path.join(f.home, '.copilot')), false);
+  assert.equal(readFileSync(reviewer, 'utf8'), 'user-owned reviewer');
+  assert.doesNotMatch(rerun.stdout, /reviewer/);
   assert.deepEqual(readFileSync(path.join(f.home, 'plugin-add'), 'utf8').trim().split('\n'), Array(2).fill(path.join(f.source, 'opencode-plugin')));
+});
+
+test('S1 signed-out Claude blocks setup and gives the sign-in step', t => {
+  const f = setupFixture(t);
+  const binary = path.join(f.bin, 'claude');
+  writeExecutable(binary, `#!/bin/sh
+if [ "$1" = plugin ]; then echo '[]'; exit 0; fi
+if [ "$1" = --version ]; then echo Claude; exit 0; fi
+echo '{"loggedIn":false}'
+echo 'auth status failed' >&2
+exit 1
+`);
+  const r = f.run(['--host', 'claude', '--companion', 'claude', '--dry-run'], { CLAUDE_BIN: binary });
+  assert.equal(r.status, 3);
+  assert.match(r.stdout, /sign in/i);
+  f.assertNoInstall();
+});
+
+test('S2 relative CODEX_HOME uses the previewed directory through registration', t => {
+  const f = setupFixture(t);
+  const env = { CODEX_HOME: 'relative codex' };
+  const args = ['--host', 'codex', '--companion', 'none', '--skip-tests'];
+  const expected = path.join(f.source, env.CODEX_HOME);
+  const preview = f.run([...args, '--dry-run'], env);
+  assert.equal(preview.status, 0, preview.stdout + preview.stderr);
+  assert.ok(preview.stdout.includes(expected));
+  const apply = f.run(args, env);
+  assert.equal(apply.status, 0, apply.stdout + apply.stderr);
+  assert.ok(existsSync(path.join(expected, 'agent-companion/.host')));
+  assert.ok(readCalls(f.log).every(call => call.codexHome === expected));
+});
+
+test('S3 foreign OpenCode link refuses preview and apply before npm or launcher', t => {
+  const f = setupFixture(t);
+  const link = path.join(f.home, '.config/opencode/plugins/agent-companion');
+  const foreign = path.join(f.tmp, 'other checkout/opencode-plugin');
+  mkdirSync(foreign, { recursive: true });
+  mkdirSync(path.dirname(link), { recursive: true });
+  symlinkSync(foreign, link);
+  writeExecutable(path.join(f.bin, 'opencode'), '#!/bin/sh\n[ "$1" != plugin ] || echo \'[]\'\nexit 0\n');
+  for (const extra of [['--dry-run'], []]) {
+    const r = f.run(['--host', 'opencode', '--companion', 'none', '--skip-tests', ...extra]);
+    assert.equal(r.status, 1);
+    assert.ok(r.stdout.includes(foreign));
+    assert.match(r.stdout, /unlink /);
+    assert.equal(realpathSync(link), foreign);
+    assert.equal(existsSync(path.join(f.home, '.local/bin/agent-companion')), false);
+    f.assertNoInstall();
+  }
+});
+
+test('foreign marketplace registrations give the host removal command before installation', t => {
+  const f = setupFixture(t);
+  const foreign = path.join(f.tmp, 'first checkout');
+  mkdirSync(foreign);
+  mkdirSync(f.codexHome);
+  writeFileSync(path.join(f.codexHome, '.fake-marketplace-source'), foreign);
+  for (const [host, registration] of [
+    ['claude', [{ name: 'agent-companion', source: 'directory', path: foreign }]],
+    ['copilot', [{ name: 'agent-companion', source: 'Local: ' + foreign }]],
+    ['codex', null],
+  ]) {
+    if (registration) writeExecutable(path.join(f.bin, host), `#!/bin/sh\necho '${JSON.stringify(registration)}'\n`);
+    for (const extra of [['--dry-run'], []]) {
+      const result = f.run(['--host', host, '--companion', 'none', '--yes', ...extra]);
+      assert.equal(result.status, 1);
+      assert.ok(result.stdout.includes(foreign) && result.stdout.includes(host + ' plugin marketplace remove agent-companion'));
+      assert.equal(existsSync(path.join(f.home, '.local/bin/agent-companion')), false);
+      f.assertNoInstall();
+    }
+  }
+  assert.equal(readFileSync(path.join(f.codexHome, '.fake-marketplace-source'), 'utf8'), foreign);
+});
+
+test('host-only preview skips auth, and a planned settings write fails before install', t => {
+  const f = setupFixture(t);
+  f.seedSettings({});
+  writeFileSync(f.settingsFile, '{broken');
+  const args = ['--host', 'codex', '--dry-run'];
+  const preview = f.run([...args, '--companion', 'none']);
+  assert.equal(preview.status, 0, preview.stdout + preview.stderr);
+  assert.match(preview.stdout, /profile settings, backups, caches and databases/);
+  assert.ok(!readCalls(f.log).some(({ args }) => args.includes('status')));
+  const refused = f.run([...args, '--companion', 'codex']);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stdout + refused.stderr, /Cannot read .*settings.json: invalid JSON/);
+  assert.equal(readFileSync(f.settingsFile, 'utf8'), '{broken');
+  f.assertNoInstall();
+});
+
+test('preview shows the saved model choice and the effective environment override', t => {
+  const f = setupFixture(t);
+  const r = f.run(['--host', 'codex', '--dry-run', '--companion', 'codex', '--model', 'gpt-5.4'],
+    { AGENT_COMPANION_CODEX_MODEL: 'other' });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /Save shared default model gpt-5.4/);
+  assert.match(r.stdout, /Effective model: other \(environment override\)/);
+});
+
+test('syntax failure reports the source, line and Node diagnostic', t => {
+  const f = setupFixture(t);
+  // Use a source file that setup does not execute before syntax checks.
+  writeFileSync(path.join(f.source, 'scripts/install-opencode-idle-timeout.mjs'), '\nconst = 1;');
+  const r = f.run(['--host', 'codex', '--companion', 'none', '--skip-tests']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /install-opencode-idle-timeout.mjs:2/);
+  assert.match(r.stderr, /SyntaxError/);
 });

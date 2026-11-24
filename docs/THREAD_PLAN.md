@@ -1,5 +1,7 @@
 # Threads: the lead talks to the companion without a subagent: plan
 
+Historical snapshot of the Claude Code and Codex hosts. See the [current host instructions](../README.md#hosts).
+
 Status: released as 1.0.0 (2026-11-23). Steps 0 to 8 are done, checked live on
 both hosts and in installed form, and merged to main. Every fact under Evidence was measured
 on 2026-11-22 unless it says otherwise.

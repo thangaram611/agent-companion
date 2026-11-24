@@ -1,5 +1,7 @@
 # Features that must survive the thread redesign
 
+Historical snapshot of the Claude Code and Codex hosts. See the [current host instructions](../README.md#hosts).
+
 Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
 
 Inventory taken 2026-11-22 from the code on main, each row checked against the

@@ -17,24 +17,21 @@ You can keep working, then follow up on the same thread.
 You need Node.js `>= 26`, npm, your host CLI and a companion ready to use.
 Source setup also needs jq. Sign in through the companion's own CLI, which handles your credentials.
 
-**Claude Code** — add the marketplace and install the plugin, then open a fresh session.
+From the checkout root, run the command for your host.
 
-```bash
-claude plugin marketplace add thangaram611/agent-companion
-claude plugin install agent-companion@agent-companion
-```
+| Host | Source setup | After setup |
+| --- | --- | --- |
+| Claude Code | `bash setup.sh --host claude` | Start a session with `claude --plugin-dir "$PWD"`. |
+| Codex CLI | `bash setup.sh --host codex` | Open a fresh session and approve the plugin hooks. |
+| OpenCode | `bash setup.sh --host opencode` | The next service launch loads the plugin. If the service is running, restart it after jobs finish. |
+| GitHub Copilot CLI | `bash setup.sh --host copilot` | Open a fresh session and approve agent-bridge. |
 
-**Codex CLI** — run setup from the root of this checkout.
-
-```bash
-bash setup.sh --host codex
-```
-
-Open a fresh Codex session and approve the plugin hooks.
+For a Claude marketplace install, run `claude plugin marketplace add thangaram611/agent-companion`
+and `claude plugin install agent-companion@agent-companion`, then open a fresh session.
 
 From your lead, try “Ask Codex to review the staged changes in /abs/path.”
 Use the absolute path to your repo. The send returns a thread id and job id as soon as the companion accepts.
-The answer comes later by hook or `companion_wait`. A wake can bring the lead back for it.
+A wake can bring the lead back for the answer. On OpenCode the lead reads it with a tool.
 
 ## Using it
 
@@ -55,8 +52,10 @@ mid-job returns `thread_busy`. Repeating the original send returns the existing 
 
 **Get the answer.** Check the send acknowledgement. If it includes a terminal result,
 handle it immediately. If `delivery.wake` is null, wait using the returned job ID.
-With an armed wake you can continue other work. Claude, Codex and Copilot can deliver
-answers through a hook. OpenCode sends a prompt with a call to read the result. Claude inbox wakes
+With an armed wake you can end your turn or continue other work. On Claude Code,
+Codex and Copilot, hooks check for results at session start, at your next prompt
+and after a tool call. OpenCode delivers the wake as a prompt, and the lead then
+calls `companion_read` to get the answer. Claude inbox wakes
 need Claude Code 2.1.228 or later. A relocated `CODEX_HOME` prevents the Codex wake from reaching the lead.
 A lead inside a native subagent also uses wait. Each wait defaults to 480 seconds
 and allows up to 1,200. If a message from the live view returns `user_intervened`,
@@ -112,7 +111,7 @@ precedence over the variant in the model string.
 
 **GitHub Copilot CLI.** Run `copilot login` with an account that can use Copilot CLI.
 Inherit the session model or pick one it offers. Effort must match that model's
-thought levels. The bundled reviewer inherits the session model. Measured on 1.0.114 with local Ollama on
+thought levels. Measured on 1.0.114 with local Ollama on
 2026-11-23, a fresh process replayed the saved session and recalled a code word.
 The bridge reapplies the model override after load. Empty replay fails the job
 with `history_unavailable`. Queue is the default. Steer is unavailable because a
@@ -161,18 +160,41 @@ A longer delay gives them more time. Codex writes the setting to its config file
 and preserves comments. Restart Codex to apply it, or run `codex app-server daemon restart`.
 Restarting the daemon stops running Codex work.
 
-**OpenCode.** Install with `setup.sh --host opencode`, then run
-`opencode service restart` to load the plugin. When the lead is idle, jobs
+**OpenCode.** Install with `bash setup.sh --host opencode`. The next service launch loads the plugin. When the lead is idle, jobs
 that outlive the directory's idle timeout stop with `bridge_loss`. To allow
 longer jobs, pass `--opencode-idle-timeout "8 hours"` during setup. OpenCode's
 default is 60 minutes. With `false`, every opened directory keeps its MCP and
 language servers loaded until the service stops. Use `default` to remove the
-global override. For a timeout change alone, run `opencode reload` after
-running jobs finish. It rebuilds open directories and restarts their MCP servers.
+global override. To apply a timeout change to an already running service, wait for
+its jobs to finish, then run `opencode reload`. This rebuilds its open directories.
 
-**GitHub Copilot CLI.** Run `setup.sh --host copilot` from the checkout. Setup enables experimental mode for the whole Copilot profile so the notice extension can join your session. Approve the bridge when prompted or launch with `--allow-tool=agent-bridge`. A root gets a completion message in its own session. Subagents and sessions without a live extension use `companion_wait`. Doctor reports the profile setting and live registrations.
+**GitHub Copilot CLI.** Run `bash setup.sh --host copilot` from the checkout. Setup enables experimental mode for the whole Copilot profile so the notice extension can join your session. Approve the bridge when prompted or launch with `--allow-tool=agent-bridge`. A root gets a completion message in its own session. Subagents and sessions without a live extension use `companion_wait`. Doctor reports the profile setting and live registrations.
 
 **Google Antigravity** hosting is planned with a permitted wake command and wait as the fallback. [Host plan](docs/THREAD_PLAN.md#hosts-built-later-1)
+
+## Removal
+
+Close active sessions after their jobs finish. From the original checkout, use the steps for each host you want to remove.
+
+| Host | Remove the plugin |
+| --- | --- |
+| Claude Code | For a source install, drop `--plugin-dir` from your launch command. For a marketplace install, run `claude plugin uninstall agent-companion@agent-companion`, then `claude plugin marketplace remove agent-companion`. |
+| Codex CLI | Run `codex plugin remove agent-companion@agent-companion`, then `codex plugin marketplace remove agent-companion`, with the same `CODEX_HOME` used for setup. |
+| GitHub Copilot CLI | Run `copilot plugin uninstall agent-companion@agent-companion`, then `copilot plugin marketplace remove agent-companion`, with the same Copilot profile. |
+| OpenCode | Check setup's link and unlink it using the commands below. The change takes effect on the next service launch. |
+
+```bash
+link="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agent-companion"
+if [ -L "$link" ] && [ "$link" -ef "$PWD/opencode-plugin" ]; then
+  unlink "$link"
+fi
+```
+
+Removal leaves the checkout, shared launcher (`~/.local/bin/agent-companion`),
+saved defaults, host records, install markers and Claude permission entries in place.
+Profile overrides also persist, including Copilot experimental mode, the OpenCode
+idle timeout and Codex's unload delay. Keep them for other users of the profile
+or revert the individual settings you changed.
 
 ## Live view
 
@@ -238,11 +260,11 @@ to the bridge. Use saved defaults or name the model in your request.
 | `--companion` | Choose `opencode`, `copilot`, `codex`, `antigravity` or `claude`. Omit to preserve existing defaults. On a clean install, setup selects the only ready companion or asks you to choose. `auto` selects the only ready one. `none` installs the host and preserves defaults. |
 | `--model` | Save a model for an explicitly named companion. Use `inherit` to clear it. |
 | `--codex-unload-delay` | For `codex`, `both` or `all`, set idle seconds (zero allowed). `default` removes the setting. |
-| `--opencode-idle-timeout` | For `opencode`, `copilot` or `all`, set a global idle duration such as `"90 minutes"`. `false` disables idle unloading. `default` removes the setting. Omit to keep the current value. |
+| `--opencode-idle-timeout` | For `opencode` or `all`, set a global idle duration such as `"90 minutes"`. `false` disables idle unloading. `default` removes the setting. Omit to keep the current value. |
 | `--no-companion-check` | Allow an explicit selection despite a readiness failure. |
 | `--skip-tests` | Skip setup's unit tests. |
 | `--yes`, `-y` | Apply without the interactive confirmation. |
-| `--dry-run` | Preview installation and configuration changes. |
+| `--dry-run` | Preview setup changes using temporary plan files. Native CLI probes can initialize profile settings, backups, databases or caches. An explicit `--companion none` preview skips companion auth probes. |
 | `--help`, `-h` | Show setup options. |
 
 Setup checks readiness without a paid turn and saves new defaults after installation
@@ -268,7 +290,7 @@ finish with “ready” for the check to pass. A failed check blocks the save. R
 | `XDG_CONFIG_HOME`, `AGENT_COMPANION_HOME` | The first selects the shared config root (default `~/.config`). The second overrides the record directory and places `settings.json` directly inside it. |
 | `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `GEMINI_HOME` | Locate native histories. Defaults are `~/.codex`, `~/.claude`, `~/.copilot` and `~/.gemini`. |
 | `OPENCODE_DB`, `XDG_DATA_HOME` | Set the OpenCode transcript database or its data root. |
-| `AGENT_RUNTIME_DIR`, `AGENT_BRIDGE_LOG_FILE`, `AGENT_PROMPT_JSONL_DIR` | Override the runtime directory, log file or prompt directory reported by doctor. |
+| `AGENT_RUNTIME_DIR`, `AGENT_BRIDGE_LOG_FILE` | Override the runtime directory or bridge log path reported for each host. |
 | `AGENT_COMPANION_NODE`, `AGENT_COMPANION_NPM` | Select Node and npm executables for the hooks. |
 | `AGENT_COMPANION_HOST`, `CLAUDE_PLUGIN_DATA`, `PLUGIN_DATA` | The registration selects the host descriptor. The data variables locate installed dependencies. |
 | `CLAUDE_PLUGIN_ROOT`, `PLUGIN_ROOT` | Locate the plugin for the dependency installer. The host or bridge launcher supplies the path. |
@@ -277,14 +299,16 @@ finish with “ready” for the check to pass. A failed check blocks the save. R
 ## Troubleshooting
 
 Run `node scripts/doctor.mjs` from the checkout. Add `--json` for machine-readable
-output. Doctor checks prerequisites, readiness and the Codex executable/helper pair,
-including quarantine evidence. It starts no model work. Ask for job status to see the
+output. Doctor checks prerequisites, companion readiness and the host install marker.
+For Codex and Copilot it also checks the native plugin list. For OpenCode it checks
+the local package. Claude source loading belongs to each session. It starts no model work. Ask for job status to see the
 companion's own error text. Catalog and status report the last Codex schema check as `match`, `drift` or `unverified`.
 
-- Claude Code keeps records in `~/.claude/agent-companion/`.
+- Claude Code keeps bridge records in `~/.claude/agent-companion/`. Its permissions and native transcripts follow `CLAUDE_CONFIG_DIR` when set.
 - Codex CLI uses `$CODEX_HOME/agent-companion/` (default `~/.codex/agent-companion/`).
+- OpenCode uses `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/agent-companion/`.
 - Copilot CLI uses `$COPILOT_HOME/agent-companion/` (default `~/.copilot/agent-companion/`).
-- In each home, `.host` marks a source install. Look for `bridge.startup` in `runtime/agent-bridge.log`. [State paths, overrides and recovery](docs/ARCHITECTURE.md#state)
+- In each home, `.host` records a completed source setup and can survive native removal. Look for `bridge.startup` in `runtime/agent-bridge.log`. [State paths, overrides and recovery](docs/ARCHITECTURE.md#state)
 
 | Refusal | What to do |
 | --- | --- |

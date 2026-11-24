@@ -335,7 +335,9 @@ test('a failing npm reports the failure, clears the hash, and releases the lock'
   try {
     const r = runSync(ctx);
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /npm install failed/);
+    assert.match(r.stderr, /npm install --no-audit --no-fund failed/);
+    assert.ok(r.stderr.includes(join(ctx.persist, 'install.log')));
+    assert.match(readFileSync(join(ctx.persist, 'install.log'), 'utf8'), /boom/);
     assert.equal(existsSync(join(ctx.persist, '.manifest.sha256')), false);
     assert.equal(existsSync(ctx.lock), false, 'a failed install must not leave the lock behind');
   } finally {

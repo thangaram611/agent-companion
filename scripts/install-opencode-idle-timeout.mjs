@@ -84,15 +84,30 @@ function edit(text) {
   }
   // Insert first so comments attached to existing members stay with them.
   const parent = experimental ?? root;
-  const pos = parent.offset + 1;
-  const multiline = text.slice(pos, end(parent)).includes('\n') || !parent.children.length;
+  const multiline = text.slice(parent.offset, end(parent)).includes('\n') || !parent.children.length;
+  let pos = parent.offset + 1;
+  const schema = !experimental && parent.children[0]?.children[0].value === '$schema';
+  if (schema) {
+    const last = end(parent.children[0]);
+    const scanner = createScanner(text, true);
+    scanner.setPosition(last);
+    if (scanner.scan() === SyntaxKind.CommaToken) pos = scanner.getPosition();
+    else {
+      text = text.slice(0, last) + ',' + text.slice(last);
+      pos = last + 1;
+    }
+    // A comment on the separator's line belongs to the schema. Leave the
+    // following lines (including comments introducing the next key) intact.
+    const inline = /^(?:[ \t]*(?:\/\/[^\r\n]*|\/\*[\s\S]*?\*\/))*/.exec(text.slice(pos))[0];
+    if (parent.children.length === 1 || /^[ \t]*[\r\n]/.test(text.slice(pos + inline.length))) pos += inline.length;
+  }
   const unit = text.match(/^([ \t]+)"/m)?.[1] ?? '  ';
   const base = text.slice(text.lastIndexOf('\n', parent.offset - 1) + 1, parent.offset).match(/^[ \t]*/)[0];
   const nl = text.includes('\r\n') ? '\r\n' : '\n';
   const indent = base + unit;
   const entry = experimental ? JSON.stringify(value) : JSON.stringify({ [key]: value }, null, multiline ? unit : 0).replaceAll('\n', nl + indent);
   const prefix = multiline ? nl + indent : '';
-  const suffix = parent.children.length ? ',' : '';
+  const suffix = parent.children.length > (schema ? 1 : 0) ? ',' : '';
   const close = multiline && text[pos] === '}' ? nl + base : '';
   return text.slice(0, pos) + prefix + JSON.stringify(experimental ? key : 'experimental') + ': ' + entry + suffix + close + text.slice(pos);
 }

@@ -34,6 +34,7 @@ import {
 } from '../lib/companion-diagnostics.mjs';
 import { migrateDefaults, previewDefaults, writeDefaultCompanion, readDefaultCompanion, writeCompanionChecks,
   readDefaultModel, writeDefaultModel, clearDefaultModel, isModelAllowedFor } from '../lib/state.mjs';
+import { loadSettings, settingsPath } from '../lib/settings.mjs';
 import { Controller } from '../bridge-server/controller/controller.mjs';
 import { createProviders } from '../bridge-server/providers.mjs';
 import { HOSTS, stateDirs } from '../lib/hosts/index.mjs';
@@ -98,7 +99,8 @@ export function planOnboard({ options, companions, configuration }) {
     }
   }
 
-  const current = companions[COMPANION_IDS.has(t) ? t : configuration?.defaultCompanion?.companion]?.defaultModel;
+  const current = companions[COMPANION_IDS.has(t) ? t : configuration?.defaultCompanion?.companion]?.defaultModel
+    ?? configuration?.defaultModel;
   const model = { requested: options.model ?? null,
     action: options.model === undefined ? 'none' : options.model === 'inherit' ? 'clear' : 'set',
     current: current?.model ?? null, source: current?.source ?? 'unset' };
@@ -127,7 +129,7 @@ export function planOnboard({ options, companions, configuration }) {
   }
   if (readyIds.length === 0) {
     if (options.yes) {
-      return { kind: 'error', code: 'no_ready_companion', message: 'no companion is ready. Install/authenticate one, use --companion none for host-only setup, or explicitly defer readiness with --companion <id> --no-companion-check. See --list-companions.' };
+      return { kind: 'error', code: 'no_ready_companion', message: 'no companion is ready. Install/authenticate one, use --companion none for host-only setup, or explicitly defer readiness with --companion <id> --no-companion-check. Run node scripts/onboard.mjs --list-companions.' };
     }
     return { kind: 'ask', candidates: Object.keys(companions) };
   }
@@ -139,7 +141,7 @@ export function planOnboard({ options, companions, configuration }) {
 }
 
 function inspectConfiguration(defaultCompanion, companions) {
-  const ready = defaultCompanion.companion ? !!companions[defaultCompanion.companion]?.ready : null;
+  const ready = defaultCompanion.companion ? companions[defaultCompanion.companion]?.ready : null;
   const summary = defaultCompanion.companion
     ? `${defaultCompanion.companion} (${defaultCompanion.source})${ready === false ? '; needs attention' : ''}`
     : 'no default; select a companion before delegating';
@@ -160,8 +162,10 @@ function printCompanionReport(report, { json } = {}) {
 }
 
 function modelIntent(model) {
-  return model?.action === 'set' ? `model ${model.requested}`
+  const intent = model?.action === 'set' ? `model ${model.requested}`
     : model?.action === 'clear' ? 'model inherit (clear saved default)' : 'model settings preserved';
+  return model?.action !== 'none' && model?.source === 'env'
+    ? `${intent}; effective model ${model.current} (environment override)` : intent;
 }
 
 // Opt-in smoke: one controller-owned job, with a two-minute budget.
@@ -200,7 +204,7 @@ const HELP = `agent-companion onboarding
 Attach your companion. Supported now: ${new Intl.ListFormat('en').format([...COMPANION_IDS])}. Onboarding never
 asks for or stores provider secrets — authenticate with the vendor tools.
 With no --companion, existing configuration is preserved. --companion none also preserves it.
---plan previews selection and readiness without writes or smoke tasks.
+--plan previews selection without changing defaults. Native CLI probes can initialize profiles, caches or databases.
 --model requires an explicit companion; inherit clears its saved default.
 Without --set-default, model changes are previewed only.
 Defaults are written only after readiness/smoke succeeds; --no-companion-check explicitly
@@ -225,12 +229,16 @@ async function main() {
   }
   const defaultCompanion = readDefaultCompanion(env, console.warn, settings);
   const run = memoizeProbe(probeCommand);
-  const companions = inspectCompanions({ env, run, configuredCompanion: defaultCompanion.companion });
+  const hostOnlyPreview = options.plan && options.companion === 'none' && !options.listCompanions && !options.doctor;
+  const companions = hostOnlyPreview ? {} : inspectCompanions({ env, run, configuredCompanion: defaultCompanion.companion });
   for (const [id, report] of Object.entries(companions)) {
     report.capabilities = getCompanionById(id).capabilities;
     report.defaultModel = readDefaultModel(id, env, console.warn, settings);
   }
   const configuration = inspectConfiguration(defaultCompanion, companions);
+  if (hostOnlyPreview && COMPANION_IDS.has(defaultCompanion.companion)) {
+    configuration.defaultModel = readDefaultModel(defaultCompanion.companion, env, console.warn, settings);
+  }
   let plan = planOnboard({ options, companions, configuration });
   if (options.model !== undefined && plan.kind === 'error' && (!options.plan || options.listCompanions || options.doctor)) {
     console.error(`[FAIL] ${plan.code}: ${plan.message}`);
@@ -257,6 +265,10 @@ async function main() {
   }
 
   if (options.plan) {
+    if (plan.writeDefault && (plan.ready || options.noCompanionCheck)) {
+      try { loadSettings(settingsPath(env)); }
+      catch (err) { plan = { kind: 'error', code: 'unreadable_settings', message: err.message }; }
+    }
     if (plan.kind === 'error') console.error(`[FAIL] ${plan.code}: ${plan.message}`);
     const ok = plan.kind !== 'error' && plan.kind !== 'ask' && (plan.kind !== 'chosen' || plan.ready || options.noCompanionCheck);
     if (options.json) console.log(JSON.stringify({ ok, plan, model: plan.model ?? { requested: options.model ?? null, action: 'none', current: null, source: 'unset' }, configuration, companions }, null, 2));
@@ -280,8 +292,8 @@ async function main() {
     const ans = (await rl.question(`\nCompanion [${plan.candidates.join('/')}/none]: `)).trim().toLowerCase();
     let model;
     if (companions[ans]?.capabilities.modelSelection) {
-      const answer = (await rl.question(`Model for ${ans} [inherit]: `)).trim();
-      if (answer && answer !== 'inherit') model = answer;
+      const answer = (await rl.question(`Model for ${ans} [Enter keeps saved model, inherit clears it]: `)).trim();
+      if (answer) model = answer;
     }
     rl.close();
     if (ans === 'none') plan = planOnboard({ options: { ...options, companion: ans }, companions, configuration });

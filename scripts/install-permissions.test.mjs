@@ -31,9 +31,9 @@ function withHome(fn) {
   }
 }
 
-function runScript(home, extraArgs = []) {
+function runScript(home, extraArgs = [], env = {}) {
   const r = spawnSync(process.execPath, [SCRIPT, '--yes', ...extraArgs], {
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, HOME: home, ...env },
     encoding: 'utf8',
   });
   return { code: r.status, stdout: r.stdout, stderr: r.stderr };
@@ -113,3 +113,11 @@ test('codex host is an explicit no-op and malformed claude settings are not over
     assert.equal(readFileSync(f, 'utf8'), '{ invalid json');
   });
 });
+
+test('Claude permissions use the selected CLAUDE_CONFIG_DIR profile', () => withHome(home => {
+  const profile = join(home, 'second profile');
+  const r = runScript(home, [], { CLAUDE_CONFIG_DIR: profile });
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(profile, 'settings.json'))).permissions.allow, REQUIRED_PERMISSIONS);
+  assert.equal(existsSync(settingsPath(home)), false);
+}));

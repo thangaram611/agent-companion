@@ -93,17 +93,19 @@ Usage: $(basename "$0") [--host ${HOST_IDS// /|}|both|all] [--companion ${COMPAN
   --no-companion-check       select the companion without failing on not-ready
   --skip-tests               skip the unit-test step
   --yes                      apply without interactive confirmation
-  --dry-run                  preview changes without installing or writing config
+  --dry-run                  preview setup changes; native CLI probes may initialize profiles, caches and databases
 EOF
       exit 0
       ;;
     *)
-      fail "unknown argument: $1"
+      fail "unknown argument: $1. Run bash setup.sh --help."
       exit 2
       ;;
   esac
 done
 
+codex_config_dir
+export CODEX_HOME="$HOST_CONFIG_DIR"
 read_registry_ids
 has_id() {
   local wanted="$1" id
@@ -126,6 +128,7 @@ if [ -n "$MODEL" ]; then
 fi
 
 # Host selection never assumes that both CLIs are installed.
+slash=/
 if [ -z "$HOST" ]; then
   DETECTED=()
   for h in $HOST_IDS; do command -v "$h" >/dev/null 2>&1 && DETECTED+=("$h"); done
@@ -133,11 +136,14 @@ if [ -z "$HOST" ]; then
     0) fail "No supported host found. Install a supported CLI, then rerun with --host ${HOST_IDS// /|}."; exit 1 ;;
     1) HOST="${DETECTED[0]}"; ok "detected host: $HOST" ;;
     *)
+      choices="${DETECTED[*]}"
+      if has_id claude "${DETECTED[@]}" && has_id codex "${DETECTED[@]}"; then choices="$choices both"; fi
+      if [ "${DETECTED[*]}" = "$HOST_IDS" ]; then choices="$choices all"; fi
       if [ -t 0 ] && [ "$YES" = 0 ]; then
-        read -r -p "Installed hosts: ${HOST_IDS// /, }. Install for [${HOST_IDS// /\/}/both/all]: " HOST
-        has_id "$HOST" $HOST_IDS both all || { fail "Select ${HOST_IDS// /, } or both/all."; exit 2; }
+        read -r -p "Installed hosts: ${DETECTED[*]}. Install for [${choices// /$slash}]: " HOST
+        has_id "$HOST" $choices || { fail "Select one of: $choices."; exit 2; }
       else
-        fail "Multiple hosts are installed. Select --host ${HOST_IDS// /|}|both|all."; exit 2
+        fail "Multiple hosts are installed: ${DETECTED[*]}. Select --host ${choices// /|}."; exit 2
       fi
       ;;
   esac
@@ -166,8 +172,9 @@ DEPS_STATUS="not installed this run"
 UI_STATUS="not installed this run"
 CLAUDE_STATUS="not installed this run"
 CODEX_STATUS="not installed this run"
-CLAUDE_COMPANION="not inspected"
-CODEX_COMPANION="not inspected"
+OPENCODE_STATUS="not installed this run"
+COPILOT_STATUS="not installed this run"
+CURRENT="not inspected"
 TEST_STATUS="not run"
 STEP="preflight"
 APPLY_STARTED=0
@@ -191,17 +198,24 @@ finish() {
   echo "Dependencies: $DEPS_STATUS; tests: $TEST_STATUS"
   echo "Live view: $UI_STATUS"
   if [ "$DO_CLAUDE" = 1 ]; then
-    echo "Claude: $CLAUDE_STATUS; companion: $CLAUDE_COMPANION"
-    [ "$APPLY_STARTED" = 0 ] || echo "  Start a fresh Claude session: claude --plugin-dir \"$SCRIPT_DIR\""
+    echo "Claude: $CLAUDE_STATUS; companion: $CURRENT"
+    [ "$CLAUDE_STATUS" != "permissions installed" ] || echo "  Start a fresh Claude session: claude --plugin-dir \"$SCRIPT_DIR\""
   fi
   if [ "$DO_CODEX" = 1 ]; then
-    echo "Codex: $CODEX_STATUS; companion: $CODEX_COMPANION"
-    if [ "$APPLY_STARTED" = 1 ]; then
+    echo "Codex: $CODEX_STATUS; companion: $CURRENT"
+    if [ "$CODEX_STATUS" = "plugin, MCP and hooks installed/verified" ]; then
       echo "  Run codex to start a fresh session. Approve the agent-companion plugin hooks if asked."
     fi
   fi
-  if [ "$DO_OPENCODE" = 1 ] && [ "$APPLY_STARTED" = 1 ] && [ -n "${OPENCODE_INSTALLED:-}" ]; then
-    echo "OpenCode plugin installed. Run: opencode service restart"
+  if [ "$DO_OPENCODE" = 1 ]; then
+    echo "OpenCode: $OPENCODE_STATUS"
+    if [ "$OPENCODE_STATUS" = installed ]; then
+      echo "  If the service is stopped, the next OpenCode launch loads the plugin. If running, restart it after current jobs finish."
+    fi
+  fi
+  if [ "$DO_COPILOT" = 1 ]; then
+    echo "Copilot: $COPILOT_STATUS"
+    [ "$COPILOT_STATUS" != installed ] || echo "  Start a fresh Copilot session and approve agent-bridge when prompted."
   fi
   echo "Unverified: live delegation and provider/model access (no quota-spending smoke run)."
 }
@@ -211,6 +225,9 @@ echo "=== agent-companion setup: preflight (host=$HOST) ==="
 
 # --- Verify prerequisites -------------------------------------------
 
+if [ "$DRY_RUN" = 1 ]; then
+  echo "Preview uses temporary plan files. Native CLI probes may create or update profile settings, backups, caches and databases."
+fi
 printf "Checking prerequisites...\n"
 
 ok "node v$(node --version | tr -d 'v')"
@@ -222,7 +239,7 @@ fi
 ok "npm $(npm --version)"
 
 if ! command -v jq >/dev/null 2>&1; then
-  fail "jq not found on PATH. Install jq; hook delivery depends on it."
+  fail "jq not found on PATH. Install jq for source setup."
   exit 1
 fi
 ok "jq $(jq --version 2>/dev/null || echo found)"
@@ -313,53 +330,94 @@ echo ""
 # --- Companion preflight and change preview ---------------------------------
 
 PLAN_DIR="$(mktemp -d)"
-SELECTED_COMPANIONS=()
-SELECTED_MODELS=()
-for h in "${HOSTS[@]}"; do
-  MODEL_CHOICE="$MODEL"
-  ONBOARD_ARGS=(--host "$h" --plan --json --set-default --yes)
-  [ -z "$COMPANION" ] || ONBOARD_ARGS+=(--companion "$COMPANION")
-  [ -z "$MODEL_CHOICE" ] || ONBOARD_ARGS+=(--model "$MODEL_CHOICE")
-  [ "$NO_COMPANION_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-companion-check)
+# Check every selected registration before npm or the shared launcher changes.
+CODEX_MARKETPLACE_DIR="$SCRIPT_DIR/dist/codex-marketplace"
+market_source() {
+  local filter="$1"
+  shift
+  local source
+  if ! source=$("$@" | jq -er "$filter"); then
+    fail "Cannot inspect registration with $*." >&2
+    return 1
+  fi
+  printf '%s\n' "$source"
+}
+if [ "$DO_CLAUDE" = 1 ]; then
+  market=$(market_source 'map(select(.name == "agent-companion") | .path // .url // .repo // .installLocation // error("missing source")) | join("\n")' claude plugin marketplace list --json)
+  if [ -n "$market" ] && ! [ "$market" -ef "$SCRIPT_DIR" ]; then
+    fail "Claude marketplace points to $market. Run this command, then rerun setup: CLAUDE_CONFIG_DIR=$(printf %q "${CLAUDE_CONFIG_DIR:-$HOME/.claude}") claude plugin marketplace remove agent-companion"
+    exit 1
+  fi
+fi
+if [ "$DO_CODEX" = 1 ] && [ -d "$CODEX_HOME" ]; then
+  market=$(market_source '.marketplaces | map(select(.name == "agent-companion") | .marketplaceSource.source // error("missing source")) | join("\n")' codex plugin marketplace list --json)
+  if [ -n "$market" ] && [ "$market" != "$CODEX_MARKETPLACE_DIR" ] && ! [ "$market" -ef "$CODEX_MARKETPLACE_DIR" ]; then
+    fail "Codex marketplace points to $market. Run this command, then rerun setup: CODEX_HOME=$(printf %q "$CODEX_HOME") codex plugin marketplace remove agent-companion"
+    exit 1
+  fi
+fi
+if [ "$DO_OPENCODE" = 1 ]; then
+  host_paths opencode "$SCRIPT_DIR"
+  local_plugin="$HOST_CONFIG_DIR/plugins/agent-companion"
+  if [ -e "$local_plugin" ] || [ -L "$local_plugin" ]; then
+    if ! [ "$local_plugin" -ef "$SCRIPT_DIR/opencode-plugin" ]; then
+      if [ -L "$local_plugin" ]; then
+        fail "OpenCode plugin points to $(readlink "$local_plugin"). To move it, run: $(printf 'unlink %q' "$local_plugin")"
+      else
+        fail "OpenCode plugin path is occupied. Move it aside before retrying: $(printf 'mv -i %q %q' "$local_plugin" "$local_plugin.previous")"
+      fi
+      exit 1
+    fi
+  fi
+fi
+check_copilot_market() {
+  market=$(market_source 'map(select(.name == "agent-companion") | .source // error("missing source")) | join("\n")' copilot plugin marketplace list --json)
+  if [ -n "$market" ] && ! [ "${market#Local: }" -ef "$SCRIPT_DIR" ]; then
+    fail "Copilot marketplace points to $market. To switch checkouts, remove that marketplace and its plugins, then rerun setup: COPILOT_HOME=$(printf %q "${COPILOT_HOME:-$HOME/.copilot}") copilot plugin marketplace remove agent-companion --force"
+    exit 1
+  fi
+}
+if [ "$DO_COPILOT" = 1 ]; then check_copilot_market; fi
+
+plan_file="$PLAN_DIR/plan.json"
+ONBOARD_ARGS=(--host "$HOST" --plan --json --set-default)
+if [ ! -t 0 ] || [ "$YES" = 1 ]; then ONBOARD_ARGS+=(--yes); fi
+[ -z "$COMPANION" ] || ONBOARD_ARGS+=(--companion "$COMPANION")
+[ -z "$MODEL" ] || ONBOARD_ARGS+=(--model "$MODEL")
+[ "$NO_COMPANION_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-companion-check)
+plan_companion() {
   PLAN_CODE=0
-  AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
-  if ! jq -e '.configuration and .plan' "$PLAN_DIR/$h.json" >/dev/null; then
-    fail "Cannot inspect $h configuration; no changes applied."; exit 1
+  node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" > "$plan_file" || PLAN_CODE=$?
+  if ! jq -e '.configuration and .plan' "$plan_file" >/dev/null; then
+    fail "Cannot inspect shared configuration; no changes applied."; exit 1
   fi
-  CURRENT="$(jq -r '.configuration.summary' "$PLAN_DIR/$h.json")"
-  case "$h" in claude) CLAUDE_COMPANION="$CURRENT" ;; codex) CODEX_COMPANION="$CURRENT" ;; esac
-  echo "Companion ($h): $CURRENT"
-  jq -r '.companions[] | "  \(.displayName): " + (if .ready then "ready" else "not ready" end), (.blockers[], .warnings[] | "    " + .message), (.nextSteps[] | "    Next: " + .)' "$PLAN_DIR/$h.json"
-  if [ "$PLAN_CODE" != 0 ] && [ -t 0 ] && [ "$YES" = 0 ] \
-      && jq -e '.plan.code == "ambiguous_companion" or .plan.code == "no_ready_companion"' "$PLAN_DIR/$h.json" >/dev/null; then
-    read -r -p "Shared default companion [${COMPANION_IDS// /\/}/none]: " CHOICE
-    if jq -e --arg id "$CHOICE" '.companions[$id].capabilities.modelSelection == true' "$PLAN_DIR/$h.json" >/dev/null; then
-      read -r -p "Default model for $CHOICE [inherit]: " MODEL_CHOICE
-      [ "$MODEL_CHOICE" != inherit ] || MODEL_CHOICE=""
-      [ -z "$MODEL_CHOICE" ] || ONBOARD_ARGS+=(--model "$MODEL_CHOICE")
-    fi
-    COMPANION="$CHOICE"
-    MODEL="$MODEL_CHOICE"
-    PLAN_CODE=0
-    AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" --companion "$CHOICE" > "$PLAN_DIR/$h.json" || PLAN_CODE=$?
+}
+plan_companion
+CURRENT="$(jq -r '.configuration.summary' "$plan_file")"
+echo "Shared companion: $CURRENT"
+jq -r '.companions[] | "  \(.displayName): " + (if .ready then "ready" else "not ready" end), (.blockers[], .warnings[] | "    " + .message), (.nextSteps[] | "    Next: " + .)' "$plan_file"
+if jq -e '.plan.kind == "ask"' "$plan_file" >/dev/null; then
+  read -r -p "Shared default companion [${COMPANION_IDS// /$slash}/none]: " COMPANION
+  ONBOARD_ARGS+=(--companion "$COMPANION" --yes)
+  if jq -e --arg id "$COMPANION" '.companions[$id].capabilities.modelSelection == true' "$plan_file" >/dev/null; then
+    read -r -p "Default model for $COMPANION [Enter keeps saved model, inherit clears it]: " MODEL
+    [ -z "$MODEL" ] || ONBOARD_ARGS+=(--model "$MODEL")
   fi
-  if [ "$PLAN_CODE" != 0 ]; then
-    jq -r '.plan.message // "Selected companion is not ready. Fix its prerequisites, or explicitly use --no-companion-check."' "$PLAN_DIR/$h.json"
-    exit "$PLAN_CODE"
-  fi
-  CHOICE="$(jq -r 'if .plan.kind == "chosen" then .plan.id else "none" end' "$PLAN_DIR/$h.json")"
-  SELECTED_COMPANIONS+=("$CHOICE")
-  SELECTED_MODELS+=("$MODEL_CHOICE")
-  if [ "$CHOICE" = none ]; then
-    echo "Plan ($h): preserve companion configuration."
-  else
-    if [ -n "$MODEL_CHOICE" ]; then
-      echo "Plan ($h): set default companion to $CHOICE; model $MODEL_CHOICE."
-    else
-      echo "Plan ($h): set default companion to $CHOICE; preserve model settings."
-    fi
-    jq -r 'if .plan.ready then empty else "  Readiness deferred by --no-companion-check; companion is not ready." end' "$PLAN_DIR/$h.json"
-  fi
+  plan_companion
+fi
+if [ "$PLAN_CODE" != 0 ]; then
+  jq -r '.plan.message // "Selected companion is not ready. Fix its prerequisites, or explicitly use --no-companion-check."' "$plan_file"
+  exit "$PLAN_CODE"
+fi
+CHOICE="$(jq -r 'if .plan.kind == "chosen" then .plan.id else "none" end' "$plan_file")"
+if [ "$CHOICE" = none ]; then
+  echo "Plan ($HOST): preserve companion configuration."
+else
+  echo "Plan ($HOST): set default companion to $CHOICE."
+  if [ -z "$MODEL" ]; then echo "  Preserve model settings."; fi
+  jq -r 'if .plan.ready then empty else "  Readiness deferred by --no-companion-check; companion is not ready." end' "$plan_file"
+fi
+for h in "${HOSTS[@]}"; do
   host_paths "$h" "$SCRIPT_DIR"
   if [ -f "$HOST_AGENT_FILE" ]; then
     if grep -q '^# AUTO-INSTALLED by agent-companion plugin' "$HOST_AGENT_FILE"; then
@@ -373,7 +431,10 @@ done
 echo "Intended installation changes:"
 echo "  Install bridge-server dependencies in $SCRIPT_DIR/bridge-server."
 echo "  Install or refresh the live-view launcher ~/.local/bin/agent-companion (runs this checkout's hooks/launch-ui.sh)."
-[ "$DO_CLAUDE" = 0 ] || echo "  Merge companion permissions into ~/.claude/settings.json."
+if [ "$DO_CLAUDE" = 1 ]; then
+  echo "  Merge companion permissions into ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json."
+  [ -z "${CLAUDE_CONFIG_DIR:-}" ] || echo "  Claude bridge records use $HOME/.claude/agent-companion; native transcripts use $CLAUDE_CONFIG_DIR/projects."
+fi
 if [ "$DO_CODEX" = 1 ]; then
   host_paths codex "$SCRIPT_DIR"
   echo "  Create $HOST_CONFIG_DIR if needed; refresh the Codex plugin, verify MCP, and remove legacy managed hooks."
@@ -391,7 +452,7 @@ if [ "$DO_OPENCODE" = 1 ]; then
     default) echo "  Remove experimental.location_idle_timeout from the global config in $HOST_CONFIG_DIR." ;;
     *) echo "  Set experimental.location_idle_timeout to $OPENCODE_IDLE in the global config in $HOST_CONFIG_DIR." ;;
   esac
-  [ -z "$OPENCODE_IDLE" ] || echo "  Apply the timeout to open directories with opencode reload or the plugin service restart."
+  [ -z "$OPENCODE_IDLE" ] || echo "  For an already running service, opencode reload applies the timeout to open directories after jobs finish."
 fi
 if [ "$DO_COPILOT" = 1 ]; then
   echo "  Register this checkout as a local Copilot marketplace and enable agent-companion."
@@ -399,12 +460,12 @@ if [ "$DO_COPILOT" = 1 ]; then
 fi
 echo "  Write diagnostic install markers after each host finishes."
 if [ "$MODEL" = inherit ]; then
-  echo "  Clear the shared default model for ${SELECTED_COMPANIONS[0]}."
+  echo "  Clear the shared default model for $CHOICE."
 elif [ -n "$MODEL" ]; then
-  echo "  Save shared default model $MODEL for ${SELECTED_COMPANIONS[0]}."
+  echo "  Save shared default model $MODEL for $CHOICE."
 fi
-if [ "$COMPANION" = copilot ] || command -v copilot >/dev/null 2>&1; then
-  echo "  Install the Copilot reviewer agent if absent (preserve any existing file)."
+if [ -n "$MODEL" ]; then
+  jq -r 'if .model.source == "env" then "  Effective model: \(.model.current) (environment override)." else empty end' "$plan_file"
 fi
 if [ "$DRY_RUN" = 1 ]; then exit 0; fi
 if [ -t 0 ] && [ "$YES" = 0 ]; then
@@ -423,11 +484,14 @@ if [ -d "$BRIDGE_DIR" ] && [ -f "$BRIDGE_DIR/package.json" ]; then
   # empty that install through the link, so drop only the link; the next
   # session start links it again.
   [ ! -L "$BRIDGE_DIR/node_modules" ] || rm "$BRIDGE_DIR/node_modules"
-  if [ -f "$BRIDGE_DIR/package-lock.json" ]; then
-    cd "$BRIDGE_DIR" && npm ci --silent --no-audit --no-fund
-  else
-    cd "$BRIDGE_DIR" && npm install --silent --no-audit --no-fund
-  fi
+  npm_action=install
+  [ ! -f "$BRIDGE_DIR/package-lock.json" ] || npm_action=ci
+  echo "  Running npm $npm_action --no-audit --no-fund in $BRIDGE_DIR"
+  (cd "$BRIDGE_DIR" && npm "$npm_action" --no-audit --no-fund) || {
+    code=$?
+    fail "npm $npm_action --no-audit --no-fund exited $code in $BRIDGE_DIR"
+    exit "$code"
+  }
   DEPS_STATUS="installed"
   ok "bridge-server node_modules installed"
 else
@@ -451,30 +515,6 @@ esac
 
 echo ""
 
-# --- Copilot-side reviewer agent (Copilot companion only) --------------
-#
-# This is Copilot-specific. Only set it up when Copilot is the selected companion
-# or is already installed (so existing Copilot users keep it); an OpenCode-only
-# install skips it entirely.
-
-if [ "$COMPANION" = "copilot" ] || command -v copilot >/dev/null 2>&1; then
-  printf "Setting up Copilot reviewer agent...\n"
-  COPILOT_AGENTS="${COPILOT_HOME:-$HOME/.copilot}/agents"
-  REVIEWER_AGENT="$COPILOT_AGENTS/reviewer.agent.md"
-  mkdir -p "$COPILOT_AGENTS"
-  if [ ! -f "$REVIEWER_AGENT" ]; then
-    if [ -f "$SCRIPT_DIR/.copilot/agents/reviewer.agent.md" ]; then
-      cp "$SCRIPT_DIR/.copilot/agents/reviewer.agent.md" "$REVIEWER_AGENT"
-      ok "reviewer.agent.md copied to $COPILOT_AGENTS/"
-    else
-      warn "reviewer.agent.md source not found, skipping"
-    fi
-  else
-    ok "reviewer.agent.md already exists"
-  fi
-  echo ""
-fi
-
 remove_retired_role() {
   if [ -f "$HOST_AGENT_FILE" ] && grep -q '^# AUTO-INSTALLED by agent-companion plugin' "$HOST_AGENT_FILE"; then
     rm -- "$HOST_AGENT_FILE"
@@ -491,7 +531,7 @@ if [ "$DO_CLAUDE" = 1 ]; then
   # invocation of a agent-bridge MCP tool can surface a permission
   # prompt. Plugin-shipped settings.json cannot declare permissions, so
   # we merge into the user's ~/.claude/settings.json.
-  printf "Granting Claude companion permissions in ~/.claude/settings.json...\n"
+  printf "Granting Claude companion permissions in ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json...\n"
   if node "$SCRIPT_DIR/scripts/install-permissions.mjs" --host claude --yes; then
     ok "permission entries present"
   else
@@ -519,7 +559,6 @@ if [ "$DO_CODEX" = 1 ]; then
   # 6a. Build and install/refresh the local Codex plugin. The manifest owns the
   # MCP registration and plugin-scoped hooks; no root .mcp.json is installed,
   # so this does not alter Claude's MCP discovery.
-  CODEX_MARKETPLACE_DIR="$SCRIPT_DIR/dist/codex-marketplace"
   printf "Building and registering the local Codex marketplace...\n"
   if node "$SCRIPT_DIR/scripts/build-codex-marketplace.mjs" \
       --out "$CODEX_MARKETPLACE_DIR"; then
@@ -645,55 +684,46 @@ if [ "$DO_OPENCODE" = 1 ]; then
   else
     fail "$output"; exit 1
   fi
+  OPENCODE_STATUS="plugin registered; host setup pending"
   if [ -n "$OPENCODE_IDLE" ]; then
     STEP="OpenCode global idle timeout"
     node "$idle_writer" "$OPENCODE_IDLE"
-    warn "OpenCode reloads open directories and their MCP servers on 'opencode reload'. The plugin service restart below also applies the timeout."
+    warn "OpenCode reloads open directories and their MCP servers on 'opencode reload'."
   fi
   mkdir -p "$HOST_STATE_DIR"
   printf 'opencode\n' > "$HOST_STATE_DIR/.host"
-  OPENCODE_INSTALLED=1
+  OPENCODE_STATUS=installed
 fi
 
 if [ "$DO_COPILOT" = 1 ]; then
   STEP="Copilot plugin installation"
   host_paths copilot "$SCRIPT_DIR"
-  market=$(copilot plugin marketplace list --json | jq -r '.[] | select(.name == "agent-companion") | .source')
-  case "$market" in
-    "") copilot plugin marketplace add "$SCRIPT_DIR" ;;
-    "Local: $SCRIPT_DIR") ;;
-    *) fail "The agent-companion marketplace is already registered from another source: $market"; exit 1 ;;
-  esac
+  check_copilot_market
+  [ -n "$market" ] || copilot plugin marketplace add "$SCRIPT_DIR"
+  COPILOT_STATUS="marketplace registered; plugin pending"
   AGENT_COMPANION_HOST=copilot CLAUDE_PLUGIN_ROOT="$SCRIPT_DIR" AGENT_COMPANION_REQUIRE_DEPS=1 /bin/bash "$SCRIPT_DIR/hooks/install-deps.sh"
   copilot config experimental true
   copilot plugin install agent-companion@agent-companion
   mkdir -p "$HOST_STATE_DIR"
   printf 'copilot\n' > "$HOST_STATE_DIR/.host"
-  ok "Copilot plugin installed. Start a fresh session and approve agent-bridge when prompted."
+  COPILOT_STATUS=installed
 fi
 
 # --- Syntax-check all .mjs files ------------------------------------
 
 STEP="syntax checks"
 printf "Syntax-checking scripts...\n"
-FAIL_COUNT=0
-while IFS= read -r -d '' f; do
-  [ -f "$f" ] || continue
-  if node --check "$f" 2>/dev/null; then
-    ok "${f#$SCRIPT_DIR/}"
-  else
-    fail "${f#$SCRIPT_DIR/} — syntax error"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-done < <(
-  find "$SCRIPT_DIR" -not -path "$SCRIPT_DIR/bridge-server/node_modules/*" -name '*.mjs' -print0
-)
-
-if [ "$FAIL_COUNT" -gt 0 ]; then
-  fail "$FAIL_COUNT file(s) have syntax errors"
+source_files() {
+  (cd "$SCRIPT_DIR" && find ./bridge-server ./extensions ./hooks ./lib ./opencode-plugin ./probes ./scripts ./test \
+    \( -name node_modules -o -name dist -o -name .plugin-data \) -prune -o -type f -name "$1" -print0)
+}
+source_files '*.mjs' > "$PLAN_DIR/sources"
+if ! (cd "$SCRIPT_DIR" && xargs -0 -P 4 -n 1 node --check < "$PLAN_DIR/sources"); then
+  fail "Source syntax check failed (see Node diagnostic above)."
   exit 1
 fi
-
+count=$(tr -cd '\000' < "$PLAN_DIR/sources" | wc -c)
+ok "Syntax checked $((count)) source files."
 echo ""
 
 # --- Run unit tests -------------------------------------------------
@@ -710,9 +740,8 @@ printf "Running unit tests...\n"
 # the README / inline-list drift problem (new tests were getting added but
 # this list was not updated).
 EXISTING=()
-while IFS= read -r -d '' f; do EXISTING+=("$f"); done < <(
-  find "$SCRIPT_DIR" -not -path "$SCRIPT_DIR/bridge-server/node_modules/*" -name '*.test.mjs' -print0
-)
+source_files '*.test.mjs' > "$PLAN_DIR/tests"
+while IFS= read -r -d '' f; do EXISTING+=("$SCRIPT_DIR/$f"); done < "$PLAN_DIR/tests"
 
 if [ "${#EXISTING[@]}" -gt 0 ]; then
   if node --test --test-timeout=300000 "${EXISTING[@]}" 2>/dev/null; then
@@ -732,20 +761,16 @@ fi
 
 # Commit only the explicitly planned defaults after installation/checks succeed.
 STEP="companion configuration"
-for i in "${!HOSTS[@]}"; do
-  h="${HOSTS[$i]}"
-  CHOICE="${SELECTED_COMPANIONS[$i]}"
-  [ "$CHOICE" != none ] || continue
-  ONBOARD_ARGS=(--host "$h" --companion "$CHOICE" --set-default --yes --json)
-  [ -z "${SELECTED_MODELS[$i]}" ] || ONBOARD_ARGS+=(--model "${SELECTED_MODELS[$i]}")
+if [ "$CHOICE" != none ]; then
+  ONBOARD_ARGS=(--host "$HOST" --companion "$CHOICE" --set-default --yes --json)
+  [ -z "$MODEL" ] || ONBOARD_ARGS+=(--model "$MODEL")
   [ "$NO_COMPANION_CHECK" = 0 ] || ONBOARD_ARGS+=(--no-companion-check)
-  if AGENT_COMPANION_HOST="$h" node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" > "$PLAN_DIR/$h-result.json"; then
-    CURRENT="$(jq -r '.configuration.summary' "$PLAN_DIR/$h-result.json")"
-    jq -r 'if .ok then empty else "Companion readiness deferred; fix prerequisites before delegating." end' "$PLAN_DIR/$h-result.json"
-    case "$h" in claude) CLAUDE_COMPANION="$CURRENT" ;; codex) CODEX_COMPANION="$CURRENT" ;; esac
+  if node "$SCRIPT_DIR/scripts/onboard.mjs" "${ONBOARD_ARGS[@]}" > "$PLAN_DIR/result.json"; then
+    CURRENT="$(jq -r '.configuration.summary' "$PLAN_DIR/result.json")"
+    jq -r 'if .ok then empty else "Companion readiness deferred; fix prerequisites before delegating." end' "$PLAN_DIR/result.json"
   else
-    jq -r '(.report.blockers[]?.message), (.report.nextSteps[]? | "Next: " + .)' "$PLAN_DIR/$h-result.json" 2>/dev/null || true
-    fail "Companion configuration failed for $h; previous configuration preserved. Fix prerequisites and rerun."
+    jq -r '(.report.blockers[]?.message), (.report.nextSteps[]? | "Next: " + .)' "$PLAN_DIR/result.json" 2>/dev/null || true
+    fail "Companion configuration failed; previous configuration preserved. Fix prerequisites and rerun."
     exit 1
   fi
-done
+fi

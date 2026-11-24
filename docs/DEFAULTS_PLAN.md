@@ -1,6 +1,6 @@
 # User defaults for companion model and effort: plan
 
-Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
+Historical design for the original Claude and Codex hosts. Written before the 1.0.0 vocabulary: tools `agent_*` are now `companion_*`, and `target` is `companion`; see docs/VOCABULARY_PLAN.md.
 
 Status: done (2026-11-18). Steps 1 to 9 are merged to main, along with the census
 fix 6200b0c found on the way.
@@ -261,7 +261,7 @@ test went with `ALLOWED_MODELS` (owner's decision).
 The store and migration described above. `readDefaultModel` and
 `readDefaultTarget` read from the store. Remove the OpenCode adapter's env read
 and Antigravity's `defaultModel`, so routing is the only place defaults apply.
-`onboard.mjs --set-default` and `setup.sh --target/--model` write the store.
+`onboard.mjs --set-default` and `bash setup.sh --companion <id> --model <id>` write the store.
 
 Check: unit tests under `test/sandbox-home.mjs` for the store, migration
 (identical, conflicting, absent) and precedence, `refuseRealHomeUnderTest`
@@ -420,7 +420,7 @@ with 0.170.0 it prints nothing and passes.
 
 ## After merge
 
-Run `setup.sh --host both --target none --skip-tests --yes` and restart sessions.
+Run `bash setup.sh --host both --companion none --skip-tests --yes` and restart sessions.
 The first bridge to start migrates `default-target = codex` from both hosts.
 Then run `agent-companion defaults` on this machine.
 

@@ -1,5 +1,7 @@
 # One vocabulary: companion, thread, job: plan
 
+Historical snapshot of the Claude Code and Codex hosts. See the [current host instructions](../README.md#hosts).
+
 Status: planned 2026-11-23, on `feat/vocabulary`. Ships as 1.0.0 again: the
 v1.0.0 tag moves to the result and its release notes are rewritten (decided by
 the user: nobody has installed the first 1.0.0).

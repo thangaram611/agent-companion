@@ -98,3 +98,14 @@ test('malformed global config survives a failed edit', () => {
     assert.equal(readFileSync(jsonc, 'utf8'), invalid);
   }
 });
+
+test('S21 inserts after a leading schema and keeps adjacent JSONC comments', () => {
+  const { run, jsonc } = fixture();
+  const before = '{\n  // schema docs\n  "$schema": "schema.json", // schema note\n';
+  const after = '  // model docs\n  "model": "a/b"\n}\n';
+  writeFileSync(jsonc, before + after);
+  const r = run('false');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(jsonc, 'utf8'), before +
+    '  "experimental": {\n    "location_idle_timeout": false\n  },\n' + after);
+});
