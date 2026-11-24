@@ -64,20 +64,6 @@ test('empty news path starts no process; an unavailable identity rewrite denies 
   assert.equal((await runHook('pre-tool', { tool_input: { lead: { session: 'fake' } } })).permissionDecision, 'deny');
 });
 
-test('session start removes only sentinel-marked legacy agent files on each host', async () => {
-  for (const host of Object.values(HOSTS).filter(h => h.oldAgentFile)) {
-    const env = { AGENT_COMPANION_HOST: host.id, CODEX_HOME: join(process.env.HOME, 'custom codex') };
-    const dir = join(host.configDir({ ...process.env, ...env }), 'agents');
-    mkdirSync(dir, { recursive: true });
-    const file = join(dir, 'agent-companion.' + (host.id === 'codex' ? 'toml' : 'md'));
-    for (const [body, keep] of [['user file', true], ['---\n# AUTO-INSTALLED by agent-companion plugin (old)\n', false]]) {
-      writeFileSync(file, body);
-      await runHook('session-start', { session_id: 'new' }, env);
-      assert.equal(existsSync(file), keep);
-    }
-  }
-});
-
 // Warm the real Node entry's imports before releasing stdin. Otherwise the
 // tool can finish during shell startup and the empty-marker fast path wins.
 async function readyHook(env) {

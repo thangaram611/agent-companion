@@ -304,7 +304,6 @@ if [ "$DO_CODEX" = 1 ]; then
     "$SCRIPT_DIR/.codex-plugin/plugin.json"
     "$SCRIPT_DIR/hooks/launch-agent-bridge.sh"
     "$SCRIPT_DIR/scripts/build-codex-marketplace.mjs"
-    "$SCRIPT_DIR/scripts/install-codex-hooks.mjs"
   )
 fi
 
@@ -417,17 +416,6 @@ else
   if [ -z "$MODEL" ]; then echo "  Preserve model settings."; fi
   jq -r 'if .plan.ready then empty else "  Readiness deferred by --no-companion-check; companion is not ready." end' "$plan_file"
 fi
-for h in "${HOSTS[@]}"; do
-  host_paths "$h" "$SCRIPT_DIR"
-  if [ -f "$HOST_AGENT_FILE" ]; then
-    if grep -q '^# AUTO-INSTALLED by agent-companion plugin' "$HOST_AGENT_FILE"; then
-      echo "  Remove the retired plugin role at $HOST_AGENT_FILE."
-    else
-      echo "  User-owned agent preserved: $HOST_AGENT_FILE"
-    fi
-  fi
-done
-
 echo "Intended installation changes:"
 echo "  Install bridge-server dependencies in $SCRIPT_DIR/bridge-server."
 echo "  Install or refresh the live-view launcher ~/.local/bin/agent-companion (runs this checkout's hooks/launch-ui.sh)."
@@ -437,7 +425,7 @@ if [ "$DO_CLAUDE" = 1 ]; then
 fi
 if [ "$DO_CODEX" = 1 ]; then
   host_paths codex "$SCRIPT_DIR"
-  echo "  Create $HOST_CONFIG_DIR if needed; refresh the Codex plugin, verify MCP, and remove legacy managed hooks."
+  echo "  Create $HOST_CONFIG_DIR if needed; refresh the Codex plugin and verify MCP."
   case "$UNLOAD_DELAY" in
     '') ;;
     default) echo "  Remove thread_unload_delay_secs from $HOST_CONFIG_DIR/config.toml (applies when Codex's daemon restarts)." ;;
@@ -515,17 +503,10 @@ esac
 
 echo ""
 
-remove_retired_role() {
-  if [ -f "$HOST_AGENT_FILE" ] && grep -q '^# AUTO-INSTALLED by agent-companion plugin' "$HOST_AGENT_FILE"; then
-    rm -- "$HOST_AGENT_FILE"
-  fi
-}
-
 if [ "$DO_CLAUDE" = 1 ]; then
   STEP="Claude permissions"
   printf "=== Claude Code host install ===\n"
   host_paths claude "$SCRIPT_DIR"
-  remove_retired_role
 
   # 5b. Permission allow-list — without an explicit allow rule, the first
   # invocation of a agent-bridge MCP tool can surface a permission
@@ -593,7 +574,7 @@ if [ "$DO_CODEX" = 1 ]; then
 
   # Plugin installation alone does not prove Codex accepted the MCP manifest.
   # Ask a fresh CLI process for its effective registry and validate the exact
-  # bridge transport before changing the user's legacy hook state.
+  # bridge transport.
   MCP_RESULT=""
   if MCP_RESULT="$(codex mcp list --json)"; then
     MCP_BRIDGE_CWD="$(printf '%s\n' "$MCP_RESULT" | jq -er '
@@ -617,22 +598,7 @@ if [ "$DO_CODEX" = 1 ]; then
     fail "Codex installed the plugin but did not register its agent-bridge MCP transport"
     exit 1
   fi
-  STEP="Codex hooks"
   ok "Codex agent-bridge MCP registration verified"
-
-  remove_retired_role
-
-  # 6c. Remove only this project's pre-plugin managed global hook entries.
-  # Current installs use hooks/hooks-codex.json from plugin scope; leaving the
-  # old copies in $CODEX_HOME/hooks.json would deliver every event twice.
-  printf "Removing legacy managed Codex hook entries, if present...\n"
-  if node "$SCRIPT_DIR/scripts/install-codex-hooks.mjs" \
-      --plugin-root "$SCRIPT_DIR" --uninstall --yes; then
-    ok "legacy managed hook entries absent"
-  else
-    fail "legacy managed hook cleanup failed — see error above"
-    exit 1
-  fi
 
   # 6d. Permission injection — explicit no-op so future Codex permission
   # work has an obvious place to plug in. Keeps the flow uniform across

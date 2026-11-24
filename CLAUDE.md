@@ -71,14 +71,11 @@ the session's advertised ids. Copilot and Antigravity validate and confirm the
 selected model's ACP `thought_level` and report inherited effort. Codex catalog
 models and OpenCode also validate model-specific levels before delivery. Codex
 levels are unverified for models outside Codex's catalog: it confirms the
-reported effort and lets the backend validate vocabulary during the turn. Before
-writing any selection on existing history, Codex reads its model. OpenCode
+reported effort and lets the backend validate vocabulary during the turn. When an effort override on resume omits the model, Codex reads the saved model before validating its levels. OpenCode
 queries variants only for an effort override, which takes precedence over a
-variant in the model string. Inherited OpenCode effort stays null. Refused effort
-is not saved on the thread or written to native selection state. On a new
+variant in the model string. Inherited OpenCode effort stays null. The bridge saves an override on the thread only after the adapter accepts it. On a new
 thread, omitted effort uses the companion's saved default, then native
-configuration. Copilot's spawn effort flag is removed; the option is validated
-before a config write. Local Ollama BYOK makes Copilot testable; GitHub-hosted
+configuration. Copilot validates effort against the selected session model before writing the option. Local Ollama BYOK makes Copilot testable; GitHub-hosted
 model qualification still hits this account's `session/new` 403. The isolated
 free-backend harness is in `probes/free-backends/`; never use the operator's live
 homes for it. Send acknowledgements expose the job, thread, companion,
@@ -96,8 +93,7 @@ Copilot CLI 1.0.114 replayed saved history in a fresh process on local Ollama.
 The bridge requires replay, queues by default and supports interrupt. Steer is
 unavailable because a second prompt cancels the running turn. Each companion
 uses a fixed transport.
-Routing applies model defaults only on a new thread. All hosts share
-`settings.json` and its one-shot migration in `lib/state.mjs`.
+Routing applies model and effort defaults only on a new thread. All hosts read and write the same `settings.json`.
 
 **Interventions share one controller path.** New text sent to a running thread
 is an intervention with an optional `mode`; omission uses the job's saved
@@ -108,7 +104,7 @@ controller's tick. Outcomes are private atomic files; close removes that
 job's inbox. An accepted user message wakes `companion_wait` with
 `user_intervened`, never an answer; durable notice receipts prevent repeats,
 including after a wait gap. User cancel produces a terminal result with cause
-`user_cancel`. The terminal metadata's `interventions` lists each message's
+`user_cancel`. The terminal response’s `meta.interventions` lists each message's
 sender, mode, state and first line, including `not_delivered` messages.
 
 ## Single-source-of-truth modules
@@ -123,7 +119,7 @@ sender, mode, state and first line, including `not_delivered` messages.
 | `bridge-server/controller/process-supervisor.mjs` | Owned process groups, descendant census, termination and PID/birth-identity verification. |
 | `bridge-server/adapters/{codex,opencode,acp,claude}.mjs` | Provider protocols, history loading, delivery acknowledgement, native progress, usage and model selection. |
 | `scripts/cleanup-watcher.mjs` | Bridge-loss tree termination and the fenced terminal result; never more model work. |
-| `lib/state.mjs` | Shared companion, model and effort settings, atomic model/effort edits and one-shot migration of legacy defaults. |
+| `lib/state.mjs` | Atomic edits to shared companion, model and effort settings, and host readiness checks. |
 | `lib/hosts/` | Host registry, paths, lead identity, wake adapters and sandbox guard. |
 | `lib/hosts/opencode.mjs` | OpenCode paths, session identity and managed-service prompt wake. |
 | `lib/hosts/copilot.mjs` | Copilot paths, hook identity signing and verification, and wake selection. |
@@ -143,7 +139,7 @@ sender, mode, state and first line, including `not_delivered` messages.
 | `lib/companion-registry.mjs` | Capabilities, readiness requirements and ACP descriptors. |
 | `lib/command-probe.mjs` | The bounded synchronous probe shared by diagnostics; enforced by `test/exec-timeout-guard.test.mjs`. |
 | `bridge-server/ui/jobs.mjs` | Cross-host job lists, thread titles and lead session names. The pane lists the latest job per thread in its session. |
-| `bridge-server/ui/defaults.mjs` | The package-free `defaults` command and the live view's defaults panel (`d`): saved choices, native inheritance, validation, saves and legacy conflict resolution. |
+| `bridge-server/ui/defaults.mjs` | The package-free `defaults` command and the live view's defaults panel (`d`): saved choices, native inheritance, validation and saves. |
 | `bridge-server/ui/rows.mjs` | Sanitizing native text, cell widths, item folding and wrapping, a job's transcript blocks, card head and pending lines for both views, and the cached row index. |
 | `bridge-server/ui/follow.mjs` | One job's transcript follow and turn selection for both views, and the `follow` entry that streams them to the Claude pane as JSON lines. |
 | `bridge-server/ui/model.mjs` | Live-view state, keys, message boxes and frame composition; `app.mjs` is only the Ink layer and the `ui` entry point. |
@@ -171,7 +167,7 @@ sender, mode, state and first line, including `not_delivered` messages.
   marker. Keep Node off that path.
 - **One delivery module arbitrates the hook/tool race.** Use `delivery.mjs`
   for both. A result is claimed once: after a hook delivery a tool call returns
-  a note and `delivered_by: "hook"` in place of the text; after a tool delivery
+  a read reference and `meta.delivered_by: "hook"` in place of the text; after a tool delivery
   repeated calls return the text again. A wake attempt, `companion_status` and
   `companion_read` never claim. The read cursor lives in a separate record so a
   controller rewrite cannot roll it back.

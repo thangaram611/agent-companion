@@ -80,20 +80,6 @@ test('install adds missing permissions, preserves unrelated entries, and backs u
   });
 });
 
-test('old bridge permissions in both namespaces are replaced', () => {
-  withHome((home) => {
-    mkdirSync(join(home, '.claude'), { recursive: true });
-    const stale = ['mcp__agent-bridge__', HOSTS.claude.toolPrefix].flatMap(prefix =>
-      ['send', 'wait', 'read', 'status', 'cancel', 'catalog', 'reply'].map(action => prefix + 'agent_' + action));
-    writeFileSync(settingsPath(home), JSON.stringify({
-      permissions: { allow: ['Bash(git status:*)', ...stale, 'Agent(agent-companion)'] },
-    }));
-    const r = runScript(home);
-    assert.equal(r.code, 0, r.stderr);
-    assert.deepEqual(readSettings(home).permissions.allow, ['Bash(git status:*)', ...REQUIRED_PERMISSIONS]);
-  });
-});
-
 test('codex host is an explicit no-op and malformed claude settings are not overwritten', () => {
   withHome((home) => {
     const codex = runScript(home, ['--host', 'codex']);

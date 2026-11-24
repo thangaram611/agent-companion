@@ -1,5 +1,5 @@
-import { readFileSync, readSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, lstatSync, fstatSync, rmSync, rmdirSync, renameSync, existsSync, constants } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { readFileSync, readSync, readdirSync, mkdirSync, openSync, closeSync, unlinkSync, lstatSync, fstatSync, rmSync, constants } from 'node:fs';
+import { join } from 'node:path';
 import { logJob } from '../validation.mjs';
 import { BASE_DIR } from '../../lib/state.mjs';
 import { refuseRealHomeUnderTest, stateDirs } from '../../lib/hosts/index.mjs';
@@ -7,7 +7,6 @@ import { writePrivateFileAtomic } from '../../lib/runtime-paths.mjs';
 import { sumUsage } from '../../lib/usage.mjs';
 import { COMPANIONS } from '../../lib/companion-registry.mjs';
 
-// The views show this name; old records without it get it on migration.
 const companionName = (companion) => COMPANIONS[companion]?.shortName ?? companion;
 
 const segment = (id) => {
@@ -55,91 +54,7 @@ export function discardInterventions(job) {
   }
 }
 
-const migrated = new Set();
-
-function entries(dir) {
-  try { return readdirSync(dir, { withFileTypes: true }); }
-  catch (err) { if (err.code === 'ENOENT') return []; throw err; }
-}
-
-function readMigrationRecord(path) {
-  try {
-    const data = JSON.parse(readFileSync(path, 'utf8'));
-    return data && typeof data === 'object' && !Array.isArray(data) ? data : null;
-  } catch (err) {
-    // A peer can have moved the file. Keep damaged input for inspection.
-    if (err.code === 'ENOENT' || err instanceof SyntaxError) return null;
-    throw err;
-  }
-}
-
-const tolerate = (fn, codes) => { try { fn(); } catch (err) { if (!codes.includes(err.code)) throw err; } };
-
-// A 1.0.0 store can still hold 0.x threads/ and jobs/, which the new folders would collide with. The process
-// whose mkdir claims legacy.pending/ moves the 0.x leftovers into it, then renames it to legacy/: that atomic
-// rename marks the archive complete, and no process writes threads/ or jobs/ before it. Others wait for it; one
-// that has not finished in five seconds died, and its moves are safe to finish, since every move tolerates a peer's.
-function archiveLegacy(dir) {
-  const legacy = join(dir, 'legacy'), pending = join(dir, 'legacy.pending');
-  let claimed = false;
-  tolerate(() => { mkdirSync(pending, { mode: 0o700 }); claimed = true; }, ['EEXIST']);
-  if (!claimed) {
-    const deadline = Date.now() + 5000;
-    while (!existsSync(legacy) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    if (existsSync(legacy)) return;
-  }
-  for (const { name } of entries(dir)) {
-    if (/^(threads|jobs|attachments|completions|leases|stops|phase1-migrated|daemon\.log)$/.test(name) || name.startsWith('profiles.retired-'))
-      tolerate(() => renameSync(join(dir, name), join(pending, name)), ['ENOENT', 'ENOTEMPTY', 'EEXIST']);
-  }
-  tolerate(() => renameSync(pending, legacy), ['ENOENT', 'ENOTEMPTY', 'EEXIST']);
-}
-
-function migrateRecords(dir) {
-  dir = resolve(dir);
-  if (migrated.has(dir)) return;
-  if (lstatSync(join(dir, 'conversations'), { throwIfNoEntry: false })?.isDirectory() && !existsSync(join(dir, 'legacy'))) archiveLegacy(dir);
-
-  for (const [source, destination] of [['conversations', 'threads'], ['executions', 'jobs'], ['results', 'results']]) {
-    const from = join(dir, source), to = join(dir, destination);
-    if (!lstatSync(from, { throwIfNoEntry: false })?.isDirectory()) continue;
-    const inPlace = from === to;
-    for (const file of entries(from)) {
-      if (!file.isFile() || !file.name.endsWith('.json')) continue;
-      const path = join(from, file.name), dest = join(to, file.name);
-      // The migration removes each old file it copies, so one found later was written afterwards by a bridge still
-      // running 1.0.0 code, and its copy wins. A new record newer than the old file means an earlier run died
-      // between its write and the removal.
-      const moved = lstatSync(path, { throwIfNoEntry: false }), existing = lstatSync(dest, { throwIfNoEntry: false });
-      if (!moved) continue;
-      if (inPlace || !existing || existing.mtimeMs <= moved.mtimeMs) {
-        const data = readMigrationRecord(path);
-        if (!data || (inPlace && Object.hasOwn(data, 'jobId'))) continue;
-        const { owner, executionId, provider, ...record } = data;
-        record.thread ??= owner;
-        record.jobId ??= executionId ?? (inPlace ? file.name.slice(0, -5) : undefined);
-        record.companion ??= provider;
-        if (destination === 'jobs') record.companionName ??= companionName(record.companion);
-        // Normal 1.0.0 results got their companion from the job.
-        if (inPlace && !record.companion) record.companion = readMigrationRecord(join(dir, 'jobs', file.name))?.companion;
-        for (const terminal of [record, record.terminal]) {
-          if (terminal?.cause === 'provider_error') terminal.cause = 'companion_error';
-          if (terminal?.detail === 'provider_error') terminal.detail = 'companion_error';
-        }
-        mkdirSync(to, { recursive: true, mode: 0o700 });
-        writePrivateFileAtomic(dest, JSON.stringify(record) + '\n', { replace: true });
-      }
-      if (!inPlace) rmSync(path, { force: true });
-    }
-    if (!inPlace) {
-      try { rmdirSync(from); }
-      catch (err) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(err.code)) throw err; }
-    }
-  }
-  migrated.add(dir);
-}
-
-// After migration, record mutations take a per-thread exclusive lock. No await occurs under
+// Record mutations take a per-thread exclusive lock. No await occurs under
 // it, so a generation check and rename cannot interleave with another writer.
 // A lock left by a crash fails closed (RECORD_BUSY); never guess its ownership
 // from a PID and steal it. Normal reads require neither a lock nor directory creation.
@@ -147,7 +62,6 @@ export class Records {
   constructor({ dir = BASE_DIR, log = (event) => console.error(JSON.stringify(event)) } = {}) {
     this.dir = refuseRealHomeUnderTest(dir, 'controller state dir');
     this.log = log;
-    migrateRecords(this.dir);
   }
   path(kind, id) { return join(this.dir, kind, `${segment(id)}.json`); }
   read(kind, id) {

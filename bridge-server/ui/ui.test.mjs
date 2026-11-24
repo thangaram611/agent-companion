@@ -228,13 +228,6 @@ test('a Claude message that joined the running turn is a message, labelled by it
   assert.doesNotMatch(text, /preamble ·/);
 });
 
-test('an older bridge\'s running job shows no box but a one-line hint, and keeps the step 2 keys', t => {
-  const model = open(uiFixture(t), 'claude:op-1', 80);
-  const text = screen(model);
-  assert.match(text, /● responding\n+ {2}messages need the updated bridge; this job started on an older one\n\n ↑↓ items {3}esc back/);
-  assert.doesNotMatch(text, /╭/);
-});
-
 test('a companion with no message modes offers cancel only', t => {
   const f = uiFixture(t);
   f.setJob('run-1', () => ({ interventionModes: { default: null, steer: false, queue: false, interrupt: false } }));
@@ -287,7 +280,6 @@ const DEFAULTS = () => ({
     copilot: { model: { saved: 'gpt-oss:20b', value: 'gpt-oss:20b', source: 'config' }, effort: { saved: null, value: null, source: 'unset' },
       inherit: { model: null, effort: null, reason: 'no reported run' }, validation: 'unverified until a session runs' },
   },
-  conflicts: [],
 });
 // A fake defaults(): records each query; a saved effort `turbo` is refused.
 function fakeDefaults() {
@@ -296,12 +288,12 @@ function fakeDefaults() {
     calls.push(query);
     if (query.effort === 'turbo') throw new Error('effort "turbo" is not valid for Codex model "gpt-6.2-astra". Use one of: low, medium, high, xhigh, max, ultra');
     const result = DEFAULTS();
-    if (query.defaultCompanion) return { settingsFile: result.settingsFile, companion: { ...result.companion, saved: query.defaultCompanion === 'inherit' ? null : query.defaultCompanion }, conflicts: [] };
+    if (query.defaultCompanion) return { settingsFile: result.settingsFile, companion: { ...result.companion, saved: query.defaultCompanion === 'inherit' ? null : query.defaultCompanion } };
     if (query.companion) {
       const row = result.companions[query.companion];
       for (const key of ['model', 'effort']) if (query[key]) row[key] = query[key] === 'inherit'
         ? { saved: null, value: null, source: 'unset' } : { saved: query[key], value: query[key], source: 'config' };
-      return { settingsFile: result.settingsFile, companions: { [query.companion]: row }, conflicts: [] };
+      return { settingsFile: result.settingsFile, companions: { [query.companion]: row } };
     }
     return result;
   };
@@ -433,9 +425,9 @@ test('follow: appended items arrive above the box; scrolling up stops following 
 });
 
 test('folding: e expands the cursor item, E expands all, p shows the preamble', t => {
-  // An older bridge's running job has no box, so the transcript takes the keys.
+  // Once the job ends, transcript navigation takes the keys.
   const f = uiFixture(t);
-  f.setJob('run-1', () => ({ interventionModes: undefined }));
+  f.setJob('run-1', () => ({ state: 'closed' }));
   const model = open(f, 'claude:run-1', 150, 80);
   press(model, 'tab', 'g');
   assert.match(screen(model), /\+19 lines/);

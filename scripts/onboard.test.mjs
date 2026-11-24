@@ -118,7 +118,7 @@ function run(args, env = {}, files = {}) {
     ]));
     const file = join(home, 'settings.json');
     const settings = existsSync(file) ? JSON.parse(readFileSync(file)) : {};
-    return { code: r.status, stdout: r.stdout, stderr: r.stderr, stored, settings, hasSettings: existsSync(file) };
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr, stored, settings };
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -128,20 +128,6 @@ function saved(companion, models = {}) {
   const companions = Object.fromEntries(Object.entries(models).map(([id, model]) => [id, { model }]));
   return { 'settings.json': JSON.stringify({ companion, companions }) };
 }
-
-test('CLI previews a legacy default without consuming it, then migrates it on startup', () => {
-  const files = { 'default-target': 'copilot\n' };
-  const args = ['--companion', 'none', '--yes', '--json'];
-  const preview = run(['--plan', ...args], {}, files);
-  assert.equal(preview.code, 0, preview.stderr);
-  assert.equal(JSON.parse(preview.stdout).configuration.defaultCompanion.companion, 'copilot');
-  assert.deepEqual(preview.stored, files);
-  assert.equal(preview.hasSettings, false);
-  const actual = run(args, {}, files);
-  assert.equal(actual.code, 0, actual.stderr);
-  assert.deepEqual(actual.settings, { companion: 'copilot' });
-  assert.equal(actual.stored['default-target'], null);
-});
 
 test('CLI --list-companions --json exits 0 with companion readiness', () => {
   const r = run(['--list-companions', '--json']);
@@ -186,11 +172,8 @@ test('CLI explicit --no-companion-check allows deferred configuration and labels
   assert.equal(r.settings.companion, 'opencode');
 });
 
-test('CLI plan and ordinary reruns preserve existing defaults, models and profiles', () => {
-  const files = {
-    ...saved('copilot', { copilot: 'custom-model' }),
-    'profiles.json': '{ "profiles": [{"id":"review","companion":"copilot","strengths":["reviewer"]}], "defaultProfile":"review" }\n',
-  };
+test('CLI plan and ordinary reruns preserve existing defaults and models', () => {
+  const files = saved('copilot', { copilot: 'custom-model' });
   for (const args of [['--plan'], [], ['--companion', 'none'], ['--plan', '--companion', 'none']]) {
     const r = run([...args, '--set-default', '--yes', '--json'], {}, files);
     assert.equal(r.code, 0, r.stderr);
@@ -219,16 +202,12 @@ test('failed smoke and read-only plans never commit a default', () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('plans explain an overriding environment default and never read legacy profiles', () => {
-  const files = { ...saved('copilot'), 'profiles.json': '{bad json\n' };
+test('plans explain an overriding environment default', () => {
+  const files = saved('copilot');
   const r = run(['--plan', '--companion', 'codex', '--set-default', '--yes', '--json'], { AGENT_COMPANION_DEFAULT_COMPANION: 'opencode' }, files);
   assert.equal(r.code, 2, r.stderr);
   assert.equal(JSON.parse(r.stdout).plan.code, 'env_override');
   for (const [name, bytes] of Object.entries(files)) assert.equal(r.stored[name], bytes);
-  const preserved = run(['--plan', '--yes', '--json'], {}, files);
-  assert.equal(preserved.code, 0, preserved.stderr);
-  assert.equal(preserved.stored['profiles.json'], files['profiles.json']);
-  assert.equal(Object.hasOwn(JSON.parse(preserved.stdout).configuration, 'profiles'), false);
 });
 
 

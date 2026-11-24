@@ -32,12 +32,12 @@ import {
   memoizeProbe,
   probeCommand,
 } from '../lib/companion-diagnostics.mjs';
-import { migrateDefaults, previewDefaults, writeDefaultCompanion, readDefaultCompanion, writeCompanionChecks,
+import { writeDefaultCompanion, readDefaultCompanion, writeCompanionChecks,
   readDefaultModel, writeDefaultModel, clearDefaultModel, isModelAllowedFor } from '../lib/state.mjs';
-import { loadSettings, settingsPath } from '../lib/settings.mjs';
+import { loadSettings, readSettings, settingsPath } from '../lib/settings.mjs';
 import { Controller } from '../bridge-server/controller/controller.mjs';
 import { createProviders } from '../bridge-server/providers.mjs';
-import { HOSTS, stateDirs } from '../lib/hosts/index.mjs';
+import { HOSTS } from '../lib/hosts/index.mjs';
 import { Records } from '../bridge-server/controller/records.mjs';
 const VALID_HOSTS = new Set([...Object.keys(HOSTS), 'both', 'all']);
 const VALID_COMPANION_OPTS = new Set([...COMPANION_IDS, 'auto', 'none']);
@@ -221,12 +221,7 @@ async function main() {
     console.error('[FAIL] --plan cannot be combined with --smoke.'); process.exit(2);
   }
 
-  const settings = options.plan ? previewDefaults({ env }) : migrateDefaults({ env });
-  if (!options.plan) {
-    for (const { dir, host } of stateDirs(env)) {
-      if (options.host === 'all' || (options.host === 'both' && [HOSTS.claude.id, HOSTS.codex.id].includes(host)) || options.host === host || env.AGENT_COMPANION_HOME) new Records({ dir });
-    }
-  }
+  const settings = readSettings(settingsPath(env)) ?? {};
   const defaultCompanion = readDefaultCompanion(env, console.warn, settings);
   const run = memoizeProbe(probeCommand);
   const hostOnlyPreview = options.plan && options.companion === 'none' && !options.listCompanions && !options.doctor;

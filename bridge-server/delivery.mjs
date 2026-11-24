@@ -50,9 +50,9 @@ function claim(records, id, by) {
     return { by, won: true };
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
-    // Older releases used an empty file for hook and "owner" for tool.
     const saved = readFileSync(path, 'utf8').trim();
-    return { by: saved === 'tool' || saved === 'owner' ? 'tool' : 'hook', won: false };
+    if (saved !== 'tool' && saved !== 'hook') throw new Error('invalid delivery receipt');
+    return { by: saved, won: false };
   } finally { rmSync(tmp, { force: true }); }
 }
 

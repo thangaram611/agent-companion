@@ -35,28 +35,24 @@ host_paths() {
       HOST_PLUGIN_DATA="${HOST_CONFIG_DIR%/}/agent-companion/deps"
       HOST_DEPS_LINK=""
       HOST_BRIDGE_IMPORT="$root/hooks/launch-agent-bridge.mjs"
-      HOST_AGENT_FILE=""
       ;;
     opencode)
       HOST_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
       HOST_PLUGIN_DATA="$root"
       HOST_DEPS_LINK=""
       HOST_BRIDGE_IMPORT=""
-      HOST_AGENT_FILE=""
       ;;
     "codex")
       codex_config_dir
       HOST_PLUGIN_DATA="${PLUGIN_DATA:-${HOST_CONFIG_DIR%/}/plugins/data/agent-companion-agent-companion}"
       HOST_DEPS_LINK=""
       HOST_BRIDGE_IMPORT="$root/hooks/launch-agent-bridge.mjs"
-      HOST_AGENT_FILE="${HOST_CONFIG_DIR%/}/agents/agent-companion.toml"
       ;;
     *)
       HOST_CONFIG_DIR="$HOME/.claude"
       HOST_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA:-${PLUGIN_DATA:-$root/.plugin-data}}"
       HOST_DEPS_LINK="$root/bridge-server/node_modules"
       HOST_BRIDGE_IMPORT=""
-      HOST_AGENT_FILE="${HOST_CONFIG_DIR%/}/agents/agent-companion.md"
       ;;
   esac
   HOST_STATE_DIR="${HOST_CONFIG_DIR%/}/agent-companion"

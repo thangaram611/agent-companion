@@ -92,7 +92,7 @@ const boxes = new Map<string, MessageBox>()
 function boxOf(jobId: string, record: any): MessageBox {
   let box = boxes.get(jobId)
   if (!box) {
-    const modes = supportedModes(record), preferred = record?.interventionModes?.default
+    const modes = supportedModes(record), preferred = record.interventionModes.default
     boxes.set(jobId, box = { draft: '', mode: modes.includes(preferred) ? preferred : modes[0] ?? null, confirm: false, sending: false })
   }
   return box
@@ -181,7 +181,7 @@ async function tick($: EngineInterface) {
 // the companion's own queue (delivered there) until it starts them.
 function queued(record: any) {
   return (record.interventions ?? []).filter((m: any) => m.from === 'user' && m.mode === 'queue'
-    && (m.state === 'accepted' || (m.state === 'delivered' && record.interventionModes?.queue === 'native'))).length
+    && (m.state === 'accepted' || (m.state === 'delivered' && record.interventionModes.queue === 'native'))).length
 }
 // What a running job is doing, as the band and the card say it: the
 // person's queued messages, or the live view's in-flight line less its bullet.
@@ -417,18 +417,18 @@ export const register: Register = on => {
       }
       // The job as jobRows draws it: the child's record, else the clock's.
       const status = follow?.job?.status ?? (a.record ? statusOf(a) : null), record = follow?.job?.record ?? a.record
-      const box = status === 'running' && record?.interventionModes ? boxOf(a.jobId, record) : null
+      const box = status === 'running' && record ? boxOf(a.jobId, record) : null
       const jobsButton = h(Button, { key: 'jobs', label: '← jobs', plain: true, dimColor: true, hotkey: 'b', ...(box ? {} : { autoFocus: true as const }), onPress: back })
       if (!box) return column(...jobRows(a, follow!, now, w, e.props.scroll.bodyRows).map(row),
         h(Box, { flexDirection: 'row', justifyContent: 'space-between' }, row([[focused ? 'esc returns' : 'ctrl+x tab for keys', 'faint']]), jobsButton))
-      const jobId = a.jobId, modes = supportedModes(record), name = clean(record.companionName ?? record.companion)
+      const jobId = a.jobId, modes = supportedModes(record), name = clean(record.companionName)
       const redraw = () => $.ui.invalidate('ui.render')
       // The box as Claude Code draws its own prompt: a faint rule above and
       // below, the field the pane's full width between them. The engine sizes
       // the field from the pane's width less its hint (2.1.326), so a frame,
       // padding or a › beside it would overflow it; its own label adds a colon.
       // Two rows, since it takes a new line only from two. The mode is on the
-      // row below; Copilot takes cancel alone.
+      // row below.
       const rule = () => row([['─'.repeat(w), 'faint']]), bodyRows = e.props.scroll.bodyRows, rows = boxRowsFor(box.draft, w, bodyRows)
       const field = box.mode
         ? [rule(), h(Input, { key: 'message', placeholder: `Message ${name}…`, value: box.draft, rows, submitLabel: 'send', autoFocus: true,

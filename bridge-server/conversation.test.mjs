@@ -62,15 +62,10 @@ test('catalog is ownerless, spawns no process and leaves cold and populated stat
   writeDefaultCompanion('codex');
   writeDefaultModel('gpt-5.4', 'codex');
   writeCompanionChecks({ claude: { ready: true, version: 'claude cached', checkedAt: '2026-11-09T00:00:00Z' }, codex: { ready: true, version: 'codex-cli cached', checkedAt: '2026-11-05T00:00:00Z' } });
-  mkdirSync(join(BASE_DIR, 'jobs'), { recursive: true });
-  writeFileSync(join(BASE_DIR, 'jobs', 'legacy-active.json'), JSON.stringify({ jobId: 'legacy-active', claudeSessionId: 'catalog-owner-b', target: 'copilot',
-    thread: 'old-thread', companionSessionId: 'old-session', promptId: 'old-prompt', status: 'running', startedAt: Date.now() }));
-  mkdirSync(join(BASE_DIR, 'threads'), { recursive: true });
-  writeFileSync(join(BASE_DIR, 'threads', 'old-thread.sid'), 'old-session\n');
-  mkdirSync(process.env.AGENT_RUNTIME_DIR, { recursive: true });
-  for (const name of ['completions.jsonl', 'agent-digest-legacy-active.md', 'acp-daemons.json', 'codex-broker.json']) {
-    writeFileSync(join(process.env.AGENT_RUNTIME_DIR, name), `unchanged ${name}\n`);
-  }
+  new Records().begin({ thread: 'th-catalog', jobId: 'catalog-job', companion: 'copilot',
+    lead: { host: 'claude', session: 'catalog-owner-b' }, cwd: BASE_DIR, text: 'fixture', now: Date.now() }, 0);
+  mkdirSync(join(process.env.AGENT_RUNTIME_DIR, 'news'), { recursive: true });
+  writeFileSync(join(process.env.AGENT_RUNTIME_DIR, 'news', 'catalog-owner-b'), '');
   const before = [snapshot(BASE_DIR), snapshot(process.env.AGENT_RUNTIME_DIR)];
   const result = JSON.parse((await call('catalog-owner-b')).content[0].text);
   assert.equal(result.companions.find((t) => t.id === 'claude').installed_version, 'claude cached');

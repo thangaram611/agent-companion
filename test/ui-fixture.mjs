@@ -31,9 +31,7 @@ export function uiFixture(t) {
   json(join(env.CLAUDE_CONFIG_DIR, 'projects/-web/lead-2.jsonl'), jsonl([{ type: 'ai-title', aiTitle: 'Auth hardening' }]));
   json(join(env.CODEX_HOME, 'session_index.jsonl'), jsonl([{ id: 'root-1', thread_name: 'Release checks' }]));
 
-  // Running Codex job, as in the mockup, from a bridge that takes messages;
-  // turn-1 is an earlier job's turn. The running OpenCode job's record comes
-  // from an older bridge: no interventionModes.
+  // turn-1 belongs to an earlier job on this Codex thread.
   const running = join(root, 'transcripts/rollout-run.jsonl');
   const output = n => Array.from({ length: n }, (_, i) => `lib/file-${i}.mjs:${i + 1}  const DIGEST_${i} = …`).join('\n');
   json(running, jsonl([
@@ -70,13 +68,14 @@ export function uiFixture(t) {
   const rateLimit = 'Failed to get response from the AI model; retried 5 times (total retry wait time: 5.00 seconds) Last error: 429 FIXTURE overloaded: HTTP 429';
 
   const locator = (companion, path, sessionId) => ({ companion, kind: 'jsonl', path, sessionId });
-  const record = fields => ({ generation: 1, state: 'closed', writer: 'controller', companionName: COMPANIONS[fields.companion]?.shortName, ...fields });
+  const record = fields => ({ generation: 1, state: 'closed', writer: 'controller',
+    interventionModes: COMPANIONS[fields.companion].capabilities.interventions, companionName: COMPANIONS[fields.companion]?.shortName, ...fields });
   const records = {
     [claude]: [
       [record({ jobId: 'run-1', thread: 'th-run', hostSessionId: 'lead-1', companion: 'codex', cwd: repo, text: 'Step 1b-2 of the live-view plan',
         startedAt: NOW - 4 * M - 12 * S, state: 'running', processes: { pid: 4242 }, historyId: 'thread-run', nativeTurnId: 'turn-2',
         effectiveModel: 'gpt-6-astra', effectiveEffort: 'high', transcript: locator('codex', running, 'thread-run'),
-        interventionModes: { default: 'steer', steer: true, queue: 'bridge', interrupt: true }, interventions: [], turns: [], nativeTurnIds: ['turn-2'],
+        interventions: [], turns: [], nativeTurnIds: ['turn-2'],
         progress: { activeCommand: 'node --test lib/digest.test.mjs', partialText: '', lastActivityAt: NOW - 18 * S } })],
       [record({ jobId: 'op-1', thread: 'th-op', hostSessionId: 'lead-1', companion: 'opencode', cwd: join(root, 'work/hermes'), text: 'Triage the restore spec',
         startedAt: NOW - 41 * S, state: 'running', processes: { pid: 4343 }, effectiveModel: { providerID: 'opencode', id: 'flint-40b-free', variant: 'default' },

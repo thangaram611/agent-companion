@@ -399,4 +399,4 @@ export class Pane {
 // Both views' input boxes: each companion's own name, what each message mode
 // does, and the modes a job's companion takes (recorded on its record).
 export const MODE_HINTS = { steer: 'joins the running turn now', queue: 'runs after the current turn', interrupt: 'stops this turn, then sends' };
-export const supportedModes = record => ['steer', 'queue', 'interrupt'].filter(mode => record?.interventionModes?.[mode]);
+export const supportedModes = record => ['steer', 'queue', 'interrupt'].filter(mode => record.interventionModes[mode]);

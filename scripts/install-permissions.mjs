@@ -31,9 +31,6 @@ import { HOSTS, settingsFile } from '../lib/hosts/index.mjs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
-// Claude registers the bridge at plugin scope, so the tool names carry the
-// plugin namespace. Both namespaces can contain permissions from the old tool set.
-const STALE = /^mcp__(?:plugin_agent-companion_)?agent-bridge__agent_/;
 const args = process.argv.slice(2);
 const yes = args.includes('--yes') || args.includes('-y');
 
@@ -59,7 +56,6 @@ if (!HOSTS[host].permissionAllowList) {
 const SETTINGS = process.env.CLAUDE_CONFIG_DIR
   ? path.resolve(process.env.CLAUDE_CONFIG_DIR, HOSTS[host].settingsName) : settingsFile(host);
 const PERMISSIONS = tools.map(({ name }) => HOSTS[host].toolPrefix + name);
-const isStale = p => STALE.test(p) || p === 'Agent(agent-companion)';
 mkdirSync(path.dirname(SETTINGS), { recursive: true });
 
 let cfg = {};
@@ -88,13 +84,11 @@ if (
   cfg.permissions = {};
 }
 const allow = Array.isArray(cfg.permissions.allow)
-  ? cfg.permissions.allow.slice()
+  ? cfg.permissions.allow
   : [];
 
-const stale = allow.filter(isStale);
-const kept = allow.filter((permission) => !isStale(permission));
-const missing = PERMISSIONS.filter((permission) => !kept.includes(permission));
-if (missing.length === 0 && stale.length === 0) {
+const missing = PERMISSIONS.filter((permission) => !allow.includes(permission));
+if (missing.length === 0) {
   ok(`agent-companion permissions already in ${SETTINGS}`);
   process.exit(0);
 }
@@ -108,7 +102,7 @@ if (!yes) {
     input: process.stdin,
     output: process.stdout,
   });
-  const ans = (await rl.question(`Add ${missing.length} agent-companion permission(s) and remove ${stale.length} stale one(s) in ${SETTINGS}? [y/N] `))
+  const ans = (await rl.question(`Add ${missing.length} agent-companion permission(s) in ${SETTINGS}? [y/N] `))
     .trim()
     .toLowerCase();
   rl.close();
@@ -118,7 +112,7 @@ if (!yes) {
   }
 }
 
-cfg.permissions.allow = kept.concat(missing);
+cfg.permissions.allow = allow.concat(missing);
 
 const ts = new Date()
   .toISOString()
@@ -130,4 +124,4 @@ if (hadExisting) copyFileSync(SETTINGS, backup);
 const tmp = `${SETTINGS}.tmp.${process.pid}`;
 writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
 renameSync(tmp, SETTINGS);
-ok(`added ${missing.join(', ') || 'nothing'}${stale.length ? `; removed stale ${stale.join(', ')}` : ''}${hadExisting ? ` (backup: ${backup})` : ''}`);
+ok(`added ${missing.join(', ')}${hadExisting ? ` (backup: ${backup})` : ''}`);

@@ -1,6 +1,6 @@
 # Release Readiness
 
-Last updated: 2026-11-23
+Last updated: 2026-11-24
 
 Release metadata is `1.0.0` in both plugin manifests and the private bridge
 package. Readiness requires the gates below on the reviewed candidate commit;
@@ -35,8 +35,7 @@ not establish release qualification.
 Claude Code plugins:
 
 - The plugin registers the bridge at plugin scope and its hooks identify the
-  lead; there is no agent file since 1.0.0, and session start removes an old
-  sentinel-marked one. The MCP boundary is documented in
+  lead. The MCP boundary is documented in
   [ARCHITECTURE.md](ARCHITECTURE.md#mcp-registration-boundary).
 
 Codex plugins:
@@ -85,7 +84,7 @@ GitHub Copilot CLI companion:
 
 Codex CLI companion:
 
-- **Wire contract generated from codex-cli 0.164.0**:
+- **Wire contract generated from codex-cli 0.172.0**:
   `lib/codex-app-server-contract.json` records provenance. The sibling test
   compares the installed CLI's schema; a version-only change passes, a schema
   change fails. The adapter reports `contractStatus: match|drift|unverified`
@@ -189,7 +188,7 @@ Manual smoke gates before a public tag (real delegations spend model tokens):
    verifies EOF-triggered watcher cleanup and immutable recovery. The latter is
    not uncatchable SIGKILL coverage. Before and after an upgrade, inspect the executable/helper pair with
    `node --input-type=module -e "import {inspectCodexAppServerInstallation as inspect} from './lib/codex-install.mjs'; console.log(inspect())"`.
-   Record `contractStatus` from the Codex companion catalog or status diagnostics.
+   Record `contractStatus` from status diagnostics for a Codex job.
 9. `node probes/smoke/acp-antigravity.mjs <available-model-id>` starts seven
    jobs on a signed-in CLI. Check completion with usage and digest, cold history
    reuse in a new process, default steer, cancel, a background command's file
@@ -207,12 +206,10 @@ Manual smoke gates before a public tag (real delegations spend model tokens):
     every stop/loss trigger, and suspend/wake. Record instruction/result accounting,
     stop detection separately from cleanup time, and process absence.
     Operator-only TUI actions and desktop cannot be inferred from headless CLI rows.
-12. Legacy history is not read since 1.0.0 (plan decision 22). Verify installed
-    artifacts and hooks, including Claude's plugin namespace and the removal of
-    the old agent files. No live legacy job may be adopted.
+12. Verify that installed hooks identify the lead for Claude’s plugin-qualified bridge tools.
 
 For source installs, also verify that prerequisite failures precede installation,
-separate host defaults and legacy migration inputs survive reruns, and a partial install reports
+shared defaults survive reruns, and a partial install reports
 completed stages and recovers on rerun. `scripts/setup-codex-install.test.mjs`
 and `scripts/onboard.test.mjs` cover these with fake CLIs. Setup itself spends
 no quota; its readiness report does not qualify a live companion response.

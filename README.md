@@ -14,8 +14,8 @@ You can keep working, then follow up on the same thread.
 
 ## Quick start
 
-You need Node.js `>= 26`, npm, your host CLI and a companion ready to use.
-Source setup also needs jq. Sign in through the companion's own CLI, which handles your credentials.
+You need Node.js `>= 26`, npm, your host CLI and, for delegation, a companion ready to use.
+For host-only setup, pass `--companion none` to preserve defaults. Source setup also needs jq. Sign in through the companion's own CLI, which handles your credentials.
 
 From the checkout root, run the command for your host.
 
@@ -30,7 +30,7 @@ For a Claude marketplace install, run `claude plugin marketplace add thangaram61
 and `claude plugin install agent-companion@agent-companion`, then open a fresh session.
 
 From your lead, try “Ask Codex to review the staged changes in /abs/path.”
-Use the absolute path to your repo. The send returns a thread id and job id as soon as the companion accepts.
+Use the absolute path to your repo. A running acknowledgement includes the thread and job IDs. A job that ends before acknowledgement can return its terminal result immediately.
 A wake can bring the lead back for the answer. On OpenCode the lead reads it with a tool.
 
 ## Using it
@@ -38,7 +38,7 @@ A wake can bring the lead back for the answer. On OpenCode the lead reads it wit
 **Start a thread.** Give the lead the task, an existing absolute directory and any
 constraints the companion needs. Name the companion or use your default. You can ask
 for a model, an effort level or a thread title. The first line of the task supplies
-the title if you omit it. Start a new thread for a different directory or companion.
+the title (up to 80 characters) if you omit it. Start a new thread for a different directory or companion.
 
 **Follow up.** Ask “On that same thread, which test would catch the bug?”
 The lead reuses the thread id. A follow-up after completion starts a new job with saved history
@@ -47,7 +47,8 @@ where supported. It keeps the model and effort unless you change them. A refused
 **Change running work.** Send new text (up to 8,000 characters) on the thread.
 Steer joins the current turn. Queue holds the message for the next turn. Interrupt stops the turn and sends the new text.
 Omit the mode to use the companion's default. Status shows which modes work now.
-An unavailable mode returns `intervention_unavailable`. Changing model or effort
+An unavailable mode returns `intervention_unavailable` with the current state and available modes.
+Changing model or effort
 mid-job returns `thread_busy`. Repeating the original send returns the existing job.
 
 **Get the answer.** Check the send acknowledgement. If it includes a terminal result,
@@ -174,7 +175,7 @@ its jobs to finish, then run `opencode reload`. This rebuilds its open directori
 
 ## Removal
 
-Close active sessions after their jobs finish. From the original checkout, use the steps for each host you want to remove.
+Close active sessions after their jobs finish. Use the same host profile you installed into, including `CLAUDE_CONFIG_DIR` for a Claude marketplace install. From the original checkout, use the steps for each host you want to remove.
 
 | Host | Remove the plugin |
 | --- | --- |
@@ -236,8 +237,7 @@ selects, `1`–`9` open cards, `b` returns to the cards and Esc returns to the c
 All hosts share `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`.
 `agent-companion defaults` shows saved choices, their sources and what each companion
 inherits. Codex and OpenCode read native defaults for the current directory. The others
-show the last reported value and its age. Conflicting older defaults show both files
-and the command to resolve them.
+show the last reported model and effort with the age of that run.
 
 ```bash
 agent-companion defaults
@@ -250,8 +250,8 @@ agent-companion defaults codex effort=inherit
 Every form accepts `--json`. Set either field or both. Use `model=inherit`,
 `effort=inherit` or `companion=inherit` to clear a choice. In the live view's `d`
 panel, Enter edits and saves. An empty field clears it. A new thread uses your
-explicit choice, then the environment override, then the saved default, then the
-companion's own model or effort. Codex hosts do not forward shell model overrides
+explicit model, then its environment override, then its saved model, then the native default.
+Effort uses the explicit level, the saved level or the native configuration, in that order. Codex hosts do not forward shell model overrides
 to the bridge. Use saved defaults or name the model in your request.
 
 | Setup flag | Effect |
@@ -268,8 +268,10 @@ to the bridge. Use saved defaults or name the model in your request.
 | `--help`, `-h` | Show setup options. |
 
 Setup checks readiness without a paid turn and saves new defaults after installation
-and checks. If it stops partway, fix the reported stage and rerun. A completed host
-install can remain in place. Setup reports when an environment override masks a choice.
+and checks. If a selected host’s agent-companion registration points to another checkout, setup stops before installation
+and prints the command to resolve the registration. Its final summary reports dependencies, tests,
+the launcher and each selected host. After a partial install, fix the reported stage and rerun.
+Setup also reports when an environment override masks a choice.
 
 For onboarding without installation, run `node scripts/onboard.mjs --list-companions`.
 It accepts the same host, companion, model, readiness, confirmation and help flags.
@@ -301,8 +303,9 @@ finish with “ready” for the check to pass. A failed check blocks the save. R
 Run `node scripts/doctor.mjs` from the checkout. Add `--json` for machine-readable
 output. Doctor checks prerequisites, companion readiness and the host install marker.
 For Codex and Copilot it also checks the native plugin list. For OpenCode it checks
-the local package. Claude source loading belongs to each session. It starts no model work. Ask for job status to see the
-companion's own error text. Catalog and status report the last Codex schema check as `match`, `drift` or `unverified`.
+the local package. Claude source loading belongs to each session. Doctor starts no model work.
+For the companion’s explanation of a failed job, read its answer. Job status shows the cause and detail code.
+For a Codex job, request status with `diagnostics: true` for the last schema check (`match`, `drift` or `unverified`).
 
 - Claude Code keeps bridge records in `~/.claude/agent-companion/`. Its permissions and native transcripts follow `CLAUDE_CONFIG_DIR` when set.
 - Codex CLI uses `$CODEX_HOME/agent-companion/` (default `~/.codex/agent-companion/`).
@@ -333,7 +336,7 @@ find . -name '*.test.mjs' -not -path './bridge-server/node_modules/*' -print0 | 
 ```
 
 Validate the Claude plugin with `claude plugin validate .` and its pane with
-`claude plugin test .`. To inspect the generated Codex package, run the first
+`claude plugin test .`. To build and install the generated Codex package in your selected Codex home, run the first
 three commands below. The last validates a release in an isolated Codex home.
 
 ```bash

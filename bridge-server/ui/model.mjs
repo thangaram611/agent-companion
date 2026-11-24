@@ -259,16 +259,15 @@ export class Model {
   }
   toggleAll() { const d = this.detail; d.expandAll = !d.expandAll; d.toggled.clear(); }
 
-  // The open running job whose box has the keys; a record without
-  // interventionModes comes from an older bridge, which reads no inbox.
+  // The open running job whose box has the keys.
   get typing() {
     const job = this.inJob && !this.help && !this.editing && !this.panel ? this.detail?.job : null;
-    return job?.status === 'running' && job.record.interventionModes ? job : null;
+    return job?.status === 'running' ? job : null;
   }
   box(job) {
     let box = this.boxes.get(job.key);
     if (!box) {
-      const modes = supported(job), preferred = job.record.interventionModes?.default;
+      const modes = supported(job), preferred = job.record.interventionModes.default;
       this.boxes.set(job.key, box = { draft: '', mode: modes.includes(preferred) ? preferred : modes[0] ?? null, confirm: false, sent: [] });
     }
     return box;
@@ -410,7 +409,6 @@ export class Model {
   // yet in the transcript, the box, then the mode with the box's keys when focused.
   footer(job, w, h, focused) {
     if (job.status !== 'running') return [];
-    if (!job.record.interventionModes) return [[['messages need the updated bridge; this job started on an older one', 'dim']]];
     const box = this.box(job), room = Math.max(1, h - 3);
     const pending = this.pending(job).map(entry => layoutLine(pendingLine(entry), w)[0]);
     let content;
@@ -418,7 +416,7 @@ export class Model {
       content = layoutLine({ segs: [['Cancel this job?', 'bad'], [' The lead is told you cancelled it.', 'normal']],
         right: [['y', 'title'], [' yes  ', 'dim'], ['n', 'title'], [' no', 'dim']], wrap: false }, w - 4);
     } else if (!box.draft) {
-      const name = clean(job.record.companionName ?? job.companion);
+      const name = clean(job.record.companionName);
       content = [[['› ', 'title'], [box.mode ? `Message ${name}…` : `${name} takes no messages while it works`, 'faint']]];
     } else content = layoutLine({ segs: [['› ', 'title'], [clean(box.draft), 'normal'], ...(focused ? [['▌', 'normal']] : [])], hang: 2 }, w - 4);
     const shown = pending.slice(-Math.max(0, Math.min(pending.length, room - 4)));
@@ -506,10 +504,9 @@ export class Model {
     const query = field.setting === 'companion' ? { defaultCompanion: value } : { companion: field.id, [field.setting]: value };
     panel.busy = 'saving'; panel.error = null;
     this.load(panel, this.defaults(query, { env: this.env, signal: panel.controller.signal }), result => {
-      const before = panel.result, scope = field.setting === 'companion' ? null : `companions.${field.id}.model`;
+      const before = panel.result;
       return { ...before, ...(result.companion ? { companion: result.companion } : {}),
         companions: { ...before.companions, ...result.companions },
-        conflicts: scope ? [...before.conflicts.filter(entry => entry.setting !== scope), ...result.conflicts] : result.conflicts,
         warnings: [...new Set([...(before.warnings ?? []), ...(result.warnings ?? [])])] };
     });
   }
@@ -542,7 +539,6 @@ export class Model {
       line('effort', value(row.effort, inherit(row.inherit, 'effort')));
       if (row.validation) rows.push([[`   ${one(row.validation)}`, 'faint']]);
     }
-    for (const entry of result.conflicts ?? []) rows.push([[` Conflict ${entry.setting}: ${entry.host} ${one(entry.value)}`, 'warn']]);
     for (const warning of result.warnings ?? []) rows.push([[` ${one(warning)}`, 'warn']]);
     const top = Math.max(0, Math.min(selectedRow - Math.floor(h / 2), rows.length - h));
     return rows.slice(top, top + h);

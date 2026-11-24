@@ -78,10 +78,6 @@ export function createJobSource({ env = process.env, dirs = stateDirs(env), aliv
   };
 }
 
-// The session a job's lead belongs to; a job from before threads has only the
-// bridge's host session.
-const leadSession = job => job.threadRecord?.lead?.session ?? job.record.hostSessionId;
-
 // One Claude Code session's threads for its Companions pane (hooks/mod.ts),
 // which has no Node and rebuilds its list from them: the newest job of each
 // thread whose lead is this session (main conversation or its subagents), in
@@ -90,7 +86,7 @@ const leadSession = job => job.threadRecord?.lead?.session ?? job.record.hostSes
 // included, are left to the live view.
 export function sessionJobs({ dir, sessionId, limit, env = process.env, alive = pidAlive }) {
   const source = createJobSource({ dirs: [{ host: HOSTS.claude.id, dir }], env, alive });
-  const all = source.list().filter(job => leadSession(job) === sessionId);
+  const all = source.list().filter(job => job.threadRecord?.lead?.session === sessionId);
   const threads = new Set();
   const jobs = all.filter(job => !threads.has(job.record.thread) && threads.add(job.record.thread)).slice(0, limit)
     .map(job => ({ thread: job.record.thread, title: source.caller(job).title, status: job.status, record: job.record, result: job.result }));
@@ -141,7 +137,7 @@ export function createCallers(env = process.env) {
   }
   const names = { [HOSTS.claude.id]: claudeName, [HOSTS.codex.id]: codexName };
   return function caller(job) {
-    const session = leadSession(job);
+    const session = job.threadRecord?.lead?.session;
     let lead = null;
     try { lead = session ? names[job.host]?.(session) ?? null : null; } catch { /* unreadable host files: no name */ }
     return { title: job.threadRecord?.title || firstLine(job.record.text), lead };

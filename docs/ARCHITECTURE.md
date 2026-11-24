@@ -1,6 +1,6 @@
 # Agent Companion Architecture
 
-Last updated: 2026-11-23
+Last updated: 2026-11-24
 
 ## Goal
 
@@ -72,12 +72,9 @@ Codex exposes deferred tools as `mcp__agent_bridge__companion_*`. Its manifest
 registers the server and hooks directly. A root `.mcp.json` would also register
 the server with Claude.
 
-Both launchers load dependencies from plugin data. Claude uses a
+For installed plugins, Claude uses a
 `bridge-server/node_modules` link. Codex rejects symlinks in installed bundles,
-so its launcher resolves imports from the data directory. Setup removes only
-entries marked `_managed_by: "agent-companion"` from the old Codex hooks file.
-The same cleanup is available from a checkout with
-`node scripts/install-codex-hooks.mjs --plugin-root "$(pwd)" --uninstall --yes`.
+so its launcher resolves imports from the data directory. A source checkout can use its installed bridge dependencies.
 
 `lib/hosts/` derives the lead identity for every call that needs it. On Claude,
 PreToolUse replaces any supplied `lead` with the hook's `session_id` and optional
@@ -248,8 +245,7 @@ An explicit native null is preserved, and terminal activity is null. Digest and
 progress publication are unchanged.
 
 New text on a running thread accepts `mode: steer|queue|interrupt`, defaulting to the job's
-saved `interventionModes.default`. Unavailable modes return `intervention_unavailable` with reason
-`state` or `capability`, never a substitute mode. Status projects `interventions:
+saved `interventionModes.default`. Unavailable modes return `intervention_unavailable` when the state or capability prevents delivery. Native delivery failures can also supply a reason. Status projects `interventions:
 { default, steer, queue, interrupt }`: the saved default and three booleans for
 modes usable now. All booleans are false after closure or when the bridge does
 not own the live job. Catalog reports the registry's
@@ -259,7 +255,7 @@ not own the live job. Catalog reports the registry's
 Terminal tool responses map stored outcomes to three statuses. `completed` stays
 `completed`, `interrupted` and `stopped` become `cancelled`, and `failed` and
 `delivery_unknown` become `failed`. The second text block carries `meta.cause`, optional detail and a cleanup summary with process absence, signal and survivor
-counts and elapsed cleanup time. Job status with diagnostics includes protocol steps.
+counts and elapsed cleanup time. Terminal metadata omits null values and empty collections. Job status with diagnostics includes the full stop evidence.
 
 ### Turn loop, interventions and user inbox
 
@@ -293,7 +289,7 @@ cancels with cause `user_cancel`. Acceptance time comes from the controller cloc
 The outcome is an atomic mode-0600 `<requestId>.outcome.json` containing
 `{ requestId, ok, status, reason?, interventionId? }`; success is `accepted`
 (cancel: `cancelling`). The controller removes the request after writing the
-outcome. The view deletes read outcomes. Saving a terminal result removes the job's
+outcome. The terminal view deletes each outcome it reads. The Claude pane can also poll a submitted request by ID after a delayed acknowledgement. Saving a terminal result removes the job's
 whole inbox, including requests left behind, in normal close, recovery and watcher
 cleanup. Late native acknowledgements do not recreate it. Each job saves
 its adapter's `interventions` as `interventionModes` at creation.
@@ -406,7 +402,7 @@ later job on that thread.
 
 On a running thread, repeating the task with the same selections returns the
 existing acknowledgement. New text (up to 8,000 characters) uses the job's
-default intervention mode or the requested mode. An unavailable mode is refused.
+default intervention mode or the requested mode. A refused intervention includes the current job state, supported modes and a next step.
 An attempt to change model or effort while the job runs returns `thread_busy`.
 
 Companion/model refusals include `COMPANION_UNCONFIGURED`, `COMPANION_UNSUPPORTED`,
@@ -415,8 +411,8 @@ ACP authentication refusals use `AUTH_REQUIRED`: relay them as setup problems
 with the sign-in steps; do not retry or switch companion.
 See historical substitution failure [F5](RELIABILITY_REMEDIATION.md#1-incident-and-exec-evidence).
 A follow-up whose saved history cannot be opened fails as `history_unavailable`;
-a new thread whose companion session cannot be created fails as
-`history_create_failed` (Copilot's 403 on an unentitled account, a refused model);
+a generic failure to create a new companion session is `history_create_failed`.
+A refused model has its own `MODEL_NOT_ALLOWED` detail.
 `FOLLOWUP_UNSUPPORTED` is reserved for companions without saved history.
 No shipped companion returns it.
 A missing delivery acknowledgement produces `delivery_unknown`, terminates the
@@ -473,11 +469,7 @@ alone is never proof of exit.
 All hosts share `${XDG_CONFIG_HOME:-$HOME/.config}/agent-companion/settings.json`,
 or `$AGENT_COMPANION_HOME/settings.json` with the override set. `lib/state.mjs`
 stores the companion and per-companion model and effort there. Environment overrides
-apply to companion and model. The first bridge, onboarding run or
-`agent-companion defaults` command moves the former `target` settings key to `companion` and renames the host readiness cache to `companion-checks.json`. It also migrates `default-target` and `default-model*`. A value found on one host
-or agreed across hosts moves into the store. A disagreement leaves the setting unset
-and preserves the source files. `launch-ui.sh defaults` lists the competing values
-and paths. Setting or clearing that default resolves the conflict. Setup previews this migration read-only.
+apply to companion and model.
 Settings writes atomically replace the private file. Unreadable or invalid settings
 produce a warning and block updates.
 
@@ -527,8 +519,9 @@ used for the thread listing's unread count.
 
 `onboard.mjs --companion <companion> --model <id|inherit> --set-default` saves or
 clears that companion's model default after the companion passes readiness/smoke
-checks. `--plan` and omission of `--set-default` leave defaults untouched.
-`setup.sh --model` passes the choice through for each selected host. Codex does
+checks, or after an explicit readiness deferral with `--no-companion-check`. A failed smoke still blocks the save.
+`--plan` and omission of `--set-default` leave defaults untouched.
+`setup.sh --model` saves the shared choice once after the selected hosts finish. Codex does
 not forward shell model env knobs to the bridge; pin its model with a saved default.
 
 Record writes are atomic and private, with thread-generation and writer
@@ -536,13 +529,10 @@ fences. A native terminal outcome is persisted before cleanup; the final immutab
 result includes cleanup evidence. Startup reconciliation reads watcher results
 or verifies process absence. It never adopts old live work; until absence is
 proven, an observing bridge reports `job_not_controlled` and directs the caller to the owning session. Status does not
-reconcile or publish a completion. The bridge log records job starts, ends and wake decisions with job ID, thread ID,
-host, transport and reason. Successful transport events report the socket write,
-queue exit, prompt API return or extension acknowledgement. A watcher failure records a bounded code. On successful cleanup the watcher writes its fenced result. The startup scan restores pending news from stored results.
-
-On first open per process, `Records` archives coexisting 0.x state under `legacy/`,
-moves 1.0.0 records into `threads/` and `jobs/`, and updates result fields in place.
-Existing destination records win. Delivery receipts keep their names and contents.
+reconcile or publish a completion. The bridge log records `job.start`, `job.end` and wake decisions. Each entry carries
+`event`, `job`, `thread`, `host`, `transport` and `reason`. A pending wait for that job
+suppresses its completion wake and logs `wake.skipped` with `covered_by_wait`. Successful transport events report the socket write,
+queue exit, prompt API return or extension acknowledgement. A watcher failure records a bounded code. On successful cleanup the watcher writes its fenced result. The startup scan restores pending news from stored results. OpenCode can also wake an eligible lead for results beyond its read cursor that have no delivery receipt.
 
 Threads consist of jobs in
 generation order with their results and interventions. There is no second event log.
@@ -551,7 +541,7 @@ generation order with their results and interventions. There is no second event 
 
 `job-digest://<jobId>` is rendered on demand by `lib/digest.mjs` from
 job/result records and the companion's own transcript. Resource listing
-uses job records. Reads write nothing, including to any older files in `runtime/digests/`. The renderer uses the same
+uses job records. Reads write nothing. The renderer uses the same
 turn selection as the work summary, collapses preamble to a count, and caps each
 item's output at about 2 KB with a truncation marker and the native path for more.
 It presents the request, selected and effective model and effort, status, timestamps,
@@ -559,10 +549,11 @@ final or partial answer, work summary and
 ordered transcript items; running reads add the in-flight progress line. Missing
 or unrecognized transcripts are explicit. Terminal metadata includes `work_summary` and `digest_uri`.
 
-The controller starts a bounded, asynchronous worktree snapshot alongside runtime
-startup and awaits it before delivery. Each snapshot copies the worktree index to
-a temporary file, stages there and writes a tree; it never changes the real index,
-HEAD, refs or working files. Loose objects remain for git gc. After terminating the
+The controller starts a bounded worktree snapshot alongside runtime startup and
+awaits it before delivery. It copies the worktree index and rounds the copy’s modification time
+down to the original index second so Git rechecks same-size files at the timestamp boundary.
+It stages changes in the temporary index and writes a tree. The real index, HEAD, refs
+and working files stay intact. Loose objects remain for git gc. After terminating the
 provider tree, the controller takes the end snapshot and reads the native transcript.
 It records a locator after acknowledgement, retrying at terminal if none was found.
 Terminal envelopes expose the immutable result's `workSummary` as `meta.work_summary` with empty collections and null values omitted,
@@ -573,9 +564,9 @@ between snapshots and excludes ignored files. Read/snapshot failures produce
 unavailable sections. Unverified cleanup produces no end snapshot. The bridge-loss
 watcher does not compute a summary.
 
-Codex, Claude and OpenCode items are selected by the acknowledged native turn id;
-Copilot uses the whole job-private session. Antigravity uses item creation
-times at or after job start. Its live view, work summary and digest read
+Codex and OpenCode items are selected by native turn ID. Claude also includes joined input IDs.
+Copilot reads the whole native session transcript, so a resumed job can include earlier turns.
+Antigravity selects items from job start through finish (through the latest read for a running job). Its live view, work summary and digest read
 `~/.gemini/antigravity-cli/conversations/<sessionId>.db`, a SQLite database
 keyed by `cascade_id` with protobuf step payloads. Step 14 is user input, 15 a
 planner response, 132 any tool, 17 an error and 101 a system message. Status 2

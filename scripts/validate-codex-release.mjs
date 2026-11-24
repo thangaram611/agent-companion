@@ -123,15 +123,6 @@ function validateMarketplaceTree(marketplaceRoot) {
   for (const name of readdirSync(path.join(REPO_ROOT, adapters)).filter(name => name.endsWith('-protocol.mjs'))) {
     assertExists(path.join(pluginRoot, adapters, name));
   }
-  for (const retired of [
-    'bridge-server/codex-runtime.mjs', 'bridge-server/codex-app-server-runtime.mjs',
-    'bridge-server/opencode-runtime.mjs', 'bridge-server/opencode-server-runtime.mjs',
-    'bridge-server/copilot-sdk-runtime.mjs', 'bridge-server/acp-runtime.mjs', 'bridge-server/daemon-client.mjs',
-    'scripts/codex-app-server-broker.mjs', 'scripts/acp-daemon.mjs', 'scripts/copilot-acp-daemon.mjs',
-    'scripts/copilot-acp-client.mjs', 'scripts/probe-codex-broker.mjs',
-    'lib/shared-runtime-registry.mjs', 'hooks/prewarm-target.sh', 'probes/codex-app-server',
-  ]) assertMissing(path.join(pluginRoot, retired), 'retired runtime');
-
   assertExists(path.join(pluginRoot, 'assets', 'readme', 'hero.png'), 'README assets');
   assertExists(path.join(pluginRoot, 'assets', 'readme', 'architecture.png'), 'README architecture asset');
   assertExists(path.join(pluginRoot, 'assets', 'readme', 'companion-matrix.png'), 'README companion matrix asset');

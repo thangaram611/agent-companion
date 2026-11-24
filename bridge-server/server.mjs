@@ -13,7 +13,6 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import pkg from './package.json' with { type: 'json' };
 import { log } from './validation.mjs';
-import { migrateDefaults } from '../lib/state.mjs';
 import { listCompanionIds } from '../lib/companion-registry.mjs';
 import { tools, dispatch, createBridgeController, recoverController, listDigestResources, listDigestResourceTemplates, readDigestResource } from './tools.mjs';
 
@@ -25,11 +24,6 @@ const isMain = (() => {
     return argvReal === metaReal;
   } catch { return false; }
 })();
-if (isMain) {
-  // A settings file the bridge cannot write leaves the old files for the next start.
-  try { migrateDefaults({ log }); } catch (err) { log('WARN', `defaults migration skipped: ${err.message}`); }
-}
-
 export const mcp = new Server({ name: 'agent-bridge', version: pkg.version }, {
   capabilities: { tools: {}, resources: {} },
   instructions: 'Delegate work to a companion: for a second opinion or a review from another model, ' +

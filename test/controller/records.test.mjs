@@ -1,8 +1,7 @@
 import '../sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { SANDBOX_HOME } from '../sandbox-home.mjs';
 import { Records } from '../../bridge-server/controller/records.mjs';
@@ -100,40 +99,4 @@ test('effort is recorded on job and deferred on thread until accepted', () => {
   assert.equal(fresh.readThread('child').effortOverride, 'low');
   assert.equal(fresh.readJob('e2').effortOverride, 'invalid');
   assert.deepEqual(readdirSync(records.dir).sort(), ['jobs', 'locks', 'threads']);
-});
-
-test('migrates a 1.0.0 store, finishes a dead archiver\'s 0.x archive and takes a late write', () => {
-  const dir = mkdtempSync(join(SANDBOX_HOME, 'migration-'));
-  const put = (folder, file, text) => {
-    mkdirSync(join(dir, folder), { recursive: true });
-    writeFileSync(join(dir, folder, file), text);
-  };
-  const old = { owner: 'th-1', executionId: 'j1', provider: 'codex' };
-  const renamed = { thread: 'th-1', jobId: 'j1', companion: 'codex' };
-  for (const folder of ['threads', 'jobs', 'stops']) put(folder, 'old', folder);
-  put('.', 'daemon.log', 'daemon.log');
-  mkdirSync(join(dir, 'legacy.pending')); // claimed by a process that died
-  put('conversations', 'th-1.json', JSON.stringify(old));
-  put('executions', 'j1.json', JSON.stringify(old));
-  put('results', 'j1.json', JSON.stringify({ ...old, cause: 'provider_error' }));
-  put('results', 'j1.json.delivery', 'owner\n');
-  const records = new Records({ dir });
-  assert.deepEqual(readdirSync(dir).sort(), ['jobs', 'legacy', 'results', 'threads']);
-  for (const file of ['threads/old', 'jobs/old', 'stops/old', 'daemon.log'])
-    assert.equal(readFileSync(join(dir, 'legacy', file), 'utf8'), file.split('/')[0]);
-  assert.deepEqual(records.readThread('th-1'), renamed);
-  assert.deepEqual(records.readJob('j1'), { ...renamed, companionName: 'Codex' });
-  assert.deepEqual(records.readResult('j1'), { ...renamed, cause: 'companion_error' });
-  assert.equal(readFileSync(join(dir, 'results/j1.json.delivery'), 'utf8'), 'owner\n');
-  const reopen = () => execFileSync(process.execPath, ['--input-type=module', '-e',
-    "import { Records } from './bridge-server/controller/records.mjs'; new Records({ dir: process.argv[1] })", dir]);
-  const before = snapshot(dir);
-  reopen();
-  assert.deepEqual(snapshot(dir), before);
-  put('conversations', 'th-1.json', JSON.stringify({ ...old, provider: 'late' }));
-  put('conversations', 'th-2.json', JSON.stringify({ ...old, owner: 'th-2' }));
-  reopen();
-  assert.deepEqual(records.readThread('th-1'), { ...renamed, companion: 'late' });
-  assert.deepEqual(records.readThread('th-2'), { ...renamed, thread: 'th-2' });
-  assert.equal(existsSync(join(dir, 'conversations')), false);
 });

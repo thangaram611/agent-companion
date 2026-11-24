@@ -1,7 +1,8 @@
 import '../../test/sandbox-home.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,7 +20,7 @@ function put(path, value) {
   writeFileSync(path, value);
 }
 
-function fixture(t) {
+function fixture(t, descendant) {
   const root = realpathSync(mkdtempSync(join(SANDBOX_HOME, 'defaults-')));
   const env = { HOME: root, PATH: process.env.PATH, CODEX_HOME: join(root, 'custom codex home'),
     XDG_CONFIG_HOME: join(root, 'xdg'), NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
@@ -34,15 +35,15 @@ function fixture(t) {
 if (process.argv[2] === 'app-server') historyFs.writeFileSync(process.env.CODEX_FAKE_TRACE + '.home', process.env.CODEX_HOME);
 `);
   const supervisors = [];
-  // Only the census is simulated. The timeout fixture also reports the pid
-  // of its deliberately detached child. All signals go to real fake processes.
+  // An optional detached process stands in for a descendant in the simulated
+  // census. The supervisor sends real signals to both process groups.
   function createSupervisor() {
     const supervisor = new ProcessSupervisor({ processTable: async () => {
       const pid = supervisor.child?.pid;
       const rows = new Map(pidAlive(pid) ? [[pid, { pid, pgid: pid, ppid: process.pid, birthTime: 'fixture-' + pid }]] : []);
-      if (env.CODEX_FAKE_CHILD_PID && existsSync(env.CODEX_FAKE_CHILD_PID)) {
-        const child = Number(readFileSync(env.CODEX_FAKE_CHILD_PID, 'utf8'));
-        if (pidAlive(child)) rows.set(child, { pid: child, pgid: child, ppid: pid, birthTime: 'fixture-' + child });
+      if (descendant && pidAlive(descendant.pid)) {
+        const child = descendant.pid;
+        rows.set(child, { pid: child, pgid: child, ppid: pid, birthTime: 'fixture-' + child });
       }
       return rows;
     } });
@@ -63,16 +64,13 @@ if (process.argv[2] === 'app-server') historyFs.writeFileSync(process.env.CODEX_
     http: () => log(join(root, 'requests.jsonl')), supervisors };
 }
 
-test('listing migrates shared settings, resolves both native defaults and shows environment overrides', async t => {
+test('listing reads shared settings, resolves both native defaults and shows environment overrides', async t => {
   const h = fixture(t);
-  const legacy = join(companionHomeDir('claude', h.env), 'default-model-codex');
-  put(legacy, 'saved-model\n');
-  put(join(companionHomeDir('codex', h.env), 'default-target'), 'copilot\n');
+  put(h.file, JSON.stringify({ companion: 'copilot', companions: { codex: { model: 'saved-model' } } }));
   h.env.AGENT_COMPANION_CODEX_MODEL = 'env-model';
   h.env.AGENT_COMPANION_DEFAULT_COMPANION = 'claude';
   h.env.CODEX_FAKE_CONFIG = JSON.stringify({ model: 'configured-model', model_reasoning_effort: 'xhigh' });
   const result = await h.run({});
-  assert.equal(existsSync(legacy), false);
   assert.equal(h.settings().companions.codex.model, 'saved-model');
   assert.deepEqual(result.companion, { saved: 'copilot', value: 'claude', source: 'env', inherit: 'claude' });
   assert.deepEqual(Object.keys(result.companions).sort(), ['antigravity', 'claude', 'codex', 'copilot', 'opencode']);
@@ -226,10 +224,8 @@ test('latest reported job across both hosts supplies model, effort and age; an o
   assert.equal(h.supervisors.length, 0);
 });
 
-test('CLI refusals have one-line reasons and leave an unmigrated home untouched', t => {
+test('CLI refusals have one-line reasons and leave settings absent on a fresh install', t => {
   const h = fixture(t);
-  const legacy = join(companionHomeDir('codex', h.env), 'default-target');
-  put(legacy, 'claude\n');
   for (const args of [['unknown'], ['companion=unknown'], ['companion=codex', 'effort=low'], ['model=foo'], ['claude', 'model='],
     ['claude', 'bad=field'], ['claude', 'effort=high', 'effort=low'], ['claude', 'model=two models'],
     ['claude', 'model=sonnet', 'effort=unsupported']]) {
@@ -237,7 +233,6 @@ test('CLI refusals have one-line reasons and leave an unmigrated home untouched'
     assert.equal(r.status, 1);
     assert.equal(r.stdout, '');
     assert.match(r.stderr, /^[^\r\n]+\n$/);
-    assert.equal(readFileSync(legacy, 'utf8'), 'claude\n');
     assert.equal(existsSync(h.file), false);
   }
   const r = h.cli('--json', 'companion=missing');
@@ -246,50 +241,16 @@ test('CLI refusals have one-line reasons and leave an unmigrated home untouched'
   assert.equal(existsSync(h.file), false);
 });
 
-test('local and native refusals preserve the settings file and both legacy conflict files byte for byte', async t => {
+test('local and native refusals preserve the settings file byte for byte', async t => {
   const h = fixture(t);
-  const paths = ['claude', 'codex'].map(host => join(companionHomeDir(host, h.env), 'default-model-codex'));
-  paths.forEach((path, i) => put(path, 'legacy-' + i));
   await assert.rejects(h.run({ companion: 'codex', model: 'configured-model', effort: 'ultra' }), /not valid/);
   assert.equal(existsSync(h.file), false);
   await h.run({ defaultCompanion: 'opencode' });
-  const state = paths.concat(h.file);
-  const snapshot = () => state.map(path => [statSync(path).ino, readFileSync(path, 'utf8')]);
+  const snapshot = () => [statSync(h.file).ino, readFileSync(h.file, 'utf8')];
   const before = snapshot();
   await assert.rejects(h.run({ companion: 'codex', model: 'configured-model', effort: 'ultra' }), /not valid/);
   await assert.rejects(h.run({ companion: 'claude', model: 'sonnet', effort: 'bogus' }), /invalid claude effort/);
   assert.deepEqual(snapshot(), before);
-});
-
-test('lists both hosts and paths for each migration conflict and resolves only the setting edited', async t => {
-  const h = fixture(t);
-  const paths = ['default-target', 'default-model'].map(name => ['claude', 'codex'].map(host => {
-    const path = join(companionHomeDir(host, h.env), name);
-    put(path, host);
-    return path;
-  }));
-  const result = await h.run({});
-  assert.equal(result.companion.saved, null);
-  assert.equal(result.conflicts.length, 4);
-  const text = formatDefaults(result);
-  for (const [i, pair] of paths.entries()) {
-    for (const [j, path] of pair.entries()) {
-      const host = ['claude', 'codex'][j];
-      assert.deepEqual(result.conflicts.find(c => c.path === path),
-        { path, host, setting: ['companion', 'companions.copilot.model'][i], value: host });
-      assert.ok(text.includes(path));
-    }
-  }
-  assert.match(text, /Choose with agent-companion defaults companion=<id>/);
-  assert.match(text, /Choose with agent-companion defaults copilot model=<id>/);
-  await h.run({ companion: 'copilot', effort: 'high' });
-  assert.ok(paths.flat().every(existsSync));
-  await h.run({ defaultCompanion: 'claude' });
-  assert.ok(paths[0].every(path => !existsSync(path)));
-  assert.ok(paths[1].every(existsSync));
-  assert.deepEqual((await h.run({ companion: 'copilot', model: 'inherit' })).conflicts, []);
-  assert.ok(paths[1].every(path => !existsSync(path)));
-  assert.deepEqual(h.settings(), { companion: 'claude', companions: { copilot: { effort: 'high' } } });
 });
 
 test('failed native reads give a short reason, allow independent settings, and refuse saves requiring the missing evidence', async t => {
@@ -309,20 +270,14 @@ test('failed native reads give a short reason, allow independent settings, and r
 });
 
 test('a stalled initialize or server bootstrap times out and its owned process is gone', async t => {
-  const h = fixture(t);
-  h.env.CODEX_FAKE_CHILD_PID = join(h.root, 'detached.pid');
-  appendFileSync(h.env.CODEX_BIN, `
-if (process.argv[2] === 'app-server') {
-  const { spawn } = await import('node:child_process');
-  spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); require('fs').writeFileSync(process.env.CODEX_FAKE_CHILD_PID, String(process.pid)); setInterval(() => {}, 10000)"],
-    { detached: true, stdio: 'ignore' }).unref();
-}`);
-  t.after(() => {
-    if (existsSync(h.env.CODEX_FAKE_CHILD_PID)) {
-      const pid = Number(readFileSync(h.env.CODEX_FAKE_CHILD_PID, 'utf8'));
-      if (pidAlive(pid)) process.kill(pid, 'SIGKILL');
-    }
-  });
+  const child = spawn(process.execPath, ['-e', `
+    process.on('SIGTERM', () => {});
+    process.send('ready');
+    setInterval(() => {}, 10000);
+  `], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+  t.after(() => { if (pidAlive(child.pid)) child.kill('SIGKILL'); });
+  await once(child, 'message');
+  const h = fixture(t, child);
   h.env.CODEX_FAKE_INIT_DELAY_MS = '30000';
   h.env.FAKE_OPENCODE_MODE = 'no-boot';
   for (const companion of ['codex', 'opencode']) {
@@ -331,6 +286,6 @@ if (process.argv[2] === 'app-server') {
     const pid = h.supervisors.at(-1).child.pid;
     assert.ok(pid > 1);
     assert.equal(pidAlive(pid), false);
+    assert.equal(pidAlive(child.pid), false);
   }
-  assert.equal(pidAlive(Number(readFileSync(h.env.CODEX_FAKE_CHILD_PID, 'utf8'))), false);
 });

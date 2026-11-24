@@ -495,19 +495,12 @@ test('cancel asks once, sends no text, and no takes it back', async ($, on) => {
   await ui.unmount()
 })
 
-test('a job recorded with no message modes (a Copilot job from an earlier release) takes cancel only: no box and no mode, cancel kept', async ($, on) => {
+test('a job recorded with no message modes takes cancel only: no box and no mode, cancel kept', async ($, on) => {
   const copilot = await boxed($, on, { companion: 'copilot', interventionModes: { default: null, steer: false, queue: false, interrupt: false } })
   expect(await copilot.ui.find({ key: 'message' })).toBeUndefined()
   expect(await copilot.ui.find({ key: 'mode' })).toBeUndefined()
   expect(await copilot.last(3)).toEqual(['Copilot takes no messages while it works · cancel only', 'cancel job  b: ← jobs', 'esc returns to the chat'])
   await copilot.ui.unmount()
-})
-
-test('a job whose record has no interventionModes, from a bridge older than the inbox, gets no box', async ($, on) => {
-  const { ui, last } = await boxed($, on, { interventionModes: undefined })
-  expect(await ui.find({ key: 'message' })).toBeUndefined()
-  expect(await last(1)).toEqual(['esc returns  b: ← jobs'])
-  await ui.unmount()
 })
 
 test('a delayed acknowledgement preserves a newer draft', async ($, on) => {

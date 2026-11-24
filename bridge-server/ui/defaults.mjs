@@ -1,10 +1,9 @@
 // The defaults command and its API for the live view. Only Codex and OpenCode
 // have zero-turn native reads. Neither probe opens a history or sends input.
-import { rmSync } from 'node:fs';
 import { aborted } from 'node:util';
 import { listCompanionIds, COMPANION_IDS, getCompanionById } from '../../lib/companion-registry.mjs';
 import {
-  settingsPath, previewDefaults, migrateDefaults, legacyDefaultConflicts, isModelAllowedFor,
+  settingsPath, readSettings, isModelAllowedFor,
   readDefaultModel, readDefaultEffort, readDefaultCompanion, writeCompanionDefaults, writeDefaultCompanion, clearDefaultCompanion,
 } from '../../lib/state.mjs';
 import { CodexAdapter, validateCodexEffort } from '../adapters/codex.mjs';
@@ -147,12 +146,10 @@ export async function defaults(query = {}, {
   // Removing overrides works even if the native server is offline.
   const validating = Object.values(changes).some(value => value !== null);
   const warnings = [];
-  const log = (_level, message) => {
-    if (!message.startsWith('Conflicting legacy ')) warnings.push(message);
-  };
-  // Validate before even creating settings.json or consuming a legacy file.
-  const opts = { env, log };
-  let settings = editing ? null : migrateDefaults(opts);
+  const log = (_level, message) => warnings.push(message);
+  const file = settingsPath(env);
+  const read = () => readSettings(file, log) ?? {};
+  let settings = editing ? null : read();
   const ids = companion ? [companion] : defaultCompanion ? [] : listCompanionIds();
   const last = ids.some(id => !usesServer(id)) ? lastRuns(env, warnings) : null;
   const natives = new Map(await Promise.all(ids.map(async id => {
@@ -166,23 +163,15 @@ export async function defaults(query = {}, {
     }
   })));
   signal?.throwIfAborted();
-  let conflicts = legacyDefaultConflicts(env);
   if (editing) {
-    if (validating) validateSelection(companion, changes, previewDefaults(opts).companions?.[companion], natives.get(companion));
-    migrateDefaults(opts);
+    if (validating) validateSelection(companion, changes, read().companions?.[companion], natives.get(companion));
     if (defaultCompanion === 'inherit') clearDefaultCompanion(env);
     else if (defaultCompanion) writeDefaultCompanion(defaultCompanion, env);
     else writeCompanionDefaults(companion, changes, env);
-    const resolved = defaultCompanion ? 'companion' : Object.hasOwn(changes, 'model') ? 'companions.' + companion + '.model' : null;
-    conflicts = conflicts.filter(entry => {
-      if (entry.setting !== resolved) return true;
-      try { rmSync(entry.path, { force: true }); return false; }
-      catch (err) { warnings.push('Could not remove ' + entry.path + ': ' + err.code); return true; }
-    });
-    settings = previewDefaults(opts);
+    settings = read();
   }
 
-  const result = { settingsFile: settingsPath(env) };
+  const result = { settingsFile: file };
   if (!companion) result.companion = { ...field(settings.companion, readDefaultCompanion(env, log, settings), 'companion'),
     inherit: readDefaultCompanion(env, log, {}).companion };
   for (const [id, native] of natives) {
@@ -190,7 +179,6 @@ export async function defaults(query = {}, {
     result.companions[id] = companionRow(id, settings, env, native);
     if (native.catalogError && native.catalogError !== native.inherit.reason) warnings.push(id + ' model list: ' + native.catalogError);
   }
-  result.conflicts = conflicts.filter(e => !companion || e.setting === 'companions.' + companion + '.model');
   if (warnings.length) result.warnings = [...new Set(warnings)];
   return result;
 }
@@ -225,11 +213,6 @@ export function formatDefaults(result) {
     const evidence = host ? host + ' last run, ' + age(ageMs) + ' ago' : source;
     lines.push('  inherit: ' + (reason ?? ('model=' + (model ?? 'not reported') + '  effort=' + (effort ?? 'not reported') + ' (' + evidence + ')')));
     if (row.validation) lines.push('  ' + row.validation);
-  }
-  for (const [setting, entries] of Object.entries(Object.groupBy(result.conflicts, e => e.setting))) {
-    lines.push('Conflict: ' + setting);
-    for (const e of entries) lines.push('  ' + e.host + ': ' + e.value + ' (' + e.path + ')');
-    lines.push('  Choose with agent-companion defaults ' + (setting === 'companion' ? 'companion=<id>' : setting.split('.')[1] + ' model=<id>'));
   }
   for (const warning of result.warnings ?? []) lines.push('Warning: ' + warning);
   return lines.map(one).join('\n');

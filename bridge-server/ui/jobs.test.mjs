@@ -65,8 +65,6 @@ test("callers: the thread's title, else the task's first line, and the lead sess
   assert.deepEqual(caller(job('codex', 'root-1', 'password fix')), { title: 'password fix', lead: 'Verify signatures' });
   appendFileSync(index, lines([{ id: 'root-1', thread_name: 'Renamed' }]));
   assert.equal(caller(job('codex', 'root-1')).lead, 'Renamed');
-  // A job from before threads has no thread record: its first line, and its bridge's host session.
-  assert.deepEqual(caller({ host: 'claude', record: { thread: 'x', hostSessionId: 'missing', text: 'Task' } }), { title: 'Task', lead: null });
 });
 
 test('branch comes from the worktree .git without running git', t => {
