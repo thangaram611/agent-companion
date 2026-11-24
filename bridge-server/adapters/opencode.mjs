@@ -197,6 +197,9 @@ class OpenCodeAdapter {
       this.terminal = null; this.observation = null; this.native = null; this.steering = null;
       this.interrupted = new Promise(resolve => { this.resolveInterrupt = resolve; });
       this.nativeTurnId = null; this.messageId = null; this.steerIds = new Set();
+      this.backgroundShells = new Map(); // shellID -> command, until its continuation starts
+      this.shellResults = new Map(); // shellID -> inboxID, possibly enqueued before tool success
+      this.drainBackground = false;
       this.progress = { lastActivityAt: null, activeCommand: null, retry: null, partialText: '' };
       this.acc = createTurnAccumulator(this.sessionId);
       // Subscribe first; fast terminal events can precede the admission reply.
@@ -231,7 +234,8 @@ class OpenCodeAdapter {
   }
 
   async _observe() {
-    let pending = '';
+    let pending = '', execution = 0;
+    let shellsAtStart = new Set(), interruptSent = false;
     const progress = this.progress;
     try {
       this.stream.setEncoding('utf8');
@@ -246,20 +250,50 @@ class OpenCodeAdapter {
           const event = JSON.parse(json);
           const data = event.data;
           if (data?.sessionID !== this.sessionId) continue;
+          if (event.type === 'session.inbox.enqueued' && data.item?.type === 'synthetic') {
+            const meta = data.item.payload?.metadata;
+            if (meta?.source === 'shell' && meta.shellID) this.shellResults.set(meta.shellID, data.inboxID);
+          }
+          let resumedShell;
+          if (event.type === 'session.execution.started') {
+            shellsAtStart = new Set(this.backgroundShells.keys());
+            const ready = [...shellsAtStart].filter(id => this.shellResults.has(id));
+            // With several enqueued results only inbox.delivered identifies
+            // which ones this execution consumed before a native interrupt.
+            if (ready.length === 1) resumedShell = ready[0];
+            interruptSent = false;
+            this.acc = createTurnAccumulator(this.sessionId);
+            this.messageId = null;
+            progress.retry = null;
+            progress.activeCommand = null;
+          } else if (event.type === 'session.inbox.delivered' && !this.acc.terminal) {
+            resumedShell = [...shellsAtStart].find(id => this.shellResults.get(id) === data.inboxID);
+          }
+          if (resumedShell) {
+            if (progress.activeCommand === this.backgroundShells.get(resumedShell)) progress.activeCommand = null;
+            this.backgroundShells.delete(resumedShell);
+            this.shellResults.delete(resumedShell);
+            shellsAtStart.delete(resumedShell);
+            if (this.drainBackground && !interruptSent) {
+              interruptSent = true;
+              await this._interruptExecution({ resume: this.backgroundShells.size > 0 });
+            }
+          }
+          const priorTerminal = this.acc.terminal;
           this.acc.push(`data: ${JSON.stringify(event)}\n\n`);
           if (event.type === 'session.step.started') { this._model(data.model); this.messageId = data.assistantMessageID; progress.retry = null; }
           if (event.type === 'session.retry.scheduled') progress.retry = { attempt: data.attempt, at: data.at, error: data.error };
-          if (event.type.startsWith('session.tool.') || event.type === 'session.shell.started') {
-            progress.activeCommand = data.input?.command || data.command || progress.activeCommand;
-            const shellID = data.shellID || data.metadata?.shellID;
-            const shell = shellID ? (await this._request('/shell/' + encodeURIComponent(shellID) + this.locationQuery)).data?.data : data;
-            if (shell?.command) progress.activeCommand = shell.command;
-            if (Number.isInteger(shell?.pid) && shell.pid > 1) await this.supervisor.recordDescendant(shell.pid);
+          if (event.type.startsWith('session.tool.') || event.type === 'session.shell.started' || event.type === 'session.shell.ended') {
+            await this._shellActivity(event.type, data);
           }
-          if (['session.tool.success', 'session.tool.failed', 'session.shell.ended'].includes(event.type)) progress.activeCommand = null;
+          progress.activeCommand ||= this.backgroundShells.values().next().value ?? null;
           Object.assign(progress, { lastActivityAt: this.clock.now(), partialText: this.acc.snapshot().message, effectiveEffort: this.effectiveEffort });
           this.onProgress?.({ ...progress });
-          if (this.acc.terminal || event.type === 'session.idle') return await this._terminal();
+          if (event.type === 'session.idle' || this.acc.terminal !== priorTerminal) {
+            const status = this.acc.terminal?.status;
+            if (this.backgroundShells.size && (status === 'completed' || (this.drainBackground && status === 'cancelled'))) execution++;
+            else return await this._terminal(execution);
+          }
         }
       }
       throw failure('ProviderLost');
@@ -269,7 +303,24 @@ class OpenCodeAdapter {
     }
   }
 
-  async _terminal() {
+  async _shellActivity(type, data) {
+    const meta = data.metadata;
+    const shellID = data.shellID || meta?.shellID;
+    const call = this.acc.toolCall(data.assistantMessageID, data.id);
+    let shell = data;
+    if (type === 'session.tool.success' && call?.name === 'shell' && meta?.status === 'running' && meta.shellID) {
+      if (call.input.background === false) this.backgroundShells.set(meta.shellID, call.input.command);
+      shell = meta;
+    }
+    if (shellID && !Number.isInteger(shell.pid) && type !== 'session.shell.ended') {
+      shell = (await this._request('/shell/' + encodeURIComponent(shellID) + this.locationQuery)).data?.data;
+    }
+    if (Number.isInteger(shell?.pid) && shell.pid > 1) await this.supervisor.recordDescendant(shell.pid);
+    this.progress.activeCommand = ['session.tool.success', 'session.tool.failed', 'session.shell.ended'].includes(type)
+      ? null : shell?.command || data.input?.command || data.command || this.progress.activeCommand;
+  }
+
+  async _terminal(execution = 0) {
     // A fast final event can beat a steer's HTTP receipt. Learn all admitted
     // user ids before walking back through the store to this turn's first one.
     await this.steering?.catch(() => {});
@@ -296,20 +347,35 @@ class OpenCodeAdapter {
       query = cursor ? '?cursor=' + encodeURIComponent(cursor) : null;
     }
     if (!found) throw failure('ProviderLost');
-    const idle = messages.find(m => m.type === 'idle');
+    // A fast explicit background result can advance the store ahead of SSE.
+    // Count idle rows from admission and use only this execution's assistant steps.
+    const ends = messages.filter(m => m.type === 'idle').reverse();
+    const idle = ends[execution];
     const outcome = outcomes[idle?.outcome];
     if (!outcome) throw failure('ProviderLost');
-    const assistants = messages.filter(m => m.type === 'assistant');
+    // The answer is the last execution's; usage covers every execution since admission.
+    const olderEnd = execution ? messages.indexOf(ends[execution - 1]) : messages.length;
+    const spent = messages.slice(messages.indexOf(idle) + 1).filter(m => m.type === 'assistant');
+    const assistants = messages.slice(messages.indexOf(idle) + 1, olderEnd).filter(m => m.type === 'assistant');
     if (outcome === 'completed' && !assistants.length) throw failure('ModelSelectionUnverified');
     for (const assistant of assistants.toReversed()) this._model(assistant.model);
     const texts = assistants.map(m => (m.content || []).filter(p => p.type === 'text').map(p => p.text).join(''));
     return {
       outcome, nativeTurnId: this.nativeTurnId, effectiveEffort: this.effectiveEffort, text: (outcome === 'failed' ? texts.find(Boolean) : texts[0]) || '',
       error: outcome === 'failed' ? [idle, ...assistants].map(m => m?.error?.message).find(m => typeof m === 'string' && m.trim()) : undefined,
-      usage: sumUsage(assistants.map(m => usageFromOpenCodeInfo({ ...m, modelID: m.model?.id }, 'opencode-server'))),
+      usage: sumUsage(spent.map(m => usageFromOpenCodeInfo({ ...m, modelID: m.model?.id }, 'opencode-server'))),
       nativeRefs: { sessionId: this.sessionId, messageId: assistants[0]?.id || this.messageId || this.nativeTurnId },
       cause: outcome === 'completed' ? 'native_complete' : 'companion_error',
     };
+  }
+
+  async _interruptExecution({ resume = false } = {}) {
+    // With more cancelled results coming, OpenCode must resume pending steering
+    // after interrupt. Its default parks the next synthetic result in the inbox.
+    const path = this.sessionPath + '/interrupt' + (resume ? '?resume=true' : '');
+    const ack = (await this._request(path, { method: 'POST' })).data;
+    if (typeof ack?.interrupted !== 'boolean') throw failure('InterruptUnacknowledged');
+    return ack.interrupted;
   }
 
   // `drain`: interrupt & send waits for the turn's own terminal (its stored usage,
@@ -317,9 +383,20 @@ class OpenCodeAdapter {
   async interrupt({ drain = false } = {}) {
     if (!this.sessionId || this.terminal) return;
     if (this.channel.signal.aborted) throw failure('ProviderLost');
-    const ack = (await this._request(this.sessionPath + '/interrupt', { method: 'POST' })).data;
-    if (typeof ack?.interrupted !== 'boolean') throw failure('InterruptUnacknowledged');
-    if (ack.interrupted && !drain) {
+    // The server can already be idle while its execution end is still in flight.
+    const betweenTurns = drain && this.backgroundShells?.size && this.acc.terminal;
+    const interrupted = betweenTurns ? false : await this._interruptExecution();
+    if (drain && !interrupted && this.backgroundShells?.size) {
+      // Idle execution interrupts are no-ops. Cancelling a job enqueues its
+      // result and wakes a turn. Observe interrupts that turn and drains its end.
+      this.drainBackground = true;
+      try {
+        await Promise.all([...this.backgroundShells.keys()].filter(id => !this.shellResults.has(id))
+          .map(id => this._request('/experimental/job/' + encodeURIComponent(id) + '/cancel', { method: 'POST' })));
+      } catch (error) { this.drainBackground = false; throw error; }
+      return;
+    }
+    if (interrupted && !drain) {
       // Native acknowledgement is also an abort outcome. Publish it before
       // close can tear down a pending SSE/transcript read during owner stop.
       const snapshot = this.acc?.snapshot();

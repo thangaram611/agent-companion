@@ -26,6 +26,8 @@ if (process.argv[2] === 'tool') {
   log({ argv: process.argv.slice(2), cwd: process.cwd(), pwd: process.env.PWD });
   if (process.argv[2] !== 'serve') process.exit(90); // readiness must not probe
   if (mode === 'crash') process.exit(1);
+  const capture = mode === 'background' && JSON.parse(readFileSync(new URL('../fixtures/opencode-background-2.4.0.json', import.meta.url)))[process.env.FAKE_OPENCODE_CAPTURE || 'timeout'];
+  let replaySession, replayRunning;
   const store = join(dir, 'history.json');
   let sessions = {};
   try { sessions = JSON.parse(readFileSync(store, 'utf8')); } catch {}
@@ -39,6 +41,19 @@ if (process.argv[2] === 'tool') {
     const frame = `data: ${JSON.stringify({ type, data })}\r\n\r\n`;
     for (const stream of streams) stream.write(frame);
   };
+  async function spawnTool() {
+    tool = fork(import.meta.filename, ['tool'], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    const [toolRow] = await once(tool, 'message');
+    rows.push(toolRow); saveRows();
+  }
+  function replay(events) {
+    for (const { type, data } of events) {
+      if (type === 'session.execution.started') replayRunning = true;
+      if (['session.execution.succeeded', 'session.execution.interrupted', 'session.execution.failed'].includes(type)) replayRunning = false;
+      emit(type, { ...data, sessionID: replaySession.id,
+        ...(data.metadata?.pid && { metadata: { ...data.metadata, pid: tool.pid } }) });
+    }
+  }
   const finish = (outcome) => {
     if (!active) return;
     const { session, assistant, user } = active;
@@ -83,6 +98,15 @@ if (process.argv[2] === 'tool') {
       finish(body?.outcome || 'succeeded');
       return reply(200, {});
     }
+    if (path === '/api/fixture/replay' && capture) {
+      if (body.messages) { replaySession.messages = body.messages.toReversed(); save(); }
+      replay(body.events);
+      return reply(200, {});
+    }
+    if (capture && path.startsWith('/api/experimental/job/') && path.endsWith('/cancel')) {
+      if (tool.exitCode === null && tool.signalCode === null) { tool.kill(); await once(tool, 'exit'); }
+      return reply(204);
+    }
     if (path === '/api/event') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.write(': connected\r\n\r\n');
@@ -117,6 +141,7 @@ if (process.argv[2] === 'tool') {
       const offset = Number(url.searchParams.get('cursor') || 0);
       return reply(200, { data: messages.slice(offset, offset + 2), cursor: { next: offset + 2 < messages.length ? String(offset + 2) : null } });
     }
+    if (operation === 'interrupt' && capture && !active) return reply(200, { interrupted: replayRunning });
     if (operation === 'interrupt') {
       if (tool && tool.exitCode === null) { tool.kill(); await once(tool, 'exit'); }
       const interrupted = Boolean(active);
@@ -124,6 +149,11 @@ if (process.argv[2] === 'tool') {
       return reply(200, { interrupted });
     }
     if (operation !== 'prompt') return reply(404, {});
+    if (capture && !replaySession) {
+      replaySession = session;
+      await spawnTool();
+      return reply(200, { data: { id: capture.messages.at(-1).id, sessionID: id } });
+    }
     const user = { id: 'msg_' + randomUUID(), type: 'user', text: body.text };
     if (active && mode === 'interventions') {
       // A steer is a new stored user message between steps of the same run.
@@ -156,9 +186,7 @@ if (process.argv[2] === 'tool') {
       emit('session.text.delta', { sessionID: id, assistantMessageID: assistant.id, ordinal: 0, delta: answer });
     }
     if (['tool', 'retry'].includes(mode)) {
-      tool = fork(import.meta.filename, ['tool'], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
-      const [toolRow] = await once(tool, 'message');
-      rows.push(toolRow); saveRows();
+      await spawnTool();
       emit('session.tool.progress', { sessionID: id, assistantMessageID: assistant.id, id: 'tool', metadata: { shellID: 'sh_fixture' } });
       if (mode === 'retry') emit('session.retry.scheduled', { sessionID: id, assistantMessageID: assistant.id, attempt: 2, at: Date.now(), error: { type: 'rate_limit', message: 'retrying' } });
     } else if (mode === 'interventions') {

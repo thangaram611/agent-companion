@@ -1,0 +1,123 @@
+{
+  "timeout": {
+    "events": [
+      {"type":"session.inbox.enqueued","data":{"inboxID":"msg_20b51d6b1001AqWxUfLtMOqn33","sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","item":{"type":"user","payload":{"text":"Use the shell tool exactly once with background: false, timeout: 5000, workdir /tmp/oc-fixture/work, and command `sleep 30; echo BG-DONE`. Run nothing else. End this turn with WAITING. When the background command result arrives, reply with exactly its output."},"delivery":"steer"}}},
+      {"type":"session.execution.started","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK"}},
+      {"type":"session.inbox.delivered","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","inboxID":"msg_20b51d6b1001AqWxUfLtMOqn33"}},
+      {"type":"session.step.started","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","agent":"build","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"assistantMessageID":"msg_20b51d6be001VLfhiV5YkJtMq0","snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","started":1795486242496}},
+      {"type":"session.tool.input.started","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","assistantMessageID":"msg_20b51d6be001VLfhiV5YkJtMq0","id":"call_j9hhft9s","name":"shell"}},
+      {"type":"session.tool.called","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","assistantMessageID":"msg_20b51d6be001VLfhiV5YkJtMq0","id":"call_j9hhft9s","input":{"command":"sleep 30; echo BG-DONE","timeout":5000,"background":false,"workdir":"/tmp/oc-fixture/work"},"executed":false}},
+      {"type":"session.tool.success","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","assistantMessageID":"msg_20b51d6be001VLfhiV5YkJtMq0","id":"call_j9hhft9s","content":[{"type":"text","text":"Command moved to the background (shell ID: sh_20b524845001159kpaNnsNPF51).\nPID: 70599\nOutput is streaming to: /tmp/oc-fixture/data/opencode/shell/db5e09751f87f58a59eb7e2e932f68952db384f0/sh_20b524845001159kpaNnsNPF51.out\n\nThe command did not finish within its timeout of 5 seconds and was moved to the background. Do not start another copy while it is running."},{"type":"text","text":"You will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output file is polling, not useful work. You may read the current output if it lets you do useful work now, but do not repeatedly check it while waiting for the command to finish. Keep working on anything that does not depend on the result. If you have nothing else to do, end your response; you will be resumed automatically when the command finishes."}],"metadata":{"status":"running","truncated":false,"shellID":"sh_20b524845001159kpaNnsNPF51","pid":70599},"executed":false}},
+      {"type":"session.step.ended","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","assistantMessageID":"msg_20b51d6be001VLfhiV5YkJtMq0","finish":"tool-calls","rawFinish":"tool_calls","tokens":{"input":518,"output":1331,"reasoning":0,"cache":{"read":10362,"write":0}},"cost":0,"snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","files":[]}},
+      {"type":"session.step.started","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","agent":"build","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"assistantMessageID":"msg_20b525c3a001R30nc4JDeoHXuM","snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","started":1795486276669}},
+      {"type":"session.text.ended","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","assistantMessageID":"msg_20b525c3a001R30nc4JDeoHXuM","ordinal":0,"text":"WAITING"}},
+      {"type":"session.step.ended","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","assistantMessageID":"msg_20b525c3a001R30nc4JDeoHXuM","finish":"stop","rawFinish":"stop","tokens":{"input":316,"output":6,"reasoning":0,"cache":{"read":12162,"write":0}},"cost":0,"snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","files":[]}},
+      {"type":"session.execution.succeeded","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK"}},
+      {"type":"session.inbox.enqueued","data":{"inboxID":"msg_20b525bd4001LvozWwVkPa3SMO","sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","item":{"type":"synthetic","delivery":"steer","payload":{"text":"<background-result kind=\"shell\" id=\"sh_20b524845001159kpaNnsNPF51\" state=\"completed\" command=\"sleep 30; echo BG-DONE\">\nBG-DONE\n\n</background-result>","description":"sleep 30; echo BG-DONE","metadata":{"source":"shell","shellID":"sh_20b524845001159kpaNnsNPF51","jobID":"sh_20b524845001159kpaNnsNPF51","state":"completed","truncated":false,"exit":0}}}}},
+      {"type":"session.execution.started","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK"}},
+      {"type":"session.inbox.delivered","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","inboxID":"msg_20b525bd4001LvozWwVkPa3SMO"}},
+      {"type":"session.step.started","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","agent":"build","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"assistantMessageID":"msg_20b52bdf40012bAaK40AKrRzvV","snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","started":1795486301687}},
+      {"type":"session.text.ended","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","assistantMessageID":"msg_20b52bdf40012bAaK40AKrRzvV","ordinal":0,"text":"The shell command finished after 30s, output BG-DONE.BG-DONE"}},
+      {"type":"session.step.ended","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK","assistantMessageID":"msg_20b52bdf40012bAaK40AKrRzvV","finish":"stop","rawFinish":"stop","tokens":{"input":393,"output":28,"reasoning":0,"cache":{"read":10875,"write":0}},"cost":0,"snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","files":[]}},
+      {"type":"session.execution.succeeded","data":{"sessionID":"ses_df4ae2955ffePJ5dzouXaC3iyK"}}
+    ],
+    "messages": [
+      {"id":"msg_20b52c242001AykfhYyWfI10lb","type":"idle","outcome":"succeeded"},
+      {"id":"msg_20b52bdf40012bAaK40AKrRzvV","type":"assistant","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"content":[{"type":"text","text":"The shell command finished after 30s, output BG-DONE.BG-DONE"}],"cost":0,"tokens":{"input":393,"output":28,"reasoning":0,"cache":{"read":10875,"write":0}}},
+      {"id":"msg_20b525bd4001LvozWwVkPa3SMO","metadata":{"source":"shell","shellID":"sh_20b524845001159kpaNnsNPF51","jobID":"sh_20b524845001159kpaNnsNPF51","state":"completed","truncated":false,"exit":0},"type":"synthetic"},
+      {"id":"msg_20b525ed8001FU3KUOdZ3n5i4I","type":"idle","outcome":"succeeded"},
+      {"id":"msg_20b525c3a001R30nc4JDeoHXuM","type":"assistant","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"content":[{"type":"text","text":"WAITING"}],"cost":0,"tokens":{"input":316,"output":6,"reasoning":0,"cache":{"read":12162,"write":0}}},
+      {"id":"msg_20b51d6be001VLfhiV5YkJtMq0","type":"assistant","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"content":[],"cost":0,"tokens":{"input":518,"output":1331,"reasoning":0,"cache":{"read":10362,"write":0}}},
+      {"id":"msg_20b51d6b1001AqWxUfLtMOqn33","type":"user"}
+    ]
+  },
+  "explicit": {
+    "events": [
+      {"type":"session.inbox.enqueued","data":{"inboxID":"msg_20b50f9cd0018Sj4xM0o1djBeO","sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","item":{"type":"user","payload":{"text":"Use the shell tool exactly once with background: true, workdir /tmp/oc-fixture/work, and command `sleep 30; echo EXPLICIT-DONE`. Run nothing else. End this turn with WAITING. When the background command result arrives, reply with exactly its output."},"delivery":"steer"}}},
+      {"type":"session.execution.started","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd"}},
+      {"type":"session.inbox.delivered","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","inboxID":"msg_20b50f9cd0018Sj4xM0o1djBeO"}},
+      {"type":"session.step.started","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","agent":"build","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"assistantMessageID":"msg_20b50fb58001OEN6c2NpyagJhn","snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","started":1795486186330}},
+      {"type":"session.tool.input.started","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","assistantMessageID":"msg_20b50fb58001OEN6c2NpyagJhn","id":"call_gyn0ufbc","name":"shell"}},
+      {"type":"session.tool.called","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","assistantMessageID":"msg_20b50fb58001OEN6c2NpyagJhn","id":"call_gyn0ufbc","input":{"background":true,"command":"sleep 30; echo EXPLICIT-DONE","timeout":120000,"workdir":"/tmp/oc-fixture/work"},"executed":false}},
+      {"type":"session.tool.success","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","assistantMessageID":"msg_20b50fb58001OEN6c2NpyagJhn","id":"call_gyn0ufbc","content":[{"type":"text","text":"Command moved to the background (shell ID: sh_20b515b940013t6KDzz5MDLKF6).\nPID: 69447\nOutput is streaming to: /tmp/oc-fixture/data/opencode/shell/db5e09751f87f58a59eb7e2e932f68952db384f0/sh_20b515b940013t6KDzz5MDLKF6.out"},{"type":"text","text":"You will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output file is polling, not useful work. You may read the current output if it lets you do useful work now, but do not repeatedly check it while waiting for the command to finish. Keep working on anything that does not depend on the result. If you have nothing else to do, end your response; you will be resumed automatically when the command finishes."}],"metadata":{"status":"running","truncated":false,"shellID":"sh_20b515b940013t6KDzz5MDLKF6","pid":69447},"executed":false}},
+      {"type":"session.step.ended","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","assistantMessageID":"msg_20b50fb58001OEN6c2NpyagJhn","finish":"tool-calls","rawFinish":"tool_calls","tokens":{"input":10875,"output":517,"reasoning":0,"cache":{"read":0,"write":0}},"cost":0,"snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","files":[]}},
+      {"type":"session.step.started","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","agent":"build","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"assistantMessageID":"msg_20b515ea3001n9PhP2bfze0G5m","snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","started":1795486211749}},
+      {"type":"session.text.ended","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","assistantMessageID":"msg_20b515ea3001n9PhP2bfze0G5m","ordinal":0,"text":"**WAITING**"}},
+      {"type":"session.step.ended","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","assistantMessageID":"msg_20b515ea3001n9PhP2bfze0G5m","finish":"stop","rawFinish":"stop","tokens":{"input":293,"output":8,"reasoning":0,"cache":{"read":11330,"write":0}},"cost":0,"snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","files":[]}},
+      {"type":"session.execution.succeeded","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd"}},
+      {"type":"session.inbox.enqueued","data":{"inboxID":"msg_20b515e0e0015Ie2tFv82FYGSf","sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","item":{"type":"synthetic","delivery":"steer","payload":{"text":"<background-result kind=\"shell\" id=\"sh_20b515b940013t6KDzz5MDLKF6\" state=\"completed\" command=\"sleep 30; echo EXPLICIT-DONE\">\nEXPLICIT-DONE\n\n</background-result>","description":"sleep 30; echo EXPLICIT-DONE","metadata":{"source":"shell","shellID":"sh_20b515b940013t6KDzz5MDLKF6","jobID":"sh_20b515b940013t6KDzz5MDLKF6","state":"completed","truncated":false,"exit":0}}}}},
+      {"type":"session.execution.started","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd"}},
+      {"type":"session.inbox.delivered","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","inboxID":"msg_20b515e0e0015Ie2tFv82FYGSf"}},
+      {"type":"session.step.started","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","agent":"build","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"assistantMessageID":"msg_20b51d3c6001bO9QLs7q1x7T7r","snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","started":1795486241736}},
+      {"type":"session.text.ended","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","assistantMessageID":"msg_20b51d3c6001bO9QLs7q1x7T7r","ordinal":0,"text":"EXPLICIT-DONE"}},
+      {"type":"session.step.ended","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd","assistantMessageID":"msg_20b51d3c6001bO9QLs7q1x7T7r","finish":"stop","rawFinish":"stop","tokens":{"input":375,"output":8,"reasoning":0,"cache":{"read":10870,"write":0}},"cost":0,"snapshot":"69c00ffd62d6670f2d64c293a8e1748accc2a1ab","files":[]}},
+      {"type":"session.execution.succeeded","data":{"sessionID":"ses_df4af077cffelBwKRFNtH4nbzd"}}
+    ],
+    "messages": [
+      {"id":"msg_20b51d6a2001DtiY5n1r5JEIDP","type":"idle","outcome":"succeeded"},
+      {"id":"msg_20b51d3c6001bO9QLs7q1x7T7r","type":"assistant","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"content":[{"type":"text","text":"EXPLICIT-DONE"}],"cost":0,"tokens":{"input":375,"output":8,"reasoning":0,"cache":{"read":10870,"write":0}}},
+      {"id":"msg_20b515e0e0015Ie2tFv82FYGSf","metadata":{"source":"shell","shellID":"sh_20b515b940013t6KDzz5MDLKF6","jobID":"sh_20b515b940013t6KDzz5MDLKF6","state":"completed","truncated":false,"exit":0},"type":"synthetic"},
+      {"id":"msg_20b51612f001h4puR261rd1wT9","type":"idle","outcome":"succeeded"},
+      {"id":"msg_20b515ea3001n9PhP2bfze0G5m","type":"assistant","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"content":[{"type":"text","text":"**WAITING**"}],"cost":0,"tokens":{"input":293,"output":8,"reasoning":0,"cache":{"read":11330,"write":0}}},
+      {"id":"msg_20b50fb58001OEN6c2NpyagJhn","type":"assistant","model":{"id":"gpt-oss:20b","providerID":"ollama","variant":"default"},"content":[],"cost":0,"tokens":{"input":10875,"output":517,"reasoning":0,"cache":{"read":0,"write":0}}},
+      {"id":"msg_20b50f9cd0018Sj4xM0o1djBeO","type":"user"}
+    ]
+  },
+  "interrupt": {
+    "sessionInterrupt": {
+      "interrupted": false
+    },
+    "shellAtFirstEnd": {
+      "status": "running",
+      "pid": 77400,
+      "exit": null
+    },
+    "shellAfterJobCancel": {
+      "status": "killed",
+      "pid": 77400,
+      "exit": null
+    },
+    "events": [
+      {
+        "type": "session.execution.succeeded",
+        "data": {
+          "sessionID": "ses_df4a5adc1ffenwg5E6NlkHBtSw"
+        }
+      },
+      {
+        "type": "session.inbox.enqueued",
+        "data": {
+          "inboxID": "msg_20b5a93e2001Muq06wL4Wzfvuv",
+          "sessionID": "ses_df4a5adc1ffenwg5E6NlkHBtSw",
+          "item": {
+            "type": "synthetic",
+            "delivery": "steer",
+            "payload": {
+              "text": "<background-result kind=\"shell\" id=\"sh_20b5a7fe5001yMxGFqlvgXURko\" state=\"cancelled\" command=\"sleep 30; echo BG-DONE\">\nCancelled\n</background-result>",
+              "description": "sleep 30; echo BG-DONE",
+              "metadata": {
+                "source": "shell",
+                "shellID": "sh_20b5a7fe5001yMxGFqlvgXURko",
+                "jobID": "sh_20b5a7fe5001yMxGFqlvgXURko",
+                "state": "cancelled"
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "session.execution.started",
+        "data": {
+          "sessionID": "ses_df4a5adc1ffenwg5E6NlkHBtSw"
+        }
+      },
+      {
+        "type": "session.inbox.delivered",
+        "data": {
+          "sessionID": "ses_df4a5adc1ffenwg5E6NlkHBtSw",
+          "inboxID": "msg_20b5a93e2001Muq06wL4Wzfvuv"
+        }
+      }
+    ]
+  }
+}

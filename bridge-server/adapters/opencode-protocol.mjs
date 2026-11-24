@@ -164,6 +164,7 @@ export function createTurnAccumulator(sessionId) {
       if (pending.trim()) consumeFrame(pending);
       pending = '';
     },
+    toolCall(messageId, id) { return messages.get(messageId)?.tools.get(id); },
     get terminal() { return terminal; },
     get sawEvent() { return sawEvent; },
     snapshot() {

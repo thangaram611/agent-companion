@@ -473,3 +473,163 @@ test('OpenCode interrupt waits for native idle before sending only the replaceme
   assert.equal(new Set(prompts(h).map(r => r.pid)).size, 1);
   assert.equal(new Set(prompts(h).map(r => r.path)).size, 1);
 });
+
+const background = JSON.parse(readFileSync(new URL('../../test/fixtures/opencode-background-2.4.0.json', import.meta.url)));
+async function backgroundJob(t, mode = 'timeout', { early = false, secondShell = false } = {}) {
+  const h = setup(t, { FAKE_OPENCODE_MODE: 'background', FAKE_OPENCODE_CAPTURE: mode });
+  const sent = await h.send(), adapter = h.adapters[0];
+  const { events, messages } = background[mode];
+  const firstEnd = events.findIndex(e => e.type === 'session.execution.succeeded');
+  const synthetic = events[firstEnd + 1];
+  const first = events.slice(0, firstEnd + 1);
+  const tool = first.findIndex(e => e.type === 'session.tool.success');
+  if (secondShell) {
+    const calls = structuredClone(first.slice(tool - 2, tool + 1));
+    for (const e of calls) e.data.id += '-second';
+    calls.at(-1).data.metadata.shellID += '-second';
+    first.splice(tool + 1, 0, ...calls);
+  }
+  if (early) first.splice(tool, 0, synthetic);
+  const replay = (events, messages) => adapter._request('/fixture/replay', { method: 'POST', body: { events, messages } });
+  // The explicit shell may already have continued by the time the store GET arrives.
+  await replay(first, mode === 'explicit' ? messages : messages.slice(messages.findIndex(m => m.type === 'synthetic') + 1));
+  await until(() => adapter.acc.terminal, 'first execution end');
+  return { ...h, sent, adapter, replay, messages, synthetic, continuation: events.slice(firstEnd + (early ? 2 : 1)),
+    shellID: synthetic.data.item.payload.metadata.shellID, command: events.find(e => e.type === 'session.tool.called').data.input.command };
+}
+
+for (const early of [false, true]) test(`OpenCode timeout holds through the synthetic result, answers from the continuation and counts usage from both executions (early result: ${early})`, async t => {
+  const h = await backgroundJob(t, 'timeout', { early });
+  const status = await callTool({ action: 'status', job_id: h.sent.jobId }, { controller: h.controller });
+  assert.equal(status.activity, 'running ' + h.command);
+  assert.equal(h.records.readResult(h.sent.jobId), null);
+  assert.equal(h.supervisors[0].serialize().processes.length, 2);
+  await assert.rejects(intervene(h, h.sent, 'steer', 'late steer'), { code: 'DeliveryUnknown' });
+  assert.equal(prompts(h).length, 1);
+  await h.replay(h.continuation, h.messages);
+  const result = await h.finish(h.sent);
+  assert.equal(result.text, h.messages[1].content[0].text);
+  const spent = h.messages.filter(m => m.type === 'assistant');
+  assert.ok(spent.length > 1);
+  assert.equal(result.usage.input_tokens, spent.reduce((n, m) => n + m.tokens.input, 0));
+  assert.equal(result.usage.output_tokens, spent.reduce((n, m) => n + m.tokens.output, 0));
+  assert.equal(result.nativeRefs.messageId, h.messages[1].id);
+});
+
+test('OpenCode explicit background completes at the first end and its owned shell exits', async t => {
+  const h = await backgroundJob(t, 'explicit');
+  const result = await h.finish(h.sent);
+  assert.equal(result.text, '**WAITING**');
+  assert.equal(result.usage.input_tokens, 10875 + 293);
+  const owned = h.supervisors[0].serialize().processes;
+  assert.equal(owned.length, 2);
+  assert.ok(owned.every(p => !pidAlive(p.pid)));
+});
+
+test('OpenCode queue during a shell hold delivers after the continuation', async t => {
+  const h = await backgroundJob(t);
+  assert.equal(h.adapter.progress.activeCommand, h.command);
+  await intervene(h, h.sent, 'queue', 'queued');
+  assert.equal(prompts(h).length, 1);
+  await h.replay(h.continuation, h.messages);
+  const result = await h.finish(h.sent);
+  assert.deepEqual(result.turns.map(r => r.text), [h.messages[1].content[0].text, 'answer: queued']);
+});
+
+function cancelledShell(shellID) {
+  const event = structuredClone(background.interrupt.events.find(e => e.data.item?.type === 'synthetic'));
+  const payload = event.data.item.payload;
+  event.data.inboxID += shellID;
+  payload.text = payload.text.replace(payload.metadata.shellID, shellID);
+  Object.assign(payload.metadata, { shellID, jobID: shellID });
+  return event;
+}
+
+for (const fast of [false, true]) test(`OpenCode held interrupt cancels each shell and drains the continuation before replacement (fast: ${fast})`, async t => {
+  const h = await backgroundJob(t, 'timeout', { secondShell: true });
+  assert.equal(h.adapter.progress.activeCommand, h.command);
+  const accepted = intervene(h, h.sent, 'interrupt', 'replacement');
+  await until(() => h.requests().filter(r => r.path?.endsWith('/cancel')).length === 2);
+  const [, start, ...rest] = h.continuation;
+  const terminal = fast ? 'succeeded' : 'interrupted';
+  const end = { type: 'session.execution.' + terminal, data: start.data };
+  const messages = [{ ...h.messages[0], outcome: terminal }, ...h.messages.slice(1)];
+  const results = [cancelledShell(h.shellID), cancelledShell(h.shellID + '-second')];
+  const delivered = results.map(({ data }) => ({ type: 'session.inbox.delivered', data: { inboxID: data.inboxID } }));
+  const batch = [...results, start, ...delivered];
+  if (fast) batch.push(...rest);
+  await h.replay(batch, messages);
+  if (!fast) {
+    await until(() => h.requests().some(r => r.path?.endsWith('/interrupt')));
+    assert.equal(prompts(h).length, 1);
+    await h.replay([end]);
+  }
+  assert.equal((await accepted).ok, true);
+  const result = await h.finish(h.sent);
+  assert.equal(result.turns.at(-1).text, 'answer: replacement');
+  assert.deepEqual(h.requests().filter(r => r.path?.endsWith('/cancel')).map(r => r.path).sort(),
+    [h.shellID, h.shellID + '-second'].map(id => '/api/experimental/job/' + id + '/cancel').sort());
+  assert.equal(h.requests().filter(r => r.path?.endsWith('/interrupt')).length, 1);
+  assert.equal(result.turns[0].outcome, fast ? 'completed' : 'interrupted');
+  assert.deepEqual(prompts(h).map(p => p.body.text), ['hello', 'replacement']);
+  assert.equal(h.supervisors.length, 1);
+});
+
+for (const stop of ['cancel', 'bridge loss']) test(`OpenCode ${stop} during a shell hold reaps the owned tree`, async t => {
+  const h = await backgroundJob(t);
+  assert.equal(h.adapter.progress.activeCommand, h.command);
+  const owned = h.supervisors[0].serialize().processes;
+  assert.equal(owned.length, 2);
+  if (stop === 'cancel') await h.settle(h.controller.cancel({ thread: 'child', jobId: h.sent.jobId }));
+  else {
+    // Use the controller's inline watcher fallback with this suite's fixture process table.
+    h.controller.launchWatcher = async () => { throw new Error('use inline cleanup'); };
+    await h.settle(h.controller.bridgeLost());
+  }
+  const result = h.records.readResult(h.sent.jobId);
+  assert.equal(result.cause, stop === 'cancel' ? 'owner_stop' : 'bridge_loss');
+  assert.equal(result.stopEvidence.gone, true);
+  assert.ok(owned.every(p => !pidAlive(p.pid)));
+});
+
+test('OpenCode waits for the last of two timeout shells and reports its continuation failure', async t => {
+  const h = await backgroundJob(t, 'timeout', { secondShell: true });
+  const firstContinuation = h.messages[1];
+  await h.replay(h.continuation, h.messages);
+  await until(() => h.adapter.messageId === firstContinuation.id && h.adapter.acc.terminal, 'first continuation end');
+  assert.equal(h.records.readResult(h.sent.jobId), null);
+  assert.equal(h.adapter.progress.activeCommand, h.command);
+
+  const second = structuredClone(h.synthetic);
+  second.data.item.payload.metadata.shellID += '-second';
+  const [, start] = h.continuation;
+  const error = { type: 'provider.error', message: 'continuation failed' };
+  await h.replay([second, start, { type: 'session.execution.failed', data: { ...start.data, error } }], [
+    { id: 'failed-idle', type: 'idle', outcome: 'failed', error }, ...h.messages,
+  ]);
+  const result = await h.finish(h.sent);
+  assert.equal(result.outcome, 'failed');
+  assert.equal(result.text, error.message);
+  // The failed continuation spent nothing; the earlier executions still count.
+  assert.equal(result.usage.input_tokens, h.messages.filter(m => m.type === 'assistant').reduce((n, m) => n + m.tokens.input, 0));
+});
+
+test('OpenCode interrupt resumes a second cancelled result parked behind the first continuation', async t => {
+  const h = await backgroundJob(t, 'timeout', { secondShell: true });
+  await intervene(h, h.sent, 'interrupt', 'replacement');
+  const [, start] = h.continuation;
+  await h.replay([cancelledShell(h.shellID), start, cancelledShell(h.shellID + '-second')]);
+  const interrupts = () => h.requests().filter(r => r.path?.endsWith('/interrupt'));
+  await until(() => interrupts().length > 0);
+  assert.equal(interrupts()[0].query, '?resume=true');
+  const end = { type: 'session.execution.interrupted', data: start.data };
+  const idle = { id: 'first-interrupt', type: 'idle', outcome: 'interrupted' };
+  await h.replay([end, start], [idle, ...h.messages.slice(3)]);
+  await until(() => interrupts().length === 2);
+  assert.equal(prompts(h).length, 1);
+  assert.equal(interrupts()[1].query, '');
+  await h.replay([end], [{ ...idle, id: 'last-interrupt' }, idle, ...h.messages.slice(3)]);
+  const result = await h.finish(h.sent);
+  assert.deepEqual(result.turns.map(r => r.outcome), ['interrupted', 'completed']);
+  assert.equal(result.turns.at(-1).text, 'answer: replacement');
+});

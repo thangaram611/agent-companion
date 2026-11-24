@@ -66,8 +66,42 @@ plugin entry, a connected bridge, the wake of an idle lead (128 s idle under
 setup links `plugins/agent-companion`. Two storage changes reached the
 transcript reader: message parts moved to a `session_part` table and the shell
 input names its directory `workdir`. A command that outlives its timeout now
-moves to the background; when it finishes, OpenCode adds a `synthetic`
-`<background-result>` message and starts a new turn on its own.
+moves to the background. With `sleep 30` and a five-second timeout, the first
+`session.execution.succeeded` arrived while `GET /api/shell/<id>` still showed
+`running` and a PID. On exit the API showed `exited` with exit code 0.
+`session.inbox.enqueued` carried a synthetic shell result with that shell ID,
+then `session.execution.started` and a second `session.execution.succeeded`
+bracketed the answer. SQLite stored two `idle` rows. The adapter-facing SSE
+stream emitted zero `session.idle` events.
+
+An explicit `background: true` command produced the same running metadata and
+automatic continuation when the server stayed open. Only the timeout move
+included a timeout explanation in its tool output. The adapter checks the shell
+call's `background` input. A foreground call moved by timeout keeps the job open
+through its continuation, whose answer and usage become the result. An explicit
+background call lets the job close at its first execution end. Closing the private
+server there stopped the observed shell PID and left a running part with no
+synthetic result. The work summary reports it as unfinished.
+
+Between executions, Steer requires a running turn and is refused. Queue waits
+for the final continuation. Native session interrupt in this gap returned
+`interrupted: false` and left the shell running. Cancelling through
+`POST /api/experimental/job/<id>/cancel` changed its status to `killed` and
+enqueued a `cancelled` result that started another execution. Interrupt & Send
+cancels the pending shells, interrupts their continuation when it starts, and
+delivers the replacement on the same server once that execution ends. If the
+continuation finishes before the interrupt arrives, its own terminal releases
+the replacement.
+
+A live check of the adapter on private GPU Ollama (`gpt-oss:20b`) returned
+`HELD-DONE` from the automatic continuation. The transcript reader recovered
+`HELD-DONE\n` and exit 0 on the original command. In the interrupt run the
+job cancel returned HTTP 204, the continuation acknowledged the native
+interrupt, and the replacement answered on the same private server. With two
+held shells, the default native interrupt left the second cancelled result
+parked in the inbox. Passing `resume=true` on the first continuation's interrupt
+let the second continuation start. Both turns acknowledged interruption, the
+replacement answered, and both recorded shell PIDs were gone after cleanup.
 
 ## Design
 

@@ -648,3 +648,36 @@ test('opencode: a shell command killed by its timeout is failed, naming the sign
   assert.equal(command.exitCode, null);
   assert.equal(command.signal, 'SIGTERM');
 });
+
+test('opencode: 2.4.0 synthetic shell output updates the running command across cursor reads', async t => {
+  const { readTranscript } = await api();
+  const { summarizeWork } = await import('../lib/work-summary.mjs');
+  const path = join(temp(t), 'transcript'), db = new DatabaseSync(path);
+  t.after(() => db.close());
+  for (const file of ['opencode-2.4.0.sql', 'background-2.4.0.sql']) db.exec(readFileSync(new URL('opencode/' + file, root), 'utf8'));
+  const loc = { companion: 'opencode', kind: 'sqlite', path, sessionId: 'ses_df4ad3db8ffe7anqFISCihICw4' };
+  const closed = readTranscript(loc);
+  assert.deepEqual(summarizeWork({ items: closed.items, ended: true }).commands.map(c => [c.status, c.exitCode]), [['unfinished', null]]);
+  loc.sessionId = 'ses_df4ae2955ffePJ5dzouXaC3iyK';
+  db.exec("CREATE TEMP TABLE result AS SELECT * FROM session_message WHERE type='synthetic'; DELETE FROM session_message WHERE type='synthetic'");
+  const before = readTranscript(loc);
+  const command = before.items.find(i => i.kind === 'command');
+  assert.equal(command.status, 'running');
+  db.exec('INSERT INTO session_message SELECT * FROM result');
+  const after = readTranscript(loc, { after: before.cursor });
+  assert.equal(after.items.length, 1);
+  const [updated] = after.items;
+  assert.deepEqual([updated.id, updated.at, updated.turnId, updated.status, updated.exitCode, updated.output],
+    [command.id, command.at, command.turnId, 'completed', 0, 'BG-DONE\n']);
+  assert.deepEqual(readTranscript(loc).items.filter(i => i.kind === 'command'), [updated]);
+  // Replay the cancelled payload from the separate job-cancel probe against this shell.
+  const capture = JSON.parse(readFileSync(new URL('../opencode-background-2.4.0.json', root)));
+  const cancelled = capture.interrupt.events.find(e => e.data.item?.type === 'synthetic').data.item.payload;
+  const shellID = JSON.parse(db.prepare('SELECT data FROM result').get().data).metadata.shellID;
+  const payload = JSON.stringify(cancelled).replaceAll(cancelled.metadata.shellID, shellID);
+  db.prepare("UPDATE session_message SET data=? WHERE type='synthetic'").run(payload);
+  const [stopped] = readTranscript(loc, { after: after.cursor }).items;
+  assert.deepEqual([stopped.id, stopped.status, stopped.exitCode, stopped.output], [command.id, 'cancelled', null, 'Cancelled']);
+  db.exec("UPDATE session_message SET data=json_set(data,'$.metadata.source','other') WHERE type='synthetic'");
+  assert.equal(readTranscript(loc).counts.unrecognized, 1);
+});

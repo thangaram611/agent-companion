@@ -187,6 +187,10 @@ sender, mode, state and first line, including `not_delivered` messages.
 - **Give OpenCode probes their own port first.** Any `opencode` command can
   start the managed service. Its fixed machine-wide port defaults to 49374.
   A test service there blocks the user's OpenCode. Stop the probe's service on exit.
+- **OpenCode can finish a turn while its shell is still running.** On 2.4.0
+  both explicit background and timed-out foreground calls report tool success
+  with running metadata. Use the original shell input to decide which holds the
+  job. Cancelling a held shell wakes a continuation that Interrupt & Send must drain.
 - **An open OpenCode TUI can lose its bridge.** After `experimental.location_idle_timeout`
   without session activity, the directory's services unload. No supported keep-alive
   worked: metadata PATCHes, session views and a held `/api/shell` command all
