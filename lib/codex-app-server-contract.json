@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.171.0",
+  "codexVersion": "0.172.0",
   "clientRequests": [
     {
       "method": "account/gatewayOAuth/cancel",
@@ -2195,8 +2195,9 @@
       {
         "input": "string",
         "input_item_id": "string",
+        "reason": "enum:chunk|sessionEnd",
         "source_event_ids": "string[]",
-        "type": "enum:sessionEndInputSaved"
+        "type": "enum:sessionInputSaved"
       }
     ],
     "ThreadRealtimeVoiceTranscript": {
